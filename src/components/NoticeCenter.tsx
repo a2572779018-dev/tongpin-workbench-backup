@@ -193,16 +193,65 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
   }, [notify]);
 
   useEffect(() => {
-    if (!window.tongpin) return;
-    return window.tongpin.onUpdaterStatus((status) => {
-      if (
-        status.state === "not-available" ||
-        status.state === "checking" ||
-        status.state === "available" ||
-        status.state === "downloading" ||
-        status.state === "downloaded"
-      ) {
+    const desktop = window.tongpin;
+    if (!desktop) return;
+    return desktop.onUpdaterStatus((status) => {
+      if (status.state === "not-available" || status.state === "checking") {
         dismiss("online-updater");
+        return;
+      }
+      if (status.state === "available") {
+        notify({
+          id: "online-updater",
+          title: "发现同频新版本",
+          body:
+            status.message ||
+            `版本 ${status.version ?? ""} 正在后台下载，完成后可以立即安装。`,
+          tone: "update",
+          dismissible: false,
+        });
+        return;
+      }
+      if (status.state === "downloading") {
+        notify({
+          id: "online-updater",
+          title: "正在下载同频更新",
+          body: status.message || "更新正在后台下载，可以继续使用同频。",
+          tone: "update",
+          progress: status.percent,
+          dismissible: false,
+          activate: false,
+        });
+        return;
+      }
+      if (status.state === "downloaded") {
+        notify({
+          id: "online-updater",
+          title: `同频 ${status.version ?? "新版本"} 已准备好`,
+          body:
+            status.message ||
+            "现在安装会重新启动同频；选择稍后安装时，退出软件后仍会自动完成更新。",
+          tone: "update",
+          dismissible: true,
+          actions: [
+            {
+              label: "稍后安装",
+              emphasis: "secondary",
+              onSelect: () => undefined,
+            },
+            {
+              label: "立即安装",
+              emphasis: "primary",
+              closeOnSelect: false,
+              onSelect: async () => {
+                const started = await desktop.installUpdate();
+                if (!started) {
+                  throw new Error("更新暂时无法启动，请退出同频后自动安装。");
+                }
+              },
+            },
+          ],
+        });
         return;
       }
       notify({
