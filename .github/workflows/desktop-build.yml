@@ -1,0 +1,127 @@
+name: Desktop builds
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and Cloudflare checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck:cloudflare
+      - run: npm run cloudflare:check
+
+  windows:
+    name: Windows installer
+    needs: quality
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run dist:win
+      - name: Verify Windows artifacts
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath artifacts -Filter "Tongpin-Setup-*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installers.Count)."
+          }
+          if (-not (Test-Path -LiteralPath artifacts/latest.yml)) {
+            throw "artifacts/latest.yml was not generated."
+          }
+          if ($installers[0].Length -le 0) {
+            throw "Windows installer is empty."
+          }
+      - run: npm run release:verify:win
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tongpin-windows-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            artifacts/Tongpin-Setup-*.exe
+            artifacts/Tongpin-Setup-*.exe.blockmap
+            artifacts/latest.yml
+
+  macos:
+    name: macOS universal test package
+    needs: quality
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Package unsigned universal app
+        run: >-
+          npm exec electron-builder -- --mac dmg zip --universal --publish never
+          -c.mac.identity=null
+          -c.mac.hardenedRuntime=false
+          -c.mac.notarize=false
+      - run: npm run release:verify:mac
+      - name: Verify macOS artifacts and architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(artifacts/*.dmg)
+          zips=(artifacts/*.zip)
+          [[ ${#dmgs[@]} -eq 1 ]]
+          [[ ${#zips[@]} -eq 1 ]]
+          [[ -f artifacts/latest-mac.yml ]]
+          hdiutil verify "${dmgs[0]}"
+          unzip -t "${zips[0]}"
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rmdir "$mount_dir" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "${dmgs[0]}"
+          app_path="$(find "$mount_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          [[ -n "$app_path" ]]
+          executable="$(plutil -extract CFBundleExecutable raw -o - "$app_path/Contents/Info.plist")"
+          architectures="$(lipo -archs "$app_path/Contents/MacOS/$executable")"
+          [[ "$architectures" == *arm64* ]]
+          [[ "$architectures" == *x86_64* ]]
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tongpin-macos-universal-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            artifacts/*.dmg
+            artifacts/*.zip
+            artifacts/*.blockmap
+            artifacts/latest-mac.yml
