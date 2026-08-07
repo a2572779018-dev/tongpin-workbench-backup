@@ -63,27 +63,37 @@ async function bufferedApiRequest(request: Request): Promise<Request> {
   });
 }
 
+function isReleaseManifest(key: string): boolean {
+  return key === "latest.yml" || key === "latest-mac.yml";
+}
+
 function releaseCacheControl(key: string): string {
-  return key === "latest.yml" || key === "latest.yml.blockmap"
+  return isReleaseManifest(key)
     ? "public, max-age=0, must-revalidate"
     : "public, max-age=31536000, immutable";
 }
 
 function releaseHttpMetadata(key: string): R2HTTPMetadata {
+  let contentType = "application/octet-stream";
+  if (key.endsWith(".yml")) contentType = "application/yaml";
+  else if (key.endsWith(".dmg")) contentType = "application/x-apple-diskimage";
+  else if (key.endsWith(".zip")) contentType = "application/zip";
+  else if (key.endsWith(".exe")) {
+    contentType = "application/vnd.microsoft.portable-executable";
+  }
   return {
-    contentType: key === "latest.yml"
-      ? "application/yaml"
-      : key.endsWith(".blockmap")
-        ? "application/octet-stream"
-        : "application/vnd.microsoft.portable-executable",
+    contentType,
     cacheControl: releaseCacheControl(key),
   };
 }
 
 function validReleaseKey(key: string): boolean {
   return (
-    key === "latest.yml" ||
+    isReleaseManifest(key) ||
     /^Tongpin-Setup-\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?\.exe(?:\.blockmap)?$/.test(
+      key,
+    ) ||
+    /^Tongpin-\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?-mac-(?:universal|x64|arm64)\.(?:dmg|zip)(?:\.blockmap)?$/.test(
       key,
     )
   );
@@ -142,7 +152,11 @@ async function handleReleaseUpload(
   try {
     if (action === "multipart/start" && request.method === "POST") {
       const { key } = await parseReleaseUploadJson<{ key?: unknown }>(request);
-      if (typeof key !== "string" || !validReleaseKey(key) || key === "latest.yml") {
+      if (
+        typeof key !== "string" ||
+        !validReleaseKey(key) ||
+        isReleaseManifest(key)
+      ) {
         return releaseUploadError("无效的安装包文件名");
       }
       const upload = await env.RELEASES.createMultipartUpload(key, {
@@ -159,7 +173,7 @@ async function handleReleaseUpload(
       const contentLength = Number(request.headers.get("Content-Length") ?? 0);
       if (
         !validReleaseKey(key) ||
-        key === "latest.yml" ||
+        isReleaseManifest(key) ||
         !uploadId ||
         uploadId.length > 512 ||
         !Number.isInteger(partNumber) ||
@@ -189,7 +203,7 @@ async function handleReleaseUpload(
       if (
         typeof key !== "string" ||
         !validReleaseKey(key) ||
-        key === "latest.yml" ||
+        isReleaseManifest(key) ||
         typeof uploadId !== "string" ||
         !uploadId ||
         uploadId.length > 512 ||
