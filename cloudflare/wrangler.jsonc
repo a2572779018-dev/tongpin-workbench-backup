@@ -1,0 +1,37 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "tongpin-workbench-api",
+  "account_id": "fe7f80d7cec7587f45c2beec0cb23a9a",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TONGPIN_CORE",
+        "class_name": "TongpinCore"
+      }
+    ]
+  },
+  "exports": {
+    "TongpinCore": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "r2_buckets": [
+    {
+      "binding": "RELEASES",
+      "bucket_name": "tongpin-workbench-releases"
+    }
+  ],
+  "vars": {
+    "BOOTSTRAP_ADMIN_EMAIL": "a2427572758@outlook.com",
+    "DEV_EMAIL_PREVIEW": "false",
+    "CLIENT_ORIGINS": "null,file://,http://127.0.0.1:5173,http://127.0.0.1:4173"
+  }
+}

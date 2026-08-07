@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>同频通知</title>
+    <style>
+      :root {
+        color: #171717;
+        font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif;
+        --ink: #171717;
+        --white: #fffdf8;
+        --yellow: #ffd84d;
+        --blue: #8cbcff;
+        --pink: #ff9fca;
+        --red: #ef6b54;
+        --accent: var(--blue);
+        --glow: rgba(140, 188, 255, 0.64);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+
+      button {
+        color: inherit;
+        font: inherit;
+      }
+
+      #notice {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+
+      #notice[data-tone="update"] {
+        --accent: var(--yellow);
+        --glow: rgba(255, 216, 77, 0.64);
+      }
+
+      #notice[data-tone="warning"],
+      #notice[data-tone="error"] {
+        --accent: var(--red);
+        --glow: rgba(239, 107, 84, 0.64);
+      }
+
+      #notice[data-requires-ack="true"] .panel {
+        background: #fff5e8;
+      }
+
+      .panel {
+        position: absolute;
+        right: 7px;
+        bottom: 7px;
+        left: 7px;
+        display: grid;
+        min-height: 148px;
+        align-content: center;
+        gap: 8px;
+        padding: 16px 16px 14px 82px;
+        visibility: hidden;
+        border: 3px solid var(--ink);
+        border-radius: 16px;
+        background: var(--white);
+        box-shadow: 6px 6px 0 var(--ink);
+        opacity: 0;
+        transform: translate3d(-6px, 6px, 0) scale(0.78);
+        transform-origin: bottom left;
+        transition:
+          opacity 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+          transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+          visibility 0s linear 220ms;
+      }
+
+      #notice.is-expanded .panel {
+        visibility: visible;
+        opacity: 1;
+        transform: translate3d(0, 0, 0) scale(1);
+        transition-delay: 0s;
+      }
+
+      .panel header {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .panel header span {
+        display: grid;
+        width: 30px;
+        aspect-ratio: 1;
+        flex: 0 0 auto;
+        place-items: center;
+        border: 2px solid var(--ink);
+        border-radius: 8px;
+        background: var(--accent);
+        font-weight: 900;
+      }
+
+      .panel strong {
+        overflow: hidden;
+        font-size: 16px;
+        letter-spacing: -0.03em;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .panel p {
+        display: -webkit-box;
+        margin: 0;
+        overflow: hidden;
+        color: #514d47;
+        font-size: 13px;
+        line-height: 1.45;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .actions button {
+        min-height: 32px;
+        padding: 5px 11px;
+        border: 2px solid var(--ink);
+        border-radius: 8px;
+        background: #f4efe4;
+        box-shadow: 2px 2px 0 var(--ink);
+        font-size: 12px;
+        font-weight: 750;
+      }
+
+      .actions .open {
+        background: var(--yellow);
+      }
+
+      .actions .acknowledge {
+        display: none;
+        background: var(--red);
+        color: var(--ink);
+      }
+
+      #notice[data-requires-ack="true"] .acknowledge {
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .orb {
+        position: absolute;
+        bottom: 12px;
+        left: 12px;
+        z-index: 2;
+        display: grid;
+        width: 54px;
+        aspect-ratio: 1;
+        place-items: center;
+        border: 3px solid var(--ink);
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow:
+          4px 4px 0 var(--ink),
+          0 0 24px var(--glow);
+        transform: translateZ(0);
+      }
+
+      .orb::before {
+        position: absolute;
+        inset: -9px;
+        z-index: -1;
+        border: 2px solid var(--accent);
+        border-radius: 50%;
+        content: "";
+        opacity: 0;
+        animation: ring 2.2s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+      }
+
+      .orb-mark {
+        display: flex;
+        gap: 4px;
+        transform: rotate(8deg);
+        animation: breathe 2.2s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+      }
+
+      .orb-mark i {
+        display: block;
+        width: 6px;
+        height: 20px;
+        border: 2px solid var(--ink);
+        background: var(--white);
+      }
+
+      #notice.is-expanded .orb {
+        transform: scale(0.94);
+      }
+
+      #notice.is-expanded .orb-mark {
+        animation-play-state: paused;
+      }
+
+      @keyframes breathe {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.52;
+        }
+      }
+
+      @keyframes ring {
+        0% {
+          opacity: 0.64;
+          transform: scale(0.78);
+        }
+        72%,
+        100% {
+          opacity: 0;
+          transform: scale(1.28);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 1ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 1ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main id="notice" data-tone="info">
+      <section class="panel" aria-label="同频通知">
+        <header>
+          <span aria-hidden="true">i</span>
+          <strong id="title">同频通知</strong>
+        </header>
+        <p id="body"></p>
+        <div class="actions">
+          <button id="dismiss" class="dismiss" type="button">关闭</button>
+          <button id="acknowledge" class="acknowledge" type="button">
+            确认收到
+          </button>
+          <button id="open" class="open" type="button">打开同频</button>
+        </div>
+      </section>
+      <button id="orb" class="orb" type="button" aria-label="展开同频通知">
+        <span class="orb-mark" aria-hidden="true"><i></i><i></i></span>
+      </button>
+    </main>
+    <script>
+      const bridge = window.tongpinDesktopNotice;
+      const root = document.getElementById("notice");
+      const title = document.getElementById("title");
+      const body = document.getElementById("body");
+      const orb = document.getElementById("orb");
+      const openButton = document.getElementById("open");
+      const dismissButton = document.getElementById("dismiss");
+      const acknowledgeButton = document.getElementById("acknowledge");
+      let expanded = false;
+      let pinned = false;
+      let activeNotificationId = "";
+
+      function setExpanded(next) {
+        if (expanded === next) return;
+        expanded = next;
+        root.classList.toggle("is-expanded", expanded);
+        orb.setAttribute(
+          "aria-label",
+          expanded ? "收起同频通知" : "展开同频通知",
+        );
+        bridge.setExpanded(expanded);
+      }
+
+      root.addEventListener("mouseenter", () => setExpanded(true));
+      root.addEventListener("mouseleave", () => {
+        if (!pinned) setExpanded(false);
+      });
+      orb.addEventListener("click", () => {
+        pinned = !pinned;
+        setExpanded(pinned);
+      });
+      openButton.addEventListener("click", () => bridge.openApp());
+      dismissButton.addEventListener("click", () => bridge.dismiss());
+      acknowledgeButton.addEventListener("click", () => {
+        if (activeNotificationId) {
+          bridge.acknowledge(activeNotificationId);
+        }
+      });
+
+      bridge.onMessage((message) => {
+        title.textContent = message.title;
+        body.textContent = message.body;
+        root.dataset.tone = message.tone || "info";
+        root.dataset.requiresAck = String(
+          message.requireAcknowledgement === true,
+        );
+        activeNotificationId = message.notificationId || "";
+        openButton.textContent = message.actionLabel || "打开同频";
+        expanded = false;
+        pinned = message.requireAcknowledgement === true;
+        root.classList.remove("is-expanded");
+        if (pinned) setExpanded(true);
+      });
+    </script>
+  </body>
+</html>
