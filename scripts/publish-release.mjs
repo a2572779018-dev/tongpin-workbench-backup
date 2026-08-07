@@ -1,13 +1,18 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, open, readFile, stat } from "node:fs/promises";
+import {
+  access,
+  open,
+  readFile,
+  readdir,
+  stat,
+} from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const releaseDir = path.resolve(root, process.env.RELEASE_DIR ?? "artifacts");
-const manifestPath = path.join(releaseDir, "latest.yml");
 const packagePath = path.join(root, "package.json");
 const wranglerPath = path.join(
   root,
@@ -19,20 +24,119 @@ const wranglerPath = path.join(
 const wranglerConfig = path.join(root, "cloudflare", "wrangler.jsonc");
 const bucket = "tongpin-workbench-releases";
 const publicBaseUrl =
+  process.env.TONGPIN_RELEASE_URL?.trim() ||
   "https://notify.samhubs.com/releases";
 const verifyOnly = process.argv.includes("--verify-only");
 const releaseUploadToken = process.env.TONGPIN_RELEASE_UPLOAD_TOKEN?.trim();
 const secureUploadBaseUrl = publicBaseUrl.replace(
-  /\/releases$/,
+  /\/releases\/?$/,
   "/internal/releases",
 );
 const multipartPartBytes = 8 * 1024 * 1024;
 const maxReleaseObjectBytes = 2 * 1024 * 1024;
 
+function argumentValue(name) {
+  const inline = process.argv.find((argument) =>
+    argument.startsWith(`${name}=`),
+  );
+  if (inline) return inline.slice(name.length + 1);
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+const platform =
+  argumentValue("--platform") ??
+  (process.platform === "darwin" ? "mac" : "win");
+if (platform !== "win" && platform !== "mac") {
+  throw new Error("--platform 只支持 win 或 mac");
+}
+const manifestName = platform === "mac" ? "latest-mac.yml" : "latest.yml";
+const manifestPath = path.join(releaseDir, manifestName);
+
+function stripYamlScalar(value) {
+  return value.trim().replace(/^['"]|['"]$/g, "");
+}
+
 function manifestValue(source, expression, label) {
   const match = source.match(expression);
-  if (!match) throw new Error(`latest.yml 缺少 ${label}`);
-  return match[1].trim().replace(/^['"]|['"]$/g, "");
+  if (!match) throw new Error(`${manifestName} 缺少 ${label}`);
+  return stripYamlScalar(match[1]);
+}
+
+function safeArtifactName(value) {
+  const decoded = decodeURIComponent(stripYamlScalar(value));
+  if (
+    !decoded ||
+    decoded !== path.basename(decoded) ||
+    decoded.includes("/") ||
+    decoded.includes("\\")
+  ) {
+    throw new Error(`${manifestName} 包含无效产物路径：${value}`);
+  }
+  return decoded;
+}
+
+function parseManifest(source) {
+  const version = manifestValue(source, /^version:\s*(.+)$/m, "version");
+  const files = [];
+  let inFiles = false;
+  let current = null;
+
+  const finishCurrent = () => {
+    if (!current) return;
+    if (!current.sha512 || !Number.isSafeInteger(current.size)) {
+      throw new Error(
+        `${manifestName} 中 ${current.name} 缺少 sha512 或 size`,
+      );
+    }
+    files.push(current);
+    current = null;
+  };
+
+  for (const line of source.split(/\r?\n/)) {
+    if (/^files:\s*$/.test(line)) {
+      inFiles = true;
+      continue;
+    }
+    if (!inFiles) continue;
+    if (/^\S/.test(line)) {
+      finishCurrent();
+      break;
+    }
+    const urlMatch = line.match(/^\s*-\s+url:\s*(.+)$/);
+    if (urlMatch) {
+      finishCurrent();
+      current = {
+        name: safeArtifactName(urlMatch[1]),
+        sha512: "",
+        size: Number.NaN,
+      };
+      continue;
+    }
+    if (!current) continue;
+    const shaMatch = line.match(/^\s+sha512:\s*(.+)$/);
+    if (shaMatch) {
+      current.sha512 = stripYamlScalar(shaMatch[1]);
+      continue;
+    }
+    const sizeMatch = line.match(/^\s+size:\s*(\d+)\s*$/);
+    if (sizeMatch) current.size = Number(sizeMatch[1]);
+  }
+  finishCurrent();
+  if (files.length === 0) {
+    throw new Error(`${manifestName} 没有可发布的 files 条目`);
+  }
+  return { version, files };
+}
+
+function contentTypeFor(name) {
+  if (name.endsWith(".yml")) return "application/yaml";
+  if (name.endsWith(".dmg")) return "application/x-apple-diskimage";
+  if (name.endsWith(".zip")) return "application/zip";
+  if (name.endsWith(".exe")) {
+    return "application/vnd.microsoft.portable-executable";
+  }
+  return "application/octet-stream";
 }
 
 async function sha512(filePath) {
@@ -97,7 +201,7 @@ async function uploadSmallObject(upload) {
       method: "PUT",
       headers: {
         "Content-Length": String(body.byteLength),
-        "Content-Type": "application/octet-stream",
+        "Content-Type": upload.contentType,
       },
       body,
     },
@@ -183,63 +287,103 @@ async function verifyRemote(fileName, expectedSize) {
   }
 }
 
-const [manifest, packageJson] = await Promise.all([
+async function fileExists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const [manifestSource, packageJson] = await Promise.all([
   readFile(manifestPath, "utf8"),
   readFile(packagePath, "utf8").then(JSON.parse),
 ]);
-const version = manifestValue(manifest, /^version:\s*(.+)$/m, "version");
-const installerName = manifestValue(
-  manifest,
-  /^\s*-\s+url:\s*(.+)$/m,
-  "安装包 URL",
-);
-const expectedInstallerSize = Number(
-  manifestValue(manifest, /^\s+size:\s*(\d+)$/m, "安装包大小"),
-);
-const expectedInstallerHash = manifestValue(
-  manifest,
-  /^sha512:\s*(.+)$/m,
-  "SHA-512",
-);
-const installerPath = path.join(releaseDir, installerName);
-const blockmapName = `${installerName}.blockmap`;
-const blockmapPath = path.join(releaseDir, blockmapName);
-
-if (version !== packageJson.version) {
+const manifest = parseManifest(manifestSource);
+if (manifest.version !== packageJson.version) {
   throw new Error(
-    `版本不一致：package.json=${packageJson.version}，latest.yml=${version}`,
+    `版本不一致：package.json=${packageJson.version}，${manifestName}=${manifest.version}`,
   );
 }
-await Promise.all([
-  access(installerPath),
-  access(blockmapPath),
-  access(wranglerPath),
-  access(wranglerConfig),
-]);
 
-const [installerInfo, blockmapInfo, manifestInfo, installerHash] =
-  await Promise.all([
-    stat(installerPath),
-    stat(blockmapPath),
-    stat(manifestPath),
-    sha512(installerPath),
-  ]);
-if (installerInfo.size !== expectedInstallerSize) {
-  throw new Error(
-    `安装包大小校验失败：latest.yml=${expectedInstallerSize}，实际=${installerInfo.size}`,
+const artifacts = new Map();
+for (const entry of manifest.files) {
+  const file = path.join(releaseDir, entry.name);
+  await access(file);
+  const [info, hash] = await Promise.all([stat(file), sha512(file)]);
+  if (info.size !== entry.size) {
+    throw new Error(
+      `${entry.name} 大小校验失败：清单=${entry.size}，实际=${info.size}`,
+    );
+  }
+  if (hash !== entry.sha512) {
+    throw new Error(`${entry.name} SHA-512 与 ${manifestName} 不一致`);
+  }
+  artifacts.set(entry.name, { name: entry.name, file, size: info.size });
+}
+
+if (platform === "mac") {
+  if (![...artifacts.keys()].some((name) => name.endsWith(".zip"))) {
+    throw new Error("latest-mac.yml 必须包含用于自动更新的 ZIP");
+  }
+  const macPrefix = `Tongpin-${manifest.version}-mac-`;
+  const dmgNames = (await readdir(releaseDir)).filter(
+    (name) => name.startsWith(macPrefix) && name.endsWith(".dmg"),
   );
+  if (dmgNames.length === 0) {
+    throw new Error("Mac 发布必须同时包含首次安装使用的 DMG");
+  }
+  for (const name of dmgNames) {
+    const file = path.join(releaseDir, name);
+    const info = await stat(file);
+    artifacts.set(name, { name, file, size: info.size });
+  }
 }
-if (installerHash !== expectedInstallerHash) {
-  throw new Error("安装包 SHA-512 与 latest.yml 不一致");
+
+const uploads = [];
+for (const artifact of artifacts.values()) {
+  if (artifact.size <= 0) throw new Error(`${artifact.name} 是空文件`);
+  uploads.push({
+    ...artifact,
+    contentType: contentTypeFor(artifact.name),
+    cacheControl: "public, max-age=31536000, immutable",
+  });
+
+  const blockmapName = `${artifact.name}.blockmap`;
+  const blockmapFile = path.join(releaseDir, blockmapName);
+  const blockmapRequired =
+    artifact.name.endsWith(".exe") || artifact.name.endsWith(".zip");
+  if (await fileExists(blockmapFile)) {
+    const info = await stat(blockmapFile);
+    uploads.push({
+      name: blockmapName,
+      file: blockmapFile,
+      size: info.size,
+      contentType: "application/octet-stream",
+      cacheControl: "public, max-age=31536000, immutable",
+    });
+  } else if (blockmapRequired) {
+    throw new Error(`${artifact.name} 缺少自动更新所需的 blockmap`);
+  }
 }
+
+const manifestInfo = await stat(manifestPath);
+uploads.push({
+  name: manifestName,
+  file: manifestPath,
+  size: manifestInfo.size,
+  contentType: "application/yaml",
+  cacheControl: "public, max-age=0, must-revalidate",
+});
 
 console.log(
   JSON.stringify(
     {
-      version,
-      installer: { name: installerName, size: installerInfo.size },
-      blockmap: { name: blockmapName, size: blockmapInfo.size },
-      manifest: { name: "latest.yml", size: manifestInfo.size },
+      platform,
+      version: manifest.version,
+      files: uploads.map(({ name, size }) => ({ name, size })),
+      manifest: manifestName,
       verified: true,
     },
     null,
@@ -249,73 +393,57 @@ console.log(
 
 if (verifyOnly) {
   console.log("本地发布文件校验通过，未执行上传。");
-  process.exit(0);
-}
-
-const uploads = [
-  {
-    name: installerName,
-    file: installerPath,
-    contentType: "application/vnd.microsoft.portable-executable",
-    cacheControl: "public, max-age=31536000, immutable",
-    size: installerInfo.size,
-  },
-  {
-    name: blockmapName,
-    file: blockmapPath,
-    contentType: "application/octet-stream",
-    cacheControl: "public, max-age=31536000, immutable",
-    size: blockmapInfo.size,
-  },
-  {
-    name: "latest.yml",
-    file: manifestPath,
-    contentType: "application/yaml",
-    cacheControl: "public, max-age=0, must-revalidate",
-    size: manifestInfo.size,
-  },
-];
-
-for (const upload of uploads) {
-  console.log(`上传 ${upload.name}...`);
-  if (releaseUploadToken) {
-    if (upload.size > maxReleaseObjectBytes) {
-      await uploadMultipartObject(upload);
+} else {
+  if (!releaseUploadToken) {
+    await Promise.all([access(wranglerPath), access(wranglerConfig)]);
+  }
+  for (const upload of uploads) {
+    console.log(`上传 ${upload.name}...`);
+    if (releaseUploadToken) {
+      if (upload.size > maxReleaseObjectBytes) {
+        await uploadMultipartObject(upload);
+      } else {
+        await uploadSmallObject(upload);
+      }
     } else {
-      await uploadSmallObject(upload);
+      await runWrangler([
+        "r2",
+        "object",
+        "put",
+        `${bucket}/${upload.name}`,
+        "--file",
+        upload.file,
+        "--content-type",
+        upload.contentType,
+        "--cache-control",
+        upload.cacheControl,
+        "--remote",
+        "--force",
+        "--config",
+        wranglerConfig,
+      ]);
     }
-  } else {
-    await runWrangler([
-      "r2",
-      "object",
-      "put",
-      `${bucket}/${upload.name}`,
-      "--file",
-      upload.file,
-      "--content-type",
-      upload.contentType,
-      "--cache-control",
-      upload.cacheControl,
-      "--remote",
-      "--force",
-      "--config",
-      wranglerConfig,
-    ]);
+    await verifyRemote(upload.name, upload.size);
   }
-  await verifyRemote(upload.name, upload.size);
-}
 
-const remoteManifest = await fetch(
-  `${publicBaseUrl}/latest.yml?verify=${Date.now()}`,
-  { cache: "no-store" },
-).then(async (response) => {
-  if (!response.ok) {
-    throw new Error(`latest.yml 读取失败：HTTP ${response.status}`);
+  const remoteManifestSource = await fetch(
+    `${publicBaseUrl}/${manifestName}?verify=${Date.now()}`,
+    { cache: "no-store" },
+  ).then(async (response) => {
+    if (!response.ok) {
+      throw new Error(
+        `${manifestName} 读取失败：HTTP ${response.status}`,
+      );
+    }
+    return response.text();
+  });
+  const remoteManifest = parseManifest(remoteManifestSource);
+  if (remoteManifest.version !== manifest.version) {
+    throw new Error(
+      `线上 ${manifestName} 未指向版本 ${manifest.version}`,
+    );
   }
-  return response.text();
-});
-if (!remoteManifest.includes(`version: ${version}`)) {
-  throw new Error(`线上 latest.yml 未指向版本 ${version}`);
+  console.log(
+    `版本 ${manifest.version} 的 ${platform} 产物已发布并通过线上校验。`,
+  );
 }
-
-console.log(`版本 ${version} 已发布并通过线上校验。`);
