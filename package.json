@@ -1,7 +1,10 @@
 {
   "name": "tongpin-workbench",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "description": "同频：公司内部每日任务、账号审批、全员进度与桌面通知",
   "main": "electron/main.cjs",
   "type": "module",
@@ -17,9 +20,15 @@
     "cloudflare:check": "wrangler deploy --config cloudflare/wrangler.jsonc --dry-run --outdir dist/cloudflare",
     "cloudflare:dev": "wrangler dev --config cloudflare/wrangler.jsonc --port 8787",
     "cloudflare:deploy": "wrangler deploy --config cloudflare/wrangler.jsonc",
-    "release:verify": "node scripts/publish-release.mjs --verify-only",
-    "release:verify:remote": "node scripts/verify-remote-release.mjs",
-    "release:upload": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-release.ps1",
+    "release:verify": "npm run release:verify:win",
+    "release:verify:win": "node scripts/publish-release.mjs --platform win --verify-only",
+    "release:verify:mac": "node scripts/publish-release.mjs --platform mac --verify-only",
+    "release:verify:remote": "npm run release:verify:remote:win",
+    "release:verify:remote:win": "node scripts/verify-remote-release.mjs --platform win",
+    "release:verify:remote:mac": "node scripts/verify-remote-release.mjs --platform mac",
+    "release:upload": "npm run release:upload:win",
+    "release:upload:win": "node scripts/publish-release.mjs --platform win",
+    "release:upload:mac": "node scripts/publish-release.mjs --platform mac",
     "resend:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/configure-resend.ps1",
     "test:cloudflare": "node scripts/verify-cloudflare.mjs",
     "test": "vitest run",
@@ -27,14 +36,14 @@
     "build:web": "vite build",
     "build:api": "tsup server/index.ts --format esm --out-dir dist/server --sourcemap",
     "build": "npm run typecheck && npm run test && npm run build:web && npm run build:api",
-    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip --universal --publish never",
     "start:desktop": "cross-env TONGPIN_API_URL=http://127.0.0.1:4318 electron ."
   },
   "build": {
     "appId": "com.tongpin.workbench",
     "productName": "同频",
     "asar": true,
-    "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "artifacts"
     },
@@ -42,6 +51,9 @@
       "dist/renderer/**/*",
       "electron/**/*",
       "build/icon.ico",
+      "build/icon.png",
+      "build/entitlements.mac.plist",
+      "build/entitlements.mac.inherit.plist",
       "package.json"
     ],
     "win": {
@@ -55,6 +67,20 @@
         }
       ],
       "artifactName": "Tongpin-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.productivity",
+      "minimumSystemVersion": "12.0",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "Tongpin-${version}-mac-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist"
     },
     "nsis": {
       "oneClick": false,
