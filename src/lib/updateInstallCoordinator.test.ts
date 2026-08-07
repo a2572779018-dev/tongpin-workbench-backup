@@ -11,7 +11,9 @@ const { createUpdateInstallCoordinator } = require(
     updater: {
       autoInstallOnAppQuit: boolean;
       install: (silent: boolean, forceRunAfter: boolean) => boolean;
+      quitAndInstall: () => void;
     };
+    platform?: string;
     prepareInstallerEnvironment: () => void;
     closeAuxiliaryWindows: () => void;
     schedule: (callback: () => void, delay: number) => {
@@ -25,13 +27,14 @@ const { createUpdateInstallCoordinator } = require(
   };
 };
 
-function createHarness(installResult = true) {
+function createHarness(installResult = true, platform = "win32") {
   const app = Object.assign(new EventEmitter(), {
     quit: vi.fn(),
   });
   const updater = {
     autoInstallOnAppQuit: true,
     install: vi.fn(() => installResult),
+    quitAndInstall: vi.fn(),
   };
   const prepareInstallerEnvironment = vi.fn();
   const closeAuxiliaryWindows = vi.fn();
@@ -45,6 +48,7 @@ function createHarness(installResult = true) {
   const coordinator = createUpdateInstallCoordinator({
     app,
     updater,
+    platform,
     prepareInstallerEnvironment,
     closeAuxiliaryWindows,
     schedule,
@@ -129,5 +133,20 @@ describe("update install coordinator", () => {
     expect(harness.updater.autoInstallOnAppQuit).toBe(true);
     expect(harness.coordinator.isInstallRequested()).toBe(false);
     expect(harness.logger.error).toHaveBeenCalledOnce();
+  });
+
+  it("uses quitAndInstall directly on macOS", () => {
+    const harness = createHarness(true, "darwin");
+
+    expect(harness.coordinator.requestInstall()).toBe(true);
+    expect(harness.coordinator.requestInstall()).toBe(false);
+    expect(harness.closeAuxiliaryWindows).toHaveBeenCalledOnce();
+    expect(harness.updater.quitAndInstall).toHaveBeenCalledOnce();
+    expect(harness.prepareInstallerEnvironment).not.toHaveBeenCalled();
+    expect(harness.schedule).not.toHaveBeenCalled();
+    expect(harness.app.quit).not.toHaveBeenCalled();
+
+    harness.app.emit("quit");
+    expect(harness.updater.install).not.toHaveBeenCalled();
   });
 });
