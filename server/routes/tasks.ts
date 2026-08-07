@@ -236,6 +236,12 @@ export function createTasksRouter(
           alreadyDecided: false,
         };
       });
+      if (!result.alreadyDecided && result.created.length > 0) {
+        realtime.pushUser(userId, "task:batch-changed", {
+          tasks: result.created,
+          dates: [sourceDate, targetDate],
+        });
+      }
       response.status(result.alreadyDecided ? 200 : 201).json(result);
     } catch (error) {
       next(error);
@@ -365,6 +371,12 @@ export function createTasksRouter(
           ),
         };
       });
+      if (result.created.length > 0) {
+        realtime.pushUser(userId, "task:batch-changed", {
+          tasks: result.created,
+          dates: [sourceDate, targetDate],
+        });
+      }
       response.status(201).json(result);
     } catch (error) {
       next(error);
@@ -426,6 +438,7 @@ export function createTasksRouter(
         task,
         receipt,
       });
+      realtime.pushUser(task.userId, "task:changed", { task });
       response.json({ task });
     } catch (error) {
       next(error);
@@ -477,6 +490,7 @@ export function createTasksRouter(
         );
         return created;
       });
+      realtime.pushUser(task.userId, "task:changed", { task });
       response.status(201).json({ task });
     } catch (error) {
       next(error);
@@ -495,7 +509,7 @@ export function createTasksRouter(
         })
         .refine((value) => Object.keys(value).length > 0)
         .parse(request.body);
-      const task = await store.mutate((database) => {
+      const result = await store.mutate((database) => {
         const target = database.tasks.find(
           (candidate) =>
             candidate.id === request.params.taskId &&
@@ -537,7 +551,9 @@ export function createTasksRouter(
           target.completedAt = null;
         }
         const changes = taskChanges(before, target);
-        if (changes.length === 0) return structuredClone(before);
+        if (changes.length === 0) {
+          return { task: structuredClone(before), changed: false };
+        }
         target.updatedAt = now;
         const action =
           before.status !== "done" && target.status === "done"
@@ -553,8 +569,12 @@ export function createTasksRouter(
           changes,
           now,
         );
-        return structuredClone(target);
+        return { task: structuredClone(target), changed: true };
       });
+      const { task } = result;
+      if (result.changed) {
+        realtime.pushUser(task.userId, "task:changed", { task });
+      }
       if (task.assignedBy) {
         realtime.pushUser(task.assignedBy, "task:status", { task });
       }
@@ -566,7 +586,7 @@ export function createTasksRouter(
 
   router.delete("/:taskId", async (request, response, next) => {
     try {
-      await store.mutate((database) => {
+      const task = await store.mutate((database) => {
         const index = database.tasks.findIndex(
           (candidate) =>
             candidate.id === request.params.taskId &&
@@ -588,7 +608,12 @@ export function createTasksRouter(
           request.currentUser!.id,
           "deleted",
         );
-        database.tasks.splice(index, 1);
+        const [deleted] = database.tasks.splice(index, 1);
+        return structuredClone(deleted);
+      });
+      realtime.pushUser(task.userId, "task:deleted", {
+        taskId: task.id,
+        date: task.date,
       });
       response.status(204).end();
     } catch (error) {
