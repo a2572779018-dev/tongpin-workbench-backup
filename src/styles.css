@@ -219,6 +219,14 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
   padding-left: 0.75rem;
 }
 
+.desktop-runtime--mac .desktop-titlebar__brand {
+  padding-left: 5.25rem;
+}
+
+.desktop-runtime--mac .desktop-titlebar {
+  padding-right: 0.75rem;
+}
+
 .desktop-titlebar__brand > span:last-child {
   display: grid;
   line-height: 1;
