@@ -20,6 +20,7 @@ const {
 } = require("./silent-update-policy.cjs");
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
+const isMac = process.platform === "darwin";
 const SESSION_FILE_NAME = "secure-session.bin";
 const CREDENTIAL_VAULT_FILE_NAME = "secure-accounts.bin";
 const MAX_CREDENTIAL_ACCOUNTS = 20;
@@ -40,6 +41,8 @@ let activeNoticeAction = null;
 let updateReady = false;
 
 function prepareSameVolumeUpdaterTemp() {
+  if (process.platform !== "win32") return null;
+
   const executableRoot = path.parse(process.execPath).root.toLowerCase();
   const installParent = path.dirname(path.dirname(process.execPath));
   const candidates = [
@@ -67,6 +70,7 @@ function prepareSameVolumeUpdaterTemp() {
 const updateInstallCoordinator = createUpdateInstallCoordinator({
   app,
   updater: autoUpdater,
+  platform: process.platform,
   prepareInstallerEnvironment: prepareSameVolumeUpdaterTemp,
   closeAuxiliaryWindows: () => {
     clearNoticeHideTimer();
@@ -97,6 +101,7 @@ function requestSilentInstallIfEligible(now = new Date()) {
 }
 
 app.on("before-quit", () => {
+  if (process.platform !== "win32") return;
   if (!updateReady || updateInstallCoordinator.isInstallRequested()) return;
   try {
     prepareSameVolumeUpdaterTemp();
@@ -126,11 +131,6 @@ function getApiUrl() {
     readPackagedConfig().apiUrl ||
     "https://notify.samhubs.com"
   );
-}
-
-function getUpdateUrl() {
-  if (process.env.TONGPIN_UPDATE_URL) return process.env.TONGPIN_UPDATE_URL;
-  return readPackagedConfig().updateUrl || "";
 }
 
 function sendUpdaterStatus(status) {
@@ -359,9 +359,16 @@ async function createWindow() {
     show: false,
     backgroundColor: "#f4efe4",
     title: "同频",
-    icon: APP_ICON_PATH,
-    frame: false,
-    autoHideMenuBar: true,
+    frame: isMac,
+    ...(isMac
+      ? {
+          titleBarStyle: "hiddenInset",
+          trafficLightPosition: { x: 16, y: 15 },
+        }
+      : {
+          icon: APP_ICON_PATH,
+          autoHideMenuBar: true,
+        }),
     roundedCorners: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -373,7 +380,7 @@ async function createWindow() {
   });
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
-  mainWindow.setMenuBarVisibility(false);
+  if (!isMac) mainWindow.setMenuBarVisibility(false);
   const sendMaximizedState = () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(
@@ -419,6 +426,22 @@ async function createWindow() {
       path.join(__dirname, "..", "dist", "renderer", "index.html"),
     );
   }
+}
+
+function configureApplicationMenu() {
+  if (!isMac) {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: "appMenu" },
+      { role: "editMenu" },
+      { role: "viewMenu" },
+      { role: "windowMenu" },
+    ]),
+  );
 }
 
 function registerDesktopIpc() {
@@ -676,19 +699,6 @@ function registerDesktopIpc() {
 function configureUpdater() {
   if (isDevelopment || !app.isPackaged) return;
 
-  const updateUrl = getUpdateUrl();
-  if (!updateUrl || updateUrl.includes("example.com")) {
-    sendUpdaterStatus({
-      state: "not-available",
-      message: "升级服务器尚未配置",
-    });
-    return;
-  }
-
-  autoUpdater.setFeedURL({
-    provider: "generic",
-    url: updateUrl,
-  });
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
@@ -785,10 +795,12 @@ function configureUpdater() {
 }
 
 app.setName("同频");
-app.setAppUserModelId("com.tongpin.workbench");
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.tongpin.workbench");
+}
 
 app.whenReady().then(async () => {
-  Menu.setApplicationMenu(null);
+  configureApplicationMenu();
   registerDesktopIpc();
   await createWindow();
   configureUpdater();
