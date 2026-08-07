@@ -550,9 +550,17 @@ export function AppShell({
             });
           } else if (message.type === "task:assigned") {
             showTaskAssignment(message.data as TaskAssignmentEvent);
+            window.dispatchEvent(
+              new CustomEvent("tongpin:task-sync", {
+                detail: message.data,
+              }),
+            );
           } else if (
             message.type === "task:assignment-receipt" ||
-            message.type === "task:status"
+            message.type === "task:status" ||
+            message.type === "task:changed" ||
+            message.type === "task:deleted" ||
+            message.type === "task:batch-changed"
           ) {
             window.dispatchEvent(
               new CustomEvent("tongpin:task-sync", {
