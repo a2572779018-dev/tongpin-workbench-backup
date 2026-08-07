@@ -312,6 +312,24 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   }, [loadTasks, selectedDate]);
 
   useEffect(() => {
+    let refreshTimer: number | null = null;
+    const refreshTasks = () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void loadTasks();
+        void loadSummary();
+      }, 120);
+    };
+
+    window.addEventListener("tongpin:task-sync", refreshTasks);
+    return () => {
+      window.removeEventListener("tongpin:task-sync", refreshTasks);
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+    };
+  }, [loadSummary, loadTasks]);
+
+  useEffect(() => {
     if (!highlightTaskId || loading) return;
     const row = document.querySelector<HTMLElement>(
       `[data-task-id="${CSS.escape(highlightTaskId)}"]`,
