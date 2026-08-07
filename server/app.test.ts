@@ -674,6 +674,77 @@ describe("同频 API 纵向流程", () => {
     bossSocket.close();
   });
 
+  it("同一账号在两台电脑上实时收到任务新增、修改和删除", async () => {
+    const address = runtime.server.address() as AddressInfo;
+    const firstDevice = new WebSocket(
+      `ws://127.0.0.1:${address.port}/api/realtime`,
+    );
+    const secondDevice = new WebSocket(
+      `ws://127.0.0.1:${address.port}/api/realtime`,
+    );
+    for (const socket of [firstDevice, secondDevice]) {
+      socket.on("open", () => {
+        socket.send(JSON.stringify({ type: "auth", token: bobToken }));
+      });
+    }
+    await Promise.all([
+      waitForRealtimeMessage(firstDevice, "realtime:ready"),
+      waitForRealtimeMessage(secondDevice, "realtime:ready"),
+    ]);
+
+    const createdOnBoth = [
+      waitForRealtimeMessage(firstDevice, "task:changed"),
+      waitForRealtimeMessage(secondDevice, "task:changed"),
+    ];
+    const created = await request(runtime.app)
+      .post("/api/tasks")
+      .set("Authorization", `Bearer ${bobToken}`)
+      .send({
+        date: TODAY,
+        title: "跨设备同步测试",
+        priority: "p2",
+      })
+      .expect(201);
+    for (const message of await Promise.all(createdOnBoth)) {
+      expect(message.data).toMatchObject({
+        task: { id: created.body.task.id, title: "跨设备同步测试" },
+      });
+    }
+
+    const updatedOnBoth = [
+      waitForRealtimeMessage(firstDevice, "task:changed"),
+      waitForRealtimeMessage(secondDevice, "task:changed"),
+    ];
+    await request(runtime.app)
+      .patch(`/api/tasks/${created.body.task.id}`)
+      .set("Authorization", `Bearer ${bobToken}`)
+      .send({ status: "doing" })
+      .expect(200);
+    for (const message of await Promise.all(updatedOnBoth)) {
+      expect(message.data).toMatchObject({
+        task: { id: created.body.task.id, status: "doing" },
+      });
+    }
+
+    const deletedOnBoth = [
+      waitForRealtimeMessage(firstDevice, "task:deleted"),
+      waitForRealtimeMessage(secondDevice, "task:deleted"),
+    ];
+    await request(runtime.app)
+      .delete(`/api/tasks/${created.body.task.id}`)
+      .set("Authorization", `Bearer ${bobToken}`)
+      .expect(204);
+    for (const message of await Promise.all(deletedOnBoth)) {
+      expect(message.data).toEqual({
+        taskId: created.body.task.id,
+        date: TODAY,
+      });
+    }
+
+    firstDevice.close();
+    secondDevice.close();
+  });
+
   it("昨日未完成任务只复制到今天一次，历史日期保持不变", async () => {
     await request(runtime.app)
       .post("/api/tasks")
