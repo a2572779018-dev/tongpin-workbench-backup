@@ -86,7 +86,10 @@ npm.cmd run typecheck
 npm.cmd test
 npm.cmd run build
 npm.cmd run dist:win
+npm.cmd run dist:mac
 ```
+
+macOS 的本地开发、通用安装包、签名公证和双平台更新说明见 [docs/MACOS.md](docs/MACOS.md)。
 
 Windows 安装包输出到 `artifacts/`。桌面端使用一体式无边框标题栏，默认 Electron 菜单已移除，最小化、最大化、还原与关闭由受限 IPC 控制。当前测试覆盖：
 
