@@ -1448,6 +1448,12 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       JSON.stringify(eligible.map((task) => task.id)),
       now,
     );
+    if (created.length > 0) {
+      this.pushToUser(user.id, "task:batch-changed", {
+        tasks: created,
+        dates: [sourceDate, body.targetDate],
+      });
+    }
     return json(
       {
         sourceDate,
@@ -1582,6 +1588,12 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         now,
       );
     }
+    if (created.length > 0) {
+      this.pushToUser(user.id, "task:batch-changed", {
+        tasks: created,
+        dates: [body.sourceDate, targetDate],
+      });
+    }
     return json(
       {
         sourceDate: body.sourceDate,
@@ -1664,6 +1676,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       task,
       receipt,
     });
+    this.pushToUser(task.userId, "task:changed", { task });
     return json({ task });
   }
 
@@ -1699,6 +1712,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     )!;
     const created = toTask(task);
     this.recordTaskAudit(created, user.id, "created", [], now);
+    this.pushToUser(user.id, "task:changed", { task: created });
     return json({ task: created }, 201);
   }
 
@@ -1800,6 +1814,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     if (task.assignedBy) {
       this.pushToUser(task.assignedBy, "task:status", { task });
     }
+    this.pushToUser(user.id, "task:changed", { task });
     return json({ task });
   }
 
@@ -1835,6 +1850,10 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       taskId,
       user.id,
     );
+    this.pushToUser(user.id, "task:deleted", {
+      taskId,
+      date: existing.date,
+    });
     return new Response(null, { status: 204 });
   }
 
