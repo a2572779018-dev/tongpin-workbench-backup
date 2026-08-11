@@ -17,6 +17,20 @@ const testDateParts = Object.fromEntries(
     .map((part) => [part.type, part.value]),
 );
 const testDate = `${testDateParts.year}-${testDateParts.month}-${testDateParts.day}`;
+const nextDateValue = new Date(`${testDate}T00:00:00Z`);
+nextDateValue.setUTCDate(nextDateValue.getUTCDate() + 1);
+const nextDate = nextDateValue.toISOString().slice(0, 10);
+const weekStart = new Date(`${testDate}T00:00:00Z`);
+const weekDay = weekStart.getUTCDay();
+const daysThroughSunday = weekDay === 0 ? 1 : 8 - weekDay;
+const remainingWeekDates = Array.from(
+  { length: daysThroughSunday },
+  (_, index) => {
+    const date = new Date(weekStart);
+    date.setUTCDate(date.getUTCDate() + index);
+    return date.toISOString().slice(0, 10);
+  },
+);
 const admin = {
   email: "admin@company.local",
   name: "本地管理员",
@@ -318,7 +332,7 @@ const assigned = await api(
     body: {
       title: "整理明日客户复盘",
       details: "附上结论与下一步",
-      date: "2026-07-29",
+      date: nextDate,
       priority: "p1",
     },
   },
@@ -355,7 +369,7 @@ await expectFailure(
 assignmentRealtime.socket.close();
 
 const rolloverPrompt = await api(
-  "/api/tasks/rollover?targetDate=2026-07-29",
+  `/api/tasks/rollover?targetDate=${nextDate}`,
   { token: sessionA.accessToken },
 );
 assert.equal(rolloverPrompt.pending, true);
@@ -366,7 +380,7 @@ const rollover = await api("/api/tasks/rollover", {
   method: "POST",
   token: sessionA.accessToken,
   body: {
-    targetDate: "2026-07-29",
+    targetDate: nextDate,
     taskIds: [createdTasks[1].id],
   },
 });
@@ -377,7 +391,7 @@ const rolloverRepeated = await api("/api/tasks/rollover", {
   method: "POST",
   token: sessionA.accessToken,
   body: {
-    targetDate: "2026-07-29",
+    targetDate: nextDate,
     taskIds: [createdTasks[1].id],
   },
 });
@@ -483,6 +497,30 @@ const tasksAfterRelogin = await api(`/api/tasks?date=${testDate}`, {
 });
 assert.equal(tasksAfterRelogin.tasks.length, 5);
 
+const weeklyRealtime = connectRealtime(sessionA.accessToken);
+await weeklyRealtime.waitFor("realtime:ready");
+const weeklyBatchPromise = weeklyRealtime.waitFor("task:batch-changed");
+const weeklyBatch = await api("/api/tasks", {
+  method: "POST",
+  token: sessionA.accessToken,
+  body: {
+    title: "本周剩余每天的验证任务",
+    details: "一次请求原子创建到周日",
+    date: testDate,
+    priority: "p2",
+    scope: "rest_of_week",
+  },
+});
+const weeklyBatchEvent = await weeklyBatchPromise;
+weeklyRealtime.socket.close();
+assert.deepEqual(
+  weeklyBatch.tasks.map((task) => task.date),
+  remainingWeekDates,
+);
+assert.equal(new Set(weeklyBatch.tasks.map((task) => task.id)).size, remainingWeekDates.length);
+assert.deepEqual(weeklyBatchEvent.data.dates, remainingWeekDates);
+assert.deepEqual(weeklyBatchEvent.data.tasks, weeklyBatch.tasks);
+
 const result = {
   ok: true,
   baseUrl,
@@ -509,6 +547,7 @@ const result = {
     "standard WebSocket notification delivery",
     "notification inbox and read state",
     "password reset and cross-login data persistence",
+    "atomic remaining-week task creation and one realtime batch event",
   ],
 };
 const outputDirectory = path.resolve("output");
