@@ -13,7 +13,10 @@ import type {
   UserRole,
   VerificationPurpose,
 } from "../../server/types";
-import { businessDateKey } from "../../server/business-date";
+import {
+  businessDateKey,
+  taskDatesForScope,
+} from "../../server/business-date";
 import { getMailMode, sendCodeEmail } from "./mailer";
 import {
   ApiError,
@@ -1691,29 +1694,43 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       );
     }
     const now = new Date().toISOString();
-    const id = crypto.randomUUID();
-    this.sql.exec(
-      `INSERT INTO tasks
-       (id, user_id, date, title, details, status, priority, completed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id,
-      user.id,
-      body.date,
-      body.title,
-      body.details,
-      body.status,
-      body.priority,
-      body.status === "done" ? now : null,
-      now,
-      now,
-    );
-    const task = firstRow(
-      this.sql.exec<TaskRow>("SELECT * FROM tasks WHERE id = ?", id),
-    )!;
-    const created = toTask(task);
-    this.recordTaskAudit(created, user.id, "created", [], now);
-    this.pushToUser(user.id, "task:changed", { task: created });
-    return json({ task: created }, 201);
+    const dates = taskDatesForScope(body.date, body.scope);
+    const created: Task[] = [];
+    this.ctx.storage.transactionSync(() => {
+      for (const date of dates) {
+        const id = crypto.randomUUID();
+        this.sql.exec(
+          `INSERT INTO tasks
+           (id, user_id, date, title, details, status, priority, completed_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id,
+          user.id,
+          date,
+          body.title,
+          body.details,
+          body.status,
+          body.priority,
+          body.status === "done" ? now : null,
+          now,
+          now,
+        );
+        const task = firstRow(
+          this.sql.exec<TaskRow>("SELECT * FROM tasks WHERE id = ?", id),
+        )!;
+        const item = toTask(task);
+        this.recordTaskAudit(item, user.id, "created", [], now);
+        created.push(item);
+      }
+    });
+    if (body.scope === "rest_of_week") {
+      this.pushToUser(user.id, "task:batch-changed", {
+        tasks: created,
+        dates,
+      });
+    } else {
+      this.pushToUser(user.id, "task:changed", { task: created[0] });
+    }
+    return json({ task: created[0], tasks: created }, 201);
   }
 
   private async patchTask(
