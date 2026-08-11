@@ -1,5 +1,15 @@
 /// <reference types="vite/client" />
 
+type UpdaterErrorKind =
+  | "channel-missing"
+  | "check-network"
+  | "check"
+  | "download"
+  | "validation"
+  | "signature"
+  | "install"
+  | "update";
+
 interface DesktopSessionBridge {
   apiUrl: string;
   platform: string;
@@ -78,6 +88,7 @@ interface DesktopSessionBridge {
       percent?: number;
       version?: string;
       message?: string;
+      errorKind?: UpdaterErrorKind;
     }) => void,
   ): () => void;
 }
