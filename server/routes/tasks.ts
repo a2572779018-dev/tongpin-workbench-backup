@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
-import { businessDateKey } from "../business-date";
+import { businessDateKey, taskDatesForScope } from "../business-date";
 import { ApiError } from "../errors";
 import { JsonStore } from "../store";
 import { appendTaskAudit, taskChanges } from "../task-audit";
@@ -20,6 +20,11 @@ const taskFields = {
   status: z.enum(["todo", "doing", "done"]).default("todo"),
   priority: z.enum(["p0", "p1", "p2", "p3", "p4"]).default("p2"),
 };
+
+const taskCreateSchema = z.object({
+  ...taskFields,
+  scope: z.enum(["day", "rest_of_week"]).default("day"),
+});
 
 function previousDate(date: string): string {
   const value = new Date(`${date}T00:00:00Z`);
@@ -455,7 +460,7 @@ export function createTasksRouter(
 
   router.post("/", async (request, response, next) => {
     try {
-      const body = z.object(taskFields).parse(request.body);
+      const body = taskCreateSchema.parse(request.body);
       if (body.date < businessDateKey()) {
         throw new ApiError(
           400,
@@ -464,34 +469,52 @@ export function createTasksRouter(
         );
       }
       const now = new Date().toISOString();
-      const task = await store.mutate((database) => {
-        const created = {
-          id: randomUUID(),
-          userId: request.currentUser!.id,
-          ...body,
-          origin: "self" as const,
-          assignedBy: null,
-          assignmentId: null,
-          sourceTaskId: null,
-          assignmentDeliveredAt: null,
-          assignmentViewedAt: null,
-          completedAt: body.status === "done" ? now : null,
-          createdAt: now,
-          updatedAt: now,
-        };
-        database.tasks.push(created);
-        appendTaskAudit(
-          database,
-          created,
-          request.currentUser!.id,
-          "created",
-          [],
-          now,
-        );
-        return created;
+      const dates = taskDatesForScope(body.date, body.scope);
+      const tasks = await store.mutate((database) => {
+        const createdTasks: Task[] = [];
+        for (const date of dates) {
+          const created: Task = {
+            id: randomUUID(),
+            userId: request.currentUser!.id,
+            title: body.title,
+            details: body.details,
+            date,
+            status: body.status,
+            priority: body.priority,
+            origin: "self",
+            assignedBy: null,
+            assignmentId: null,
+            sourceTaskId: null,
+            assignmentDeliveredAt: null,
+            assignmentViewedAt: null,
+            completedAt: body.status === "done" ? now : null,
+            createdAt: now,
+            updatedAt: now,
+          };
+          database.tasks.push(created);
+          appendTaskAudit(
+            database,
+            created,
+            request.currentUser!.id,
+            "created",
+            [],
+            now,
+          );
+          createdTasks.push(created);
+        }
+        return createdTasks;
       });
-      realtime.pushUser(task.userId, "task:changed", { task });
-      response.status(201).json({ task });
+      if (body.scope === "rest_of_week") {
+        realtime.pushUser(request.currentUser!.id, "task:batch-changed", {
+          tasks,
+          dates,
+        });
+      } else {
+        realtime.pushUser(tasks[0].userId, "task:changed", {
+          task: tasks[0],
+        });
+      }
+      response.status(201).json({ task: tasks[0], tasks });
     } catch (error) {
       next(error);
     }
