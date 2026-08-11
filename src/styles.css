@@ -1863,7 +1863,7 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
 .quick-add {
   display: grid;
   min-height: 4rem;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   margin-top: 1.7rem;
   overflow: hidden;
@@ -1892,6 +1892,7 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
   font-weight: 600;
 }
 
+.task-scope-toggle,
 .priority-toggle {
   display: inline-flex;
   min-height: 2.4rem;
@@ -1907,8 +1908,8 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
   font-weight: 700;
 }
 
+.task-scope-toggle select,
 .priority-toggle select {
-  max-width: 9rem;
   height: 2.2rem;
   cursor: pointer;
   border: 0;
@@ -1917,6 +1918,14 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
   background: transparent;
   font-size: 0.67rem;
   font-weight: 750;
+}
+
+.task-scope-toggle select {
+  max-width: 11.5rem;
+}
+
+.priority-toggle select {
+  max-width: 9rem;
 }
 
 .priority-p0 {
@@ -4617,7 +4626,7 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .priority-toggle {
+  .task-scope-toggle {
     grid-row: 2;
     grid-column: 1 / 2;
     justify-content: center;
@@ -4626,10 +4635,19 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
     border-radius: 0;
   }
 
-  .quick-add__submit {
-    min-height: 2.8rem;
+  .priority-toggle {
     grid-row: 2;
     grid-column: 2;
+    justify-content: center;
+    margin: 0;
+    border-width: 2px 0 0;
+    border-radius: 0;
+  }
+
+  .quick-add__submit {
+    min-height: 2.8rem;
+    grid-row: 3;
+    grid-column: 1 / -1;
     border-top: var(--thin-border);
     border-left: 0;
   }
@@ -7345,6 +7363,7 @@ html[data-home-layout^="lanes-"] .past-sync-bar__icon {
   color: var(--lane-accent-strong);
 }
 
+html[data-home-layout^="lanes-"] .task-scope-toggle,
 html[data-home-layout^="lanes-"] .priority-toggle {
   border-color: var(--lane-border);
   background: var(--lane-panel-muted);
