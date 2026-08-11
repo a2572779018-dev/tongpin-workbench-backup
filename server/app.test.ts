@@ -7,7 +7,7 @@ import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createRuntime, type AppRuntime } from "./app";
-import { businessDateKey } from "./business-date";
+import { businessDateKey, taskDatesForScope } from "./business-date";
 import { loadConfig } from "./config";
 
 const TODAY = businessDateKey();
@@ -247,6 +247,7 @@ describe("同频 API 纵向流程", () => {
       .expect(201);
     aliceTaskId = created.body.task.id;
     expect(created.body.task.priority).toBe("p0");
+    expect(created.body.tasks).toEqual([created.body.task]);
 
     const bobTasks = await request(runtime.app)
       .get(`/api/tasks?date=${TODAY}`)
@@ -273,6 +274,75 @@ describe("同频 API 纵向流程", () => {
       .send({ status: "done" })
       .expect(200);
     expect(completed.body.task.completedAt).toBeTruthy();
+  });
+
+  it("可从所选日期原子创建本周剩余每天的任务", async () => {
+    const expectedDates = taskDatesForScope(TODAY, "rest_of_week");
+    const title = `本周每日任务-${randomUUID()}`;
+    const created = await request(runtime.app)
+      .post("/api/tasks")
+      .set("Authorization", `Bearer ${bobToken}`)
+      .send({
+        date: TODAY,
+        title,
+        details: "每天都要保留一条独立记录",
+        priority: "p1",
+        scope: "rest_of_week",
+      })
+      .expect(201);
+
+    expect(created.body.task).toEqual(created.body.tasks[0]);
+    expect(
+      created.body.tasks.map((task: { date: string }) => task.date),
+    ).toEqual(expectedDates);
+    expect(
+      new Set(created.body.tasks.map((task: { id: string }) => task.id)).size,
+    ).toBe(expectedDates.length);
+    expect(
+      created.body.tasks.every(
+        (task: {
+          title: string;
+          details: string;
+          priority: string;
+          status: string;
+        }) =>
+          task.title === title &&
+          task.details === "每天都要保留一条独立记录" &&
+          task.priority === "p1" &&
+          task.status === "todo",
+      ),
+    ).toBe(true);
+
+    const createdIds = new Set<string>(
+      created.body.tasks.map((task: { id: string }) => task.id),
+    );
+    const snapshot = await runtime.store.read((database) => ({
+      tasks: database.tasks.filter((task) => createdIds.has(task.id)),
+      audits: database.taskAuditEvents.filter((event) =>
+        createdIds.has(event.taskId),
+      ),
+    }));
+    expect(snapshot.tasks).toHaveLength(expectedDates.length);
+    expect(snapshot.audits).toHaveLength(expectedDates.length);
+    expect(snapshot.audits.every((event) => event.action === "created")).toBe(
+      true,
+    );
+
+    await request(runtime.app)
+      .post("/api/tasks")
+      .set("Authorization", `Bearer ${bobToken}`)
+      .send({
+        date: TODAY,
+        title: `${title}-无效范围`,
+        scope: "month",
+      })
+      .expect(400);
+    const invalidCount = await runtime.store.read(
+      (database) =>
+        database.tasks.filter((task) => task.title === `${title}-无效范围`)
+          .length,
+    );
+    expect(invalidCount).toBe(0);
   });
 
   it("管理员可设置老板，老板可看进度并给成员发送通知", async () => {
@@ -709,6 +779,28 @@ describe("同频 API 纵向流程", () => {
       expect(message.data).toMatchObject({
         task: { id: created.body.task.id, title: "跨设备同步测试" },
       });
+    }
+
+    const batchOnBoth = [
+      waitForRealtimeMessage(firstDevice, "task:batch-changed"),
+      waitForRealtimeMessage(secondDevice, "task:batch-changed"),
+    ];
+    const weekly = await request(runtime.app)
+      .post("/api/tasks")
+      .set("Authorization", `Bearer ${bobToken}`)
+      .send({
+        date: TODAY,
+        title: "跨设备本周任务",
+        priority: "p2",
+        scope: "rest_of_week",
+    })
+      .expect(201);
+    for (const message of await Promise.all(batchOnBoth)) {
+      const data = message.data as { dates: string[]; tasks: unknown[] };
+      expect(data.dates).toEqual(
+        taskDatesForScope(TODAY, "rest_of_week"),
+      );
+      expect(data.tasks).toEqual(weekly.body.tasks);
     }
 
     const updatedOnBoth = [
