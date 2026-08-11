@@ -58,6 +58,8 @@ interface DailySummary {
   doing: number;
 }
 
+type TaskCreateScope = "day" | "rest_of_week";
+
 const PRIORITY_RANK: Record<TaskPriority, number> = {
   p0: 0,
   p1: 1,
@@ -131,6 +133,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   const [summary, setSummary] = useState<Record<string, DailySummary>>({});
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState<TaskPriority>("p2");
+  const [createScope, setCreateScope] = useState<TaskCreateScope>("day");
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -356,19 +359,40 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     setSaving(true);
     setError("");
     try {
-      const result = await api<{ task: Task }>("/api/tasks", {
+      const result = await api<{ task: Task; tasks: Task[] }>("/api/tasks", {
         method: "POST",
         body: JSON.stringify({
           title: title.trim(),
           details: "",
           date: selectedDate,
           priority,
+          scope: createScope,
         }),
       });
-      setTasks((current) => sortTasks([result.task, ...current]));
+      const visibleCreated = result.tasks.filter(
+        (task) => task.date === selectedDateRef.current,
+      );
+      if (visibleCreated.length > 0) {
+        const createdIds = new Set(visibleCreated.map((task) => task.id));
+        setTasks((current) =>
+          sortTasks([
+            ...visibleCreated,
+            ...current.filter((task) => !createdIds.has(task.id)),
+          ]),
+        );
+      }
       setTitle("");
       setPriority("p2");
+      setCreateScope("day");
       await loadSummary();
+      if (createScope === "rest_of_week") {
+        notify({
+          title: "本周任务已创建",
+          body: `已从当天到本周日创建 ${result.tasks.length} 项任务。`,
+          tone: "success",
+          duration: 6_000,
+        });
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "任务创建失败");
     } finally {
@@ -557,6 +581,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
           selectedDate={selectedDate}
           title={title}
           priority={priority}
+          createScope={createScope}
           loading={loading}
           saving={saving}
           error={error}
@@ -572,6 +597,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
           onSelectedDateChange={setSelectedDate}
           onTitleChange={setTitle}
           onPriorityChange={setPriority}
+          onCreateScopeChange={setCreateScope}
           onCreateTask={createTask}
           onMoveTask={moveTask}
           onEditTask={setEditingTask}
@@ -734,6 +760,20 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
               aria-label="新任务标题"
               maxLength={120}
             />
+            <label className="task-scope-toggle">
+              <CalendarDays size={15} />
+              <select
+                value={createScope}
+                aria-label="新任务创建范围"
+                onChange={(event) =>
+                  setCreateScope(event.target.value as TaskCreateScope)
+                }
+              >
+                <option value="day">仅当天（默认）</option>
+                <option value="rest_of_week">当天至本周日（每天）</option>
+              </select>
+              <ChevronDown size={13} />
+            </label>
             <label className={`priority-toggle priority-${priority}`}>
               <Flag size={15} />
               <select
@@ -1098,6 +1138,7 @@ function LaneTaskBoard({
   selectedDate,
   title,
   priority,
+  createScope,
   loading,
   saving,
   error,
@@ -1113,6 +1154,7 @@ function LaneTaskBoard({
   onSelectedDateChange,
   onTitleChange,
   onPriorityChange,
+  onCreateScopeChange,
   onCreateTask,
   onMoveTask,
   onEditTask,
@@ -1124,6 +1166,7 @@ function LaneTaskBoard({
   selectedDate: string;
   title: string;
   priority: TaskPriority;
+  createScope: TaskCreateScope;
   loading: boolean;
   saving: boolean;
   error: string;
@@ -1139,6 +1182,7 @@ function LaneTaskBoard({
   onSelectedDateChange: (date: string) => void;
   onTitleChange: (title: string) => void;
   onPriorityChange: (priority: TaskPriority) => void;
+  onCreateScopeChange: (scope: TaskCreateScope) => void;
   onCreateTask: (event: FormEvent) => Promise<void>;
   onMoveTask: (taskId: string, status: TaskStatus) => Promise<void>;
   onEditTask: (task: Task) => void;
@@ -1342,10 +1386,28 @@ function LaneTaskBoard({
         <input
           value={title}
           onChange={(event) => onTitleChange(event.target.value)}
-          placeholder="添加今天要完成的任务"
+          placeholder={
+            createScope === "rest_of_week"
+              ? "添加本周每天都要完成的任务"
+              : "添加当天要完成的任务"
+          }
           aria-label="新任务标题"
           maxLength={120}
         />
+        <label className="task-scope-toggle">
+          <CalendarDays size={15} />
+          <select
+            value={createScope}
+            aria-label="新任务创建范围"
+            onChange={(event) =>
+              onCreateScopeChange(event.target.value as TaskCreateScope)
+            }
+          >
+            <option value="day">仅当天（默认）</option>
+            <option value="rest_of_week">当天至本周日（每天）</option>
+          </select>
+          <ChevronDown size={13} />
+        </label>
         <label className={`priority-toggle priority-${priority}`}>
           <Flag size={15} />
           <select
