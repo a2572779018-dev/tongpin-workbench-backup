@@ -18,6 +18,11 @@ const {
 const {
   shouldInstallSilently,
 } = require("./silent-update-policy.cjs");
+const {
+  classifyUpdateError,
+  getUpdateRetryDelayMs,
+  shouldShowUpdateError,
+} = require("./update-error-policy.cjs");
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === "darwin";
@@ -29,7 +34,6 @@ const NOTICE_COLLAPSED_SIZE = { width: 82, height: 82 };
 const NOTICE_EXPANDED_SIZE = { width: 430, height: 178 };
 const STRONG_NOTICE_AUTO_HIDE_MS = 30_000;
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
-const UPDATE_RETRY_DELAY_MS = 2 * 60 * 1000;
 const SILENT_INSTALL_CHECK_INTERVAL_MS = 60 * 1000;
 const UPDATE_TEMP_DIR_NAME = ".tongpin-updater-temp";
 let mainWindow = null;
@@ -702,10 +706,101 @@ function configureUpdater() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
+  let checking = false;
+  let retryTimer = null;
+  let checkFailureCount = 0;
+  let updatePhase = "idle";
+  let currentCheckReportedErrorKind = "";
+  let channelMissingShown = false;
+  const checkErrorNoticeTimes = new Map();
+
+  const clearRetryTimer = () => {
+    if (!retryTimer) return;
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+  const resetCheckFailures = () => {
+    checkFailureCount = 0;
+    clearRetryTimer();
+  };
+  const reportUpdaterError = (error) => {
+    const errorClass = classifyUpdateError(error, updatePhase);
+    if (
+      checking &&
+      currentCheckReportedErrorKind === errorClass.kind
+    ) {
+      return errorClass;
+    }
+    if (checking) currentCheckReportedErrorKind = errorClass.kind;
+
+    console.error(
+      `[updater] ${errorClass.kind}:`,
+      error instanceof Error ? error.stack || error.message : error,
+    );
+    const nowMs = Date.now();
+    const shouldShow = shouldShowUpdateError({
+      errorClass,
+      nowMs,
+      channelMissingShown,
+      lastShownAtMs: checkErrorNoticeTimes.get(errorClass.kind),
+    });
+    if (!shouldShow) return errorClass;
+
+    if (errorClass.kind === "channel-missing") {
+      channelMissingShown = true;
+    } else if (errorClass.scope === "check") {
+      checkErrorNoticeTimes.set(errorClass.kind, nowMs);
+    }
+    sendUpdaterStatus({
+      state: "error",
+      errorKind: errorClass.kind,
+      message: errorClass.message,
+    });
+    return errorClass;
+  };
+
+  const scheduleRetry = (errorClass) => {
+    if (retryTimer || updateReady || errorClass.retry !== "backoff") return;
+    checkFailureCount += 1;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      check();
+    }, getUpdateRetryDelayMs(checkFailureCount));
+    retryTimer.unref();
+  };
+
+  const check = () => {
+    if (checking || updateReady || retryTimer) return;
+    checking = true;
+    updatePhase = "checking";
+    currentCheckReportedErrorKind = "";
+    autoUpdater
+      .checkForUpdates()
+      .then(() => resetCheckFailures())
+      .catch((error) => {
+        const classifiedError = classifyUpdateError(error, updatePhase);
+        const errorClass =
+          currentCheckReportedErrorKind === classifiedError.kind
+            ? classifiedError
+            : reportUpdaterError(error);
+        if (errorClass.kind === "channel-missing") {
+          resetCheckFailures();
+          return;
+        }
+        scheduleRetry(errorClass);
+      })
+      .finally(() => {
+        checking = false;
+      });
+  };
+
   autoUpdater.on("checking-for-update", () => {
+    updatePhase = "checking";
     sendUpdaterStatus({ state: "checking", message: "正在检查新版本" });
   });
   autoUpdater.on("update-available", (info) => {
+    resetCheckFailures();
+    updatePhase = "downloading";
     updateReady = false;
     sendUpdaterStatus({
       state: "available",
@@ -714,6 +809,8 @@ function configureUpdater() {
     });
   });
   autoUpdater.on("update-not-available", (info) => {
+    resetCheckFailures();
+    updatePhase = "idle";
     updateReady = false;
     sendUpdaterStatus({
       state: "not-available",
@@ -722,6 +819,7 @@ function configureUpdater() {
     });
   });
   autoUpdater.on("download-progress", (progress) => {
+    updatePhase = "downloading";
     sendUpdaterStatus({
       state: "downloading",
       percent: progress.percent,
@@ -729,12 +827,12 @@ function configureUpdater() {
     });
   });
   autoUpdater.on("error", (error) => {
-    sendUpdaterStatus({
-      state: "error",
-      message: error.message || "更新检查失败",
-    });
+    updateReady = false;
+    reportUpdaterError(error);
   });
   autoUpdater.on("update-downloaded", (info) => {
+    resetCheckFailures();
+    updatePhase = "downloaded";
     updateReady = true;
     sendUpdaterStatus({
       state: "downloaded",
@@ -747,33 +845,6 @@ function configureUpdater() {
     );
     silentInstallTimer.unref();
   });
-
-  let checking = false;
-  let retryTimer = null;
-  const scheduleRetry = () => {
-    if (retryTimer || updateReady) return;
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      check();
-    }, UPDATE_RETRY_DELAY_MS);
-    retryTimer.unref();
-  };
-  const check = () => {
-    if (checking || updateReady) return;
-    checking = true;
-    autoUpdater
-      .checkForUpdates()
-      .catch((error) => {
-        sendUpdaterStatus({
-          state: "error",
-          message: error.message || "更新检查失败",
-        });
-        scheduleRetry();
-      })
-      .finally(() => {
-        checking = false;
-      });
-  };
 
   setTimeout(check, 8_000);
   const interval = setInterval(check, UPDATE_CHECK_INTERVAL_MS);
