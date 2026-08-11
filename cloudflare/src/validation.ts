@@ -205,6 +205,7 @@ export function parseTaskCreate(value: unknown): {
   date: string;
   status: TaskStatus;
   priority: TaskPriority;
+  scope: "day" | "rest_of_week";
 } {
   const body = objectValue(value);
   return {
@@ -234,6 +235,14 @@ export function parseTaskCreate(value: unknown): {
             body.priority,
             ["p0", "p1", "p2", "p3", "p4"] as const,
             "任务优先级",
+          ),
+    scope:
+      body.scope === undefined
+        ? "day"
+        : enumValue(
+            body.scope,
+            ["day", "rest_of_week"] as const,
+            "任务创建范围",
           ),
   };
 }
