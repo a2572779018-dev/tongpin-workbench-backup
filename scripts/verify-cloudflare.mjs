@@ -6,7 +6,17 @@ import WebSocket from "ws";
 const baseUrl = (process.env.TONGPIN_CLOUDFLARE_TEST_URL ??
   "http://127.0.0.1:8787").replace(/\/$/, "");
 const runId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-const testDate = "2026-07-28";
+const testDateParts = Object.fromEntries(
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  })
+    .formatToParts(new Date())
+    .map((part) => [part.type, part.value]),
+);
+const testDate = `${testDateParts.year}-${testDateParts.month}-${testDateParts.day}`;
 const admin = {
   email: "admin@company.local",
   name: "本地管理员",
