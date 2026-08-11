@@ -59,6 +59,51 @@ interface NoticeCenterValue {
 
 const NoticeCenterContext = createContext<NoticeCenterValue | null>(null);
 const NOTICE_EVENT = "tongpin:notice";
+const UPDATER_ERROR_COPY = {
+  "channel-missing": {
+    title: "更新通道暂未就绪",
+    body: "软件更新通道暂未准备好，不影响任务同步和老板通知，软件会按正常周期自动重试。",
+    tone: "warning",
+  },
+  "check-network": {
+    title: "暂时无法检查更新",
+    body: "暂时无法检查软件更新，不影响任务同步和老板通知，软件会自动重试。",
+    tone: "warning",
+  },
+  check: {
+    title: "暂时无法检查更新",
+    body: "暂时无法检查软件更新，不影响任务同步和老板通知，软件会自动重试。",
+    tone: "warning",
+  },
+  download: {
+    title: "更新下载失败",
+    body: "软件更新下载未完成，不影响任务同步和老板通知，软件会自动重试。",
+    tone: "error",
+  },
+  validation: {
+    title: "更新校验失败",
+    body: "软件更新校验未通过，为保护数据已停止安装；不影响任务同步和老板通知，软件会自动重试。",
+    tone: "error",
+  },
+  signature: {
+    title: "更新签名校验失败",
+    body: "软件更新签名校验未通过，为保护数据已停止安装；不影响任务同步和老板通知，软件会自动重试。",
+    tone: "error",
+  },
+  install: {
+    title: "更新安装未完成",
+    body: "软件更新安装未完成，不影响任务同步和老板通知，软件会自动重试。",
+    tone: "error",
+  },
+  update: {
+    title: "软件更新暂时失败",
+    body: "软件更新暂时未完成，不影响任务同步和老板通知，软件会自动重试。",
+    tone: "error",
+  },
+} as const satisfies Record<
+  UpdaterErrorKind,
+  { title: string; body: string; tone: NoticeTone }
+>;
 let noticeSequence = 0;
 
 function createNoticeId() {
@@ -246,7 +291,9 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
               onSelect: async () => {
                 const started = await desktop.installUpdate();
                 if (!started) {
-                  throw new Error("更新暂时无法启动，请退出同频后自动安装。");
+                  throw new Error(
+                    "软件更新安装未能启动，不影响任务同步和老板通知，软件会自动重试。",
+                  );
                 }
               },
             },
@@ -254,11 +301,13 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
         });
         return;
       }
+      const errorCopy =
+        UPDATER_ERROR_COPY[status.errorKind ?? "update"];
       notify({
         id: "online-updater",
-        title: "更新检查失败",
-        body: status.message || "暂时无法连接升级服务，下次启动会自动重试。",
-        tone: "error",
+        title: errorCopy.title,
+        body: errorCopy.body,
+        tone: errorCopy.tone,
         duration: 12_000,
       });
     });
