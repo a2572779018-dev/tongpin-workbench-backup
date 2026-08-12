@@ -156,18 +156,24 @@ function connectRealtime(accessToken) {
     for (const listener of listeners) listener(message);
   });
 
-  function waitFor(type, timeoutMs = 5_000) {
-    const existing = messages.find((message) => message.type === type);
-    if (existing) return Promise.resolve(existing);
+  function waitFor(type, predicate = () => true, timeoutMs = 5_000) {
+    const existingIndex = messages.findIndex(
+      (message) => message.type === type && predicate(message.data),
+    );
+    if (existingIndex >= 0) {
+      return Promise.resolve(messages.splice(existingIndex, 1)[0]);
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         listeners.delete(listener);
         reject(new Error(`Timed out waiting for WebSocket message ${type}`));
       }, timeoutMs);
       const listener = (message) => {
-        if (message.type !== type) return;
+        if (message.type !== type || !predicate(message.data)) return;
         clearTimeout(timer);
         listeners.delete(listener);
+        const index = messages.indexOf(message);
+        if (index >= 0) messages.splice(index, 1);
         resolve(message);
       };
       listeners.add(listener);
@@ -175,6 +181,14 @@ function connectRealtime(accessToken) {
   }
 
   return { socket, waitFor };
+}
+
+function closeRealtime(realtime) {
+  if (realtime.socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve) => {
+    realtime.socket.once("close", resolve);
+    realtime.socket.close();
+  });
 }
 
 const health = await api("/api/health");
@@ -446,33 +460,141 @@ const destroyedFlash = flashMessages.messages.find(
 assert.equal(destroyedFlash.body, "");
 assert(destroyedFlash.destroyedAt);
 
-const realtime = connectRealtime(sessionA.accessToken);
-await realtime.waitFor("realtime:ready");
-const notificationPromise = realtime.waitFor("notification:new");
+const bossRealtime = connectRealtime(bossSession.accessToken);
+assert.equal(
+  (await bossRealtime.waitFor("realtime:ready")).data.heartbeat,
+  true,
+);
 const pushed = await api("/api/boss/notifications", {
   method: "POST",
   token: bossSession.accessToken,
   body: {
     all: false,
     recipientIds: [sessionA.user.id],
-    title: "即时推送验证",
-    body: "这是一条通过标准 WebSocket 送达的桌面通知。",
+    title: "离线补送验证",
+    body: "成员恢复网络后无需重启也必须收到。",
   },
 });
-assert.equal(pushed.delivered, 1);
-const received = await notificationPromise;
+assert.equal(pushed.accepted, 1);
+assert.equal(pushed.delivered, 0);
+assert.equal(pushed.dispatch.counts.delivered, 0);
+
+const realtime = connectRealtime(sessionA.accessToken);
+const secondRealtime = connectRealtime(sessionA.accessToken);
+const notificationPromise = realtime.waitFor("notification:new");
+const secondNotificationPromise = secondRealtime.waitFor("notification:new");
+const [memberReady, secondMemberReady] = await Promise.all([
+  realtime.waitFor("realtime:ready"),
+  secondRealtime.waitFor("realtime:ready"),
+]);
+assert.equal(memberReady.data.heartbeat, true);
+assert.equal(secondMemberReady.data.heartbeat, true);
+const pongPromise = realtime.waitFor("pong");
+realtime.socket.send(JSON.stringify({ type: "ping" }));
+await pongPromise;
+const [received, receivedOnSecondDevice] = await Promise.all([
+  notificationPromise,
+  secondNotificationPromise,
+]);
 assert.equal(received.data.id, pushed.notifications[0].id);
-realtime.socket.close();
+assert.equal(receivedOnSecondDevice.data.id, pushed.notifications[0].id);
 
 const inbox = await api("/api/notifications", {
   token: sessionA.accessToken,
 });
 assert(inbox.notifications.some((item) => item.id === received.data.id));
+const deliveredReceipt = bossRealtime.waitFor("notification:receipt");
+const isDeliveredUpdate = (notification) =>
+  notification.id === received.data.id &&
+  Boolean(notification.deliveredAt) &&
+  !notification.acknowledgedAt;
+const deliveredUpdates = [
+  realtime.waitFor("notification:new", isDeliveredUpdate),
+  secondRealtime.waitFor("notification:new", isDeliveredUpdate),
+];
+const delivered = await api(
+  `/api/notifications/${received.data.id}/delivered`,
+  {
+    method: "PATCH",
+    token: sessionA.accessToken,
+  },
+);
+assert(delivered.notification.deliveredAt);
+for (const update of await Promise.all(deliveredUpdates)) {
+  assert.equal(update.data.id, received.data.id);
+  assert.equal(
+    update.data.deliveredAt,
+    delivered.notification.deliveredAt,
+  );
+}
+const receipt = await deliveredReceipt;
+assert.equal(receipt.data.notificationId, received.data.id);
+assert.equal(receipt.data.dispatchId, pushed.dispatch.id);
+assert.equal(receipt.data.recipientId, sessionA.user.id);
+assert.equal(receipt.data.deliveredAt, delivered.notification.deliveredAt);
+const repeatedDelivery = await api(
+  `/api/notifications/${received.data.id}/delivered`,
+  {
+    method: "PATCH",
+    token: sessionA.accessToken,
+  },
+);
+assert.equal(
+  repeatedDelivery.notification.deliveredAt,
+  delivered.notification.deliveredAt,
+);
+const isAcknowledgedUpdate = (notification) =>
+  notification.id === received.data.id && Boolean(notification.acknowledgedAt);
+const acknowledgedUpdates = [
+  realtime.waitFor("notification:new", isAcknowledgedUpdate),
+  secondRealtime.waitFor("notification:new", isAcknowledgedUpdate),
+];
+const acknowledgedReceipt = bossRealtime.waitFor(
+  "notification:receipt",
+  (candidate) =>
+    candidate.notificationId === received.data.id &&
+    Boolean(candidate.acknowledgedAt),
+);
+const acknowledged = await api(
+  `/api/notifications/${received.data.id}/acknowledge`,
+  {
+    method: "PATCH",
+    token: sessionA.accessToken,
+  },
+);
+assert(acknowledged.notification.acknowledgedAt);
+for (const update of await Promise.all(acknowledgedUpdates)) {
+  assert.equal(update.data.id, received.data.id);
+  assert.equal(
+    update.data.acknowledgedAt,
+    acknowledged.notification.acknowledgedAt,
+  );
+}
+assert.equal(
+  (await acknowledgedReceipt).data.acknowledgedAt,
+  acknowledged.notification.acknowledgedAt,
+);
+const dispatchesAfterDelivery = await api(
+  "/api/boss/notification-dispatches",
+  { token: bossSession.accessToken },
+);
+const deliveredDispatch = dispatchesAfterDelivery.dispatches.find(
+  (dispatch) => dispatch.id === pushed.dispatch.id,
+);
+assert.deepEqual(deliveredDispatch.counts, {
+  total: 1,
+  delivered: 1,
+  acknowledged: 1,
+  pending: 0,
+});
 const read = await api(`/api/notifications/${received.data.id}/read`, {
   method: "PATCH",
   token: sessionA.accessToken,
 });
 assert(read.notification.readAt);
+await closeRealtime(realtime);
+await closeRealtime(secondRealtime);
+await closeRealtime(bossRealtime);
 
 const forgot = await api("/api/auth/forgot-password", {
   method: "POST",
@@ -544,7 +666,7 @@ const result = {
     "boss task assignment, realtime delivery, receipts, and member lock",
     "idempotent yesterday-to-today rollover with history retained",
     "contact messaging and server-authoritative flash expiry",
-    "standard WebSocket notification delivery",
+    "offline WebSocket replay, heartbeat, and multi-device receipt synchronization",
     "notification inbox and read state",
     "password reset and cross-login data persistence",
     "atomic remaining-week task creation and one realtime batch event",

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -14,9 +15,7 @@ import {
   ChevronDown,
   Circle,
   Clock3,
-  Edit3,
   Flag,
-  GripVertical,
   ListChecks,
   Plus,
   Sparkles,
@@ -67,6 +66,8 @@ const PRIORITY_RANK: Record<TaskPriority, number> = {
   p3: 3,
   p4: 4,
 };
+
+const TASK_PRIORITY_OPTIONS: TaskPriority[] = ["p0", "p1", "p2", "p3", "p4"];
 
 const STATUS_RANK: Record<TaskStatus, number> = {
   doing: 0,
@@ -516,8 +517,8 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     );
   }
 
-  async function syncPastTasks() {
-    if (pastSyncBusy || pastSyncSelection.length === 0) return;
+  async function syncPastTasks(taskIds = pastSyncSelection) {
+    if (pastSyncBusy || taskIds.length === 0) return;
     setPastSyncBusy(true);
     setError("");
     try {
@@ -529,17 +530,19 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         method: "POST",
         body: JSON.stringify({
           sourceDate: selectedDate,
-          taskIds: pastSyncSelection,
+          taskIds,
         }),
       });
       setSyncedSourceTaskIds((current) => [
         ...new Set([
           ...current,
-          ...pastSyncSelection,
+          ...taskIds,
           ...result.skippedTaskIds,
         ]),
       ]);
-      setPastSyncSelection([]);
+      setPastSyncSelection((current) =>
+        current.filter((taskId) => !taskIds.includes(taskId)),
+      );
       await loadSummary();
       if (result.created.length > 0) {
         setSelectedDate(result.targetDate);
@@ -557,7 +560,15 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         duration: 7_000,
       });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "往日任务同步失败");
+      const message =
+        caught instanceof Error ? caught.message : "往日任务同步失败";
+      setError(message);
+      notify({
+        title: "同步到今天失败",
+        body: message,
+        tone: "error",
+        duration: 7_000,
+      });
     } finally {
       setPastSyncBusy(false);
     }
@@ -774,23 +785,10 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
               </select>
               <ChevronDown size={13} />
             </label>
-            <label className={`priority-toggle priority-${priority}`}>
-              <Flag size={15} />
-              <select
-                value={priority}
-                aria-label="新任务优先级"
-                onChange={(event) =>
-                  setPriority(event.target.value as TaskPriority)
-                }
-              >
-                {Object.entries(TASK_PRIORITY_META).map(([value, meta]) => (
-                  <option key={value} value={value}>
-                    {meta.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={13} />
-            </label>
+            <QuickAddPriorityMenu
+              value={priority}
+              onChange={setPriority}
+            />
             <button
               className="quick-add__submit"
               type="submit"
@@ -828,6 +826,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                     `task-row--${task.status}`,
                     highlightTaskId === task.id ? "is-highlighted" : "",
                   ].join(" ")}
+                  onClick={() => setEditingTask(task)}
                 >
                   {isPastDate && task.status !== "done" ? (
                     <button
@@ -849,7 +848,10 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                           ? `${task.title} 已同步到今天`
                           : `${pastSyncSelection.includes(task.id) ? "取消选择" : "选择"} ${task.title}`
                       }
-                      onClick={() => togglePastSyncTask(task.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        togglePastSyncTask(task.id);
+                      }}
                     >
                       {syncedSourceTaskIds.includes(task.id) ||
                       pastSyncSelection.includes(task.id) ? (
@@ -872,7 +874,10 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                   <button
                     className="task-row__copy"
                     type="button"
-                    onClick={() => setEditingTask(task)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setEditingTask(task);
+                    }}
                   >
                     <span>
                       <b>{task.title}</b>
@@ -885,7 +890,10 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                     </span>
                     {task.details && <small>{task.details}</small>}
                   </button>
-                  <label className={`status-select status-${task.status}`}>
+                  <label
+                    className={`status-select status-${task.status}`}
+                    onClick={(event) => event.stopPropagation()}
+                  >
                     <select
                       value={task.status}
                       aria-label={`${task.title}的状态`}
@@ -903,20 +911,32 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                     </select>
                     <ChevronDown size={14} />
                   </label>
-                  <button
-                    className="task-action"
-                    type="button"
-                    aria-label={`编辑 ${task.title}`}
-                    onClick={() => setEditingTask(task)}
-                  >
-                    <Edit3 size={16} />
-                  </button>
+                  {isPastDate &&
+                    task.status !== "done" &&
+                    !syncedSourceTaskIds.includes(task.id) && (
+                      <button
+                        className="task-action task-action--today"
+                        type="button"
+                        title="将该任务放到今天"
+                        aria-label="将该任务放到今天"
+                        disabled={pastSyncBusy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void syncPastTasks([task.id]);
+                        }}
+                      >
+                        今
+                      </button>
+                    )}
                   {!task.assignedBy && (
                     <button
                       className="task-action task-action--danger"
                       type="button"
                       aria-label={`删除 ${task.title}`}
-                      onClick={() => void deleteTask(task.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void deleteTask(task.id);
+                      }}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -1093,6 +1113,170 @@ function TaskStatusIcon({ status }: { status: TaskStatus }) {
   return <Circle size={16} />;
 }
 
+function QuickAddPriorityMenu({
+  value,
+  onChange,
+}: {
+  value: TaskPriority;
+  onChange: (priority: TaskPriority) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedIndex = TASK_PRIORITY_OPTIONS.indexOf(value);
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const listboxId = useId();
+  const triggerId = `${listboxId}-trigger`;
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => {
+      optionRefs.current[activeIndex]?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeIndex, open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function handleOutsidePointerDown(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+
+    document.addEventListener("pointerdown", handleOutsidePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("pointerdown", handleOutsidePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  function openMenu() {
+    setActiveIndex(selectedIndex);
+    setOpen(true);
+  }
+
+  function selectPriority(priority: TaskPriority) {
+    onChange(priority);
+    setOpen(false);
+    triggerRef.current?.focus();
+  }
+
+  function moveActiveOption(index: number) {
+    const nextIndex =
+      (index + TASK_PRIORITY_OPTIONS.length) % TASK_PRIORITY_OPTIONS.length;
+    setActiveIndex(nextIndex);
+    optionRefs.current[nextIndex]?.focus();
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className={[
+        "priority-menu",
+        `priority-${value}`,
+        open ? "is-open" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        id={triggerId}
+        className="priority-menu__trigger"
+        type="button"
+        aria-label={`新任务优先级，当前${TASK_PRIORITY_META[value].label}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listboxId}
+        onClick={() => {
+          if (open) setOpen(false);
+          else openMenu();
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          if (!open) openMenu();
+        }}
+      >
+        <Flag size={15} />
+        <span>{TASK_PRIORITY_META[value].label}</span>
+        <ChevronDown size={13} />
+      </button>
+
+      {open && (
+        <div
+          id={listboxId}
+          className="priority-menu__panel"
+          role="listbox"
+          aria-labelledby={triggerId}
+        >
+          {TASK_PRIORITY_OPTIONS.map((priority, index) => {
+            const selected = priority === value;
+            return (
+              <button
+                key={priority}
+                ref={(element) => {
+                  optionRefs.current[index] = element;
+                }}
+                className={[
+                  "priority-menu__option",
+                  `priority-${priority}`,
+                  selected ? "is-selected" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                tabIndex={index === activeIndex ? 0 : -1}
+                onFocus={() => setActiveIndex(index)}
+                onClick={() => selectPriority(priority)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    moveActiveOption(index + 1);
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    moveActiveOption(index - 1);
+                  } else if (event.key === "Home") {
+                    event.preventDefault();
+                    moveActiveOption(0);
+                  } else if (event.key === "End") {
+                    event.preventDefault();
+                    moveActiveOption(TASK_PRIORITY_OPTIONS.length - 1);
+                  } else if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    selectPriority(priority);
+                  }
+                }}
+              >
+                <span>{TASK_PRIORITY_META[priority].label}</span>
+                <Check aria-hidden="true" size={16} />
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PastTaskSyncBar({
   availableCount,
   selectedCount,
@@ -1188,7 +1372,7 @@ function LaneTaskBoard({
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => Promise<void>;
   onTogglePastSync: (taskId: string) => void;
-  onSyncPastTasks: () => Promise<void>;
+  onSyncPastTasks: (taskIds?: string[]) => Promise<void>;
 }) {
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [calendarCursor, setCalendarCursor] = useState(() =>
@@ -1408,23 +1592,10 @@ function LaneTaskBoard({
           </select>
           <ChevronDown size={13} />
         </label>
-        <label className={`priority-toggle priority-${priority}`}>
-          <Flag size={15} />
-          <select
-            value={priority}
-            aria-label="新任务优先级"
-            onChange={(event) =>
-              onPriorityChange(event.target.value as TaskPriority)
-            }
-          >
-            {Object.entries(TASK_PRIORITY_META).map(([value, meta]) => (
-              <option key={value} value={value}>
-                {meta.label}
-              </option>
-            ))}
-          </select>
-          <ChevronDown size={13} />
-        </label>
+        <QuickAddPriorityMenu
+          value={priority}
+          onChange={onPriorityChange}
+        />
         <button
           className="quick-add__submit"
           type="submit"
@@ -1509,6 +1680,7 @@ function LaneTaskBoard({
                       ]
                         .filter(Boolean)
                         .join(" ")}
+                      onClick={() => onEditTask(task)}
                       onDragStart={(event) => {
                         event.dataTransfer.effectAllowed = "move";
                         event.dataTransfer.setData("text/plain", task.id);
@@ -1539,7 +1711,10 @@ function LaneTaskBoard({
                               ? `${task.title} 已同步到今天`
                               : `${pastSyncSelection.includes(task.id) ? "取消选择" : "选择"} ${task.title}`
                           }
-                          onClick={() => onTogglePastSync(task.id)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onTogglePastSync(task.id);
+                          }}
                         >
                           {syncedSourceTaskIds.includes(task.id) ||
                           pastSyncSelection.includes(task.id) ? (
@@ -1558,12 +1733,13 @@ function LaneTaskBoard({
                               : `完成 ${task.title}`
                           }
                           disabled={movingTaskId === task.id}
-                          onClick={() =>
+                          onClick={(event) => {
+                            event.stopPropagation();
                             void moveTask(
                               task.id,
                               task.status === "done" ? "todo" : "done",
-                            )
-                          }
+                            );
+                          }}
                         >
                           <TaskStatusIcon status={task.status} />
                         </button>
@@ -1571,7 +1747,10 @@ function LaneTaskBoard({
                       <button
                         className="lane-task__copy"
                         type="button"
-                        onClick={() => onEditTask(task)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onEditTask(task);
+                        }}
                       >
                         <b>{task.title}</b>
                         {task.details && <small>{task.details}</small>}
@@ -1587,25 +1766,35 @@ function LaneTaskBoard({
                         )}
                       </div>
                       <div className="lane-task__actions">
-                        <button
-                          type="button"
-                          aria-label={`编辑 ${task.title}`}
-                          onClick={() => onEditTask(task)}
-                        >
-                          <Edit3 size={15} />
-                        </button>
                         {!task.assignedBy && (
                           <button
                             type="button"
                             aria-label={`删除 ${task.title}`}
-                            onClick={() => void onDeleteTask(task.id)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void onDeleteTask(task.id);
+                            }}
                           >
                             <Trash2 size={15} />
                           </button>
                         )}
-                        <span title="拖动任务">
-                          <GripVertical size={17} />
-                        </span>
+                        {isPastDate &&
+                          task.status !== "done" &&
+                          !syncedSourceTaskIds.includes(task.id) && (
+                            <button
+                              className="lane-task__today"
+                              type="button"
+                              title="将该任务放到今天"
+                              aria-label="将该任务放到今天"
+                              disabled={pastSyncBusy}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void onSyncPastTasks([task.id]);
+                              }}
+                            >
+                              今
+                            </button>
+                          )}
                       </div>
                     </article>
                   ))

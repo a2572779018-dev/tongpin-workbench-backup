@@ -6,6 +6,8 @@ function createUpdateInstallCoordinator({
   platform = process.platform,
   prepareInstallerEnvironment = () => {},
   closeAuxiliaryWindows = () => {},
+  onInstallError = () => {},
+  onDeferredInstallError = () => {},
   schedule = setTimeout,
   logger = console,
   shutdownDelayMs = 120,
@@ -18,11 +20,15 @@ function createUpdateInstallCoordinator({
     if (isMac || !installRequested || installerStarted) return;
     installerStarted = true;
 
-    const started = updater.install(true, true);
+    let started = false;
+    try {
+      started = updater.install(true, true);
+    } catch {
+      started = false;
+    }
     if (!started) {
-      logger.error(
-        "[updater] The downloaded installer could not be started after app exit.",
-      );
+      logger.error("[updater] installer-start-failed-after-exit");
+      onDeferredInstallError();
     }
   });
 
@@ -36,35 +42,35 @@ function createUpdateInstallCoordinator({
         closeAuxiliaryWindows();
         updater.quitAndInstall();
         return true;
-      } catch (error) {
+      } catch {
         installRequested = false;
-        logger.error(
-          `[updater] Could not start the macOS update installation: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+        logger.error("[updater] installer-start-failed");
         return false;
       }
     }
 
     updater.autoInstallOnAppQuit = false;
 
-    const shutdownTimer = schedule(() => {
-      try {
-        prepareInstallerEnvironment();
-      } catch (error) {
-        installRequested = false;
-        updater.autoInstallOnAppQuit = true;
-        logger.error(
-          `[updater] Could not prepare the installer environment: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        return;
-      }
-      closeAuxiliaryWindows();
-      app.quit();
-    }, shutdownDelayMs);
+    let shutdownTimer;
+    try {
+      shutdownTimer = schedule(() => {
+        try {
+          prepareInstallerEnvironment();
+          closeAuxiliaryWindows();
+          app.quit();
+        } catch {
+          installRequested = false;
+          updater.autoInstallOnAppQuit = true;
+          logger.error("[updater] installer-preparation-failed");
+          onInstallError();
+        }
+      }, shutdownDelayMs);
+    } catch {
+      installRequested = false;
+      updater.autoInstallOnAppQuit = true;
+      logger.error("[updater] installer-schedule-failed");
+      return false;
+    }
     shutdownTimer?.unref?.();
 
     return true;

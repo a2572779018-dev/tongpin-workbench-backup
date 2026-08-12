@@ -24,6 +24,8 @@ const {
   shouldShowUpdateError,
 } = require("./update-error-policy.cjs");
 
+autoUpdater.logger = null;
+
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === "darwin";
 const SESSION_FILE_NAME = "secure-session.bin";
@@ -36,6 +38,8 @@ const STRONG_NOTICE_AUTO_HIDE_MS = 30_000;
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const SILENT_INSTALL_CHECK_INTERVAL_MS = 60 * 1000;
 const UPDATE_TEMP_DIR_NAME = ".tongpin-updater-temp";
+const UPDATE_INSTALL_FAILURE_MARKER_NAME = "updater-install-failed";
+const UPDATER_ERROR_DEDUP_WINDOW_MS = 2_000;
 let mainWindow = null;
 let noticeWindow = null;
 let noticeHideTimer = null;
@@ -43,6 +47,7 @@ let activeNoticeId = "";
 let activeNoticeRequiresAcknowledgement = false;
 let activeNoticeAction = null;
 let updateReady = false;
+let updateInstallInProgress = false;
 
 function prepareSameVolumeUpdaterTemp() {
   if (process.platform !== "win32") return null;
@@ -82,6 +87,8 @@ const updateInstallCoordinator = createUpdateInstallCoordinator({
       noticeWindow.destroy();
     }
   },
+  onInstallError: handleUpdaterInstallError,
+  onDeferredInstallError: persistUpdateInstallFailureMarker,
 });
 
 function requestSilentInstallIfEligible(now = new Date()) {
@@ -101,7 +108,18 @@ function requestSilentInstallIfEligible(now = new Date()) {
   ) {
     return false;
   }
-  return updateInstallCoordinator.requestInstall();
+  updateInstallInProgress = true;
+  let started = false;
+  try {
+    started = updateInstallCoordinator.requestInstall();
+  } catch {
+    started = false;
+  }
+  if (!started) {
+    updateInstallInProgress = false;
+    sendUpdaterInstallError();
+  }
+  return started;
 }
 
 app.on("before-quit", () => {
@@ -109,12 +127,13 @@ app.on("before-quit", () => {
   if (!updateReady || updateInstallCoordinator.isInstallRequested()) return;
   try {
     prepareSameVolumeUpdaterTemp();
-  } catch (error) {
+    updateInstallInProgress = true;
+  } catch {
+    updateInstallInProgress = false;
     autoUpdater.autoInstallOnAppQuit = false;
-    console.error(
-      "[updater] Automatic install on quit was disabled:",
-      error instanceof Error ? error.message : error,
-    );
+    console.error("[updater] Automatic install on quit was disabled.");
+    sendUpdaterInstallError();
+    persistUpdateInstallFailureMarker();
   }
 });
 
@@ -139,8 +158,74 @@ function getApiUrl() {
 
 function sendUpdaterStatus(status) {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("updater:status", status);
+    try {
+      mainWindow.webContents.send("updater:status", status);
+      return true;
+    } catch {
+      console.error("[updater] renderer-status-send-failed");
+    }
   }
+  return false;
+}
+
+function sendUpdaterInstallError() {
+  return sendUpdaterStatus({
+    state: "error",
+    errorKind: "install",
+    message: "更新安装未完成，请稍后重试。",
+  });
+}
+
+function handleUpdaterInstallError() {
+  updateInstallInProgress = false;
+  return sendUpdaterInstallError();
+}
+
+function getUpdateInstallFailureMarkerPath() {
+  return path.join(app.getPath("userData"), UPDATE_INSTALL_FAILURE_MARKER_NAME);
+}
+
+function persistUpdateInstallFailureMarker() {
+  try {
+    const markerPath = getUpdateInstallFailureMarkerPath();
+    fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+    fs.writeFileSync(markerPath, "install-failed\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    return true;
+  } catch {
+    console.error("[updater] install-failure-marker-write-failed");
+    return false;
+  }
+}
+
+function hasUpdateInstallFailureMarker() {
+  try {
+    return fs.existsSync(getUpdateInstallFailureMarkerPath());
+  } catch {
+    console.error("[updater] install-failure-marker-read-failed");
+    return false;
+  }
+}
+
+function clearUpdateInstallFailureMarker() {
+  try {
+    fs.unlinkSync(getUpdateInstallFailureMarkerPath());
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.error("[updater] install-failure-marker-clear-failed");
+    }
+  }
+}
+
+function schedulePersistedInstallFailureNotice() {
+  if (!hasUpdateInstallFailureMarker()) return;
+  const timer = setTimeout(() => {
+    if (!hasUpdateInstallFailureMarker()) return;
+    if (sendUpdaterInstallError()) clearUpdateInstallFailureMarker();
+  }, 2_000);
+  timer.unref();
 }
 
 function focusMainWindow() {
@@ -642,7 +727,16 @@ function registerDesktopIpc() {
     ) {
       return false;
     }
-    return updateInstallCoordinator.requestInstall();
+    if (updateInstallCoordinator.isInstallRequested()) return false;
+    updateInstallInProgress = true;
+    let started = false;
+    try {
+      started = updateInstallCoordinator.requestInstall();
+    } catch {
+      started = false;
+    }
+    if (!started) updateInstallInProgress = false;
+    return started;
   });
 
   ipcMain.on("desktop-notice:set-expanded", (event, expanded) => {
@@ -711,8 +805,9 @@ function configureUpdater() {
   let checkFailureCount = 0;
   let updatePhase = "idle";
   let currentCheckReportedErrorKind = "";
-  let channelMissingShown = false;
-  const checkErrorNoticeTimes = new Map();
+  const reportedErrorObjects = new WeakMap();
+  let lastReportedErrorKind = "";
+  let lastReportedErrorAt = 0;
 
   const clearRetryTimer = () => {
     if (!retryTimer) return;
@@ -722,6 +817,23 @@ function configureUpdater() {
   const resetCheckFailures = () => {
     checkFailureCount = 0;
     clearRetryTimer();
+  };
+  const isDuplicateCriticalError = (error, errorClass) => {
+    const now = Date.now();
+    if (error !== null && typeof error === "object") {
+      const lastReportedAt = reportedErrorObjects.get(error) ?? 0;
+      if (now - lastReportedAt < UPDATER_ERROR_DEDUP_WINDOW_MS) return true;
+      reportedErrorObjects.set(error, now);
+    }
+    if (
+      lastReportedErrorKind === errorClass.kind &&
+      now - lastReportedErrorAt < UPDATER_ERROR_DEDUP_WINDOW_MS
+    ) {
+      return true;
+    }
+    lastReportedErrorKind = errorClass.kind;
+    lastReportedErrorAt = now;
+    return false;
   };
   const reportUpdaterError = (error) => {
     const errorClass = classifyUpdateError(error, updatePhase);
@@ -733,24 +845,10 @@ function configureUpdater() {
     }
     if (checking) currentCheckReportedErrorKind = errorClass.kind;
 
-    console.error(
-      `[updater] ${errorClass.kind}:`,
-      error instanceof Error ? error.stack || error.message : error,
-    );
-    const nowMs = Date.now();
-    const shouldShow = shouldShowUpdateError({
-      errorClass,
-      nowMs,
-      channelMissingShown,
-      lastShownAtMs: checkErrorNoticeTimes.get(errorClass.kind),
-    });
-    if (!shouldShow) return errorClass;
+    if (!shouldShowUpdateError({ errorClass })) return errorClass;
+    if (isDuplicateCriticalError(error, errorClass)) return errorClass;
 
-    if (errorClass.kind === "channel-missing") {
-      channelMissingShown = true;
-    } else if (errorClass.scope === "check") {
-      checkErrorNoticeTimes.set(errorClass.kind, nowMs);
-    }
+    console.error(`[updater] ${errorClass.kind}`);
     sendUpdaterStatus({
       state: "error",
       errorKind: errorClass.kind,
@@ -828,12 +926,22 @@ function configureUpdater() {
   });
   autoUpdater.on("error", (error) => {
     updateReady = false;
+    const failedDuringInstall = updateInstallInProgress;
+    if (failedDuringInstall) updatePhase = "installing";
     reportUpdaterError(error);
+    if (
+      failedDuringInstall &&
+      (!mainWindow || mainWindow.isDestroyed())
+    ) {
+      persistUpdateInstallFailureMarker();
+    }
+    if (failedDuringInstall) updateInstallInProgress = false;
   });
   autoUpdater.on("update-downloaded", (info) => {
     resetCheckFailures();
     updatePhase = "downloaded";
     updateReady = true;
+    updateInstallInProgress = false;
     sendUpdaterStatus({
       state: "downloaded",
       version: info.version,
@@ -875,6 +983,9 @@ app.whenReady().then(async () => {
   registerDesktopIpc();
   await createWindow();
   configureUpdater();
+  if (!isDevelopment && app.isPackaged) {
+    schedulePersistedInstallFailureNotice();
+  }
 
   app.on("activate", () => {
     if (!mainWindow || mainWindow.isDestroyed()) {

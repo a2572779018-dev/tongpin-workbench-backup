@@ -37,6 +37,16 @@ import {
   selectLatestStrongReminder,
 } from "../lib/strongReminder";
 import {
+  REALTIME_HEARTBEAT_INTERVAL_MS,
+  REALTIME_HEARTBEAT_TIMEOUT_MS,
+  REALTIME_READY_TIMEOUT_MS,
+  REALTIME_STABLE_CONNECTION_MS,
+  getRealtimeReconnectDelayMs,
+  mergeNotificationsById,
+  notificationsNeedingDelivery,
+  shouldRecoverRealtimeSession,
+} from "../lib/realtimeReliability";
+import {
   HOME_LAYOUT_DESCRIPTIONS,
   HOME_LAYOUT_LABELS,
   HOME_LAYOUT_OPTIONS,
@@ -200,14 +210,43 @@ export function AppShell({
     setLayoutMenuOpen(false);
   }, [view]);
 
+  const deliverNotifications = useCallback(
+    (incoming: AppNotification[]) => {
+      for (const notification of notificationsNeedingDelivery(incoming)) {
+        if (deliveryInFlight.current.has(notification.id)) continue;
+        deliveryInFlight.current.add(notification.id);
+        void api<{ notification: AppNotification }>(
+          `/api/notifications/${notification.id}/delivered`,
+          { method: "PATCH" },
+        )
+          .then((result) => {
+            setNotifications((current) =>
+              mergeNotificationsById(current, [result.notification]),
+            );
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            deliveryInFlight.current.delete(notification.id);
+          });
+      }
+    },
+    [api],
+  );
+
+  const syncNotifications = useCallback(async () => {
+    const result = await api<{ notifications: AppNotification[] }>(
+      "/api/notifications",
+    );
+    setNotifications((current) =>
+      mergeNotificationsById(current, result.notifications),
+    );
+    deliverNotifications(result.notifications);
+  }, [api, deliverNotifications]);
+
   useEffect(() => {
     if (user.role === "admin") return;
-    void api<{
-      notifications: AppNotification[];
-    }>("/api/notifications")
-      .then((result) => setNotifications(result.notifications))
-      .catch(() => undefined);
-  }, [api, user.role]);
+    void syncNotifications().catch(() => undefined);
+  }, [syncNotifications, user.role]);
 
   useEffect(() => {
     if (user.role === "admin") return;
@@ -320,45 +359,13 @@ export function AppShell({
 
   useEffect(() => {
     if (user.role === "admin") return;
-    let disposed = false;
-
-    const syncDelivered = () => {
-      for (const notification of notificationsRef.current) {
-        if (
-          !notification.requiresAcknowledgement ||
-          notification.acknowledgedAt ||
-          notification.deliveredAt ||
-          deliveryInFlight.current.has(notification.id)
-        ) {
-          continue;
-        }
-        deliveryInFlight.current.add(notification.id);
-        void api<{ notification: AppNotification }>(
-          `/api/notifications/${notification.id}/delivered`,
-          { method: "PATCH" },
-        )
-          .then((result) => {
-            if (disposed) return;
-            setNotifications((current) =>
-              current.map((item) =>
-                item.id === notification.id ? result.notification : item,
-              ),
-            );
-          })
-          .catch(() => undefined)
-          .finally(() => {
-            deliveryInFlight.current.delete(notification.id);
-          });
-      }
-    };
-
-    syncDelivered();
-    const timer = window.setInterval(syncDelivered, 15_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [api, user.role]);
+    deliverNotifications(notificationsRef.current);
+    const timer = window.setInterval(
+      () => deliverNotifications(notificationsRef.current),
+      15_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [deliverNotifications, user.role]);
 
   useEffect(() => {
     if (!pendingStrongNotification || user.role === "admin") {
@@ -445,12 +452,90 @@ export function AppShell({
     let disposed = false;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
+    let readyTimer: number | null = null;
+    let heartbeatInterval: number | null = null;
+    let heartbeatTimeout: number | null = null;
+    let stabilityTimer: number | null = null;
+    let reconnectAttempt = 0;
+    let sessionRecoveryInFlight: Promise<void> | null = null;
+
+    function clearSocketTimers() {
+      if (readyTimer !== null) window.clearTimeout(readyTimer);
+      if (heartbeatInterval !== null) window.clearInterval(heartbeatInterval);
+      if (heartbeatTimeout !== null) window.clearTimeout(heartbeatTimeout);
+      if (stabilityTimer !== null) window.clearTimeout(stabilityTimer);
+      readyTimer = null;
+      heartbeatInterval = null;
+      heartbeatTimeout = null;
+      stabilityTimer = null;
+    }
+
+    function scheduleReconnect() {
+      if (
+        disposed ||
+        reconnectTimer !== null ||
+        socket?.readyState === WebSocket.CONNECTING ||
+        socket?.readyState === WebSocket.OPEN ||
+        navigator.onLine === false
+      ) {
+        return;
+      }
+      const delay = getRealtimeReconnectDelayMs(reconnectAttempt);
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
+    }
+
+    function recoverSessionThenReconnect() {
+      if (disposed || sessionRecoveryInFlight) return;
+      sessionRecoveryInFlight = api("/api/auth/me")
+        .then(() => undefined)
+        .catch(() => undefined)
+        .finally(() => {
+          sessionRecoveryInFlight = null;
+          scheduleReconnect();
+        });
+    }
+
+    function synchronizeAfterReady() {
+      void syncNotifications().catch(() => undefined);
+      void api<{ unread: number }>("/api/contacts")
+        .then((result) => setMessageUnread(result.unread))
+        .catch(() => undefined);
+      void api<{ assignments: TaskAssignmentEvent[] }>(
+        "/api/tasks/assignments/pending",
+      )
+        .then((result) => {
+          for (const assignment of result.assignments) {
+            showTaskAssignment(assignment);
+          }
+        })
+        .catch(() => undefined);
+      window.dispatchEvent(new CustomEvent("tongpin:task-sync"));
+      window.dispatchEvent(new CustomEvent("tongpin:realtime-ready"));
+    }
+
+    function startHeartbeat(activeSocket: WebSocket) {
+      heartbeatInterval = window.setInterval(() => {
+        if (activeSocket !== socket || activeSocket.readyState !== WebSocket.OPEN) {
+          activeSocket.close();
+          return;
+        }
+        activeSocket.send(JSON.stringify({ type: "ping" }));
+        if (heartbeatTimeout !== null) window.clearTimeout(heartbeatTimeout);
+        heartbeatTimeout = window.setTimeout(() => {
+          activeSocket.close(4000, "heartbeat timeout");
+        }, REALTIME_HEARTBEAT_TIMEOUT_MS);
+      }, REALTIME_HEARTBEAT_INTERVAL_MS);
+    }
 
     function showNotification(notification: AppNotification) {
-      setNotifications((current) => [
-        notification,
-        ...current.filter((item) => item.id !== notification.id),
-      ]);
+      setNotifications((current) =>
+        mergeNotificationsById(current, [notification]),
+      );
+      deliverNotifications([notification]);
       if (notification.requiresAcknowledgement) return;
       notify({
         id: `boss-push-${notification.id}`,
@@ -501,28 +586,59 @@ export function AppShell({
     }
 
     function connect() {
-      if (disposed) return;
+      if (
+        disposed ||
+        socket?.readyState === WebSocket.CONNECTING ||
+        socket?.readyState === WebSocket.OPEN
+      ) {
+        return;
+      }
       const url = new URL(
         `${API_URL.replace(/\/$/, "")}/api/realtime`,
       );
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(url);
-      socket.addEventListener("open", () => {
-        socket?.send(
+      const activeSocket = new WebSocket(url);
+      let reachedReady = false;
+      socket = activeSocket;
+      readyTimer = window.setTimeout(() => {
+        activeSocket.close(4000, "ready timeout");
+      }, REALTIME_READY_TIMEOUT_MS);
+      activeSocket.addEventListener("open", () => {
+        activeSocket.send(
           JSON.stringify({
             type: "auth",
             token: session!.accessToken,
           }),
         );
       });
-      socket.addEventListener("message", (event) => {
+      activeSocket.addEventListener("message", (event) => {
+        if (activeSocket !== socket) return;
         try {
           const message = JSON.parse(String(event.data)) as {
             type?: string;
             data?: unknown;
           };
           if (message.type === "realtime:ready") {
+            if (readyTimer !== null) window.clearTimeout(readyTimer);
+            readyTimer = null;
+            reachedReady = true;
             setRealtimeReady(true);
+            stabilityTimer = window.setTimeout(() => {
+              reconnectAttempt = 0;
+              stabilityTimer = null;
+            }, REALTIME_STABLE_CONNECTION_MS);
+            if (
+              (message.data as { heartbeat?: unknown } | undefined)?.heartbeat ===
+              true
+            ) {
+              startHeartbeat(activeSocket);
+            }
+            synchronizeAfterReady();
+          } else if (message.type === "pong") {
+            if (heartbeatTimeout !== null) {
+              window.clearTimeout(heartbeatTimeout);
+              heartbeatTimeout = null;
+            }
           } else if (
             message.type === "notification:new" ||
             message.type === "notification:ding"
@@ -572,25 +688,63 @@ export function AppShell({
           // Ignore malformed real-time frames and keep the connection alive.
         }
       });
-      socket.addEventListener("close", () => {
+      activeSocket.addEventListener("close", (event) => {
+        if (disposed || activeSocket !== socket) return;
+        clearSocketTimers();
         setRealtimeReady(false);
-        if (!disposed) {
-          reconnectTimer = window.setTimeout(connect, 2_000);
+        if (navigator.onLine === false) return;
+        if (shouldRecoverRealtimeSession(reachedReady, event.code)) {
+          recoverSessionThenReconnect();
+        } else {
+          scheduleReconnect();
         }
       });
-      socket.addEventListener("error", () => {
+      activeSocket.addEventListener("error", () => {
+        if (activeSocket !== socket) return;
         setRealtimeReady(false);
+        activeSocket.close();
       });
     }
 
+    const handleOnline = () => {
+      reconnectAttempt = 0;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (socket && socket.readyState !== WebSocket.CLOSED) {
+        socket.close(4003, "network restored");
+      } else {
+        connect();
+      }
+    };
+
+    const handleOffline = () => {
+      setRealtimeReady(false);
+      socket?.close(4003, "network offline");
+    };
+
     const connectTimer = window.setTimeout(connect, 80);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
     return () => {
       disposed = true;
       window.clearTimeout(connectTimer);
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      clearSocketTimers();
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
       socket?.close();
     };
-  }, [notify, session, showTaskAssignment, user.role]);
+  }, [
+    api,
+    deliverNotifications,
+    notify,
+    session,
+    showTaskAssignment,
+    syncNotifications,
+    user.role,
+  ]);
 
   const roleLabel = {
     member: "成员",

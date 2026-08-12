@@ -13,15 +13,29 @@ export function createNotificationsRouter(
 
   router.get("/", async (request, response, next) => {
     try {
-      const notifications = await store.read((database) =>
-        database.notifications
+      const notifications = await store.read((database) => {
+        const sorted = database.notifications
           .filter(
             (notification) =>
               notification.recipientId === request.currentUser!.id,
           )
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-          .slice(0, 100),
-      );
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const merged = new Map(
+          sorted
+            .filter(
+              (notification) =>
+                notification.requiresAcknowledgement &&
+                !notification.acknowledgedAt,
+            )
+            .map((notification) => [notification.id, notification]),
+        );
+        for (const notification of sorted.slice(0, 100)) {
+          merged.set(notification.id, notification);
+        }
+        return [...merged.values()].sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt),
+        );
+      });
       response.json({
         notifications,
         unread: notifications.filter((item) => !item.readAt).length,
@@ -55,7 +69,7 @@ export function createNotificationsRouter(
     "/:notificationId/delivered",
     async (request, response, next) => {
       try {
-        const notification = await store.mutate((database) => {
+        const result = await store.mutate((database) => {
           const target = database.notifications.find(
             (candidate) =>
               candidate.id === request.params.notificationId &&
@@ -69,16 +83,21 @@ export function createNotificationsRouter(
               "没有找到该提醒",
             );
           }
+          const changed = !target.deliveredAt;
           target.deliveredAt ??= new Date().toISOString();
-          return target;
+          return { notification: target, changed };
         });
-        realtime.receiptUser(notification.senderId, {
-          notificationId: notification.id,
-          dispatchId: notification.dispatchId,
-          recipientId: notification.recipientId,
-          deliveredAt: notification.deliveredAt,
-          acknowledgedAt: notification.acknowledgedAt,
-        });
+        const { notification } = result;
+        if (result.changed) {
+          realtime.receiptUser(notification.senderId, {
+            notificationId: notification.id,
+            dispatchId: notification.dispatchId,
+            recipientId: notification.recipientId,
+            deliveredAt: notification.deliveredAt,
+            acknowledgedAt: notification.acknowledgedAt,
+          });
+        }
+        realtime.notifyUser(notification.recipientId, notification);
         response.json({ notification });
       } catch (error) {
         next(error);
@@ -90,7 +109,7 @@ export function createNotificationsRouter(
     "/:notificationId/acknowledge",
     async (request, response, next) => {
       try {
-        const notification = await store.mutate((database) => {
+        const result = await store.mutate((database) => {
           const target = database.notifications.find(
             (candidate) =>
               candidate.id === request.params.notificationId &&
@@ -104,19 +123,24 @@ export function createNotificationsRouter(
               "没有找到该提醒",
             );
           }
+          const changed = !target.acknowledgedAt;
           const now = new Date().toISOString();
           target.deliveredAt ??= now;
           target.acknowledgedAt ??= now;
           target.readAt ??= now;
-          return target;
+          return { notification: target, changed };
         });
-        realtime.receiptUser(notification.senderId, {
-          notificationId: notification.id,
-          dispatchId: notification.dispatchId,
-          recipientId: notification.recipientId,
-          deliveredAt: notification.deliveredAt,
-          acknowledgedAt: notification.acknowledgedAt,
-        });
+        const { notification } = result;
+        if (result.changed) {
+          realtime.receiptUser(notification.senderId, {
+            notificationId: notification.id,
+            dispatchId: notification.dispatchId,
+            recipientId: notification.recipientId,
+            deliveredAt: notification.deliveredAt,
+            acknowledgedAt: notification.acknowledgedAt,
+          });
+        }
+        realtime.notifyUser(notification.recipientId, notification);
         response.json({ notification });
       } catch (error) {
         next(error);

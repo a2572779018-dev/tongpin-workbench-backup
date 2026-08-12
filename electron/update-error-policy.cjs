@@ -6,48 +6,39 @@ const UPDATE_RETRY_DELAYS_MS = [
   30 * 60 * 1000,
   2 * 60 * 60 * 1000,
 ];
-const UPDATE_CHECK_ERROR_NOTICE_THROTTLE_MS = 6 * 60 * 60 * 1000;
 
 const FRIENDLY_ERRORS = {
   "channel-missing": {
     title: "更新通道暂未就绪",
-    message:
-      "软件更新通道暂未准备好，不影响任务同步和老板通知，软件会按正常周期自动重试。",
+    message: "软件会按正常周期自动重试。",
   },
   "check-network": {
     title: "暂时无法检查更新",
-    message:
-      "暂时无法检查软件更新，不影响任务同步和老板通知，软件会自动重试。",
+    message: "软件会自动重试。",
   },
   check: {
     title: "暂时无法检查更新",
-    message:
-      "暂时无法检查软件更新，不影响任务同步和老板通知，软件会自动重试。",
+    message: "软件会自动重试。",
   },
   download: {
     title: "更新下载失败",
-    message:
-      "软件更新下载未完成，不影响任务同步和老板通知，软件会自动重试。",
+    message: "更新下载未完成，软件会自动重试。",
   },
   validation: {
     title: "更新校验失败",
-    message:
-      "软件更新校验未通过，为保护数据已停止安装；不影响任务同步和老板通知，软件会自动重试。",
+    message: "更新文件校验未通过，已停止安装。",
   },
   signature: {
     title: "更新签名校验失败",
-    message:
-      "软件更新签名校验未通过，为保护数据已停止安装；不影响任务同步和老板通知，软件会自动重试。",
+    message: "更新签名校验未通过，已停止安装。",
   },
   install: {
     title: "更新安装未完成",
-    message:
-      "软件更新安装未完成，不影响任务同步和老板通知，软件会自动重试。",
+    message: "更新安装未完成，请稍后重试。",
   },
   update: {
     title: "软件更新暂时失败",
-    message:
-      "软件更新暂时未完成，不影响任务同步和老板通知，软件会自动重试。",
+    message: "软件更新未完成，请稍后重试。",
   },
 };
 
@@ -79,6 +70,21 @@ function classifyUpdateError(error, phase = "checking") {
       /cannot\s+find\s+channel/i.test(source));
   if (manifestMissing) {
     return classification("channel-missing", "check", "normal");
+  }
+
+  if (phase === "checking") {
+    const networkFailure =
+      /\b(?:eai_again|enotfound|etimedout|econnreset|econnrefused|enetunreach|ehostunreach)\b/i.test(
+        source,
+      ) ||
+      /err_(?:network|connection|internet|proxy|timed_out)|network\s+error|socket\s+hang\s+up|tls|http(?:error)?\s*:?\s*(?:408|425|429|5\d\d)\b/i.test(
+        source,
+      );
+    return classification(
+      networkFailure ? "check-network" : "check",
+      "check",
+      "backoff",
+    );
   }
 
   if (
@@ -113,19 +119,6 @@ function classifyUpdateError(error, phase = "checking") {
     return classification("download", "critical", "normal");
   }
 
-  const networkFailure =
-    /\b(?:eai_again|enotfound|etimedout|econnreset|econnrefused|enetunreach|ehostunreach)\b/i.test(
-      source,
-    ) ||
-    /err_(?:network|connection|internet|proxy|timed_out)|network\s+error|socket\s+hang\s+up|tls|http(?:error)?\s*:?\s*(?:408|425|429|5\d\d)\b/i.test(
-      source,
-    );
-  if (phase === "checking" && networkFailure) {
-    return classification("check-network", "check", "backoff");
-  }
-  if (phase === "checking") {
-    return classification("check", "check", "backoff");
-  }
   return classification("update", "critical", "normal");
 }
 
@@ -138,20 +131,11 @@ function getUpdateRetryDelayMs(failureCount) {
   return UPDATE_RETRY_DELAYS_MS[index];
 }
 
-function shouldShowUpdateError({
-  errorClass,
-  nowMs,
-  channelMissingShown = false,
-  lastShownAtMs,
-}) {
-  if (errorClass.scope === "critical") return true;
-  if (errorClass.kind === "channel-missing") return !channelMissingShown;
-  if (!Number.isFinite(lastShownAtMs)) return true;
-  return nowMs - lastShownAtMs >= UPDATE_CHECK_ERROR_NOTICE_THROTTLE_MS;
+function shouldShowUpdateError({ errorClass }) {
+  return errorClass.scope === "critical";
 }
 
 module.exports = {
-  UPDATE_CHECK_ERROR_NOTICE_THROTTLE_MS,
   UPDATE_RETRY_DELAYS_MS,
   classifyUpdateError,
   getUpdateRetryDelayMs,

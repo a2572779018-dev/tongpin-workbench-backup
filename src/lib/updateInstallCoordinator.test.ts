@@ -16,6 +16,8 @@ const { createUpdateInstallCoordinator } = require(
     platform?: string;
     prepareInstallerEnvironment: () => void;
     closeAuxiliaryWindows: () => void;
+    onInstallError: () => void;
+    onDeferredInstallError: () => void;
     schedule: (callback: () => void, delay: number) => {
       unref: () => void;
     };
@@ -38,6 +40,8 @@ function createHarness(installResult = true, platform = "win32") {
   };
   const prepareInstallerEnvironment = vi.fn();
   const closeAuxiliaryWindows = vi.fn();
+  const onInstallError = vi.fn();
+  const onDeferredInstallError = vi.fn();
   const scheduled: Array<() => void> = [];
   const unref = vi.fn();
   const schedule = vi.fn((callback: () => void) => {
@@ -51,6 +55,8 @@ function createHarness(installResult = true, platform = "win32") {
     platform,
     prepareInstallerEnvironment,
     closeAuxiliaryWindows,
+    onInstallError,
+    onDeferredInstallError,
     schedule,
     logger,
   });
@@ -60,6 +66,8 @@ function createHarness(installResult = true, platform = "win32") {
     updater,
     prepareInstallerEnvironment,
     closeAuxiliaryWindows,
+    onInstallError,
+    onDeferredInstallError,
     scheduled,
     unref,
     schedule,
@@ -108,7 +116,7 @@ describe("update install coordinator", () => {
     expect(harness.updater.autoInstallOnAppQuit).toBe(true);
   });
 
-  it("logs a startup failure without launching twice", () => {
+  it("records a deferred startup failure without launching twice", () => {
     const harness = createHarness(false);
 
     harness.coordinator.requestInstall();
@@ -117,6 +125,28 @@ describe("update install coordinator", () => {
 
     expect(harness.updater.install).toHaveBeenCalledOnce();
     expect(harness.logger.error).toHaveBeenCalledOnce();
+    expect(harness.onDeferredInstallError).toHaveBeenCalledOnce();
+    expect(harness.onInstallError).not.toHaveBeenCalled();
+  });
+
+  it("does not expose a thrown installer error when recording it", () => {
+    const harness = createHarness();
+    harness.updater.install.mockImplementation(() => {
+      throw new Error(
+        "https://secret.example/update Headers: Authorization=Bearer token-value",
+      );
+    });
+
+    harness.coordinator.requestInstall();
+    harness.app.emit("quit");
+
+    expect(harness.onDeferredInstallError).toHaveBeenCalledOnce();
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      "[updater] installer-start-failed-after-exit",
+    );
+    expect(JSON.stringify(harness.logger.error.mock.calls)).not.toMatch(
+      /https?:|headers?|authorization|bearer|token-value/i,
+    );
   });
 
   it("keeps the app open when the same-volume temp directory cannot be prepared", () => {
@@ -133,6 +163,11 @@ describe("update install coordinator", () => {
     expect(harness.updater.autoInstallOnAppQuit).toBe(true);
     expect(harness.coordinator.isInstallRequested()).toBe(false);
     expect(harness.logger.error).toHaveBeenCalledOnce();
+    expect(harness.onInstallError).toHaveBeenCalledOnce();
+    expect(harness.onDeferredInstallError).not.toHaveBeenCalled();
+    expect(JSON.stringify(harness.logger.error.mock.calls)).not.toMatch(
+      /temp directory is not writable/i,
+    );
   });
 
   it("uses quitAndInstall directly on macOS", () => {
@@ -148,5 +183,23 @@ describe("update install coordinator", () => {
 
     harness.app.emit("quit");
     expect(harness.updater.install).not.toHaveBeenCalled();
+  });
+
+  it("returns a fixed failure signal without logging raw macOS errors", () => {
+    const harness = createHarness(true, "darwin");
+    harness.updater.quitAndInstall.mockImplementation(() => {
+      throw new Error(
+        "https://secret.example/update Headers: Authorization=Bearer token-value",
+      );
+    });
+
+    expect(harness.coordinator.requestInstall()).toBe(false);
+    expect(harness.coordinator.isInstallRequested()).toBe(false);
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      "[updater] installer-start-failed",
+    );
+    expect(JSON.stringify(harness.logger.error.mock.calls)).not.toMatch(
+      /https?:|headers?|authorization|bearer|token-value/i,
+    );
   });
 });
