@@ -94,6 +94,7 @@ describe("同频 API 纵向流程", () => {
   function waitForRealtimeMessage(
     socket: WebSocket,
     type: string,
+    predicate: (data: unknown) => boolean = () => true,
   ): Promise<{ type: string; data: unknown }> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
@@ -105,11 +106,36 @@ describe("同频 API 纵向流程", () => {
           type: string;
           data: unknown;
         };
-        if (message.type !== type) return;
+        if (message.type !== type || !predicate(message.data)) return;
         clearTimeout(timer);
         socket.off("message", listener);
         resolve(message);
       });
+    });
+  }
+
+  function expectNoRealtimeMessage(
+    socket: WebSocket,
+    type: string,
+    predicate: (data: unknown) => boolean,
+    durationMs = 150,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const listener = (raw: WebSocket.RawData) => {
+        const message = JSON.parse(raw.toString()) as {
+          type: string;
+          data: unknown;
+        };
+        if (message.type !== type || !predicate(message.data)) return;
+        clearTimeout(timer);
+        socket.off("message", listener);
+        reject(new Error(`Unexpected duplicate ${type}`));
+      };
+      const timer = setTimeout(() => {
+        socket.off("message", listener);
+        resolve();
+      }, durationMs);
+      socket.on("message", listener);
     });
   }
 
@@ -459,7 +485,8 @@ describe("同频 API 纵向流程", () => {
         body: "请带上今日任务进度。",
       })
       .expect(201);
-    expect(sent.body.delivered).toBe(1);
+    expect(sent.body.accepted).toBe(1);
+    expect(sent.body.delivered).toBe(0);
     expect(sent.body.targeted).toBe(1);
     expect(sent.body.dispatch.counts).toEqual({
       total: 1,
@@ -545,6 +572,241 @@ describe("同频 API 纵向流程", () => {
     expect(inbox.body.unread).toBe(0);
     expect(inbox.body.notifications[0].title).toBe("十分钟后开会");
     expect(inbox.body.notifications[0].acknowledgedAt).toBeTruthy();
+  });
+
+  it("成员离线期间的强提醒会在重连后补送并幂等回执", async () => {
+    const address = runtime.server.address() as AddressInfo;
+    const bossSocket = new WebSocket(
+      `ws://127.0.0.1:${address.port}/api/realtime`,
+    );
+    const bossReady = waitForRealtimeMessage(bossSocket, "realtime:ready");
+    bossSocket.on("open", () => {
+      bossSocket.send(JSON.stringify({ type: "auth", token: aliceToken }));
+    });
+    await bossReady;
+
+    const sent = await request(runtime.app)
+      .post("/api/boss/notifications")
+      .set("Authorization", `Bearer ${aliceToken}`)
+      .send({
+        all: false,
+        recipientIds: [bobId],
+        title: "离线补送验证",
+        body: "恢复网络后无需重启也必须收到。",
+      })
+      .expect(201);
+    expect(sent.body.accepted).toBe(1);
+    expect(sent.body.delivered).toBe(0);
+    expect(sent.body.dispatch.counts.delivered).toBe(0);
+    const notificationId = sent.body.notifications[0].id as string;
+    const dispatchId = sent.body.dispatch.id as string;
+
+    const memberSocket = new WebSocket(
+      `ws://127.0.0.1:${address.port}/api/realtime`,
+    );
+    const ready = waitForRealtimeMessage(memberSocket, "realtime:ready");
+    const replayed = waitForRealtimeMessage(memberSocket, "notification:new");
+    memberSocket.on("open", () => {
+      memberSocket.send(JSON.stringify({ type: "auth", token: bobToken }));
+    });
+    await ready;
+    expect((await replayed).data).toMatchObject({
+      id: notificationId,
+      deliveredAt: null,
+      acknowledgedAt: null,
+    });
+
+    const inbox = await request(runtime.app)
+      .get("/api/notifications")
+      .set("Authorization", `Bearer ${bobToken}`)
+      .expect(200);
+    expect(
+      inbox.body.notifications.some(
+        (notification: { id: string }) => notification.id === notificationId,
+      ),
+    ).toBe(true);
+
+    const receipt = waitForRealtimeMessage(bossSocket, "notification:receipt");
+    const delivered = await request(runtime.app)
+      .patch(`/api/notifications/${notificationId}/delivered`)
+      .set("Authorization", `Bearer ${bobToken}`)
+      .expect(200);
+    const deliveredAt = delivered.body.notification.deliveredAt as string;
+    expect(deliveredAt).toBeTruthy();
+    expect((await receipt).data).toMatchObject({
+      notificationId,
+      dispatchId,
+      recipientId: bobId,
+      deliveredAt,
+    });
+
+    const noDuplicateReceipt = expectNoRealtimeMessage(
+      bossSocket,
+      "notification:receipt",
+      (data) =>
+        (data as { notificationId?: string } | undefined)?.notificationId ===
+        notificationId,
+    );
+    const repeated = await request(runtime.app)
+      .patch(`/api/notifications/${notificationId}/delivered`)
+      .set("Authorization", `Bearer ${bobToken}`)
+      .expect(200);
+    expect(repeated.body.notification.deliveredAt).toBe(deliveredAt);
+    await noDuplicateReceipt;
+
+    const dispatches = await request(runtime.app)
+      .get("/api/boss/notification-dispatches")
+      .set("Authorization", `Bearer ${aliceToken}`)
+      .expect(200);
+    const dispatch = dispatches.body.dispatches.find(
+      (candidate: { id: string }) => candidate.id === dispatchId,
+    );
+    expect(dispatch.counts).toEqual({
+      total: 1,
+      delivered: 1,
+      acknowledged: 0,
+      pending: 1,
+    });
+
+    memberSocket.close();
+    bossSocket.close();
+  });
+
+  it("同一账号在另一台电脑确认后会立刻停止所有设备的强提醒", async () => {
+    const address = runtime.server.address() as AddressInfo;
+    const firstDevice = new WebSocket(
+      `ws://127.0.0.1:${address.port}/api/realtime`,
+    );
+    const secondDevice = new WebSocket(
+      `ws://127.0.0.1:${address.port}/api/realtime`,
+    );
+    const bossSocket = new WebSocket(
+      `ws://127.0.0.1:${address.port}/api/realtime`,
+    );
+    const firstReady = waitForRealtimeMessage(firstDevice, "realtime:ready");
+    const secondReady = waitForRealtimeMessage(secondDevice, "realtime:ready");
+    const bossReady = waitForRealtimeMessage(bossSocket, "realtime:ready");
+    firstDevice.on("open", () => {
+      firstDevice.send(JSON.stringify({ type: "auth", token: bobToken }));
+    });
+    secondDevice.on("open", () => {
+      secondDevice.send(JSON.stringify({ type: "auth", token: bobToken }));
+    });
+    bossSocket.on("open", () => {
+      bossSocket.send(JSON.stringify({ type: "auth", token: aliceToken }));
+    });
+    expect((await firstReady).data).toMatchObject({ heartbeat: true });
+    await Promise.all([secondReady, bossReady]);
+    const pong = waitForRealtimeMessage(firstDevice, "pong");
+    firstDevice.send(JSON.stringify({ type: "ping" }));
+    await pong;
+
+    const isThisReminder = (data: unknown) =>
+      (data as { title?: string } | undefined)?.title === "跨设备确认同步";
+    const initialFrames = [
+      waitForRealtimeMessage(firstDevice, "notification:new", isThisReminder),
+      waitForRealtimeMessage(secondDevice, "notification:new", isThisReminder),
+    ];
+    const sent = await request(runtime.app)
+      .post("/api/boss/notifications")
+      .set("Authorization", `Bearer ${aliceToken}`)
+      .send({
+        all: false,
+        recipientIds: [bobId],
+        title: "跨设备确认同步",
+        body: "任意一台电脑确认后，其他电脑必须立即停止提醒。",
+      })
+      .expect(201);
+    const notificationId = sent.body.notifications[0].id as string;
+    for (const frame of await Promise.all(initialFrames)) {
+      expect(frame.data).toMatchObject({
+        id: notificationId,
+        deliveredAt: null,
+        acknowledgedAt: null,
+      });
+    }
+
+    const isDeliveredUpdate = (data: unknown) => {
+      const notification = data as {
+        id?: string;
+        deliveredAt?: string | null;
+        acknowledgedAt?: string | null;
+      };
+      return (
+        notification?.id === notificationId &&
+        Boolean(notification.deliveredAt) &&
+        !notification.acknowledgedAt
+      );
+    };
+    const deliveredOnBoth = [
+      waitForRealtimeMessage(firstDevice, "notification:new", isDeliveredUpdate),
+      waitForRealtimeMessage(secondDevice, "notification:new", isDeliveredUpdate),
+    ];
+    const deliveredReceipt = waitForRealtimeMessage(
+      bossSocket,
+      "notification:receipt",
+      (data) =>
+        (data as { notificationId?: string } | undefined)?.notificationId ===
+        notificationId,
+    );
+    await request(runtime.app)
+      .patch(`/api/notifications/${notificationId}/delivered`)
+      .set("Authorization", `Bearer ${bobToken}`)
+      .expect(200);
+    for (const frame of await Promise.all(deliveredOnBoth)) {
+      expect(frame.data).toMatchObject({ id: notificationId });
+      expect((frame.data as { deliveredAt: string }).deliveredAt).toBeTruthy();
+    }
+    expect((await deliveredReceipt).data).toMatchObject({ notificationId });
+
+    const isAcknowledgedUpdate = (data: unknown) => {
+      const notification = data as {
+        id?: string;
+        acknowledgedAt?: string | null;
+      };
+      return (
+        notification?.id === notificationId &&
+        Boolean(notification.acknowledgedAt)
+      );
+    };
+    const acknowledgedOnBoth = [
+      waitForRealtimeMessage(
+        firstDevice,
+        "notification:new",
+        isAcknowledgedUpdate,
+      ),
+      waitForRealtimeMessage(
+        secondDevice,
+        "notification:new",
+        isAcknowledgedUpdate,
+      ),
+    ];
+    const acknowledgedReceipt = waitForRealtimeMessage(
+      bossSocket,
+      "notification:receipt",
+      (data) =>
+        (data as { notificationId?: string; acknowledgedAt?: string | null })
+          ?.notificationId === notificationId &&
+        Boolean(
+          (data as { acknowledgedAt?: string | null } | undefined)
+            ?.acknowledgedAt,
+        ),
+    );
+    await request(runtime.app)
+      .patch(`/api/notifications/${notificationId}/acknowledge`)
+      .set("Authorization", `Bearer ${bobToken}`)
+      .expect(200);
+    for (const frame of await Promise.all(acknowledgedOnBoth)) {
+      expect(frame.data).toMatchObject({ id: notificationId });
+      expect(
+        (frame.data as { acknowledgedAt: string }).acknowledgedAt,
+      ).toBeTruthy();
+    }
+    expect((await acknowledgedReceipt).data).toMatchObject({ notificationId });
+
+    firstDevice.close();
+    secondDevice.close();
+    bossSocket.close();
   });
 
   it("成员可按姓名确认联系人，并实时收发持久化消息", async () => {

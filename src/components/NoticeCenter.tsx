@@ -59,45 +59,52 @@ interface NoticeCenterValue {
 
 const NoticeCenterContext = createContext<NoticeCenterValue | null>(null);
 const NOTICE_EVENT = "tongpin:notice";
+export const INSTALL_UPDATE_ERROR_MESSAGE =
+  "更新安装未能启动，请稍后重试。";
+const SILENT_UPDATER_ERROR_KINDS = new Set<UpdaterErrorKind>([
+  "channel-missing",
+  "check-network",
+  "check",
+]);
 const UPDATER_ERROR_COPY = {
   "channel-missing": {
     title: "更新通道暂未就绪",
-    body: "软件更新通道暂未准备好，不影响任务同步和老板通知，软件会按正常周期自动重试。",
+    body: "软件会按正常周期自动重试。",
     tone: "warning",
   },
   "check-network": {
     title: "暂时无法检查更新",
-    body: "暂时无法检查软件更新，不影响任务同步和老板通知，软件会自动重试。",
+    body: "软件会自动重试。",
     tone: "warning",
   },
   check: {
     title: "暂时无法检查更新",
-    body: "暂时无法检查软件更新，不影响任务同步和老板通知，软件会自动重试。",
+    body: "软件会自动重试。",
     tone: "warning",
   },
   download: {
     title: "更新下载失败",
-    body: "软件更新下载未完成，不影响任务同步和老板通知，软件会自动重试。",
+    body: "更新下载未完成，软件会自动重试。",
     tone: "error",
   },
   validation: {
     title: "更新校验失败",
-    body: "软件更新校验未通过，为保护数据已停止安装；不影响任务同步和老板通知，软件会自动重试。",
+    body: "更新文件校验未通过，已停止安装。",
     tone: "error",
   },
   signature: {
     title: "更新签名校验失败",
-    body: "软件更新签名校验未通过，为保护数据已停止安装；不影响任务同步和老板通知，软件会自动重试。",
+    body: "更新签名校验未通过，已停止安装。",
     tone: "error",
   },
   install: {
     title: "更新安装未完成",
-    body: "软件更新安装未完成，不影响任务同步和老板通知，软件会自动重试。",
+    body: "更新安装未完成，请稍后重试。",
     tone: "error",
   },
   update: {
     title: "软件更新暂时失败",
-    body: "软件更新暂时未完成，不影响任务同步和老板通知，软件会自动重试。",
+    body: "软件更新未完成，请稍后重试。",
     tone: "error",
   },
 } as const satisfies Record<
@@ -105,6 +112,17 @@ const UPDATER_ERROR_COPY = {
   { title: string; body: string; tone: NoticeTone }
 >;
 let noticeSequence = 0;
+
+export async function requestImmediateUpdateInstall(
+  installUpdate: () => Promise<boolean>,
+) {
+  try {
+    const started = await installUpdate();
+    if (!started) throw new Error(INSTALL_UPDATE_ERROR_MESSAGE);
+  } catch {
+    throw new Error(INSTALL_UPDATE_ERROR_MESSAGE);
+  }
+}
 
 function createNoticeId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -288,23 +306,25 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
               label: "立即安装",
               emphasis: "primary",
               closeOnSelect: false,
-              onSelect: async () => {
-                const started = await desktop.installUpdate();
-                if (!started) {
-                  throw new Error(
-                    "软件更新安装未能启动，不影响任务同步和老板通知，软件会自动重试。",
-                  );
-                }
-              },
+              onSelect: () =>
+                requestImmediateUpdateInstall(() => desktop.installUpdate()),
             },
           ],
         });
         return;
       }
+      if (
+        status.errorKind &&
+        SILENT_UPDATER_ERROR_KINDS.has(status.errorKind)
+      ) {
+        dismiss("online-updater");
+        return;
+      }
       const errorCopy =
         UPDATER_ERROR_COPY[status.errorKind ?? "update"];
+      if (status.errorKind !== "install") dismiss("online-updater");
       notify({
-        id: "online-updater",
+        id: "online-updater-error",
         title: errorCopy.title,
         body: errorCopy.body,
         tone: errorCopy.tone,

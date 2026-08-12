@@ -369,7 +369,8 @@ export function createBossRouter(
       }
       response.status(201).json({
         targeted: notifications.length,
-        delivered: notifications.length,
+        accepted: notifications.length,
+        delivered: 0,
         notifications,
         dispatch: (
           await store.read((database) =>

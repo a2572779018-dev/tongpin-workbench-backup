@@ -12,7 +12,11 @@ interface ClientMessage {
 
 function sendJson(socket: WebSocket, payload: unknown): void {
   if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(payload));
+    try {
+      socket.send(JSON.stringify(payload));
+    } catch {
+      socket.terminate();
+    }
   }
 }
 
@@ -55,9 +59,14 @@ export function attachRealtime(
     }, 5_000);
 
     socket.on("message", async (raw, isBinary) => {
-      if (isBinary || userId) return;
+      if (isBinary) return;
       try {
         const message = JSON.parse(raw.toString()) as ClientMessage;
+        if (message.type === "ping" && userId) {
+          sendJson(socket, { type: "pong" });
+          return;
+        }
+        if (userId) return;
         if (message.type !== "auth" || typeof message.token !== "string") {
           throw new Error("missing authentication");
         }
@@ -76,8 +85,24 @@ export function attachRealtime(
         clients.set(userId, userClients);
         sendJson(socket, {
           type: "realtime:ready",
-          data: { connected: true },
+          data: { connected: true, heartbeat: true },
         });
+        const pendingNotifications = await store.read((database) =>
+          database.notifications
+            .filter(
+              (notification) =>
+                notification.recipientId === userId &&
+                notification.requiresAcknowledgement &&
+                !notification.acknowledgedAt,
+            )
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+        );
+        for (const notification of pendingNotifications) {
+          sendJson(socket, {
+            type: "notification:new",
+            data: notification,
+          });
+        }
       } catch {
         socket.close(4401, "unauthorized");
       }

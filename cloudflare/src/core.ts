@@ -135,8 +135,12 @@ interface SchemaColumnRow extends Record<string, SqlStorageValue> {
 }
 
 interface SocketAttachment {
-  userId: string;
+  userId: string | null;
+  authenticationDeadline?: number;
 }
+
+const REALTIME_AUTHENTICATION_TIMEOUT_MS = 5_000;
+const MAX_PENDING_REALTIME_AUTHENTICATIONS = 32;
 
 function decodeAvatarDataUrl(dataUrl: string): {
   contentType: string;
@@ -590,7 +594,21 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           ? message
           : new TextDecoder().decode(message);
       const payload = JSON.parse(raw) as { type?: string; token?: string };
+      const attachment =
+        socket.deserializeAttachment() as SocketAttachment | null;
+      if (
+        !attachment?.userId &&
+        typeof attachment?.authenticationDeadline === "number" &&
+        Date.now() > attachment.authenticationDeadline
+      ) {
+        socket.close(4001, "authentication timeout");
+        return;
+      }
       if (payload.type === "auth" && typeof payload.token === "string") {
+        if (attachment?.userId) {
+          socket.close(4002, "already authenticated");
+          return;
+        }
         const claims = await verifyAccessToken(payload.token, this.env);
         const user = this.userById(claims.sub);
         if (!user || user.status !== "active") {
@@ -601,12 +619,20 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         socket.send(
           JSON.stringify({
             type: "realtime:ready",
-            data: { connected: true },
+            data: { connected: true, heartbeat: true },
           }),
         );
+        for (const notification of this.pendingNotificationsForUser(user.id)) {
+          socket.send(
+            JSON.stringify({
+              type: "notification:new",
+              data: notification,
+            }),
+          );
+        }
         return;
       }
-      if (payload.type === "ping") {
+      if (payload.type === "ping" && attachment?.userId) {
         socket.send(JSON.stringify({ type: "pong" }));
         return;
       }
@@ -637,9 +663,23 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       throw new ApiError(426, "WEBSOCKET_REQUIRED", "需要 WebSocket 连接");
     }
+    if (
+      this.pendingRealtimeAuthenticationCount() >=
+      MAX_PENDING_REALTIME_AUTHENTICATIONS
+    ) {
+      throw new ApiError(
+        503,
+        "REALTIME_BUSY",
+        "实时连接繁忙，请稍后重试",
+      );
+    }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({
+      userId: null,
+      authenticationDeadline: Date.now() + REALTIME_AUTHENTICATION_TIMEOUT_MS,
+    } satisfies SocketAttachment);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -2600,59 +2640,64 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     }
     const now = new Date().toISOString();
     const dispatchId = crypto.randomUUID();
-    this.sql.exec(
-      `INSERT INTO notification_dispatches
-       (id, sender_id, title, body, ding_count, last_ding_at, created_at)
-       VALUES (?, ?, ?, ?, 0, NULL, ?)`,
-      dispatchId,
-      boss.id,
-      body.title,
-      body.body,
-      now,
-    );
     const notifications: AppNotification[] = [];
-    for (const recipient of recipients) {
-      const notification: AppNotification = {
-        id: crypto.randomUUID(),
-        dispatchId,
-        senderId: boss.id,
-        recipientId: recipient.id,
-        title: body.title,
-        body: body.body,
-        requiresAcknowledgement: true,
-        deliveredAt: null,
-        acknowledgedAt: null,
-        dingCount: 0,
-        lastDingAt: null,
-        readAt: null,
-        createdAt: now,
-      };
+    this.ctx.storage.transactionSync(() => {
       this.sql.exec(
-        `INSERT INTO notifications
-         (id, sender_id, recipient_id, title, body, read_at, created_at)
-         VALUES (?, ?, ?, ?, ?, NULL, ?)`,
-        notification.id,
-        notification.senderId,
-        notification.recipientId,
-        notification.title,
-        notification.body,
-        notification.createdAt,
-      );
-      this.sql.exec(
-        `INSERT INTO notification_receipts
-         (notification_id, dispatch_id, delivered_at, acknowledged_at)
-         VALUES (?, ?, NULL, NULL)`,
-        notification.id,
+        `INSERT INTO notification_dispatches
+         (id, sender_id, title, body, ding_count, last_ding_at, created_at)
+         VALUES (?, ?, ?, ?, 0, NULL, ?)`,
         dispatchId,
+        boss.id,
+        body.title,
+        body.body,
+        now,
       );
-      notifications.push(notification);
+      for (const recipient of recipients) {
+        const notification: AppNotification = {
+          id: crypto.randomUUID(),
+          dispatchId,
+          senderId: boss.id,
+          recipientId: recipient.id,
+          title: body.title,
+          body: body.body,
+          requiresAcknowledgement: true,
+          deliveredAt: null,
+          acknowledgedAt: null,
+          dingCount: 0,
+          lastDingAt: null,
+          readAt: null,
+          createdAt: now,
+        };
+        this.sql.exec(
+          `INSERT INTO notifications
+           (id, sender_id, recipient_id, title, body, read_at, created_at)
+           VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+          notification.id,
+          notification.senderId,
+          notification.recipientId,
+          notification.title,
+          notification.body,
+          notification.createdAt,
+        );
+        this.sql.exec(
+          `INSERT INTO notification_receipts
+           (notification_id, dispatch_id, delivered_at, acknowledged_at)
+           VALUES (?, ?, NULL, NULL)`,
+          notification.id,
+          dispatchId,
+        );
+        notifications.push(notification);
+      }
+    });
+    for (const notification of notifications) {
       this.pushNotification(notification);
     }
     const dispatch = this.notificationDispatchById(dispatchId, boss.id)!;
     return json(
       {
         targeted: notifications.length,
-        delivered: notifications.length,
+        accepted: notifications.length,
+        delivered: 0,
         notifications,
         dispatch,
       },
@@ -2733,7 +2778,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
 
   private async getNotifications(request: Request): Promise<Response> {
     const user = await this.requireUser(request);
-    const notifications = this.sql
+    const recent = this.sql
       .exec<NotificationRow>(
         `SELECT n.*,
                 r.dispatch_id,
@@ -2750,10 +2795,42 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       )
       .toArray()
       .map(toNotification);
+    const merged = new Map(
+      this.pendingNotificationsForUser(user.id).map((notification) => [
+        notification.id,
+        notification,
+      ]),
+    );
+    for (const notification of recent) {
+      merged.set(notification.id, notification);
+    }
+    const notifications = [...merged.values()].sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt),
+    );
     return json({
       notifications,
       unread: notifications.filter((item) => !item.readAt).length,
     });
+  }
+
+  private pendingNotificationsForUser(userId: string): AppNotification[] {
+    return this.sql
+      .exec<NotificationRow>(
+        `SELECT n.*,
+                r.dispatch_id,
+                r.delivered_at,
+                r.acknowledged_at,
+                d.ding_count,
+                d.last_ding_at
+         FROM notifications n
+         INNER JOIN notification_receipts r ON r.notification_id = n.id
+         INNER JOIN notification_dispatches d ON d.id = r.dispatch_id
+         WHERE n.recipient_id = ? AND r.acknowledged_at IS NULL
+         ORDER BY n.created_at ASC`,
+        userId,
+      )
+      .toArray()
+      .map(toNotification);
   }
 
   private async readNotification(
@@ -2805,6 +2882,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         "没有找到该提醒",
       );
     }
+    const changed = !notification.deliveredAt;
     this.sql.exec(
       `UPDATE notification_receipts
        SET delivered_at = COALESCE(delivered_at, ?)
@@ -2813,7 +2891,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       notificationId,
     );
     const updated = this.notificationById(notificationId)!;
-    this.pushNotificationReceipt(updated);
+    if (changed) this.pushNotificationReceipt(updated);
+    this.pushNotification(updated);
     return json({ notification: updated });
   }
 
@@ -2834,6 +2913,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         "没有找到该提醒",
       );
     }
+    const changed = !notification.acknowledgedAt;
     const now = new Date().toISOString();
     this.sql.exec(
       `UPDATE notification_receipts
@@ -2853,7 +2933,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       user.id,
     );
     const updated = this.notificationById(notificationId)!;
-    this.pushNotificationReceipt(updated);
+    if (changed) this.pushNotificationReceipt(updated);
+    this.pushNotification(updated);
     return json({ notification: updated });
   }
 
@@ -2881,45 +2962,91 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
 
   private pushToUser(userId: string, type: string, data: unknown): void {
     const message = JSON.stringify({ type, data });
-    for (const socket of this.ctx.getWebSockets()) {
+    for (const socket of this.authenticatedSockets()) {
       const attachment =
         socket.deserializeAttachment() as SocketAttachment | null;
       if (
         attachment?.userId === userId &&
         socket.readyState === WebSocket.OPEN
       ) {
-        socket.send(message);
+        try {
+          socket.send(message);
+        } catch {
+          try {
+            socket.close(1011, "realtime delivery failed");
+          } catch {
+            // A failed client must not block delivery to the remaining devices.
+          }
+        }
       }
     }
   }
 
   private pushDirectMessage(message: DirectMessage, sender: UserRow): void {
-    const payload = JSON.stringify({
-      type: "message:new",
-      data: {
-        message,
-        sender: toPublicUser(sender),
-      },
+    this.pushToUser(message.recipientId, "message:new", {
+      message,
+      sender: toPublicUser(sender),
     });
-    for (const socket of this.ctx.getWebSockets()) {
+  }
+
+  private closeUserSockets(userId: string): void {
+    for (const socket of this.authenticatedSockets()) {
       const attachment =
         socket.deserializeAttachment() as SocketAttachment | null;
-      if (
-        attachment?.userId === message.recipientId &&
-        socket.readyState === WebSocket.OPEN
-      ) {
-        socket.send(payload);
+      if (attachment?.userId === userId) {
+        try {
+          socket.close(4003, "session revoked");
+        } catch {
+          // Continue revoking any other open device sessions.
+        }
       }
     }
   }
 
-  private closeUserSockets(userId: string): void {
+  private authenticatedSockets(): WebSocket[] {
+    const now = Date.now();
+    const authenticated: WebSocket[] = [];
     for (const socket of this.ctx.getWebSockets()) {
       const attachment =
         socket.deserializeAttachment() as SocketAttachment | null;
-      if (attachment?.userId === userId) {
-        socket.close(4003, "session revoked");
+      if (attachment?.userId) {
+        authenticated.push(socket);
+        continue;
+      }
+      if (
+        typeof attachment?.authenticationDeadline === "number" &&
+        now > attachment.authenticationDeadline
+      ) {
+        try {
+          socket.close(4001, "authentication timeout");
+        } catch {
+          // Closing one stale socket must not interrupt realtime fan-out.
+        }
       }
     }
+    return authenticated;
+  }
+
+  private pendingRealtimeAuthenticationCount(): number {
+    const now = Date.now();
+    let pending = 0;
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment =
+        socket.deserializeAttachment() as SocketAttachment | null;
+      if (attachment?.userId) continue;
+      if (
+        typeof attachment?.authenticationDeadline === "number" &&
+        now <= attachment.authenticationDeadline
+      ) {
+        pending += 1;
+        continue;
+      }
+      try {
+        socket.close(4001, "authentication timeout");
+      } catch {
+        // A stale unauthenticated socket must not block a new legitimate client.
+      }
+    }
+    return pending;
   }
 }

@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -88,6 +89,7 @@ export function BossDashboard() {
   const [taskHistory, setTaskHistory] = useState<TaskHistoryDetail | null>(null);
   const [taskHistoryLoading, setTaskHistoryLoading] = useState(false);
   const [taskHistoryError, setTaskHistoryError] = useState("");
+  const dispatchLoadGeneration = useRef(0);
 
   const loadTeam = useCallback(async () => {
     setLoading(true);
@@ -114,16 +116,22 @@ export function BossDashboard() {
   }, [loadTeam]);
 
   const loadDispatches = useCallback(async () => {
+    const generation = dispatchLoadGeneration.current + 1;
+    dispatchLoadGeneration.current = generation;
     setDispatchesLoading(true);
     try {
       const result = await api<{ dispatches: NotificationDispatch[] }>(
         "/api/boss/notification-dispatches",
       );
-      setDispatches(result.dispatches);
+      if (generation === dispatchLoadGeneration.current) {
+        setDispatches(result.dispatches);
+      }
     } catch {
       // 任务进度仍可使用，下一次回执或发送操作会重试。
     } finally {
-      setDispatchesLoading(false);
+      if (generation === dispatchLoadGeneration.current) {
+        setDispatchesLoading(false);
+      }
     }
   }, [api]);
 
@@ -138,11 +146,13 @@ export function BossDashboard() {
       timer = window.setTimeout(() => void loadDispatches(), 240);
     };
     window.addEventListener("tongpin:notification-receipt", handleReceipt);
+    window.addEventListener("tongpin:realtime-ready", handleReceipt);
     return () => {
       window.removeEventListener(
         "tongpin:notification-receipt",
         handleReceipt,
       );
+      window.removeEventListener("tongpin:realtime-ready", handleReceipt);
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [loadDispatches]);
@@ -237,6 +247,8 @@ export function BossDashboard() {
           }),
         },
       );
+      dispatchLoadGeneration.current += 1;
+      setDispatchesLoading(false);
       setDispatches((current) => [
         result.dispatch,
         ...current.filter(
@@ -270,6 +282,8 @@ export function BossDashboard() {
         `/api/boss/notification-dispatches/${dispatch.id}/ding`,
         { method: "POST" },
       );
+      dispatchLoadGeneration.current += 1;
+      setDispatchesLoading(false);
       setDispatches((current) =>
         current.map((item) =>
           item.id === dispatch.id ? result.dispatch : item,
