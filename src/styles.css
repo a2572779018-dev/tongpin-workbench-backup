@@ -232,10 +232,30 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
   line-height: 1;
 }
 
+.desktop-titlebar__brand-line {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
 .desktop-titlebar__brand b {
   overflow: hidden;
   font-size: 0.76rem;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-titlebar__brand-line em {
+  padding: 0.08rem 0.28rem 0.07rem;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  background: var(--yellow);
+  font-family: "DM Mono", monospace;
+  font-size: 0.43rem;
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: 0.015em;
+  line-height: 1;
   white-space: nowrap;
 }
 

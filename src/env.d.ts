@@ -47,6 +47,8 @@ interface DesktopSessionBridge {
     title: string;
     body: string;
     requireAcknowledgement?: boolean;
+    playSound?: boolean;
+    soundKey?: string;
     actionLabel?: string;
     action?: {
       type: "open-task";
@@ -87,6 +89,7 @@ interface DesktopSessionBridge {
         | "error";
       percent?: number;
       version?: string;
+      releaseNotes?: string;
       message?: string;
       errorKind?: UpdaterErrorKind;
     }) => void,

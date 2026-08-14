@@ -8,6 +8,7 @@ export function DesktopTitlebar({
 }) {
   const desktop = window.tongpin;
   const isMac = desktop?.platform === "darwin";
+  const appVersion = desktop?.versions.app?.trim();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -52,8 +53,13 @@ export function DesktopTitlebar({
           <i />
           <i />
         </span>
-        <span>
-          <b>同频</b>
+        <span className="desktop-titlebar__wordmark">
+          <span className="desktop-titlebar__brand-line">
+            <b>同频</b>
+            {appVersion && (
+              <em title={`当前版本 v${appVersion}`}>v{appVersion}</em>
+            )}
+          </span>
           <small>TONGPIN</small>
         </span>
       </div>
