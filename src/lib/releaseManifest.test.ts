@@ -32,6 +32,15 @@ describe("release manifest notes", () => {
     expect(readManifestReleaseNotes("version: 0.1.18\n")).toBe("");
   });
 
+  it("decodes the CRLF scalar emitted by Windows electron-builder", () => {
+    const manifest =
+      'releaseNotes: "老板通知新增铃声；左上角显示版本号。\\r\\n"\r\n';
+
+    expect(normalizeReleaseNotesText(readManifestReleaseNotes(manifest))).toBe(
+      "老板通知新增铃声；左上角显示版本号。",
+    );
+  });
+
   it("normalizes line wrapping before exact comparison", () => {
     expect(normalizeReleaseNotesText("新增铃声；\n  显示版本号。 ")).toBe(
       "新增铃声； 显示版本号。",
