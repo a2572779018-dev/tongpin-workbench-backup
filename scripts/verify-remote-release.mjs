@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import releaseManifestHelpers from "./release-manifest.cjs";
+
+const { readManifestReleaseNotes } = releaseManifestHelpers;
 
 const baseUrl =
   process.env.TONGPIN_RELEASE_URL?.trim() ||
@@ -85,6 +88,7 @@ function parseManifest(source) {
   return {
     version: stripYamlScalar(versionMatch[1]),
     files,
+    releaseNotes: readManifestReleaseNotes(source),
   };
 }
 
@@ -103,6 +107,9 @@ const manifestSource = await checkedFetch(
   `${baseUrl}/${manifestName}?${cacheBuster}`,
 ).then((response) => response.text());
 const manifest = parseManifest(manifestSource);
+if (!manifest.releaseNotes.trim()) {
+  throw new Error(`远端 ${manifestName} 缺少 releaseNotes`);
+}
 const updateArtifact =
   manifest.files.find((file) =>
     platform === "mac"
@@ -238,6 +245,7 @@ console.log(
     {
       platform,
       version: manifest.version,
+      releaseNotes: manifest.releaseNotes,
       manifest: manifestName,
       installer: updateArtifact.name,
       bytes: downloadedBytes,

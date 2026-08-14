@@ -15,6 +15,12 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
+import {
+  RELEASE_ANNOUNCEMENT_STORAGE_KEY,
+  formatReleaseAnnouncementBody,
+  getReleaseAnnouncement,
+  shouldShowReleaseAnnouncement,
+} from "../lib/releaseAnnouncement";
 
 export type NoticeTone = "info" | "success" | "warning" | "error" | "update";
 
@@ -34,6 +40,7 @@ export interface NoticeInput {
   duration?: number;
   dismissible?: boolean;
   activate?: boolean;
+  autoExpand?: boolean;
   actions?: NoticeAction[];
   onDismiss?: () => void;
 }
@@ -256,6 +263,45 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
   }, [notify]);
 
   useEffect(() => {
+    const currentVersion = window.tongpin?.versions.app?.trim();
+    if (!currentVersion) return;
+    let lastAnnouncedVersion: string | null = null;
+    try {
+      lastAnnouncedVersion = window.localStorage.getItem(
+        RELEASE_ANNOUNCEMENT_STORAGE_KEY,
+      );
+    } catch {
+      // A locked-down storage policy must not hide the release announcement.
+    }
+    if (
+      !shouldShowReleaseAnnouncement({
+        currentVersion,
+        lastAnnouncedVersion,
+      })
+    ) {
+      return;
+    }
+    const announcement = getReleaseAnnouncement(currentVersion);
+    if (!announcement) return;
+    try {
+      window.localStorage.setItem(
+        RELEASE_ANNOUNCEMENT_STORAGE_KEY,
+        currentVersion,
+      );
+    } catch {
+      // The announcement still appears when the marker cannot persist.
+    }
+    notify({
+      id: `release-announcement-${currentVersion}`,
+      title: `同频已更新至 v${currentVersion}`,
+      body: formatReleaseAnnouncementBody(announcement),
+      tone: "update",
+      dismissible: true,
+      autoExpand: true,
+    });
+  }, [notify]);
+
+  useEffect(() => {
     const desktop = window.tongpin;
     if (!desktop) return;
     return desktop.onUpdaterStatus((status) => {
@@ -268,10 +314,13 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
           id: "online-updater",
           title: "发现同频新版本",
           body:
-            status.message ||
+            (status.releaseNotes
+              ? `版本 ${status.version ?? ""}：${status.releaseNotes}`
+              : status.message) ||
             `版本 ${status.version ?? ""} 正在后台下载，完成后可以立即安装。`,
           tone: "update",
           dismissible: false,
+          autoExpand: true,
         });
         return;
       }
@@ -292,10 +341,13 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
           id: "online-updater",
           title: `同频 ${status.version ?? "新版本"} 已准备好`,
           body:
-            status.message ||
+            (status.releaseNotes
+              ? `本次更新：${status.releaseNotes}`
+              : status.message) ||
             "现在安装会重新启动同频；选择稍后安装时，退出软件后仍会自动完成更新。",
           tone: "update",
           dismissible: true,
+          autoExpand: true,
           actions: [
             {
               label: "稍后安装",
@@ -406,10 +458,13 @@ function NoticeOrb({
       previousNoticeId.current = "";
       return;
     }
-    if (
-      previousNoticeId.current &&
-      previousNoticeId.current !== notice.id
-    ) {
+    const changed =
+      Boolean(previousNoticeId.current) &&
+      previousNoticeId.current !== notice.id;
+    if (notice.autoExpand) {
+      setExpanded(true);
+      setPinned(false);
+    } else if (changed) {
       setExpanded(false);
       setPinned(false);
     }

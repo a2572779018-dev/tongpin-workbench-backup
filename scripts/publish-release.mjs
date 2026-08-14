@@ -10,10 +10,15 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import releaseManifestHelpers from "./release-manifest.cjs";
+
+const { normalizeReleaseNotesText, readManifestReleaseNotes } =
+  releaseManifestHelpers;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const releaseDir = path.resolve(root, process.env.RELEASE_DIR ?? "artifacts");
 const packagePath = path.join(root, "package.json");
+const releaseNotesPath = path.join(root, "build", "release-notes.md");
 const wranglerPath = path.join(
   root,
   "node_modules",
@@ -126,7 +131,11 @@ function parseManifest(source) {
   if (files.length === 0) {
     throw new Error(`${manifestName} 没有可发布的 files 条目`);
   }
-  return { version, files };
+  return {
+    version,
+    files,
+    releaseNotes: readManifestReleaseNotes(source),
+  };
 }
 
 function contentTypeFor(name) {
@@ -296,14 +305,33 @@ async function fileExists(filePath) {
   }
 }
 
-const [manifestSource, packageJson] = await Promise.all([
-  readFile(manifestPath, "utf8"),
-  readFile(packagePath, "utf8").then(JSON.parse),
-]);
+const [manifestSource, packageJson, expectedReleaseNotesSource] =
+  await Promise.all([
+    readFile(manifestPath, "utf8"),
+    readFile(packagePath, "utf8").then(JSON.parse),
+    readFile(releaseNotesPath, "utf8"),
+  ]);
 const manifest = parseManifest(manifestSource);
 if (manifest.version !== packageJson.version) {
   throw new Error(
     `版本不一致：package.json=${packageJson.version}，${manifestName}=${manifest.version}`,
+  );
+}
+const expectedReleaseNotes = normalizeReleaseNotesText(
+  expectedReleaseNotesSource,
+);
+const manifestReleaseNotes = normalizeReleaseNotesText(
+  manifest.releaseNotes,
+);
+if (!expectedReleaseNotes) {
+  throw new Error("build/release-notes.md 不能为空");
+}
+if (!manifestReleaseNotes) {
+  throw new Error(`${manifestName} 缺少 releaseNotes`);
+}
+if (manifestReleaseNotes !== expectedReleaseNotes) {
+  throw new Error(
+    `${manifestName} 的 releaseNotes 与 build/release-notes.md 不一致`,
   );
 }
 

@@ -263,6 +263,8 @@ export function AppShell({
         title: notification.title,
         body: notification.body,
         requireAcknowledgement: true,
+        playSound: true,
+        soundKey: `boss-notification:${notification.id}:${notification.dingCount}`,
       });
     },
     [],
@@ -549,8 +551,11 @@ export function AppShell({
         (document.visibilityState !== "visible" || !document.hasFocus())
       ) {
         void window.tongpin.notify({
+          notificationId: notification.id,
           title: notification.title,
           body: notification.body,
+          playSound: true,
+          soundKey: `boss-notification:${notification.id}:${notification.dingCount}`,
         });
       }
     }

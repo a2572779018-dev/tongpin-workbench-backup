@@ -23,6 +23,11 @@ const {
   getUpdateRetryDelayMs,
   shouldShowUpdateError,
 } = require("./update-error-policy.cjs");
+const {
+  DEFAULT_NOTIFICATION_SOUND_DEDUP_MS,
+  shouldPlayNotificationSound,
+} = require("./notification-sound-policy.cjs");
+const { normalizeReleaseNotes } = require("./release-notes.cjs");
 
 autoUpdater.logger = null;
 
@@ -48,6 +53,7 @@ let activeNoticeRequiresAcknowledgement = false;
 let activeNoticeAction = null;
 let updateReady = false;
 let updateInstallInProgress = false;
+const recentNoticeSounds = new Map();
 
 function prepareSameVolumeUpdaterTemp() {
   if (process.platform !== "win32") return null;
@@ -242,6 +248,35 @@ function clearNoticeHideTimer() {
   }
 }
 
+function playDesktopNoticeSound(payload) {
+  const soundKey =
+    typeof payload?.soundKey === "string"
+      ? payload.soundKey.trim().slice(0, 160)
+      : "";
+  const now = Date.now();
+  for (const [key, playedAt] of recentNoticeSounds) {
+    if (now - playedAt >= DEFAULT_NOTIFICATION_SOUND_DEDUP_MS) {
+      recentNoticeSounds.delete(key);
+    }
+  }
+  if (
+    !shouldPlayNotificationSound({
+      enabled: payload?.playSound === true,
+      soundKey,
+      lastPlayedAt: recentNoticeSounds.get(soundKey),
+      now,
+    })
+  ) {
+    return;
+  }
+  recentNoticeSounds.set(soundKey, now);
+  try {
+    shell.beep();
+  } catch {
+    console.error("[desktop-notice] bell-failed");
+  }
+}
+
 function normalizeCredentialEmail(value) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
@@ -424,6 +459,7 @@ async function showDesktopNotice(payload) {
   window.webContents.send("desktop-notice:message", payload);
   positionNoticeWindow(false);
   window.showInactive();
+  if (window.isVisible()) playDesktopNoticeSound(payload);
   clearNoticeHideTimer();
   const autoHideMs = activeNoticeRequiresAcknowledgement
     ? STRONG_NOTICE_AUTO_HIDE_MS
@@ -703,6 +739,11 @@ function registerDesktopIpc() {
       tone: payload.requireAcknowledgement ? "warning" : "info",
       requireAcknowledgement:
         payload.requireAcknowledgement === true,
+      playSound: payload.playSound === true,
+      soundKey:
+        typeof payload.soundKey === "string"
+          ? payload.soundKey.slice(0, 160)
+          : "",
     });
   });
 
@@ -903,6 +944,7 @@ function configureUpdater() {
     sendUpdaterStatus({
       state: "available",
       version: info.version,
+      releaseNotes: normalizeReleaseNotes(info.releaseNotes),
       message: `发现版本 ${info.version}，正在后台下载`,
     });
   });
@@ -945,6 +987,7 @@ function configureUpdater() {
     sendUpdaterStatus({
       state: "downloaded",
       version: info.version,
+      releaseNotes: normalizeReleaseNotes(info.releaseNotes),
       message: `版本 ${info.version} 已下载`,
     });
     const silentInstallTimer = setTimeout(
