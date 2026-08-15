@@ -128,17 +128,18 @@ describe("LORA dashboard fixed fixture", () => {
 
   it("shows honest unavailable states instead of zero", () => {
     const markup = render(null);
-    expect(markup).toContain("基线建立中");
-    expect(markup).toContain("暂无完整日基线");
+    expect(markup).toContain("同步中");
+    expect(markup).toContain("暂无日基线");
     expect(markup).toContain("暂无可信价格");
     expect(markup).not.toContain(">0<");
   });
 
-  it("does not present a stale cached Pair value as a real-time price", () => {
+  it("shows a stale cached Pair value as an explicitly cached price", () => {
     const markup = render({
       ...fixture,
       price: { ...fixture.price, status: "stale" },
     });
-    expect(markup).toContain("暂无可信价格");
+    expect(markup).toContain("0.2");
+    expect(markup).toContain("缓存价格");
   });
 });

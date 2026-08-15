@@ -83,6 +83,8 @@ function completeState(): LoraCollectorState {
     transactionCursor: null,
     burnCursor: null,
     burnHistoryCursor: null,
+    internalDetailsComplete: true,
+    swapTodayComplete: true,
     bootstrapDate: "2026-08-14",
     transactionTodayComplete: true,
     transactionYesterdayComplete: true,
@@ -262,6 +264,44 @@ describe("LORA burn, threshold and de-duplication rules", () => {
 });
 
 describe("LORA pair, Swap and cache honesty", () => {
+  it("publishes each completed metric while the remaining baseline is still syncing", () => {
+    const state = {
+      ...completeState(),
+      transactionTodayComplete: false,
+      internalDetailsComplete: false,
+      swapTodayComplete: false,
+      todayComplete: false,
+    };
+    const dashboard = buildLoraDashboard({
+      now: new Date("2026-08-14T02:01:00.000Z"),
+      blocks: [],
+      transactions: [transaction()],
+      internalTransactions: [internal()],
+      swaps: [],
+      addressBaselines: [],
+      currentTotalAddresses: null,
+      price: {
+        status: "ready",
+        priceUsdt: "0.2",
+        reserveUsdt: "2",
+        reserveWlrb: "10",
+        blockNumber: 10,
+        updatedAt: "2026-08-14T02:00:00.000Z",
+        source: "pair",
+        configError: null,
+      },
+      state,
+      health: healthy(),
+    });
+
+    expect(dashboard.baselineStatus).toBe("building");
+    expect(dashboard.nodes.todayCount).toBe("1");
+    expect(dashboard.price.priceUsdt).toBe("0.2");
+    expect(dashboard.transactions.todayTotal).toBeNull();
+    expect(dashboard.largeTransfers.count).toBeNull();
+    expect(dashboard.swaps.status).toBe("building");
+  });
+
   it("validates token order, decimals and zero reserves", () => {
     const base = {
       chainId: "0x18d7",

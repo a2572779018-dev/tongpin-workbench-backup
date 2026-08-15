@@ -194,7 +194,7 @@ async function verifySize(browser, width, height) {
       })}`,
     );
   }
-  if (result.bodyBackground !== "rgb(247, 244, 236)" || result.appView !== "lora-chain") {
+  if (result.bodyBackground !== "rgb(23, 35, 60)" || result.appView !== "lora-chain") {
     throw new Error(`${width}x${height} palette/view policy failed`);
   }
   const screenshot = path.join(outputDir, `lora-dashboard-${width}x${height}.png`);

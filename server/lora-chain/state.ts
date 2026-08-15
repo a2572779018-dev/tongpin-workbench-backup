@@ -1,5 +1,6 @@
 import {
   LORA_BURN_ADDRESS,
+  LORA_BOOTSTRAP_INTERVAL_MS,
   LORA_COLLECT_INTERVAL_MS,
   LORA_PAIR_ADDRESS,
 } from "./constants";
@@ -213,7 +214,12 @@ export function applyLoraCollectionBatch(
     todayComplete: batch.todayComplete,
     yesterdayComplete: batch.yesterdayComplete,
     historyComplete: batch.historyComplete,
-    nextRunAt: new Date(now.getTime() + LORA_COLLECT_INTERVAL_MS).toISOString(),
+    nextRunAt: new Date(
+      now.getTime() +
+        (batch.todayComplete
+          ? LORA_COLLECT_INTERVAL_MS
+          : LORA_BOOTSTRAP_INTERVAL_MS),
+    ).toISOString(),
     lastAttemptAt: now.toISOString(),
     lastSuccessfulSyncAt: successful
       ? now.toISOString()

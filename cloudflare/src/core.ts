@@ -19,6 +19,7 @@ import {
 } from "../../server/lora-chain/source";
 import {
   LORA_BURN_ADDRESS,
+  LORA_BOOTSTRAP_INTERVAL_MS,
   LORA_CACHE_STALE_AFTER_MS,
   LORA_COLLECT_INTERVAL_MS,
   LORA_DEFAULT_RPC_URL,
@@ -1680,7 +1681,12 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         batch.yesterdayComplete ? 1 : 0,
         batch.historyComplete ? 1 : 0,
         batch.currentTotalAddresses,
-        new Date(now.getTime() + LORA_COLLECT_INTERVAL_MS).toISOString(),
+        new Date(
+          now.getTime() +
+            (batch.todayComplete
+              ? LORA_COLLECT_INTERVAL_MS
+              : LORA_BOOTSTRAP_INTERVAL_MS),
+        ).toISOString(),
         now.toISOString(),
         syncedAt,
         cycleComplete ? 0 : Number(checkpoint.consecutive_failures) + 1,

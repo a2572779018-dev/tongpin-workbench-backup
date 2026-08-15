@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { ApiRequestError } from "../lib/api";
 import {
@@ -133,8 +133,8 @@ function ExplorerButton({ kind, value }: { kind: "address" | "tx"; value: string
   );
 }
 
-function TransferRows({ rows }: { rows: LoraLargeTransferRow[] }) {
-  if (rows.length === 0) return <div className="lora-table-empty">暂无符合条件的转账</div>;
+function TransferRows({ rows, loading }: { rows: LoraLargeTransferRow[]; loading: boolean }) {
+  if (rows.length === 0) return <div className="lora-table-empty">{loading ? "同步中" : "暂无转账"}</div>;
   return (
     <div className="lora-data-rows">
       {rows.map((row) => (
@@ -152,9 +152,9 @@ function TransferRows({ rows }: { rows: LoraLargeTransferRow[] }) {
   );
 }
 
-function SwapRows({ rows, enabled }: { rows: LoraSwapRow[]; enabled: boolean }) {
+function SwapRows({ rows, enabled, loading }: { rows: LoraSwapRow[]; enabled: boolean; loading: boolean }) {
   if (!enabled) return <div className="lora-table-empty">Swap 统计已禁用</div>;
-  if (rows.length === 0) return <div className="lora-table-empty">暂无符合条件的 Swap</div>;
+  if (rows.length === 0) return <div className="lora-table-empty">{loading ? "同步中" : "暂无 Swap"}</div>;
   return (
     <div className="lora-data-rows">
       {rows.map((row) => (
@@ -195,10 +195,12 @@ export function LoraChainDashboardView({
   error: string;
   onRefresh: () => void;
 }) {
-  const baselineLabel = data ? statusLabel(data.baselineStatus) : "基线建立中";
-  const addressState = data ? statusLabel(data.addresses.baselineStatus) : "暂无完整日基线";
+  const baselineLabel = data?.baselineStatus === "ready" ? "—" : "同步中";
+  const addressState = data?.addresses.baselineStatus === "ready" ? "—" : "暂无日基线";
   const trustedPrice =
-    data?.price.status === "ready" ? data.price.priceUsdt : null;
+    data?.price.status === "ready" || data?.price.status === "stale"
+      ? data.price.priceUsdt
+      : null;
   const transactionHourly = data?.transactions.hourly ?? [];
   const nodeHourly = data?.nodes.hourly ?? [];
   const transfers = data?.largeTransfers.top5?.length
@@ -211,11 +213,17 @@ export function LoraChainDashboardView({
       <header className="lora-dashboard-header">
         <div>
           <h1>LORA 链数据驾驶舱</h1>
-          <span>{data?.reportDate ?? "今日"} · Asia/Shanghai</span>
+          <span>{data?.reportDate ?? "今日"}</span>
         </div>
         <div className="lora-dashboard-header__status">
           <span className={data?.stale || error ? "is-stale" : ""}>
-            {data?.stale || error ? "数据已失效" : `更新 ${formatShanghaiDateTime(data?.dataUpdatedAt ?? null)}`}
+            {error
+              ? "暂不可用"
+              : data?.baselineStatus === "building"
+                ? "同步中"
+                : data?.stale
+                  ? "数据延迟"
+                  : `已更新 ${formatShanghaiDateTime(data?.dataUpdatedAt ?? null)}`}
           </span>
           <b>{clock}</b>
           <button type="button" disabled={busy} onClick={onRefresh}>
@@ -234,22 +242,22 @@ export function LoraChainDashboardView({
         <article>
           <span>{data?.addresses.label ?? "今日新增链上地址"}</span>
           <strong>{displayMetric(data?.addresses.todayNew ?? null, addressState)}</strong>
-          <b>00:00 至当前</b>
+          <b>零点基线</b>
         </article>
         <article>
-          <span>今日链上交易总数</span>
+          <span>今日交易</span>
           <strong>{displayMetric(data?.transactions.todayTotal ?? null, baselineLabel)}</strong>
           <b>昨日 {displayLoraValue(data?.transactions.yesterdayTotal, "—")}</b>
         </article>
         <article className="lora-price-kpi">
-          <span>LRB / USDT 实时价格</span>
+          <span>LRB / USDT</span>
           <strong>{displayMetric(trustedPrice, "暂无可信价格")}</strong>
-          <b>1 LRB · {data?.price.source ?? "暂无可信价格"}</b>
+          <b>{data?.price.status === "stale" ? "缓存价格" : "1 LRB = USDT"}</b>
         </article>
         <article>
           <span>今日活跃地址数</span>
           <strong>{displayMetric(data?.transactions.activeAddresses ?? null, baselineLabel)}</strong>
-          <b>去重地址</b>
+          <b>去重</b>
         </article>
         <article>
           <span>今日交易成功率</span>
@@ -260,7 +268,7 @@ export function LoraChainDashboardView({
             )}
           </strong>
           <b>
-            成功 {displayLoraValue(data?.transactions.success, "—")} · 失败 {displayLoraValue(data?.transactions.failed, "—")}
+            成功 {displayLoraValue(data?.transactions.success, "—")} / 失败 {displayLoraValue(data?.transactions.failed, "—")}
           </b>
         </article>
       </section>
@@ -269,7 +277,7 @@ export function LoraChainDashboardView({
         <article className="lora-dashboard-card">
           <header>
             <h2>每小时交易趋势</h2>
-            <span>原生转账 {displayLoraValue(data?.transactions.nativeTransfers, "—")}</span>
+            <span>原生转账 {displayLoraValue(data?.transactions.nativeTransfers, "同步中")}</span>
           </header>
           <HourlyBars points={transactionHourly} />
           <footer><span>00</span><span>08</span><span>16</span><span>23</span></footer>
@@ -277,7 +285,7 @@ export function LoraChainDashboardView({
         <article className="lora-dashboard-card">
           <header>
             <h2>每小时新增节点趋势</h2>
-            <span>节点销毁 {displayLoraValue(data?.nodes.todayNodeBurnLrb, "—")} LRB</span>
+            <span>销毁 {displayLoraValue(data?.nodes.todayNodeBurnLrb, "同步中")} LRB</span>
           </header>
           <HourlyLine points={nodeHourly} />
           <div className="lora-node-facts">
@@ -289,7 +297,7 @@ export function LoraChainDashboardView({
         <article className="lora-dashboard-card">
           <header>
             <h2>今日与昨日交易量</h2>
-            <span>00:00 至当前 / 昨日完整</span>
+            <span>今日 / 昨日</span>
           </header>
           <ComparisonBars
             today={data?.transactions.todayTotal ?? null}
@@ -309,7 +317,7 @@ export function LoraChainDashboardView({
           <div className="lora-transfer-row lora-table-head" aria-hidden="true">
             <span>时间</span><span>From</span><span>To</span><span>LRB</span><span>类型</span><span>状态</span><span>交易</span>
           </div>
-          <TransferRows rows={transfers} />
+          <TransferRows rows={transfers} loading={data?.largeTransfers.count === null} />
         </article>
         <article className="lora-dashboard-card lora-table-card">
           <header>
@@ -321,7 +329,11 @@ export function LoraChainDashboardView({
           <div className="lora-swap-row lora-table-head" aria-hidden="true">
             <span>时间</span><span>方向</span><span>LRB</span><span>USDT</span><span>价格</span><span>发起地址</span><span>余额</span><span>交易</span>
           </div>
-          <SwapRows rows={swaps} enabled={data?.swaps.enabled ?? false} />
+          <SwapRows
+            rows={swaps}
+            enabled={data?.swaps.enabled ?? false}
+            loading={data?.swaps.status === "building"}
+          />
         </article>
       </section>
 

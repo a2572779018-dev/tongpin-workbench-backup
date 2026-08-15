@@ -49,11 +49,11 @@ interface ParsedExplorerPage<T> {
 
 const REQUEST_TIMEOUT_MS = 20_000;
 const REQUEST_ATTEMPTS = 2;
-const REQUEST_SPACING_MS = 40;
-const REQUEST_CONCURRENCY = 2;
-const MAX_REQUEST_ATTEMPTS_PER_TICK = 48;
+const REQUEST_SPACING_MS = 25;
+const REQUEST_CONCURRENCY = 4;
+const MAX_REQUEST_ATTEMPTS_PER_TICK = 192;
 const MAX_HEAD_PAGES_PER_TICK = 4;
-const MAX_HISTORY_PAGES_PER_TICK = 4;
+const MAX_HISTORY_PAGES_PER_TICK = 24;
 const MAX_DETAIL_PAGES = 100;
 const PAIR_LOG_WINDOW_BLOCKS = 5_000;
 const MAX_PAIR_WINDOWS_PER_TICK = 2;
@@ -1373,8 +1373,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     let blockHeadConnected = false;
     let transactionHeadConnected = false;
     let burnHeadConnected = false;
-    let explorerFailures = 0;
-    let explorerSuccesses = 0;
+    let statsHealthy = false;
 
     const blockTask = (async () => {
       const previousKey =
@@ -1491,7 +1490,6 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       ]);
 
     if (blockResult.status === "fulfilled") {
-      explorerSuccesses += 1;
       const { head, history } = blockResult.value;
       blocks.push(...head.items, ...history.items);
       blockHeadConnected = head.connected;
@@ -1508,12 +1506,9 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
           checkpointHash = hash;
         }
       }
-    } else {
-      explorerFailures += 1;
     }
 
     if (transactionResult.status === "fulfilled") {
-      explorerSuccesses += 1;
       const { head, history } = transactionResult.value;
       transactions.push(...head.items, ...history.items);
       transactionHeadConnected = head.connected;
@@ -1533,12 +1528,9 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       if (head.connected && head.newestKey) {
         headTransactionHash = head.newestKey;
       }
-    } else {
-      explorerFailures += 1;
     }
 
     if (burnResult.status === "fulfilled") {
-      explorerSuccesses += 1;
       const { head, daily, lifetime } = burnResult.value;
       internalTransactions.push(
         ...head.items,
@@ -1553,20 +1545,14 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       nextBurnCursor = daily.next;
       nextBurnHistoryCursor = lifetime.next;
       if (head.connected && head.newestKey) headBurnKey = head.newestKey;
-    } else {
-      explorerFailures += 1;
     }
 
     if (statsResult.status === "fulfilled") {
       const totalAddresses = stringValue(statsResult.value.total_addresses);
       if (totalAddresses && /^\d+$/.test(totalAddresses)) {
         currentTotalAddresses = totalAddresses;
-        explorerSuccesses += 1;
-      } else {
-        explorerFailures += 1;
+        statsHealthy = true;
       }
-    } else {
-      explorerFailures += 1;
     }
 
     const pendingByHash = new Map<string, LoraPendingInternalTransaction>();
@@ -1605,7 +1591,6 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     internalTransactions.push(...detailResult.items);
     const pendingInternalTransactions = detailResult.pending;
     const internalDetailsComplete = pendingInternalTransactions.length === 0;
-    if (detailResult.failed > 0) explorerFailures += 1;
 
     let swapCheckpointBlock = crossedDate
       ? null
@@ -1629,10 +1614,9 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         swapTodayComplete = pairResult.complete;
         rpcHealthy = true;
       } else {
-        // A failed mandatory log/proof cycle keeps the previous checkpoint and
-        // completeness. Cached values remain available but source health drops.
-        explorerFailures += 1;
-        rpcHealthy = false;
+        // Keep the previous checkpoint. Price validation already proved that
+        // RPC is reachable; Swap readiness is tracked independently.
+        swapTodayComplete = false;
       }
     }
 
@@ -1659,7 +1643,11 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       };
     }
 
-    const explorerHealthy = explorerSuccesses > 0 && explorerFailures === 0;
+    const explorerHealthy =
+      blockResult.status === "fulfilled" &&
+      transactionResult.status === "fulfilled" &&
+      burnResult.status === "fulfilled" &&
+      statsHealthy;
     const todayComplete =
       blockHeadConnected &&
       transactionHeadConnected &&

@@ -246,6 +246,17 @@ export function buildLoraDashboard(
       ),
   );
   const todayComplete = stateMatchesReportDate && input.state.todayComplete;
+  const nodeTodayReady =
+    stateMatchesReportDate && input.state.burnTodayComplete;
+  const transactionTodayReady =
+    stateMatchesReportDate && input.state.transactionTodayComplete;
+  const internalTodayReady =
+    stateMatchesReportDate && Boolean(input.state.internalDetailsComplete);
+  const largeTransferReady = transactionTodayReady && internalTodayReady;
+  const swapTodayReady =
+    stateMatchesReportDate && Boolean(input.state.swapTodayComplete);
+  const blockTodayReady =
+    stateMatchesReportDate && input.state.blockTodayComplete;
   const historyComplete = input.state.historyComplete;
 
   const todayNodeBurns = todayInternal.filter(isConfirmedNodeBurn);
@@ -263,7 +274,7 @@ export function buildLoraDashboard(
   );
   const transactionCount = BigInt(todayTransactions.length);
   const failedCount = transactionCount - successCount;
-  const successRate = todayComplete
+  const successRate = transactionTodayReady
     ? ratioPercent(successCount, transactionCount, 2)
     : null;
 
@@ -379,7 +390,8 @@ export function buildLoraDashboard(
     (maximum, value) => (value > maximum ? value : maximum),
     0n,
   );
-  const dayValue = <T>(value: T): T | null => (todayComplete ? value : null);
+  const readyValue = <T>(ready: boolean, value: T): T | null =>
+    ready ? value : null;
 
   return {
     reportDate,
@@ -390,11 +402,13 @@ export function buildLoraDashboard(
     stale,
     baselineStatus,
     nodes: {
-      todayCount: dayValue(String(todayNodeBurns.length)),
-      todayNodeBurnLrb: dayValue(
+      todayCount: readyValue(nodeTodayReady, String(todayNodeBurns.length)),
+      todayNodeBurnLrb: readyValue(
+        nodeTodayReady,
         formatUnits(BigInt(todayNodeBurns.length) * NODE_BURN_WEI),
       ),
-      todayOtherBurnLrb: dayValue(
+      todayOtherBurnLrb: readyValue(
+        nodeTodayReady,
         formatUnits(
           todayOtherBurns.reduce(
             (total, transaction) =>
@@ -417,7 +431,7 @@ export function buildLoraDashboard(
         : null,
       hourly: hourlyPoints(
         todayNodeBurns.map((transaction) => transaction.timestamp),
-        todayComplete,
+        nodeTodayReady,
       ),
     },
     addresses: {
@@ -426,12 +440,16 @@ export function buildLoraDashboard(
       baselineStatus: addressStatus,
     },
     transactions: {
-      todayTotal: dayValue(transactionCount.toString()),
-      success: dayValue(successCount.toString()),
-      failed: dayValue(failedCount.toString()),
-      successRate: dayValue(successRate),
-      successRateLabel: dayValue(successRate ? `${successRate}%` : null),
-      nativeTransfers: dayValue(
+      todayTotal: readyValue(transactionTodayReady, transactionCount.toString()),
+      success: readyValue(transactionTodayReady, successCount.toString()),
+      failed: readyValue(transactionTodayReady, failedCount.toString()),
+      successRate: readyValue(transactionTodayReady, successRate),
+      successRateLabel: readyValue(
+        transactionTodayReady,
+        successRate ? `${successRate}%` : null,
+      ),
+      nativeTransfers: readyValue(
+        largeTransferReady,
         String(
           todayTransactions.filter(
             (transaction) =>
@@ -445,21 +463,24 @@ export function buildLoraDashboard(
             ).length,
         ),
       ),
-      activeAddresses: dayValue(String(activeAddresses.size)),
+      activeAddresses: readyValue(
+        transactionTodayReady,
+        String(activeAddresses.size),
+      ),
       yesterdayTotal: stateMatchesReportDate && input.state.yesterdayComplete
         ? String(yesterdayTransactions.length)
         : null,
       hourly: hourlyPoints(
         todayTransactions.map((transaction) => transaction.timestamp),
-        todayComplete,
+        transactionTodayReady,
       ),
     },
     largeTransfers: {
-      count: dayValue(String(largeRows.length)),
-      totalLrb: dayValue(formatUnits(totalLargeWei)),
-      maxLrb: dayValue(formatUnits(maxLargeWei)),
-      rows: todayComplete ? largeRows : [],
-      top5: todayComplete ? rankedLargeRows.slice(0, 5) : [],
+      count: readyValue(largeTransferReady, String(largeRows.length)),
+      totalLrb: readyValue(largeTransferReady, formatUnits(totalLargeWei)),
+      maxLrb: readyValue(largeTransferReady, formatUnits(maxLargeWei)),
+      rows: transactionTodayReady ? largeRows : [],
+      top5: transactionTodayReady ? rankedLargeRows.slice(0, 5) : [],
     },
     swaps: {
       enabled: pairMetricsEnabled,
@@ -468,10 +489,10 @@ export function buildLoraDashboard(
           ? "config-error"
           : !pairMetricsEnabled
             ? "unavailable"
-          : todayComplete
+          : swapTodayReady
             ? priceStatus
             : "building",
-      rows: todayComplete && pairMetricsEnabled
+      rows: swapTodayReady && pairMetricsEnabled
         ? largeSwaps.map((swap) => ({
             time: swap.timestamp,
             side: swap.side,
@@ -511,9 +532,9 @@ export function buildLoraDashboard(
         );
         return seconds === null ? null : `${seconds} 秒`;
       })(),
-      gasUsed: todayComplete ? gasUsed.toString() : null,
+      gasUsed: blockTodayReady ? gasUsed.toString() : null,
       averageGasPrice:
-        todayComplete && averageGasPriceWei !== null
+        transactionTodayReady && averageGasPriceWei !== null
           ? `${formatUnits(averageGasPriceWei, 9, 4)} Gwei`
           : null,
     },
