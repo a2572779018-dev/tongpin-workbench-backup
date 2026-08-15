@@ -41,7 +41,10 @@ import type {
   LoraPriceSnapshot,
   LoraSourceHealth,
 } from "../../server/lora-chain/types";
-import { ExplorerLoraChainDataSource } from "../../server/lora-chain/source";
+import {
+  ExplorerLoraChainDataSource,
+  normalizePendingInternalTransactions,
+} from "../../server/lora-chain/source";
 
 export const LORA_AGGREGATE_OBJECT_KEY = "_internal/lora/aggregate-v1.json";
 
@@ -74,6 +77,20 @@ interface LoraDayAggregate {
   otherBurnWei: string;
   hourlyNodes: string[];
   largeSwaps: LoraIndexedSwap[];
+}
+
+interface LoraDayIndexes {
+  transactionHashes: Set<string>;
+  internalKeys: Set<string>;
+  blockHeights: Set<number>;
+  swapKeys: Set<string>;
+  topLevelMovementFingerprints: Set<string>;
+  activeAddresses: Set<string>;
+}
+
+interface PersistedPendingInternalTransaction {
+  transactionHash: string;
+  nextPageParams: Record<string, string | number> | null;
 }
 
 export interface LoraAggregateSnapshot {
@@ -129,6 +146,31 @@ function emptyDay(): LoraDayAggregate {
   };
 }
 
+function dayIndexes(day: LoraDayAggregate): LoraDayIndexes {
+  return {
+    transactionHashes: new Set(day.transactionHashes),
+    internalKeys: new Set(day.internalKeys),
+    blockHeights: new Set(day.blockHeights),
+    swapKeys: new Set(day.swapKeys),
+    topLevelMovementFingerprints: new Set(day.topLevelMovementFingerprints),
+    activeAddresses: new Set(day.activeAddresses),
+  };
+}
+
+function persistDayIndexes(
+  day: LoraDayAggregate,
+  indexes: LoraDayIndexes,
+): void {
+  day.transactionHashes = [...indexes.transactionHashes];
+  day.internalKeys = [...indexes.internalKeys];
+  day.blockHeights = [...indexes.blockHeights];
+  day.swapKeys = [...indexes.swapKeys];
+  day.topLevelMovementFingerprints = [
+    ...indexes.topLevelMovementFingerprints,
+  ];
+  day.activeAddresses = [...indexes.activeAddresses];
+}
+
 export function createEmptyLoraAggregateSnapshot(): LoraAggregateSnapshot {
   return {
     version: 1,
@@ -162,7 +204,29 @@ function asAggregateSnapshot(value: unknown): LoraAggregateSnapshot | null {
   ) {
     return null;
   }
-  return candidate as LoraAggregateSnapshot;
+  const snapshot = candidate as LoraAggregateSnapshot;
+  snapshot.state.pendingInternalTransactions =
+    normalizePendingInternalTransactions(
+      snapshot.state.pendingInternalTransactions,
+    );
+  return snapshot;
+}
+
+function serializeAggregateSnapshot(snapshot: LoraAggregateSnapshot): string {
+  const pending: PersistedPendingInternalTransaction[] =
+    normalizePendingInternalTransactions(
+      snapshot.state.pendingInternalTransactions,
+    ).map((entry) => ({
+      transactionHash: entry.transaction.hash,
+      nextPageParams: entry.nextPageParams,
+    }));
+  return JSON.stringify({
+    ...snapshot,
+    state: {
+      ...snapshot.state,
+      pendingInternalTransactions: pending,
+    },
+  });
 }
 
 export async function loadLoraAggregateSnapshot(
@@ -264,35 +328,33 @@ function recordTransaction(
   snapshot: LoraAggregateSnapshot,
   transaction: LoraIndexedTransaction,
   retainedDates: Set<string>,
+  indexesByDate: Map<string, LoraDayIndexes>,
 ): void {
   const date = timestampDate(transaction.timestamp);
   if (!date || !retainedDates.has(date)) return;
   const day = (snapshot.days[date] ??= emptyDay());
+  const indexes = indexesByDate.get(date) ?? dayIndexes(day);
+  indexesByDate.set(date, indexes);
   const hash = transaction.hash.toLowerCase();
-  const hashes = new Set(day.transactionHashes);
-  if (hashes.has(hash)) return;
-  hashes.add(hash);
-  day.transactionHashes = [...hashes];
+  if (indexes.transactionHashes.has(hash)) return;
+  indexes.transactionHashes.add(hash);
   day.transactionTotal = increment(day.transactionTotal);
   if (transaction.success) day.transactionSuccess = increment(day.transactionSuccess);
   else day.transactionFailed = increment(day.transactionFailed);
   day.hourlyTransactions[shanghaiHour(new Date(transaction.timestamp))] = increment(
     day.hourlyTransactions[shanghaiHour(new Date(transaction.timestamp))],
   );
-  const activeAddresses = new Set(day.activeAddresses);
   const from = normalizeAddress(transaction.from);
   const to = normalizeAddress(transaction.to);
-  if (from) activeAddresses.add(from);
-  if (to) activeAddresses.add(to);
-  day.activeAddresses = [...activeAddresses];
+  if (from) indexes.activeAddresses.add(from);
+  if (to) indexes.activeAddresses.add(to);
   day.gasPriceTotalWei = addDecimal(day.gasPriceTotalWei, transaction.gasPriceWei);
   day.gasPriceCount = increment(day.gasPriceCount);
 
   const value = parseUnsignedInteger(transaction.valueWei);
   if (transaction.success && value > 0n) {
     day.nativeTransfers = increment(day.nativeTransfers);
-    const fingerprints = new Set(day.topLevelMovementFingerprints);
-    fingerprints.add(
+    indexes.topLevelMovementFingerprints.add(
       movementFingerprint({
         transactionHash: transaction.hash,
         from: transaction.from,
@@ -300,7 +362,6 @@ function recordTransaction(
         valueWei: transaction.valueWei,
       }),
     );
-    day.topLevelMovementFingerprints = [...fingerprints];
   }
   if (transaction.success && isLargeNativeAmount(transaction.valueWei)) {
     recordLargeTransfer(
@@ -315,6 +376,8 @@ function recordInternalTransaction(
   snapshot: LoraAggregateSnapshot,
   transaction: LoraIndexedInternalTransaction,
   retainedDates: Set<string>,
+  indexesByDate: Map<string, LoraDayIndexes>,
+  burnKeys: Set<string>,
 ): void {
   const key = internalTransactionKey(transaction);
   const isBurn =
@@ -322,10 +385,8 @@ function recordInternalTransaction(
     transaction.success &&
     normalizeAddress(transaction.to) === LORA_BURN_ADDRESS;
   if (isBurn) {
-    const burnKeys = new Set(snapshot.burnKeys);
     if (!burnKeys.has(key)) {
       burnKeys.add(key);
-      snapshot.burnKeys = [...burnKeys];
       snapshot.cumulativeBurnWei = addDecimal(
         snapshot.cumulativeBurnWei,
         transaction.valueWei,
@@ -341,10 +402,10 @@ function recordInternalTransaction(
   const date = timestampDate(transaction.timestamp);
   if (!date || !retainedDates.has(date)) return;
   const day = (snapshot.days[date] ??= emptyDay());
-  const internalKeys = new Set(day.internalKeys);
-  if (internalKeys.has(key)) return;
-  internalKeys.add(key);
-  day.internalKeys = [...internalKeys];
+  const indexes = indexesByDate.get(date) ?? dayIndexes(day);
+  indexesByDate.set(date, indexes);
+  if (indexes.internalKeys.has(key)) return;
+  indexes.internalKeys.add(key);
 
   if (isConfirmedNodeBurn(transaction)) {
     day.nodeCount = increment(day.nodeCount);
@@ -364,7 +425,7 @@ function recordInternalTransaction(
     to: transaction.to,
     valueWei: transaction.valueWei,
   });
-  if (new Set(day.topLevelMovementFingerprints).has(fingerprint)) return;
+  if (indexes.topLevelMovementFingerprints.has(fingerprint)) return;
   if (parseUnsignedInteger(transaction.valueWei) > 0n) {
     day.nativeTransfers = increment(day.nativeTransfers);
   }
@@ -381,28 +442,27 @@ function recordBlock(
   snapshot: LoraAggregateSnapshot,
   block: LoraIndexedBlock,
   retainedDates: Set<string>,
+  indexesByDate: Map<string, LoraDayIndexes>,
+  recentBlocks: Map<number, LoraIndexedBlock>,
 ): void {
   const date = timestampDate(block.timestamp);
   if (date && retainedDates.has(date)) {
     const day = (snapshot.days[date] ??= emptyDay());
-    const heights = new Set(day.blockHeights);
-    if (!heights.has(block.height)) {
-      heights.add(block.height);
-      day.blockHeights = [...heights];
+    const indexes = indexesByDate.get(date) ?? dayIndexes(day);
+    indexesByDate.set(date, indexes);
+    if (!indexes.blockHeights.has(block.height)) {
+      indexes.blockHeights.add(block.height);
       day.gasUsed = addDecimal(day.gasUsed, block.gasUsed);
     }
   }
-  const blocks = new Map(snapshot.recentBlocks.map((item) => [item.height, item]));
-  blocks.set(block.height, block);
-  snapshot.recentBlocks = [...blocks.values()]
-    .sort((left, right) => right.height - left.height)
-    .slice(0, 180);
+  recentBlocks.set(block.height, block);
 }
 
 function recordSwap(
   snapshot: LoraAggregateSnapshot,
   swap: LoraIndexedSwap,
   retainedDates: Set<string>,
+  indexesByDate: Map<string, LoraDayIndexes>,
 ): void {
   if (!snapshot.latestSwap || swap.timestamp > snapshot.latestSwap.timestamp) {
     snapshot.latestSwap = swap;
@@ -410,11 +470,11 @@ function recordSwap(
   const date = timestampDate(swap.timestamp);
   if (!date || !retainedDates.has(date)) return;
   const day = (snapshot.days[date] ??= emptyDay());
+  const indexes = indexesByDate.get(date) ?? dayIndexes(day);
+  indexesByDate.set(date, indexes);
   const key = `${swap.transactionHash.toLowerCase()}:${swap.logIndex}`;
-  const keys = new Set(day.swapKeys);
-  if (keys.has(key)) return;
-  keys.add(key);
-  day.swapKeys = [...keys];
+  if (indexes.swapKeys.has(key)) return;
+  indexes.swapKeys.add(key);
   if (isLargeNativeAmount(swap.lrbWei)) {
     day.largeSwaps = [...day.largeSwaps, swap]
       .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
@@ -541,14 +601,47 @@ export function applyLoraAggregateBatch(
   }
   snapshot.days[reportDate] ??= emptyDay();
   snapshot.days[addCalendarDays(reportDate, -1)] ??= emptyDay();
-  for (const block of batch.blocks) recordBlock(snapshot, block, retainedDates);
+  const indexesByDate = new Map(
+    [...retainedDates].map((date) => [
+      date,
+      dayIndexes(snapshot.days[date] ??= emptyDay()),
+    ]),
+  );
+  const burnKeys = new Set(snapshot.burnKeys);
+  const recentBlocks = new Map(
+    snapshot.recentBlocks.map((item) => [item.height, item]),
+  );
+  for (const block of batch.blocks) {
+    recordBlock(
+      snapshot,
+      block,
+      retainedDates,
+      indexesByDate,
+      recentBlocks,
+    );
+  }
   for (const transaction of batch.transactions) {
-    recordTransaction(snapshot, transaction, retainedDates);
+    recordTransaction(snapshot, transaction, retainedDates, indexesByDate);
   }
   for (const transaction of batch.internalTransactions) {
-    recordInternalTransaction(snapshot, transaction, retainedDates);
+    recordInternalTransaction(
+      snapshot,
+      transaction,
+      retainedDates,
+      indexesByDate,
+      burnKeys,
+    );
   }
-  for (const swap of batch.swaps) recordSwap(snapshot, swap, retainedDates);
+  for (const swap of batch.swaps) {
+    recordSwap(snapshot, swap, retainedDates, indexesByDate);
+  }
+  for (const [date, indexes] of indexesByDate) {
+    persistDayIndexes(snapshot.days[date], indexes);
+  }
+  snapshot.burnKeys = [...burnKeys];
+  snapshot.recentBlocks = [...recentBlocks.values()]
+    .sort((left, right) => right.height - left.height)
+    .slice(0, 180);
   if (batch.currentTotalAddresses !== null) {
     snapshot.currentTotalAddresses = batch.currentTotalAddresses;
   }
@@ -841,7 +934,7 @@ export async function collectLoraAggregateSnapshot(options: {
   const snapshot = applyLoraAggregateBatch(loaded.snapshot, batch, now);
   const result = await options.bucket.put(
     LORA_AGGREGATE_OBJECT_KEY,
-    JSON.stringify(snapshot),
+    serializeAggregateSnapshot(snapshot),
     {
       onlyIf: loaded.etag
         ? { etagMatches: loaded.etag }

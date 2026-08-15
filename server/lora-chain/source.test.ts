@@ -161,6 +161,18 @@ describe("LORA internal detail cursor queue fixtures", () => {
     ]);
   });
 
+  it("restores compact aggregate queue entries without losing cursors", () => {
+    const transaction = indexedTransaction("4");
+    const [restored] = normalizePendingInternalTransactions([
+      {
+        transactionHash: transaction.hash,
+        nextPageParams: { block_number: 20, index: 7 },
+      },
+    ]);
+    expect(restored.transaction.hash).toBe(transaction.hash);
+    expect(restored.nextPageParams).toEqual({ block_number: 20, index: 7 });
+  });
+
   it("rotates failed and incomplete work behind untouched transactions", async () => {
     const first = indexedTransaction("1");
     const broken = indexedTransaction("2");

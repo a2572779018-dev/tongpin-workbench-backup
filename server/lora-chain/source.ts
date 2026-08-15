@@ -635,6 +635,27 @@ export function normalizePendingInternalTransactions(
   for (const item of value) {
     const record = asRecord(item);
     if (!record) continue;
+    const compactHash = stringValue(record.transactionHash);
+    if (compactHash && /^0x[0-9a-f]{64}$/i.test(compactHash)) {
+      const hash = compactHash.toLowerCase();
+      if (normalized.has(hash)) continue;
+      normalized.set(hash, {
+        transaction: {
+          hash,
+          blockNumber: 0,
+          timestamp: "1970-01-01T00:00:00.000Z",
+          from: "0x0000000000000000000000000000000000000000",
+          to: null,
+          valueWei: "0",
+          success: true,
+          gasUsed: "0",
+          gasPriceWei: "0",
+          input: "0x",
+        },
+        nextPageParams: parseStoredCursor(record.nextPageParams),
+      });
+      continue;
+    }
     const wrapped = record.transaction !== undefined;
     const transaction = parseStoredIndexedTransaction(
       wrapped ? record.transaction : record,
