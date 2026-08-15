@@ -6908,26 +6908,26 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
 }
 
 /* LORA_DASHBOARD_VISUAL_START */
-/* The scoped palette is intentionally limited to two inks. */
+/* Solid yellow surfaces and white cards; no filters or translucent washes. */
 
 html[data-app-view="lora-chain"] {
   --ink: #17233c;
-  --paper: #f7f4ec;
-  --white: #f7f4ec;
-  --yellow: #f7f4ec;
-  --blue: #f7f4ec;
-  --pink: #f7f4ec;
-  --green: #f7f4ec;
+  --paper: #fffdf7;
+  --white: #fffdf7;
+  --yellow: #ffd84d;
+  --blue: #ffd84d;
+  --pink: #ffd84d;
+  --green: #ffd84d;
   --purple: #17233c;
-  --orange: #f7f4ec;
+  --orange: #ffd84d;
   --red: #17233c;
   --muted: #17233c;
 }
 
 html[data-app-view="lora-chain"] body {
   overflow: hidden;
-  background: #17233c;
-  color: #f7f4ec;
+  background: #ffd84d;
+  color: #17233c;
 }
 
 html[data-app-view="lora-chain"] body::before {
@@ -6935,7 +6935,7 @@ html[data-app-view="lora-chain"] body::before {
 }
 
 html[data-app-view="lora-chain"] ::-webkit-scrollbar-track {
-  background: #f7f4ec;
+  background: #fffdf7;
   border-color: #17233c;
 }
 
@@ -6946,45 +6946,45 @@ html[data-app-view="lora-chain"] ::-webkit-scrollbar-thumb {
 
 html[data-app-view="lora-chain"] .desktop-titlebar,
 html[data-app-view="lora-chain"] .sidebar {
-  background: #f7f4ec;
+  background: #fffdf7;
   backdrop-filter: none;
 }
 
 html[data-app-view="lora-chain"] .desktop-titlebar__status,
 html[data-app-view="lora-chain"] .sync-status {
-  background: #f7f4ec;
+  background: #fffdf7;
 }
 
 html[data-app-view="lora-chain"] .desktop-titlebar__status > span,
 html[data-app-view="lora-chain"] .desktop-titlebar__mark {
-  background: #17233c;
-  color: #f7f4ec;
+  background: #ffd84d;
+  color: #17233c;
 }
 
 html[data-app-view="lora-chain"] .desktop-titlebar__mark i {
-  background: #f7f4ec;
+  background: #17233c;
 }
 
 html[data-app-view="lora-chain"] .desktop-titlebar__brand-line em,
 html[data-app-view="lora-chain"] .side-nav > button.is-active {
-  background: #17233c;
-  color: #f7f4ec;
+  background: #ffd84d;
+  color: #17233c;
 }
 
 html[data-app-view="lora-chain"] .desktop-titlebar__controls button:hover,
 html[data-app-view="lora-chain"] .side-nav > button:hover,
 html[data-app-view="lora-chain"] .user-chip > button:hover {
-  background: #17233c;
-  color: #f7f4ec;
+  background: #ffd84d;
+  color: #17233c;
 }
 
 html[data-app-view="lora-chain"] .desktop-titlebar__controls .desktop-titlebar__close:hover {
-  color: #f7f4ec;
-  background: #17233c;
+  color: #17233c;
+  background: #ffd84d;
 }
 
 html[data-app-view="lora-chain"] .custom-cursor__arrow path:first-child {
-  fill: #f7f4ec;
+  fill: #fffdf7;
 }
 
 html[data-app-view="lora-chain"] .custom-cursor__arrow path:last-child {
@@ -6999,7 +6999,7 @@ html[data-app-view="lora-chain"] .custom-cursor__arrow path:last-child {
   gap: 0.6rem;
   padding: 0.5rem 0 0.6rem;
   overflow: hidden;
-  background: #17233c;
+  background: #ffd84d;
 }
 
 body:not(.desktop-runtime) .app-frame--lora-chain {
@@ -7022,7 +7022,7 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  background: #17233c;
+  background: #ffd84d;
 }
 
 .app-frame--lora-chain .app-content {
@@ -7043,8 +7043,8 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   gap: 0.48rem;
   overflow: hidden;
   padding: 0 0.5rem;
-  color: #f7f4ec;
-  background: #17233c;
+  color: #17233c;
+  background: #ffd84d;
 }
 
 .lora-dashboard-header {
@@ -7054,7 +7054,7 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0 0.15rem;
-  border-bottom: 1px solid #f7f4ec;
+  border-bottom: 1px solid #17233c;
 }
 
 .lora-dashboard-header > div:first-child {
@@ -7088,13 +7088,13 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
 
 .lora-dashboard-header__status > span {
   padding: 0.28rem 0.48rem;
-  border: 1px solid #f7f4ec;
+  border: 1px solid #17233c;
   border-radius: 999px;
 }
 
 .lora-dashboard-header__status > span.is-stale {
   border-style: dashed;
-  background: #f7f4ec;
+  background: #fffdf7;
   color: #17233c;
 }
 
@@ -7108,16 +7108,16 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   gap: 0.35rem;
   align-items: center;
   padding: 0 0.62rem;
-  border: 1px solid #f7f4ec;
+  border: 1px solid #17233c;
   border-radius: 0.42rem;
-  background: #f7f4ec;
+  background: #fffdf7;
   color: #17233c;
   font-weight: 700;
 }
 
 .lora-dashboard-header__status > button:hover:not(:disabled) {
   background: #17233c;
-  color: #f7f4ec;
+  color: #fffdf7;
 }
 
 .lora-kpi-grid,
@@ -7142,14 +7142,14 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   align-items: center;
   padding: 0.48rem 0.58rem;
   overflow: hidden;
-  border: 2px solid #f7f4ec;
+  border: 2px solid #17233c;
   border-radius: 0.58rem;
-  background: #f7f4ec;
+  background: #fffdf7;
   color: #17233c;
 }
 
 .lora-kpi-grid > article:nth-child(even) {
-  background: #f7f4ec;
+  background: #fffdf7;
 }
 
 .lora-kpi-grid span,
@@ -7195,9 +7195,9 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   min-height: 0;
   padding: 0.48rem 0.58rem;
   overflow: hidden;
-  border: 2px solid #f7f4ec;
+  border: 2px solid #17233c;
   border-radius: 0.58rem;
-  background: #f7f4ec;
+  background: #fffdf7;
   color: #17233c;
 }
 
@@ -7251,12 +7251,12 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
 .lora-hourly-bars > span {
   min-height: 2px;
   border: 1px solid #17233c;
-  background: #17233c;
+  background: #ffd84d;
 }
 
 .lora-hourly-bars > span:nth-child(3n),
 .lora-hourly-bars > span.is-missing {
-  background: #f7f4ec;
+  background: #fffdf7;
   border-style: dashed;
 }
 
@@ -7342,11 +7342,11 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   display: block;
   min-height: 3px;
   border: 1px solid #17233c;
-  background: #17233c;
+  background: #ffd84d;
 }
 
 .lora-comparison-bars > div:last-child i {
-  background: #f7f4ec;
+  background: #fffdf7;
   border-style: dashed;
 }
 
@@ -7422,7 +7422,7 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
 
 .lora-explorer-link:hover {
   background: #17233c;
-  color: #f7f4ec;
+  color: #fffdf7;
 }
 
 .lora-dashboard-footer {
@@ -7438,7 +7438,7 @@ body:not(.desktop-runtime) .app-frame--lora-chain {
   overflow: hidden;
   border: 1px solid #17233c;
   border-radius: 0.55rem;
-  background: #f7f4ec;
+  background: #fffdf7;
   color: #17233c;
   font-family: "DM Mono", monospace;
   font-size: 0.62rem;

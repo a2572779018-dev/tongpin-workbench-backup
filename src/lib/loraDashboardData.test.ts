@@ -24,13 +24,14 @@ describe("LORA dashboard display policy", () => {
   });
 
   it("maps explicit data states to concise labels", () => {
-    expect(statusLabel("building")).toBe("基线建立中");
-    expect(statusLabel("missing")).toBe("暂无完整日基线");
+    expect(statusLabel("building")).toBe("采集中");
+    expect(statusLabel("missing")).toBe("无日基线");
     expect(statusLabel("config-error")).toBe("配置错误");
   });
 
   it("uses counts only for chart geometry", () => {
     expect(chartCount("42")).toBe(42);
+    expect(chartCount("1250+")).toBe(1250);
     expect(chartCount("1.2")).toBe(0);
     expect(chartCount(null)).toBe(0);
   });

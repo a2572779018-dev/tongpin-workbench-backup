@@ -18,6 +18,10 @@ import {
   normalizePendingInternalTransactions,
 } from "../../server/lora-chain/source";
 import {
+  collectLoraAggregateSnapshot,
+  readLoraAggregateDashboard,
+} from "./lora-aggregate";
+import {
   LORA_BURN_ADDRESS,
   LORA_BOOTSTRAP_INTERVAL_MS,
   LORA_CACHE_STALE_AFTER_MS,
@@ -92,6 +96,8 @@ import {
   LORA_INSERT_ADDRESS_BASELINE,
   LORA_RETENTION_QUERIES,
 } from "./schema";
+
+const LORA_RAW_COLLECTION_PAUSED = true;
 import {
   generateCode,
   hashOpaque,
@@ -526,6 +532,13 @@ function auditTaskChanges(before: Task, after: Task): TaskAuditChange[] {
   );
 }
 
+function isDurableObjectRowWriteLimit(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes("Exceeded allowed rows written in Durable Objects free tier")
+  );
+}
+
 export class TongpinCore extends DurableObject<WorkerEnv> {
   private readonly sql: SqlStorage;
   private readonly loraSource: ExplorerLoraChainDataSource;
@@ -540,7 +553,9 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     );
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
-      await this.scheduleNextAlarm();
+      if (!LORA_RAW_COLLECTION_PAUSED) {
+        await this.scheduleNextAlarm();
+      }
     });
   }
 
@@ -561,6 +576,40 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   }
 
   private migrate(): void {
+    try {
+      const existingTables = new Set(
+        this.sql
+          .exec<{ name: string }>(
+            `SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('users', 'tasks', 'lora_chain_checkpoint')`,
+          )
+          .toArray()
+          .map((row) => row.name),
+      );
+      if (
+        existingTables.has("users") &&
+        existingTables.has("tasks") &&
+        existingTables.has("lora_chain_checkpoint")
+      ) {
+        return;
+      }
+    } catch (error) {
+      if (isDurableObjectRowWriteLimit(error)) return;
+      throw error;
+    }
+    try {
+      const currentVersion = Number(
+        firstRow(
+          this.sql.exec<{ version: number }>(
+            "SELECT COALESCE(MAX(id), 0) AS version FROM _sql_schema_migrations",
+          ),
+        )?.version ?? 0,
+      );
+      if (currentVersion >= 5) return;
+    } catch {
+      // A fresh database does not have the migration table yet.
+    }
     this.sql.exec("PRAGMA foreign_keys = ON;");
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
@@ -1005,8 +1054,15 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
 
   async alarm(): Promise<void> {
     const now = new Date();
-    this.expireDueFlashMessages();
-    this.dispatchLoraDailyDue(now);
+    try {
+      this.expireDueFlashMessages();
+      this.dispatchLoraDailyDue(now);
+    } catch (error) {
+      if (!isDurableObjectRowWriteLimit(error)) throw error;
+    }
+    if (LORA_RAW_COLLECTION_PAUSED) {
+      return;
+    }
     const checkpoint = this.loraCheckpoint();
     const nextMidnight = nextShanghaiClock(now, 0);
     const millisecondsUntilMidnight =
@@ -1353,16 +1409,28 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
 
   private async getLoraDashboard(request: Request): Promise<Response> {
     await this.requireLoraUser(request);
-    return json(this.cachedLoraDashboard());
+    const now = new Date();
+    const dashboard =
+      (await readLoraAggregateDashboard(this.env.RELEASES, now)) ??
+      this.buildLoraDashboardFromSql(now);
+    return json(dashboard);
   }
 
   private async refreshLoraDashboard(request: Request): Promise<Response> {
     await this.requireLoraUser(request);
-    this.ctx.waitUntil(this.runLoraCollection());
-    return json(
-      { accepted: true, dashboard: this.cachedLoraDashboard() },
-      202,
+    const now = new Date();
+    const current =
+      (await readLoraAggregateDashboard(this.env.RELEASES, now)) ??
+      this.buildLoraDashboardFromSql(now);
+    this.ctx.waitUntil(
+      collectLoraAggregateSnapshot({
+        bucket: this.env.RELEASES,
+        source: this.loraSource,
+      })
+        .then((dashboard) => this.pushLoraDashboard(dashboard))
+        .catch((error) => console.error("LORA aggregate refresh failed", error)),
     );
+    return json({ accepted: true, dashboard: current }, 202);
   }
 
   private async claimLoraDailyPopup(request: Request): Promise<Response> {
@@ -1384,7 +1452,9 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       throw new ApiError(400, "INVALID_TRIGGER", "无效的驾驶舱打开来源");
     }
     const reportDate = shanghaiDateKey();
-    const dashboard = this.cachedLoraDashboard();
+    const dashboard =
+      (await readLoraAggregateDashboard(this.env.RELEASES)) ??
+      this.cachedLoraDashboard();
     if (user.role === "admin" || trigger === "manual") {
       return json({ shouldOpen: false, reportDate, dashboard });
     }

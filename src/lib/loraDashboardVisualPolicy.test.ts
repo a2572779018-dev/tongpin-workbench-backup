@@ -21,15 +21,13 @@ describe("LORA dashboard visual policy", () => {
     expect(css).not.toMatch(/overflow-x\s*:\s*(?:visible|auto|scroll)/i);
   });
 
-  it("contains only the two approved base colors", () => {
+  it("uses only yellow, white and the existing dark ink", () => {
     const css = dashboardCss();
     const hexColors = css.match(/#[0-9a-f]{3,8}\b/gi) ?? [];
     expect(new Set(hexColors.map((color) => color.toLowerCase()))).toEqual(
-      new Set(["#f7f4ec", "#17233c"]),
+      new Set(["#ffd84d", "#fffdf7", "#17233c"]),
     );
     const rgbColors = css.match(/rgba?\([^)]*\)/gi) ?? [];
-    for (const color of rgbColors) {
-      expect(color).toMatch(/^rgba\((?:23, 35, 60|247, 244, 236), (?:0|1|0?\.\d+)\)$/i);
-    }
+    expect(rgbColors).toEqual([]);
   });
 });

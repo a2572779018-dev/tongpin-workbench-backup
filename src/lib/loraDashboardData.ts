@@ -124,8 +124,8 @@ export function displayLoraValue(
 export function statusLabel(status: LoraDataStatus): string {
   return {
     ready: "正常",
-    building: "基线建立中",
-    missing: "暂无完整日基线",
+    building: "采集中",
+    missing: "无日基线",
     unavailable: "不可用",
     stale: "数据已失效",
     "config-error": "配置错误",
@@ -138,7 +138,7 @@ export function compactExplorerValue(value: string): string {
 }
 
 export function chartCount(value: string | null): number {
-  if (!value || !/^\d+$/.test(value)) return 0;
-  const parsed = Number(value);
+  if (!value || !/^\d+\+?$/.test(value)) return 0;
+  const parsed = Number(value.replace(/\+$/, ""));
   return Number.isSafeInteger(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
 }

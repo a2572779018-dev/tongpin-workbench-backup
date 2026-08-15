@@ -128,8 +128,8 @@ describe("LORA dashboard fixed fixture", () => {
 
   it("shows honest unavailable states instead of zero", () => {
     const markup = render(null);
-    expect(markup).toContain("同步中");
-    expect(markup).toContain("暂无日基线");
+    expect(markup).toContain("采集中");
+    expect(markup).toContain("无日基线");
     expect(markup).toContain("暂无可信价格");
     expect(markup).not.toContain(">0<");
   });

@@ -1,5 +1,11 @@
 import { TongpinCore } from "./core";
 import type { WorkerEnv } from "./platform";
+import { ExplorerLoraChainDataSource } from "../../server/lora-chain/source";
+import {
+  LORA_DEFAULT_RPC_URL,
+  LORA_EXPLORER_API,
+} from "../../server/lora-chain/constants";
+import { collectLoraAggregateSnapshot } from "./lora-aggregate";
 
 export { TongpinCore };
 
@@ -299,7 +305,7 @@ async function serveRelease(
   env: WorkerEnv,
   key: string,
 ): Promise<Response> {
-  if (!key || key.includes("..")) {
+  if (!key || key.includes("..") || !validReleaseKey(key)) {
     return Response.json(
       { error: { code: "RELEASE_NOT_FOUND", message: "更新文件不存在" } },
       { status: 404 },
@@ -426,5 +432,16 @@ export default {
       api: "/api/health",
       releases: "/releases/",
     });
+  },
+  scheduled(_controller, env, ctx) {
+    const source = new ExplorerLoraChainDataSource(
+      env.LORA_EXPLORER_API ?? LORA_EXPLORER_API,
+      env.LORA_RPC_URL ?? LORA_DEFAULT_RPC_URL,
+    );
+    ctx.waitUntil(
+      collectLoraAggregateSnapshot({ bucket: env.RELEASES, source }).catch(
+        (error) => console.error("LORA scheduled aggregate failed", error),
+      ),
+    );
   },
 } satisfies ExportedHandler<WorkerEnv>;

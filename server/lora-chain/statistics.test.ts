@@ -297,8 +297,10 @@ describe("LORA pair, Swap and cache honesty", () => {
     expect(dashboard.baselineStatus).toBe("building");
     expect(dashboard.nodes.todayCount).toBe("1");
     expect(dashboard.price.priceUsdt).toBe("0.2");
-    expect(dashboard.transactions.todayTotal).toBeNull();
-    expect(dashboard.largeTransfers.count).toBeNull();
+    expect(dashboard.transactions.todayTotal).toBe("1+");
+    expect(dashboard.transactions.successRateLabel).toBe("≈100%");
+    expect(dashboard.largeTransfers.count).toBe("1+");
+    expect(dashboard.largeTransfers.rows).toHaveLength(1);
     expect(dashboard.swaps.status).toBe("building");
   });
 

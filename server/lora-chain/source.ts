@@ -51,9 +51,15 @@ const REQUEST_TIMEOUT_MS = 20_000;
 const REQUEST_ATTEMPTS = 2;
 const REQUEST_SPACING_MS = 25;
 const REQUEST_CONCURRENCY = 4;
-const MAX_REQUEST_ATTEMPTS_PER_TICK = 192;
+// Cloudflare Workers Free allows 50 external subrequests per invocation.
+// Keep the whole cycle below that ceiling, including price/RPC validation and
+// retry headroom, so a busy history backfill never discards its partial page.
+const MAX_REQUEST_ATTEMPTS_PER_TICK = 48;
 const MAX_HEAD_PAGES_PER_TICK = 4;
 const MAX_HISTORY_PAGES_PER_TICK = 24;
+const MAX_CORE_HISTORY_PAGES_PER_TICK = 14;
+const MAX_BURN_DAILY_PAGES_PER_TICK = 2;
+const MAX_BURN_LIFETIME_PAGES_PER_TICK = 1;
 const MAX_DETAIL_PAGES = 100;
 const PAIR_LOG_WINDOW_BLOCKS = 5_000;
 const MAX_PAIR_WINDOWS_PER_TICK = 2;
@@ -1402,6 +1408,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         alreadyComplete: blockTodayComplete,
         boundary: todayStart,
         label: "block backfill",
+        maxPages: MAX_CORE_HISTORY_PAGES_PER_TICK,
       });
       return { head, history };
     })();
@@ -1433,6 +1440,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         alreadyComplete: transactionYesterdayComplete,
         boundary: yesterdayStart,
         label: "transaction backfill",
+        maxPages: MAX_CORE_HISTORY_PAGES_PER_TICK,
       });
       return { head, history };
     })();
@@ -1463,6 +1471,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
           alreadyComplete: burnTodayComplete,
           boundary: todayStart,
           label: "burn daily backfill",
+          maxPages: MAX_BURN_DAILY_PAGES_PER_TICK,
         }),
         collectBackfill({
           fetchPage,
@@ -1475,6 +1484,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
           alreadyComplete: historyComplete,
           boundary: new Date(0),
           label: "burn lifetime backfill",
+          maxPages: MAX_BURN_LIFETIME_PAGES_PER_TICK,
         }),
       ]);
       return { head, daily, lifetime };

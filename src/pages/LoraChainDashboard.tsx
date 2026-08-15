@@ -64,7 +64,7 @@ function HourlyBars({ points }: { points: LoraHourlyPoint[] }) {
           style={{
             height: hasData ? `${Math.max(3, (values[index] / maximum) * 100)}%` : "3%",
           }}
-          title={`${point.hour}:00 ${point.count ?? "暂无数据"}`}
+          title={`${point.hour}:00 ${point.count ?? "—"}`}
         />
       ))}
     </div>
@@ -89,7 +89,7 @@ function HourlyLine({ points }: { points: LoraHourlyPoint[] }) {
         <path d="M0 35H100" />
         {hasData && <polyline points={line} />}
       </svg>
-      {!hasData && <span>基线建立中</span>}
+      {!hasData && <span>采集中</span>}
     </div>
   );
 }
@@ -134,7 +134,7 @@ function ExplorerButton({ kind, value }: { kind: "address" | "tx"; value: string
 }
 
 function TransferRows({ rows, loading }: { rows: LoraLargeTransferRow[]; loading: boolean }) {
-  if (rows.length === 0) return <div className="lora-table-empty">{loading ? "同步中" : "暂无转账"}</div>;
+  if (rows.length === 0) return <div className="lora-table-empty">{loading ? "采集中" : "暂无转账"}</div>;
   return (
     <div className="lora-data-rows">
       {rows.map((row) => (
@@ -154,7 +154,7 @@ function TransferRows({ rows, loading }: { rows: LoraLargeTransferRow[]; loading
 
 function SwapRows({ rows, enabled, loading }: { rows: LoraSwapRow[]; enabled: boolean; loading: boolean }) {
   if (!enabled) return <div className="lora-table-empty">Swap 统计已禁用</div>;
-  if (rows.length === 0) return <div className="lora-table-empty">{loading ? "同步中" : "暂无 Swap"}</div>;
+  if (rows.length === 0) return <div className="lora-table-empty">{loading ? "采集中" : "暂无 Swap"}</div>;
   return (
     <div className="lora-data-rows">
       {rows.map((row) => (
@@ -195,8 +195,8 @@ export function LoraChainDashboardView({
   error: string;
   onRefresh: () => void;
 }) {
-  const baselineLabel = data?.baselineStatus === "ready" ? "—" : "同步中";
-  const addressState = data?.addresses.baselineStatus === "ready" ? "—" : "暂无日基线";
+  const baselineLabel = data?.baselineStatus === "ready" ? "—" : "采集中";
+  const addressState = data?.addresses.baselineStatus === "ready" ? "—" : "无日基线";
   const trustedPrice =
     data?.price.status === "ready" || data?.price.status === "stale"
       ? data.price.priceUsdt
@@ -220,7 +220,7 @@ export function LoraChainDashboardView({
             {error
               ? "暂不可用"
               : data?.baselineStatus === "building"
-                ? "同步中"
+                ? "采集中"
                 : data?.stale
                   ? "数据延迟"
                   : `已更新 ${formatShanghaiDateTime(data?.dataUpdatedAt ?? null)}`}
@@ -242,7 +242,7 @@ export function LoraChainDashboardView({
         <article>
           <span>{data?.addresses.label ?? "今日新增链上地址"}</span>
           <strong>{displayMetric(data?.addresses.todayNew ?? null, addressState)}</strong>
-          <b>零点基线</b>
+          <b>今日净增</b>
         </article>
         <article>
           <span>今日交易</span>
@@ -277,7 +277,7 @@ export function LoraChainDashboardView({
         <article className="lora-dashboard-card">
           <header>
             <h2>每小时交易趋势</h2>
-            <span>原生转账 {displayLoraValue(data?.transactions.nativeTransfers, "同步中")}</span>
+            <span>原生转账 {displayLoraValue(data?.transactions.nativeTransfers, "采集中")}</span>
           </header>
           <HourlyBars points={transactionHourly} />
           <footer><span>00</span><span>08</span><span>16</span><span>23</span></footer>
@@ -285,7 +285,7 @@ export function LoraChainDashboardView({
         <article className="lora-dashboard-card">
           <header>
             <h2>每小时新增节点趋势</h2>
-            <span>销毁 {displayLoraValue(data?.nodes.todayNodeBurnLrb, "同步中")} LRB</span>
+            <span>销毁 {displayLoraValue(data?.nodes.todayNodeBurnLrb, "采集中")} LRB</span>
           </header>
           <HourlyLine points={nodeHourly} />
           <div className="lora-node-facts">
