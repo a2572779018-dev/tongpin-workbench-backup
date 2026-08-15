@@ -32,6 +32,8 @@
   "vars": {
     "BOOTSTRAP_ADMIN_EMAIL": "a2427572758@outlook.com",
     "DEV_EMAIL_PREVIEW": "false",
-    "CLIENT_ORIGINS": "null,file://,http://127.0.0.1:5173,http://127.0.0.1:4173"
+    "CLIENT_ORIGINS": "null,file://,http://127.0.0.1:5173,http://127.0.0.1:4173",
+    "LORA_EXPLORER_API": "https://explorer.lorachain.org/api/v2",
+    "LORA_RPC_URL": "https://explorer.lorachain.org/api/eth-rpc"
   }
 }

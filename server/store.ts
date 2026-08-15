@@ -1,9 +1,15 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  createEmptyLoraDatabaseFields,
+  EMPTY_LORA_COLLECTOR_STATE,
+  EMPTY_LORA_HEALTH,
+  EMPTY_LORA_PRICE,
+} from "./lora-chain/state";
 import type { DatabaseShape } from "./types";
 
 const EMPTY_DATABASE: DatabaseShape = {
-  version: 4,
+  version: 5,
   users: [],
   tasks: [],
   verificationCodes: [],
@@ -13,6 +19,7 @@ const EMPTY_DATABASE: DatabaseShape = {
   directMessages: [],
   taskRolloverDecisions: [],
   taskAuditEvents: [],
+  ...createEmptyLoraDatabaseFields(),
 };
 
 function seedFromId(id: string): number {
@@ -70,13 +77,14 @@ export class JsonStore {
         parsed.version !== 1 &&
         parsed.version !== 2 &&
         parsed.version !== 3 &&
-        parsed.version !== 4
+        parsed.version !== 4 &&
+        parsed.version !== 5
       ) {
         throw new Error(`不支持的数据版本：${String(parsed.version)}`);
       }
       let migrated = false;
-      if (parsed.version < 4) {
-        parsed.version = 4;
+      if (parsed.version < 5) {
+        parsed.version = 5;
         migrated = true;
       }
       for (const user of parsed.users) {
@@ -234,6 +242,55 @@ export class JsonStore {
       if (!Array.isArray(parsed.taskAuditEvents)) {
         parsed.taskAuditEvents = [];
         migrated = true;
+      }
+      const loraArrayFields = [
+        "bossLoraReportOpens",
+        "loraBlocks",
+        "loraTransactions",
+        "loraInternalTransactions",
+        "loraSwaps",
+        "loraAddressBaselines",
+        "loraDashboardCaches",
+      ] as const;
+      for (const field of loraArrayFields) {
+        if (!Array.isArray(parsed[field])) {
+          parsed[field] = [];
+          migrated = true;
+        }
+      }
+      if (!parsed.loraCollectorState || typeof parsed.loraCollectorState !== "object") {
+        parsed.loraCollectorState = structuredClone(EMPTY_LORA_COLLECTOR_STATE);
+        migrated = true;
+      } else {
+        parsed.loraCollectorState = {
+          ...structuredClone(EMPTY_LORA_COLLECTOR_STATE),
+          ...parsed.loraCollectorState,
+        };
+      }
+      if (
+        parsed.loraCurrentTotalAddresses !== null &&
+        typeof parsed.loraCurrentTotalAddresses !== "string"
+      ) {
+        parsed.loraCurrentTotalAddresses = null;
+        migrated = true;
+      }
+      if (!parsed.loraPrice || typeof parsed.loraPrice !== "object") {
+        parsed.loraPrice = structuredClone(EMPTY_LORA_PRICE);
+        migrated = true;
+      } else {
+        parsed.loraPrice = {
+          ...structuredClone(EMPTY_LORA_PRICE),
+          ...parsed.loraPrice,
+        };
+      }
+      if (!parsed.loraHealth || typeof parsed.loraHealth !== "object") {
+        parsed.loraHealth = structuredClone(EMPTY_LORA_HEALTH);
+        migrated = true;
+      } else {
+        parsed.loraHealth = {
+          ...structuredClone(EMPTY_LORA_HEALTH),
+          ...parsed.loraHealth,
+        };
       }
       const store = new JsonStore(absolutePath, parsed as DatabaseShape);
       if (migrated) await store.persist();

@@ -54,9 +54,16 @@ interface DesktopSessionBridge {
       type: "open-task";
       taskId: string;
       date: string;
+    } | {
+      type: "open-lora-dashboard";
+      reportDate: string;
     };
   }): Promise<boolean>;
   dismissNotification(notificationId?: string): Promise<boolean>;
+  openLoraExplorer(target: {
+    kind: "address" | "tx";
+    value: string;
+  }): Promise<boolean>;
   onDesktopNoticeAcknowledge(
     callback: (notificationId: string) => void,
   ): () => void;
@@ -64,11 +71,17 @@ interface DesktopSessionBridge {
     callback: (notificationId: string) => void,
   ): () => void;
   onDesktopNoticeAction(
-    callback: (action: {
-      type: "open-task";
-      taskId: string;
-      date: string;
-    }) => void,
+    callback: (action:
+      | {
+          type: "open-task";
+          taskId: string;
+          date: string;
+        }
+      | {
+          type: "open-lora-dashboard";
+          reportDate: string;
+        },
+    ) => void,
   ): () => void;
   installUpdate(): Promise<boolean>;
   windowControls: {

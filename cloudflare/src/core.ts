@@ -14,6 +14,43 @@ import type {
   VerificationPurpose,
 } from "../../server/types";
 import {
+  ExplorerLoraChainDataSource,
+  normalizePendingInternalTransactions,
+} from "../../server/lora-chain/source";
+import {
+  LORA_BURN_ADDRESS,
+  LORA_CACHE_STALE_AFTER_MS,
+  LORA_COLLECT_INTERVAL_MS,
+  LORA_DEFAULT_RPC_URL,
+  LORA_EXPLORER_API,
+  LORA_PAIR_ADDRESS,
+} from "../../server/lora-chain/constants";
+import {
+  EMPTY_LORA_COLLECTOR_STATE,
+  EMPTY_LORA_HEALTH,
+  EMPTY_LORA_PRICE,
+} from "../../server/lora-chain/state";
+import { buildLoraDashboard } from "../../server/lora-chain/statistics";
+import {
+  nextShanghaiClock,
+  shanghaiDateKey,
+  shanghaiDayBounds,
+} from "../../server/lora-chain/time";
+import type {
+  LoraCollectionBatch,
+  LoraCollectorState,
+  LoraDailyAddressBaseline,
+  LoraDashboardData,
+  LoraDataStatus,
+  LoraIndexedBlock,
+  LoraIndexedInternalTransaction,
+  LoraIndexedSwap,
+  LoraIndexedTransaction,
+  LoraPendingInternalTransaction,
+  LoraPriceSnapshot,
+  LoraSourceHealth,
+} from "../../server/lora-chain/types";
+import {
   businessDateKey,
   taskDatesForScope,
 } from "../../server/business-date";
@@ -22,10 +59,17 @@ import {
   ApiError,
   errorResponse,
   firstRow,
+  isCompleteLoraCollectionCycle,
+  isLoraDashboardRole,
+  isLoraRpcSourceReachable,
   isEnabled,
   json,
   normalizeEmail,
+  nextUnifiedAlarmTimestamp,
+  nextLoraSuccessfulSyncAt,
   parseJson,
+  resolveLoraNullableCheckpoint,
+  shouldDispatchLoraDailyDue,
   toDirectMessage,
   toNotification,
   toPublicUser,
@@ -42,7 +86,10 @@ import {
   DATABASE_MIGRATION_2,
   DATABASE_MIGRATION_3,
   DATABASE_MIGRATION_4,
+  DATABASE_MIGRATION_5,
   DATABASE_SCHEMA,
+  LORA_INSERT_ADDRESS_BASELINE,
+  LORA_RETENTION_QUERIES,
 } from "./schema";
 import {
   generateCode,
@@ -134,6 +181,127 @@ interface SchemaColumnRow extends Record<string, SqlStorageValue> {
   name: string;
 }
 
+interface LoraCheckpointRow extends Record<string, SqlStorageValue> {
+  id: number;
+  checkpoint_block: number | null;
+  checkpoint_hash: string | null;
+  block_cursor_json: string | null;
+  transaction_cursor_json: string | null;
+  burn_cursor_json: string | null;
+  burn_history_cursor_json: string | null;
+  head_transaction_hash: string | null;
+  head_burn_key: string | null;
+  block_head_cursor_json: string | null;
+  block_head_candidate_key: string | null;
+  transaction_head_cursor_json: string | null;
+  transaction_head_candidate_hash: string | null;
+  burn_head_cursor_json: string | null;
+  burn_head_candidate_key: string | null;
+  swap_checkpoint_block: number | null;
+  pending_internal_transactions_json: string;
+  internal_details_complete: number;
+  swap_today_complete: number;
+  bootstrap_date: string | null;
+  transaction_today_complete: number;
+  transaction_yesterday_complete: number;
+  burn_today_complete: number;
+  block_today_complete: number;
+  today_complete: number;
+  yesterday_complete: number;
+  history_complete: number;
+  current_total_addresses: string | null;
+  next_run_at: string | null;
+  last_attempt_at: string | null;
+  last_successful_sync_at: string | null;
+  last_0800_date: string | null;
+  consecutive_failures: number;
+}
+
+interface LoraBlockRow extends Record<string, SqlStorageValue> {
+  height: number;
+  hash: string;
+  parent_hash: string;
+  timestamp: string;
+  gas_used: string;
+}
+
+interface LoraTransactionRow extends Record<string, SqlStorageValue> {
+  hash: string;
+  block_number: number;
+  timestamp: string;
+  from_address: string;
+  to_address: string | null;
+  value_wei: string;
+  success: number;
+  gas_used: string;
+  gas_price_wei: string;
+  input: string;
+  to_is_contract: number | null;
+}
+
+interface LoraInternalTransactionRow
+  extends Record<string, SqlStorageValue> {
+  transaction_hash: string;
+  trace_index: string;
+  block_number: number;
+  timestamp: string;
+  from_address: string;
+  to_address: string | null;
+  value_wei: string;
+  success: number;
+  call_type: string;
+}
+
+interface LoraSwapRow extends Record<string, SqlStorageValue> {
+  transaction_hash: string;
+  log_index: number;
+  block_number: number;
+  timestamp: string;
+  side: string;
+  lrb_wei: string;
+  usdt_units: string;
+  price_usdt: string;
+  initiator: string;
+  current_native_balance_wei: string | null;
+}
+
+interface LoraAddressBaselineRow extends Record<string, SqlStorageValue> {
+  report_date: string;
+  total_addresses: string;
+  captured_at: string;
+  block_number: number | null;
+}
+
+interface LoraPriceRow extends Record<string, SqlStorageValue> {
+  id: number;
+  status: LoraDataStatus;
+  price_usdt: string | null;
+  reserve_usdt: string | null;
+  reserve_wlrb: string | null;
+  block_number: number | null;
+  updated_at: string | null;
+  source: string | null;
+  config_error: string | null;
+}
+
+interface LoraHealthRow extends Record<string, SqlStorageValue> {
+  id: number;
+  rpc_status: LoraDataStatus;
+  explorer_status: LoraDataStatus;
+  collector_status: LoraDataStatus;
+  last_rpc_success_at: string | null;
+  last_explorer_success_at: string | null;
+  last_successful_sync_at: string | null;
+  last_error: string | null;
+}
+
+interface LoraDashboardCacheRow extends Record<string, SqlStorageValue> {
+  report_date: string;
+  dashboard_json: string;
+  generated_at: string;
+  last_successful_sync_at: string | null;
+}
+
 interface SocketAttachment {
   userId: string | null;
   authenticationDeadline?: number;
@@ -206,6 +374,142 @@ function previousDate(date: string): string {
   return value.toISOString().slice(0, 10);
 }
 
+function parseCursorJson(
+  value: string | null,
+): Record<string, string | number> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const cursor: Record<string, string | number> = {};
+    for (const [key, item] of Object.entries(parsed)) {
+      if (typeof item === "string" || typeof item === "number") {
+        cursor[key] = item;
+      }
+    }
+    return Object.keys(cursor).length > 0 ? cursor : null;
+  } catch {
+    return null;
+  }
+}
+
+function parsePendingTransactionsJson(
+  value: string | null,
+): LoraPendingInternalTransaction[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return normalizePendingInternalTransactions(parsed);
+  } catch {
+    return [];
+  }
+}
+
+function toLoraBlock(row: LoraBlockRow): LoraIndexedBlock {
+  return {
+    height: Number(row.height),
+    hash: row.hash,
+    parentHash: row.parent_hash,
+    timestamp: row.timestamp,
+    gasUsed: row.gas_used,
+  };
+}
+
+function toLoraTransaction(row: LoraTransactionRow): LoraIndexedTransaction {
+  return {
+    hash: row.hash,
+    blockNumber: Number(row.block_number),
+    timestamp: row.timestamp,
+    from: row.from_address,
+    to: row.to_address,
+    valueWei: row.value_wei,
+    success: Boolean(row.success),
+    gasUsed: row.gas_used,
+    gasPriceWei: row.gas_price_wei,
+    input: row.input,
+    toIsContract:
+      row.to_is_contract === null ? undefined : Boolean(row.to_is_contract),
+  };
+}
+
+function toLoraInternalTransaction(
+  row: LoraInternalTransactionRow,
+): LoraIndexedInternalTransaction {
+  return {
+    transactionHash: row.transaction_hash,
+    index: row.trace_index,
+    blockNumber: Number(row.block_number),
+    timestamp: row.timestamp,
+    from: row.from_address,
+    to: row.to_address,
+    valueWei: row.value_wei,
+    success: Boolean(row.success),
+    callType: row.call_type,
+  };
+}
+
+function toLoraSwap(row: LoraSwapRow): LoraIndexedSwap {
+  return {
+    transactionHash: row.transaction_hash,
+    logIndex: Number(row.log_index),
+    blockNumber: Number(row.block_number),
+    timestamp: row.timestamp,
+    side: row.side === "买入" ? "买入" : "卖出",
+    lrbWei: row.lrb_wei,
+    usdtUnits: row.usdt_units,
+    priceUsdt: row.price_usdt,
+    initiator: row.initiator,
+    currentNativeBalanceWei: row.current_native_balance_wei,
+  };
+}
+
+function toLoraAddressBaseline(
+  row: LoraAddressBaselineRow,
+): LoraDailyAddressBaseline {
+  return {
+    reportDate: row.report_date,
+    totalAddresses: row.total_addresses,
+    capturedAt: row.captured_at,
+    blockNumber:
+      row.block_number === null ? null : Number(row.block_number),
+  };
+}
+
+function toLoraPrice(row: LoraPriceRow | undefined): LoraPriceSnapshot {
+  if (!row) {
+    return {
+      ...EMPTY_LORA_PRICE,
+      source: `WLRB/USDT Pair ${LORA_PAIR_ADDRESS}`,
+    };
+  }
+  return {
+    status: row.status,
+    priceUsdt: row.price_usdt,
+    reserveUsdt: row.reserve_usdt,
+    reserveWlrb: row.reserve_wlrb,
+    blockNumber:
+      row.block_number === null ? null : Number(row.block_number),
+    updatedAt: row.updated_at,
+    source: row.source,
+    configError: row.config_error,
+  };
+}
+
+function toLoraHealth(row: LoraHealthRow | undefined): LoraSourceHealth {
+  if (!row) return structuredClone(EMPTY_LORA_HEALTH);
+  return {
+    rpc: row.rpc_status,
+    explorer: row.explorer_status,
+    collector: row.collector_status,
+    lastRpcSuccessAt: row.last_rpc_success_at,
+    lastExplorerSuccessAt: row.last_explorer_success_at,
+    lastSuccessfulSyncAt: row.last_successful_sync_at,
+    lastError: row.last_error,
+  };
+}
+
 function auditTaskChanges(before: Task, after: Task): TaskAuditChange[] {
   const fields = [
     "title",
@@ -223,12 +527,19 @@ function auditTaskChanges(before: Task, after: Task): TaskAuditChange[] {
 
 export class TongpinCore extends DurableObject<WorkerEnv> {
   private readonly sql: SqlStorage;
+  private readonly loraSource: ExplorerLoraChainDataSource;
+  private loraCollectionInFlight: Promise<LoraDashboardData> | null = null;
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.loraSource = new ExplorerLoraChainDataSource(
+      env.LORA_EXPLORER_API ?? LORA_EXPLORER_API,
+      env.LORA_RPC_URL ?? LORA_DEFAULT_RPC_URL,
+    );
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
+      await this.scheduleNextAlarm();
     });
   }
 
@@ -339,6 +650,30 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       this.sql.exec(
         "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (4)",
       );
+    }
+    if (version < 5) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec(DATABASE_MIGRATION_5);
+        this.sql.exec(
+          `INSERT OR IGNORE INTO lora_chain_checkpoint
+           (id, next_run_at) VALUES (1, ?)`,
+          new Date(Date.now() + 1_000).toISOString(),
+        );
+        this.sql.exec(
+          `INSERT OR IGNORE INTO lora_chain_price
+           (id, status, source)
+           VALUES (1, 'unavailable', ?)`,
+          `WLRB/USDT Pair ${LORA_PAIR_ADDRESS}`,
+        );
+        this.sql.exec(
+          `INSERT OR IGNORE INTO lora_chain_health
+           (id, rpc_status, explorer_status, collector_status)
+           VALUES (1, 'unavailable', 'unavailable', 'building')`,
+        );
+        this.sql.exec(
+          "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (5)",
+        );
+      });
     }
   }
 
@@ -484,6 +819,19 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       );
       if (profileMatch && method === "PATCH") {
         return await this.changeUserProfile(request, profileMatch[1]);
+      }
+
+      if (path === "/api/boss/lora-chain/dashboard" && method === "GET") {
+        return await this.getLoraDashboard(request);
+      }
+      if (path === "/api/boss/lora-chain/refresh" && method === "POST") {
+        return await this.refreshLoraDashboard(request);
+      }
+      if (
+        path === "/api/boss/lora-chain/daily-popup/claim" &&
+        method === "POST"
+      ) {
+        return await this.claimLoraDailyPopup(request);
       }
 
       if (path === "/api/boss/team" && method === "GET") {
@@ -655,8 +1003,36 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   }
 
   async alarm(): Promise<void> {
+    const now = new Date();
     this.expireDueFlashMessages();
-    await this.scheduleNextFlashAlarm();
+    this.dispatchLoraDailyDue(now);
+    const checkpoint = this.loraCheckpoint();
+    const nextMidnight = nextShanghaiClock(now, 0);
+    const millisecondsUntilMidnight =
+      nextMidnight.getTime() - now.getTime();
+    if (
+      checkpoint.bootstrap_date === shanghaiDateKey(now) &&
+      millisecondsUntilMidnight > 0 &&
+      millisecondsUntilMidnight <= 15_000 &&
+      (!checkpoint.next_run_at ||
+        Date.parse(checkpoint.next_run_at) <= now.getTime())
+    ) {
+      this.sql.exec(
+        "UPDATE lora_chain_checkpoint SET next_run_at = ? WHERE id = 1",
+        nextMidnight.toISOString(),
+      );
+      await this.scheduleNextAlarm(now);
+      return;
+    }
+    if (
+      checkpoint.bootstrap_date !== shanghaiDateKey(now) ||
+      !checkpoint.next_run_at ||
+      Date.parse(checkpoint.next_run_at) <= now.getTime()
+    ) {
+      await this.runLoraCollection();
+      return;
+    }
+    await this.scheduleNextAlarm(now);
   }
 
   private upgradeRealtime(request: Request): Response {
@@ -728,6 +1104,728 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       throw new ApiError(403, "FORBIDDEN", "你没有访问此功能的权限");
     }
     return user;
+  }
+
+  private loraCheckpoint(): LoraCheckpointRow {
+    let row = firstRow(
+      this.sql.exec<LoraCheckpointRow>(
+        "SELECT * FROM lora_chain_checkpoint WHERE id = 1",
+      ),
+    );
+    if (!row) {
+      this.sql.exec(
+        `INSERT INTO lora_chain_checkpoint (id, next_run_at)
+         VALUES (1, ?)`,
+        new Date(Date.now() + 1_000).toISOString(),
+      );
+      row = firstRow(
+        this.sql.exec<LoraCheckpointRow>(
+          "SELECT * FROM lora_chain_checkpoint WHERE id = 1",
+        ),
+      );
+    }
+    if (!row) throw new Error("LORA checkpoint initialization failed");
+    return row;
+  }
+
+  private async requireLoraUser(request: Request): Promise<UserRow> {
+    const user = await this.requireUser(request);
+    if (!isLoraDashboardRole(user.role)) {
+      throw new ApiError(403, "FORBIDDEN", "你没有访问此功能的权限");
+    }
+    return user;
+  }
+
+  private loraStateFromCheckpoint(
+    row: LoraCheckpointRow,
+  ): LoraCollectorState {
+    return {
+      checkpointBlock:
+        row.checkpoint_block === null ? null : Number(row.checkpoint_block),
+      checkpointHash: row.checkpoint_hash,
+      blockCursor: parseCursorJson(row.block_cursor_json),
+      transactionCursor: parseCursorJson(row.transaction_cursor_json),
+      burnCursor: parseCursorJson(row.burn_cursor_json),
+      burnHistoryCursor: parseCursorJson(row.burn_history_cursor_json),
+      headTransactionHash: row.head_transaction_hash,
+      headBurnKey: row.head_burn_key,
+      blockHeadCursor: parseCursorJson(row.block_head_cursor_json),
+      blockHeadCandidateKey: row.block_head_candidate_key,
+      transactionHeadCursor: parseCursorJson(
+        row.transaction_head_cursor_json,
+      ),
+      transactionHeadCandidateHash: row.transaction_head_candidate_hash,
+      burnHeadCursor: parseCursorJson(row.burn_head_cursor_json),
+      burnHeadCandidateKey: row.burn_head_candidate_key,
+      swapCheckpointBlock:
+        row.swap_checkpoint_block === null
+          ? null
+          : Number(row.swap_checkpoint_block),
+      pendingInternalTransactions: parsePendingTransactionsJson(
+        row.pending_internal_transactions_json,
+      ),
+      internalDetailsComplete: Boolean(row.internal_details_complete),
+      swapTodayComplete: Boolean(row.swap_today_complete),
+      bootstrapDate: row.bootstrap_date,
+      transactionTodayComplete: Boolean(row.transaction_today_complete),
+      transactionYesterdayComplete: Boolean(
+        row.transaction_yesterday_complete,
+      ),
+      burnTodayComplete: Boolean(row.burn_today_complete),
+      blockTodayComplete: Boolean(row.block_today_complete),
+      todayComplete: Boolean(row.today_complete),
+      yesterdayComplete: Boolean(row.yesterday_complete),
+      historyComplete: Boolean(row.history_complete),
+      nextRunAt: row.next_run_at,
+      lastAttemptAt: row.last_attempt_at,
+      lastSuccessfulSyncAt: row.last_successful_sync_at,
+      consecutiveFailures: Number(row.consecutive_failures),
+    };
+  }
+
+  private prepareLoraState(now: Date): LoraCollectorState {
+    const reportDate = shanghaiDateKey(now);
+    const row = this.loraCheckpoint();
+    if (row.bootstrap_date !== reportDate) {
+      this.sql.exec(
+        `UPDATE lora_chain_checkpoint
+         SET bootstrap_date = ?,
+             block_cursor_json = NULL,
+             transaction_cursor_json = NULL,
+             burn_cursor_json = NULL,
+             transaction_today_complete = 0,
+             transaction_yesterday_complete = 0,
+             burn_today_complete = 0,
+             block_today_complete = 0,
+             internal_details_complete = 0,
+             swap_today_complete = 0,
+             today_complete = 0,
+             yesterday_complete = 0
+         WHERE id = 1`,
+        reportDate,
+      );
+    }
+    return this.loraStateFromCheckpoint(this.loraCheckpoint());
+  }
+
+  private buildLoraDashboardFromSql(now = new Date()): LoraDashboardData {
+    const { yesterdayStart } = shanghaiDayBounds(now);
+    const lowerBound = yesterdayStart.toISOString();
+    const checkpoint = this.loraCheckpoint();
+    const blocks = this.sql
+      .exec<LoraBlockRow>(
+        `SELECT * FROM lora_chain_blocks
+         WHERE timestamp >= ? ORDER BY height ASC`,
+        lowerBound,
+      )
+      .toArray()
+      .map(toLoraBlock);
+    const transactions = this.sql
+      .exec<LoraTransactionRow>(
+        `SELECT * FROM lora_chain_transactions
+         WHERE timestamp >= ? ORDER BY timestamp ASC`,
+        lowerBound,
+      )
+      .toArray()
+      .map(toLoraTransaction);
+    const internalTransactions = this.sql
+      .exec<LoraInternalTransactionRow>(
+        `SELECT * FROM lora_chain_internal_transactions
+         WHERE timestamp >= ? OR lower(to_address) = ?
+         ORDER BY timestamp ASC`,
+        lowerBound,
+        LORA_BURN_ADDRESS,
+      )
+      .toArray()
+      .map(toLoraInternalTransaction);
+    const swaps = this.sql
+      .exec<LoraSwapRow>(
+        `SELECT * FROM lora_chain_swaps
+         WHERE timestamp >= ?
+            OR rowid = (
+              SELECT rowid FROM lora_chain_swaps
+              ORDER BY timestamp DESC LIMIT 1
+            )
+         ORDER BY timestamp ASC`,
+        lowerBound,
+      )
+      .toArray()
+      .map(toLoraSwap);
+    const addressBaselines = this.sql
+      .exec<LoraAddressBaselineRow>(
+        `SELECT * FROM lora_chain_address_baselines
+         ORDER BY report_date DESC LIMIT 3`,
+      )
+      .toArray()
+      .map(toLoraAddressBaseline);
+    const price = toLoraPrice(
+      firstRow(
+        this.sql.exec<LoraPriceRow>(
+          "SELECT * FROM lora_chain_price WHERE id = 1",
+        ),
+      ),
+    );
+    const health = toLoraHealth(
+      firstRow(
+        this.sql.exec<LoraHealthRow>(
+          "SELECT * FROM lora_chain_health WHERE id = 1",
+        ),
+      ),
+    );
+    const state = this.loraStateFromCheckpoint(checkpoint);
+    if (state.bootstrapDate !== shanghaiDateKey(now)) {
+      state.blockCursor = null;
+      state.transactionCursor = null;
+      state.burnCursor = null;
+      state.transactionTodayComplete = false;
+      state.transactionYesterdayComplete = false;
+      state.burnTodayComplete = false;
+      state.blockTodayComplete = false;
+      state.internalDetailsComplete = false;
+      state.swapTodayComplete = false;
+      state.todayComplete = false;
+      state.yesterdayComplete = false;
+    }
+    return buildLoraDashboard({
+      now,
+      blocks,
+      transactions,
+      internalTransactions,
+      swaps,
+      addressBaselines,
+      currentTotalAddresses: checkpoint.current_total_addresses,
+      price,
+      state,
+      health,
+    });
+  }
+
+  private cachedLoraDashboard(now = new Date()): LoraDashboardData {
+    const row = firstRow(
+      this.sql.exec<LoraDashboardCacheRow>(
+        `SELECT * FROM lora_chain_dashboard_cache
+         WHERE report_date = ? LIMIT 1`,
+        shanghaiDateKey(now),
+      ),
+    );
+    if (row) {
+      try {
+        const dashboard = JSON.parse(row.dashboard_json) as LoraDashboardData;
+        const lastSuccessfulSyncAt =
+          row.last_successful_sync_at ?? dashboard.lastSuccessfulSyncAt;
+        const stale =
+          !lastSuccessfulSyncAt ||
+          now.getTime() - Date.parse(lastSuccessfulSyncAt) >
+            LORA_CACHE_STALE_AFTER_MS;
+        if (!stale) return dashboard;
+        const staleStatus = (status: LoraDataStatus): LoraDataStatus =>
+          status === "ready" ? "stale" : status;
+        return {
+          ...dashboard,
+          generatedAt: now.toISOString(),
+          stale: true,
+          baselineStatus:
+            dashboard.baselineStatus === "building"
+              ? "building"
+              : "stale",
+          health: {
+            ...dashboard.health,
+            rpc: staleStatus(dashboard.health.rpc),
+            explorer: staleStatus(dashboard.health.explorer),
+            collector: staleStatus(dashboard.health.collector),
+          },
+          price: {
+            ...dashboard.price,
+            status: staleStatus(dashboard.price.status),
+          },
+          swaps: {
+            ...dashboard.swaps,
+            status: staleStatus(dashboard.swaps.status),
+          },
+        };
+      } catch {
+        // Rebuild only from persisted SQL if a cache row is corrupt.
+      }
+    }
+    return this.buildLoraDashboardFromSql(now);
+  }
+
+  private async getLoraDashboard(request: Request): Promise<Response> {
+    await this.requireLoraUser(request);
+    return json(this.cachedLoraDashboard());
+  }
+
+  private async refreshLoraDashboard(request: Request): Promise<Response> {
+    await this.requireLoraUser(request);
+    this.ctx.waitUntil(this.runLoraCollection());
+    return json(
+      { accepted: true, dashboard: this.cachedLoraDashboard() },
+      202,
+    );
+  }
+
+  private async claimLoraDailyPopup(request: Request): Promise<Response> {
+    const user = await this.requireLoraUser(request);
+    let payload: unknown = {};
+    if (request.body) payload = await parseJson(request);
+    const trigger =
+      payload && typeof payload === "object" && "trigger" in payload
+        ? (payload as { trigger?: unknown }).trigger
+        : "startup";
+    const allowedTriggers = new Set([
+      "startup",
+      "login",
+      "08:00",
+      "reconnect",
+      "manual",
+    ]);
+    if (typeof trigger !== "string" || !allowedTriggers.has(trigger)) {
+      throw new ApiError(400, "INVALID_TRIGGER", "无效的驾驶舱打开来源");
+    }
+    const reportDate = shanghaiDateKey();
+    const dashboard = this.cachedLoraDashboard();
+    if (user.role === "admin" || trigger === "manual") {
+      return json({ shouldOpen: false, reportDate, dashboard });
+    }
+
+    const claimedAt = new Date().toISOString();
+    const result = this.ctx.storage.transactionSync(() => {
+      const existing = firstRow(
+        this.sql.exec<{ claimed_at: string }>(
+          `SELECT claimed_at FROM boss_lora_report_opens
+           WHERE boss_user_id = ? AND report_date = ?`,
+          user.id,
+          reportDate,
+        ),
+      );
+      if (existing) {
+        return { shouldOpen: false, claimedAt: existing.claimed_at };
+      }
+      this.sql.exec(
+        `INSERT INTO boss_lora_report_opens
+         (boss_user_id, report_date, claimed_at, trigger)
+         VALUES (?, ?, ?, ?)`,
+        user.id,
+        reportDate,
+        claimedAt,
+        trigger,
+      );
+      return { shouldOpen: true, claimedAt };
+    });
+    return json({ reportDate, ...result, dashboard });
+  }
+
+  private persistLoraBatch(batch: LoraCollectionBatch, now: Date): void {
+    this.ctx.storage.transactionSync(() => {
+      for (const block of batch.blocks) {
+        this.sql.exec(
+          `INSERT INTO lora_chain_blocks
+           (height, hash, parent_hash, timestamp, gas_used)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(height) DO UPDATE SET
+             hash = excluded.hash,
+             parent_hash = excluded.parent_hash,
+             timestamp = excluded.timestamp,
+             gas_used = excluded.gas_used`,
+          block.height,
+          block.hash,
+          block.parentHash,
+          block.timestamp,
+          block.gasUsed,
+        );
+      }
+      for (const transaction of batch.transactions) {
+        this.sql.exec(
+          `INSERT INTO lora_chain_transactions
+           (hash, block_number, timestamp, from_address, to_address,
+            value_wei, success, gas_used, gas_price_wei, input, to_is_contract)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(hash) DO UPDATE SET
+             block_number = excluded.block_number,
+             timestamp = excluded.timestamp,
+             from_address = excluded.from_address,
+             to_address = excluded.to_address,
+             value_wei = excluded.value_wei,
+             success = excluded.success,
+             gas_used = excluded.gas_used,
+             gas_price_wei = excluded.gas_price_wei,
+             input = excluded.input,
+             to_is_contract = excluded.to_is_contract`,
+          transaction.hash,
+          transaction.blockNumber,
+          transaction.timestamp,
+          transaction.from,
+          transaction.to,
+          transaction.valueWei,
+          transaction.success ? 1 : 0,
+          transaction.gasUsed,
+          transaction.gasPriceWei,
+          transaction.input,
+          transaction.toIsContract === undefined
+            ? null
+            : transaction.toIsContract
+              ? 1
+              : 0,
+        );
+      }
+      for (const transaction of batch.internalTransactions) {
+        this.sql.exec(
+          `INSERT INTO lora_chain_internal_transactions
+           (transaction_hash, trace_index, block_number, timestamp,
+            from_address, to_address, value_wei, success, call_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(transaction_hash, trace_index) DO UPDATE SET
+             block_number = excluded.block_number,
+             timestamp = excluded.timestamp,
+             from_address = excluded.from_address,
+             to_address = excluded.to_address,
+             value_wei = excluded.value_wei,
+             success = excluded.success,
+             call_type = excluded.call_type`,
+          transaction.transactionHash,
+          transaction.index,
+          transaction.blockNumber,
+          transaction.timestamp,
+          transaction.from,
+          transaction.to,
+          transaction.valueWei,
+          transaction.success ? 1 : 0,
+          transaction.callType,
+        );
+      }
+      for (const swap of batch.swaps) {
+        this.sql.exec(
+          `INSERT INTO lora_chain_swaps
+           (transaction_hash, log_index, block_number, timestamp, side,
+            lrb_wei, usdt_units, price_usdt, initiator,
+            current_native_balance_wei)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(transaction_hash, log_index) DO UPDATE SET
+             block_number = excluded.block_number,
+             timestamp = excluded.timestamp,
+             side = excluded.side,
+             lrb_wei = excluded.lrb_wei,
+             usdt_units = excluded.usdt_units,
+             price_usdt = excluded.price_usdt,
+             initiator = excluded.initiator,
+             current_native_balance_wei = excluded.current_native_balance_wei`,
+          swap.transactionHash,
+          swap.logIndex,
+          swap.blockNumber,
+          swap.timestamp,
+          swap.side,
+          swap.lrbWei,
+          swap.usdtUnits,
+          swap.priceUsdt,
+          swap.initiator,
+          swap.currentNativeBalanceWei,
+        );
+      }
+      if (batch.addressBaseline) {
+        this.sql.exec(
+          LORA_INSERT_ADDRESS_BASELINE,
+          batch.addressBaseline.reportDate,
+          batch.addressBaseline.totalAddresses,
+          batch.addressBaseline.capturedAt,
+          batch.addressBaseline.blockNumber,
+        );
+      }
+
+      const currentPrice = firstRow(
+        this.sql.exec<LoraPriceRow>(
+          "SELECT * FROM lora_chain_price WHERE id = 1",
+        ),
+      );
+      if (
+        batch.price.status === "ready" ||
+        batch.price.status === "config-error" ||
+        !currentPrice?.updated_at
+      ) {
+        this.sql.exec(
+          `INSERT INTO lora_chain_price
+           (id, status, price_usdt, reserve_usdt, reserve_wlrb,
+            block_number, updated_at, source, config_error)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             status = excluded.status,
+             price_usdt = excluded.price_usdt,
+             reserve_usdt = excluded.reserve_usdt,
+             reserve_wlrb = excluded.reserve_wlrb,
+             block_number = excluded.block_number,
+             updated_at = excluded.updated_at,
+             source = excluded.source,
+             config_error = excluded.config_error`,
+          batch.price.status,
+          batch.price.priceUsdt,
+          batch.price.reserveUsdt,
+          batch.price.reserveWlrb,
+          batch.price.blockNumber,
+          batch.price.updatedAt,
+          batch.price.source,
+          batch.price.configError,
+        );
+      } else {
+        this.sql.exec(
+          "UPDATE lora_chain_price SET status = 'stale' WHERE id = 1",
+        );
+      }
+
+      const checkpoint = this.loraCheckpoint();
+      const rpcReachable = isLoraRpcSourceReachable(
+        batch.rpcHealthy,
+        batch.price.status,
+      );
+      const cycleComplete = isCompleteLoraCollectionCycle({
+        rpcHealthy: rpcReachable,
+        explorerHealthy: batch.explorerHealthy,
+      });
+      const syncedAt = nextLoraSuccessfulSyncAt(
+        cycleComplete,
+        now.toISOString(),
+        checkpoint.last_successful_sync_at,
+      );
+      this.sql.exec(
+        `UPDATE lora_chain_checkpoint
+         SET checkpoint_block = ?,
+             checkpoint_hash = ?,
+             block_cursor_json = ?,
+             transaction_cursor_json = ?,
+             burn_cursor_json = ?,
+             burn_history_cursor_json = ?,
+             head_transaction_hash = ?,
+             head_burn_key = ?,
+             block_head_cursor_json = ?,
+             block_head_candidate_key = ?,
+             transaction_head_cursor_json = ?,
+             transaction_head_candidate_hash = ?,
+             burn_head_cursor_json = ?,
+             burn_head_candidate_key = ?,
+             swap_checkpoint_block = ?,
+             pending_internal_transactions_json = ?,
+             internal_details_complete = ?,
+             swap_today_complete = ?,
+             bootstrap_date = ?,
+             transaction_today_complete = ?,
+             transaction_yesterday_complete = ?,
+             burn_today_complete = ?,
+             block_today_complete = ?,
+             today_complete = ?,
+             yesterday_complete = ?,
+             history_complete = ?,
+             current_total_addresses = COALESCE(?, current_total_addresses),
+             next_run_at = ?,
+             last_attempt_at = ?,
+             last_successful_sync_at = ?,
+             consecutive_failures = ?
+         WHERE id = 1`,
+        batch.checkpointBlock,
+        batch.checkpointHash,
+        batch.nextBlockCursor ? JSON.stringify(batch.nextBlockCursor) : null,
+        batch.nextTransactionCursor
+          ? JSON.stringify(batch.nextTransactionCursor)
+          : null,
+        batch.nextBurnCursor ? JSON.stringify(batch.nextBurnCursor) : null,
+        batch.nextBurnHistoryCursor
+          ? JSON.stringify(batch.nextBurnHistoryCursor)
+          : null,
+        batch.headTransactionHash ?? checkpoint.head_transaction_hash,
+        batch.headBurnKey ?? checkpoint.head_burn_key,
+        batch.blockHeadCursor === undefined
+          ? checkpoint.block_head_cursor_json
+          : batch.blockHeadCursor
+            ? JSON.stringify(batch.blockHeadCursor)
+            : null,
+        batch.blockHeadCandidateKey === undefined
+          ? checkpoint.block_head_candidate_key
+          : batch.blockHeadCandidateKey,
+        batch.transactionHeadCursor === undefined
+          ? checkpoint.transaction_head_cursor_json
+          : batch.transactionHeadCursor
+            ? JSON.stringify(batch.transactionHeadCursor)
+            : null,
+        batch.transactionHeadCandidateHash === undefined
+          ? checkpoint.transaction_head_candidate_hash
+          : batch.transactionHeadCandidateHash,
+        batch.burnHeadCursor === undefined
+          ? checkpoint.burn_head_cursor_json
+          : batch.burnHeadCursor
+            ? JSON.stringify(batch.burnHeadCursor)
+            : null,
+        batch.burnHeadCandidateKey === undefined
+          ? checkpoint.burn_head_candidate_key
+          : batch.burnHeadCandidateKey,
+        resolveLoraNullableCheckpoint(
+          batch.swapCheckpointBlock,
+          checkpoint.swap_checkpoint_block,
+        ),
+        JSON.stringify(
+          batch.pendingInternalTransactions ??
+            parsePendingTransactionsJson(
+              checkpoint.pending_internal_transactions_json,
+            ),
+        ),
+        (batch.internalDetailsComplete ??
+        Boolean(checkpoint.internal_details_complete))
+          ? 1
+          : 0,
+        (batch.swapTodayComplete ?? Boolean(checkpoint.swap_today_complete))
+          ? 1
+          : 0,
+        shanghaiDateKey(now),
+        batch.transactionTodayComplete ? 1 : 0,
+        batch.transactionYesterdayComplete ? 1 : 0,
+        batch.burnTodayComplete ? 1 : 0,
+        batch.blockTodayComplete ? 1 : 0,
+        batch.todayComplete ? 1 : 0,
+        batch.yesterdayComplete ? 1 : 0,
+        batch.historyComplete ? 1 : 0,
+        batch.currentTotalAddresses,
+        new Date(now.getTime() + LORA_COLLECT_INTERVAL_MS).toISOString(),
+        now.toISOString(),
+        syncedAt,
+        cycleComplete ? 0 : Number(checkpoint.consecutive_failures) + 1,
+      );
+
+      const health = toLoraHealth(
+        firstRow(
+          this.sql.exec<LoraHealthRow>(
+            "SELECT * FROM lora_chain_health WHERE id = 1",
+          ),
+        ),
+      );
+      this.sql.exec(
+        `INSERT INTO lora_chain_health
+         (id, rpc_status, explorer_status, collector_status,
+          last_rpc_success_at, last_explorer_success_at,
+          last_successful_sync_at, last_error)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           rpc_status = excluded.rpc_status,
+           explorer_status = excluded.explorer_status,
+           collector_status = excluded.collector_status,
+           last_rpc_success_at = excluded.last_rpc_success_at,
+           last_explorer_success_at = excluded.last_explorer_success_at,
+           last_successful_sync_at = excluded.last_successful_sync_at,
+           last_error = excluded.last_error`,
+        rpcReachable ? "ready" : "unavailable",
+        batch.explorerHealthy ? "ready" : "unavailable",
+        cycleComplete ? "ready" : "unavailable",
+        rpcReachable ? now.toISOString() : health.lastRpcSuccessAt,
+        batch.explorerHealthy
+          ? now.toISOString()
+          : health.lastExplorerSuccessAt,
+        syncedAt,
+        cycleComplete
+          ? null
+          : !rpcReachable && !batch.explorerHealthy
+            ? "RPC and Explorer unavailable"
+            : !rpcReachable
+              ? "RPC unavailable"
+              : "Explorer collection incomplete",
+      );
+
+      const retentionBoundary = new Date(
+        now.getTime() - 9 * 24 * 60 * 60 * 1_000,
+      ).toISOString();
+      this.sql.exec(
+        LORA_RETENTION_QUERIES.blocks,
+        retentionBoundary,
+      );
+      this.sql.exec(
+        LORA_RETENTION_QUERIES.transactions,
+        retentionBoundary,
+      );
+      this.sql.exec(
+        LORA_RETENTION_QUERIES.nonBurnInternals,
+        retentionBoundary,
+        LORA_BURN_ADDRESS,
+      );
+      this.sql.exec(
+        LORA_RETENTION_QUERIES.swaps,
+        retentionBoundary,
+      );
+    });
+
+    const dashboard = this.buildLoraDashboardFromSql(now);
+    this.sql.exec(
+      `INSERT INTO lora_chain_dashboard_cache
+       (report_date, dashboard_json, generated_at, last_successful_sync_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(report_date) DO UPDATE SET
+         dashboard_json = excluded.dashboard_json,
+         generated_at = excluded.generated_at,
+         last_successful_sync_at = excluded.last_successful_sync_at`,
+      dashboard.reportDate,
+      JSON.stringify(dashboard),
+      dashboard.generatedAt,
+      dashboard.lastSuccessfulSyncAt,
+    );
+    this.sql.exec(
+      `DELETE FROM lora_chain_dashboard_cache
+       WHERE report_date NOT IN (
+         SELECT report_date FROM lora_chain_dashboard_cache
+         ORDER BY report_date DESC LIMIT 8
+       )`,
+    );
+  }
+
+  private markLoraCollectionFailure(error: unknown, now: Date): void {
+    const checkpoint = this.loraCheckpoint();
+    const message = error instanceof Error ? error.message : "collection failed";
+    this.sql.exec(
+      `UPDATE lora_chain_checkpoint
+       SET last_attempt_at = ?, next_run_at = ?, consecutive_failures = ?
+       WHERE id = 1`,
+      now.toISOString(),
+      new Date(now.getTime() + LORA_COLLECT_INTERVAL_MS).toISOString(),
+      Number(checkpoint.consecutive_failures) + 1,
+    );
+    this.sql.exec(
+      `UPDATE lora_chain_health
+       SET collector_status = 'unavailable', last_error = ?
+       WHERE id = 1`,
+      message.slice(0, 300),
+    );
+  }
+
+  private pushLoraDashboard(dashboard: LoraDashboardData): void {
+    const recipients = this.sql
+      .exec<{ id: string }>(
+        `SELECT id FROM users
+         WHERE status = 'active' AND role IN ('boss', 'admin')`,
+      )
+      .toArray();
+    for (const recipient of recipients) {
+      this.pushToUser(recipient.id, "lora-chain:updated", { dashboard });
+    }
+  }
+
+  private runLoraCollection(): Promise<LoraDashboardData> {
+    if (this.loraCollectionInFlight) return this.loraCollectionInFlight;
+    const operation = this.collectLoraOnce();
+    this.loraCollectionInFlight = operation.finally(() => {
+      this.loraCollectionInFlight = null;
+    });
+    return this.loraCollectionInFlight;
+  }
+
+  private async collectLoraOnce(): Promise<LoraDashboardData> {
+    const now = new Date();
+    try {
+      const state = this.prepareLoraState(now);
+      const batch = await this.loraSource.collect({ state, now });
+      this.persistLoraBatch(batch, now);
+      const dashboard = this.cachedLoraDashboard(now);
+      this.pushLoraDashboard(dashboard);
+      return dashboard;
+    } catch (error) {
+      this.markLoraCollectionFailure(error, now);
+      const dashboard = this.cachedLoraDashboard(now);
+      this.pushLoraDashboard(dashboard);
+      return dashboard;
+    } finally {
+      await this.scheduleNextAlarm();
+    }
   }
 
   private async enforceAuthRate(
@@ -2520,7 +3618,48 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   }
 
   private async scheduleNextFlashAlarm(): Promise<void> {
-    const next = firstRow(
+    await this.scheduleNextAlarm();
+  }
+
+  private dispatchLoraDailyDue(now: Date): void {
+    const reportDate = shanghaiDateKey(now);
+    const dueAt = Date.parse(`${reportDate}T08:00:00+08:00`);
+    const checkpoint = this.loraCheckpoint();
+    if (!shouldDispatchLoraDailyDue({
+      nowMs: now.getTime(),
+      dueAtMs: dueAt,
+      reportDate,
+      lastDispatchedDate: checkpoint.last_0800_date,
+    })) {
+      return;
+    }
+    const bosses = this.sql
+      .exec<{ id: string }>(
+        `SELECT u.id
+         FROM users u
+         WHERE u.status = 'active' AND u.role = 'boss'
+           AND NOT EXISTS (
+             SELECT 1 FROM boss_lora_report_opens report
+             WHERE report.boss_user_id = u.id
+               AND report.report_date = ?
+           )`,
+        reportDate,
+      )
+      .toArray();
+    for (const boss of bosses) {
+      this.pushToUser(boss.id, "lora-chain:daily-popup", {
+        reportDate,
+        trigger: "08:00",
+      });
+    }
+    this.sql.exec(
+      "UPDATE lora_chain_checkpoint SET last_0800_date = ? WHERE id = 1",
+      reportDate,
+    );
+  }
+
+  private async scheduleNextAlarm(now = new Date()): Promise<void> {
+    const nextFlash = firstRow(
       this.sql.exec<{ expires_at: string | null }>(
         `SELECT MIN(expires_at) AS expires_at
          FROM direct_messages
@@ -2528,12 +3667,26 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
            AND expires_at IS NOT NULL`,
       ),
     )?.expires_at;
-    if (!next) {
-      await this.ctx.storage.deleteAlarm();
-      return;
+    const checkpoint = this.loraCheckpoint();
+    const candidates = [
+      nextFlash ? Date.parse(nextFlash) : Number.POSITIVE_INFINITY,
+      checkpoint.next_run_at
+        ? Date.parse(checkpoint.next_run_at)
+        : now.getTime() + 1_000,
+      nextShanghaiClock(now, 0).getTime(),
+    ];
+    const reportDate = shanghaiDateKey(now);
+    const today0800 = Date.parse(`${reportDate}T08:00:00+08:00`);
+    if (
+      checkpoint.last_0800_date !== reportDate &&
+      now.getTime() >= today0800
+    ) {
+      candidates.push(now.getTime() + 1);
+    } else {
+      candidates.push(nextShanghaiClock(now, 8).getTime());
     }
     await this.ctx.storage.setAlarm(
-      Math.max(Date.now() + 1, Date.parse(next)),
+      nextUnifiedAlarmTimestamp(now.getTime(), candidates),
     );
   }
 

@@ -8,6 +8,7 @@
   "include": [
     "worker-configuration.d.ts",
     "src/**/*.ts",
-    "../server/types.ts"
+    "../server/types.ts",
+    "../server/express.d.ts"
   ]
 }

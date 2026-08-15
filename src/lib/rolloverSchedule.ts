@@ -18,3 +18,4 @@ export function shouldCheckRollover(
   if (minutes < threshold) return false;
   return rolloverCheckKey(userId, now) !== lastCheckedKey;
 }
+

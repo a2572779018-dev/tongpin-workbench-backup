@@ -28,6 +28,16 @@ const {
   shouldPlayNotificationSound,
 } = require("./notification-sound-policy.cjs");
 const { normalizeReleaseNotes } = require("./release-notes.cjs");
+const {
+  buildLoraExplorerUrl,
+  validateLoraExplorerUrl,
+} = require("./lora-explorer-policy.cjs");
+const {
+  normalizeDesktopNoticeAction,
+} = require("./desktop-notice-action-policy.cjs");
+const {
+  normalizeDesktopNoticePayload,
+} = require("./desktop-notice-policy.cjs");
 
 autoUpdater.logger = null;
 
@@ -446,16 +456,7 @@ async function showDesktopNotice(payload) {
       : "";
   activeNoticeRequiresAcknowledgement =
     payload.requireAcknowledgement === true;
-  activeNoticeAction =
-    payload.action?.type === "open-task" &&
-    typeof payload.action.taskId === "string" &&
-    typeof payload.action.date === "string"
-      ? {
-          type: "open-task",
-          taskId: payload.action.taskId.slice(0, 80),
-          date: payload.action.date.slice(0, 10),
-        }
-      : null;
+  activeNoticeAction = normalizeDesktopNoticeAction(payload.action);
   window.webContents.send("desktop-notice:message", payload);
   positionNoticeWindow(false);
   window.showInactive();
@@ -524,9 +525,8 @@ async function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("https://") || url.startsWith("http://")) {
-      void shell.openExternal(url);
-    }
+    const explorerUrl = validateLoraExplorerUrl(url);
+    if (explorerUrl) void shell.openExternal(explorerUrl);
     return { action: "deny" };
   });
 
@@ -597,6 +597,14 @@ function registerDesktopIpc() {
   ipcMain.handle("window:is-maximized", (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return false;
     return mainWindow.isMaximized();
+  });
+
+  ipcMain.handle("lora-explorer:open", async (event, target) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+    const explorerUrl = buildLoraExplorerUrl(target);
+    if (!explorerUrl) return false;
+    await shell.openExternal(explorerUrl);
+    return true;
   });
 
   ipcMain.handle("session:load", async () => {
@@ -717,34 +725,9 @@ function registerDesktopIpc() {
 
   ipcMain.handle("notification:show", async (event, payload) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return false;
-    if (
-      !payload ||
-      typeof payload.title !== "string" ||
-      typeof payload.body !== "string"
-    ) {
-      return false;
-    }
-    return showDesktopNotice({
-      notificationId:
-        typeof payload.notificationId === "string"
-          ? payload.notificationId.slice(0, 80)
-          : "",
-      title: payload.title.slice(0, 80),
-      body: payload.body.slice(0, 400),
-      actionLabel:
-        typeof payload.actionLabel === "string"
-          ? payload.actionLabel.slice(0, 20)
-          : undefined,
-      action: payload.action,
-      tone: payload.requireAcknowledgement ? "warning" : "info",
-      requireAcknowledgement:
-        payload.requireAcknowledgement === true,
-      playSound: payload.playSound === true,
-      soundKey:
-        typeof payload.soundKey === "string"
-          ? payload.soundKey.slice(0, 160)
-          : "",
-    });
+    const normalized = normalizeDesktopNoticePayload(payload);
+    if (!normalized) return false;
+    return showDesktopNotice(normalized);
   });
 
   ipcMain.handle("notification:dismiss", (event, notificationId) => {

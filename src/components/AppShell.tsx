@@ -7,6 +7,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import {
+  Activity,
   Bell,
   BriefcaseBusiness,
   Camera,
@@ -53,6 +54,13 @@ import {
   isLaneHomeLayout,
   type HomeLayout,
 } from "../lib/homeLayout";
+import { showBossStrongReminderDesktop } from "../lib/bossStrongReminderDesktop";
+import {
+  millisecondsUntilNextShanghaiEight,
+  shouldAutoOpenLoraDashboard,
+  type LoraDashboardClaimTrigger,
+} from "../lib/loraDashboardSchedule";
+import type { LoraDailyClaimResult } from "../lib/loraDashboardData";
 import type {
   AppNotification,
   DirectMessage,
@@ -62,12 +70,13 @@ import type {
   User,
 } from "../types";
 
-export type AppView = "home" | "boss" | "admin";
+export type AppView = "home" | "boss" | "admin" | "lora-chain";
 
 const PAGE_TITLES: Record<AppView, string> = {
   home: "我的任务",
   boss: "全员进度",
   admin: "账号与权限",
+  "lora-chain": "LORA 链驾驶舱",
 };
 
 const MAX_AVATAR_SOURCE_BYTES = 8 * 1024 * 1024;
@@ -181,6 +190,10 @@ export function AppShell({
   const notificationsRef = useRef<AppNotification[]>([]);
   const deliveryInFlight = useRef(new Set<string>());
   const handledAssignments = useRef(new Set<string>());
+  const shownLoraReportDates = useRef(new Set<string>());
+  const loraClaimInFlight = useRef<Promise<void> | null>(null);
+  const loraClaimRetryTimer = useRef<number | null>(null);
+  const loraClaimFailureCount = useRef(0);
 
   const user = session!.user;
   const isLaneHome = view === "home" && isLaneHomeLayout(homeLayout);
@@ -257,18 +270,120 @@ export function AppShell({
 
   const showDesktopStrong = useCallback(
     (notification: AppNotification) => {
-      if (!window.tongpin) return;
-      void window.tongpin.notify({
-        notificationId: notification.id,
-        title: notification.title,
-        body: notification.body,
-        requireAcknowledgement: true,
-        playSound: true,
-        soundKey: `boss-notification:${notification.id}:${notification.dingCount}`,
-      });
+      void showBossStrongReminderDesktop(window.tongpin, notification);
     },
     [],
   );
+
+  const claimLoraDashboard = useCallback(
+    (trigger: LoraDashboardClaimTrigger) => {
+      if (!shouldAutoOpenLoraDashboard(user.role) || loraClaimInFlight.current) {
+        return loraClaimInFlight.current ?? Promise.resolve();
+      }
+      if (trigger === "startup" || trigger === "08:00") {
+        loraClaimFailureCount.current = 0;
+        if (loraClaimRetryTimer.current !== null) {
+          window.clearTimeout(loraClaimRetryTimer.current);
+          loraClaimRetryTimer.current = null;
+        }
+      }
+      const request = api<LoraDailyClaimResult>(
+        "/api/boss/lora-chain/daily-popup/claim",
+        {
+          method: "POST",
+          body: JSON.stringify({ trigger }),
+        },
+      )
+        .then(async (result) => {
+          loraClaimFailureCount.current = 0;
+          if (loraClaimRetryTimer.current !== null) {
+            window.clearTimeout(loraClaimRetryTimer.current);
+            loraClaimRetryTimer.current = null;
+          }
+          if (
+            !result.shouldOpen ||
+            !result.reportDate ||
+            shownLoraReportDates.current.has(result.reportDate)
+          ) {
+            return;
+          }
+          const shouldNotifyDesktop =
+            Boolean(window.tongpin) &&
+            (document.visibilityState !== "visible" || !document.hasFocus());
+          if (shouldNotifyDesktop) {
+            try {
+              const notified = await window.tongpin!.notify({
+                notificationId: `lora-dashboard:${result.reportDate}`,
+                title: "LORA 链数据驾驶舱",
+                body: `${result.reportDate} 链上报告已就绪`,
+                actionLabel: "打开驾驶舱",
+                action: {
+                  type: "open-lora-dashboard",
+                  reportDate: result.reportDate,
+                },
+              });
+              if (notified) {
+                shownLoraReportDates.current.add(result.reportDate);
+                return;
+              }
+            } catch {
+              // Fall through to the in-app dashboard when desktop notice IPC fails.
+            }
+          }
+          shownLoraReportDates.current.add(result.reportDate);
+          onViewChange("lora-chain");
+        })
+        .catch(() => {
+          const retryDelays = [5_000, 15_000, 60_000] as const;
+          const attempt = loraClaimFailureCount.current;
+          if (
+            attempt >= retryDelays.length ||
+            loraClaimRetryTimer.current !== null
+          ) {
+            return;
+          }
+          loraClaimFailureCount.current = attempt + 1;
+          loraClaimRetryTimer.current = window.setTimeout(() => {
+            loraClaimRetryTimer.current = null;
+            void claimLoraDashboard("reconnect");
+          }, retryDelays[attempt]);
+        })
+        .finally(() => {
+          loraClaimInFlight.current = null;
+        });
+      loraClaimInFlight.current = request;
+      return request;
+    },
+    [api, onViewChange, user.role],
+  );
+
+  useEffect(() => {
+    if (!shouldAutoOpenLoraDashboard(user.role)) return;
+    void claimLoraDashboard("startup");
+  }, [claimLoraDashboard, user.role]);
+
+  useEffect(
+    () => () => {
+      if (loraClaimRetryTimer.current !== null) {
+        window.clearTimeout(loraClaimRetryTimer.current);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!shouldAutoOpenLoraDashboard(user.role)) return;
+    let timer: number | null = null;
+    const schedule = () => {
+      timer = window.setTimeout(() => {
+        void claimLoraDashboard("08:00").finally(schedule);
+      }, millisecondsUntilNextShanghaiEight());
+    };
+    schedule();
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [claimLoraDashboard, user.role]);
 
   const acknowledgeStrong = useCallback(
     async (notification: AppNotification) => {
@@ -432,7 +547,13 @@ export function AppShell({
   useEffect(() => {
     if (!window.tongpin?.onDesktopNoticeAction) return;
     return window.tongpin.onDesktopNoticeAction((action) => {
-      if (action.type !== "open-task") return;
+      if (action.type === "open-lora-dashboard") {
+        if (user.role === "boss" || user.role === "admin") {
+          setDrawerOpen(false);
+          onViewChange("lora-chain");
+        }
+        return;
+      }
       const taskId = action.taskId;
       const date = action.date;
       if (!taskId || !date) return;
@@ -447,7 +568,7 @@ export function AppShell({
         }),
       );
     });
-  }, [api, onViewChange]);
+  }, [api, onViewChange, user.role]);
 
   useEffect(() => {
     if (user.role === "admin") return;
@@ -502,6 +623,9 @@ export function AppShell({
     }
 
     function synchronizeAfterReady() {
+      if (user.role === "boss") {
+        void claimLoraDashboard("reconnect");
+      }
       void syncNotifications().catch(() => undefined);
       void api<{ unread: number }>("/api/contacts")
         .then((result) => setMessageUnread(result.unread))
@@ -676,6 +800,16 @@ export function AppShell({
                 detail: message.data,
               }),
             );
+          } else if (message.type === "lora-chain:updated") {
+            if (user.role === "boss" || user.role === "admin") {
+              window.dispatchEvent(
+                new CustomEvent("tongpin:lora-chain-updated", {
+                  detail: message.data,
+                }),
+              );
+            }
+          } else if (message.type === "lora-chain:daily-popup") {
+            if (user.role === "boss") void claimLoraDashboard("08:00");
           } else if (
             message.type === "task:assignment-receipt" ||
             message.type === "task:status" ||
@@ -712,6 +846,7 @@ export function AppShell({
     }
 
     const handleOnline = () => {
+      loraClaimFailureCount.current = 0;
       reconnectAttempt = 0;
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
@@ -743,6 +878,7 @@ export function AppShell({
     };
   }, [
     api,
+    claimLoraDashboard,
     deliverNotifications,
     notify,
     session,
@@ -765,6 +901,11 @@ export function AppShell({
           label: "账号与权限",
           icon: ShieldCheck,
         },
+        {
+          view: "lora-chain" as const,
+          label: "LORA 链驾驶舱",
+          icon: Activity,
+        },
       ];
     }
     return [
@@ -779,6 +920,11 @@ export function AppShell({
               view: "boss" as const,
               label: "全员进度",
               icon: UsersRound,
+            },
+            {
+              view: "lora-chain" as const,
+              label: "LORA 链驾驶舱",
+              icon: Activity,
             },
           ]
         : []),
@@ -883,6 +1029,7 @@ export function AppShell({
         "app-frame",
         isLaneHome ? "app-frame--lane-home" : "",
         view === "home" ? `home-layout-${homeLayout}` : "",
+        view === "lora-chain" ? "app-frame--lora-chain" : "",
       ]
         .filter(Boolean)
         .join(" ")}

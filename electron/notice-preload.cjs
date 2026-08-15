@@ -17,3 +17,4 @@ contextBridge.exposeInMainWorld("tongpinDesktopNotice", {
     ),
   dismiss: () => ipcRenderer.send("desktop-notice:dismiss"),
 });
+

@@ -7,6 +7,7 @@ import { DesktopTitlebar } from "./components/DesktopTitlebar";
 import { AdminConsole } from "./pages/AdminConsole";
 import { AuthPage } from "./pages/AuthPage";
 import { BossDashboard } from "./pages/BossDashboard";
+import { LoraChainDashboard } from "./pages/LoraChainDashboard";
 import { MemberHome } from "./pages/MemberHome";
 import {
   isLaneHomeLayout,
@@ -14,6 +15,10 @@ import {
   saveHomeLayout,
   type HomeLayout,
 } from "./lib/homeLayout";
+import {
+  canAccessLoraDashboard,
+  roleAllowsAppView,
+} from "./lib/loraDashboardAccess";
 
 export function App() {
   const {
@@ -28,12 +33,18 @@ export function App() {
 
   useEffect(() => {
     if (!session) return;
-    if (session.user.role === "admin") {
-      setView("admin");
-    } else if (view === "admin" || (view === "boss" && session.user.role !== "boss")) {
-      setView("home");
-    }
+    if (roleAllowsAppView(session.user.role, view)) return;
+    setView(session.user.role === "admin" ? "admin" : "home");
   }, [session, view]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (session && !loading && !startupError) root.dataset.appView = view;
+    else delete root.dataset.appView;
+    return () => {
+      delete root.dataset.appView;
+    };
+  }, [loading, session, startupError, view]);
 
   useEffect(() => {
     if (!session || session.user.role === "admin") return;
@@ -114,7 +125,9 @@ export function App() {
     content = <AuthPage />;
   } else {
     content =
-    session.user.role === "admin" ? (
+    view === "lora-chain" && canAccessLoraDashboard(session.user.role) ? (
+      <LoraChainDashboard />
+    ) : session.user.role === "admin" ? (
       <AdminConsole />
     ) : view === "boss" && session.user.role === "boss" ? (
       <BossDashboard />

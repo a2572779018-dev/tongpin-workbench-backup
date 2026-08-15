@@ -24,6 +24,19 @@ export type TaskAuditField =
 export type DirectMessageMode = "normal" | "flash";
 export type VerificationPurpose = "register" | "reset_password";
 
+import type {
+  BossLoraReportOpen,
+  LoraCollectorState,
+  LoraDailyAddressBaseline,
+  LoraDashboardCache,
+  LoraIndexedBlock,
+  LoraIndexedInternalTransaction,
+  LoraIndexedSwap,
+  LoraIndexedTransaction,
+  LoraPriceSnapshot,
+  LoraSourceHealth,
+} from "./lora-chain/types";
+
 export interface User {
   id: string;
   email: string;
@@ -175,7 +188,7 @@ export interface TaskRolloverDecision {
 }
 
 export interface DatabaseShape {
-  version: 4;
+  version: 5;
   users: User[];
   tasks: Task[];
   verificationCodes: VerificationCode[];
@@ -185,6 +198,17 @@ export interface DatabaseShape {
   directMessages: DirectMessage[];
   taskRolloverDecisions: TaskRolloverDecision[];
   taskAuditEvents: TaskAuditEvent[];
+  bossLoraReportOpens: BossLoraReportOpen[];
+  loraBlocks: LoraIndexedBlock[];
+  loraTransactions: LoraIndexedTransaction[];
+  loraInternalTransactions: LoraIndexedInternalTransaction[];
+  loraSwaps: LoraIndexedSwap[];
+  loraAddressBaselines: LoraDailyAddressBaseline[];
+  loraCollectorState: LoraCollectorState;
+  loraCurrentTotalAddresses: string | null;
+  loraPrice: LoraPriceSnapshot;
+  loraHealth: LoraSourceHealth;
+  loraDashboardCaches: LoraDashboardCache[];
 }
 
 export type PublicUser = Omit<User, "passwordHash" | "avatarDataUrl"> & {

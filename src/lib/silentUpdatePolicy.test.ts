@@ -58,3 +58,4 @@ describe("silent update policy", () => {
     ).toBe(false);
   });
 });
+

@@ -8,6 +8,11 @@ import helmet from "helmet";
 import type { AppConfig } from "./config";
 import { errorHandler, notFoundHandler } from "./errors";
 import { getMailMode } from "./mailer";
+import {
+  LoraChainCollector,
+  type LoraChainDataSource,
+} from "./lora-chain/collector";
+import { ExplorerLoraChainDataSource } from "./lora-chain/source";
 import { createRequireAuth } from "./middleware";
 import { attachRealtime } from "./realtime";
 import { createAdminRouter } from "./routes/admin";
@@ -16,6 +21,7 @@ import { createAuthRouter } from "./routes/auth";
 import { createBossRouter, silentRealtimeHub } from "./routes/boss";
 import { createContactsRouter } from "./routes/contacts";
 import { createNotificationsRouter } from "./routes/notifications";
+import { createLoraChainRouter } from "./routes/lora-chain";
 import { createTasksRouter } from "./routes/tasks";
 import { JsonStore } from "./store";
 
@@ -23,6 +29,7 @@ export interface AppRuntime {
   app: express.Express;
   server: HttpServer;
   store: JsonStore;
+  loraCollector: LoraChainCollector;
 }
 
 export async function ensureBootstrapAdmin(
@@ -59,7 +66,11 @@ export async function ensureBootstrapAdmin(
 
 export async function createRuntime(
   config: AppConfig,
-  options: { attachSockets?: boolean } = {},
+  options: {
+    attachSockets?: boolean;
+    loraSource?: LoraChainDataSource;
+    startLoraCollector?: boolean;
+  } = {},
 ): Promise<AppRuntime> {
   const store = await JsonStore.open(config.dataFile);
   await ensureBootstrapAdmin(store, config);
@@ -71,6 +82,11 @@ export async function createRuntime(
       ? silentRealtimeHub
       : attachRealtime(server, store, config);
   const requireAuth = createRequireAuth(store, config);
+  const loraCollector = new LoraChainCollector(
+    store,
+    options.loraSource ?? ExplorerLoraChainDataSource.fromConfig(config),
+    realtime,
+  );
 
   app.disable("x-powered-by");
   app.use(helmet());
@@ -114,6 +130,10 @@ export async function createRuntime(
   );
   app.use("/api/tasks", createTasksRouter(store, requireAuth, realtime));
   app.use("/api/admin", createAdminRouter(store, requireAuth));
+  app.use(
+    "/api/boss/lora-chain",
+    createLoraChainRouter(store, requireAuth, loraCollector),
+  );
   app.use("/api/boss", createBossRouter(store, requireAuth, realtime));
   app.use(
     "/api/contacts",
@@ -127,5 +147,7 @@ export async function createRuntime(
   app.use(notFoundHandler);
   app.use(errorHandler);
 
-  return { app, server, store };
+  if (options.startLoraCollector) loraCollector.start();
+
+  return { app, server, store, loraCollector };
 }

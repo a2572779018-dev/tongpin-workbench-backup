@@ -65,3 +65,4 @@ export class AppErrorBoundary extends Component<
     );
   }
 }
+

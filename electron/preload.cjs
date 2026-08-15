@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld("tongpin", {
   notify: (payload) => ipcRenderer.invoke("notification:show", payload),
   dismissNotification: (notificationId) =>
     ipcRenderer.invoke("notification:dismiss", notificationId),
+  openLoraExplorer: (target) =>
+    ipcRenderer.invoke("lora-explorer:open", target),
   onDesktopNoticeAcknowledge: (callback) => {
     const listener = (_event, notificationId) =>
       callback(String(notificationId));

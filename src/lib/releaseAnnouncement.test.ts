@@ -18,23 +18,23 @@ describe("release announcement", () => {
   });
 
   it("shows a release once and includes the version changes", () => {
-    const announcement = getReleaseAnnouncement("0.1.18");
+    const announcement = getReleaseAnnouncement("0.1.19");
 
     expect(
       shouldShowReleaseAnnouncement({
-        currentVersion: "0.1.18",
-        lastAnnouncedVersion: "0.1.17",
+        currentVersion: "0.1.19",
+        lastAnnouncedVersion: "0.1.18",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("铃声");
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("版本号");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("LORA 链数据驾驶舱");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("桌面弹窗");
   });
 
   it("does not repeat an announcement for the same installed version", () => {
     expect(
       shouldShowReleaseAnnouncement({
-        currentVersion: "0.1.18",
-        lastAnnouncedVersion: "0.1.18",
+        currentVersion: "0.1.19",
+        lastAnnouncedVersion: "0.1.19",
       }),
     ).toBe(false);
   });

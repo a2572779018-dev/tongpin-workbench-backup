@@ -48,3 +48,4 @@ export function normalizeSession(session: Session): Session {
     user: normalizeUser(session.user),
   };
 }
+

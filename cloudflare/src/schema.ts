@@ -228,3 +228,170 @@ export const DATABASE_MIGRATION_4 = `
   CREATE INDEX IF NOT EXISTS idx_task_audit_user_task
     ON task_audit_events(user_id, task_id);
 `;
+
+export const DATABASE_MIGRATION_5 = `
+  CREATE TABLE IF NOT EXISTS boss_lora_report_opens (
+    boss_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    report_date TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    trigger TEXT NOT NULL
+      CHECK (trigger IN ('startup', 'login', '08:00', 'reconnect')),
+    PRIMARY KEY (boss_user_id, report_date)
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_checkpoint (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    checkpoint_block INTEGER,
+    checkpoint_hash TEXT,
+    block_cursor_json TEXT,
+    transaction_cursor_json TEXT,
+    burn_cursor_json TEXT,
+    burn_history_cursor_json TEXT,
+    head_transaction_hash TEXT,
+    head_burn_key TEXT,
+    block_head_cursor_json TEXT,
+    block_head_candidate_key TEXT,
+    transaction_head_cursor_json TEXT,
+    transaction_head_candidate_hash TEXT,
+    burn_head_cursor_json TEXT,
+    burn_head_candidate_key TEXT,
+    swap_checkpoint_block INTEGER,
+    pending_internal_transactions_json TEXT NOT NULL DEFAULT '[]',
+    internal_details_complete INTEGER NOT NULL DEFAULT 0,
+    swap_today_complete INTEGER NOT NULL DEFAULT 0,
+    bootstrap_date TEXT,
+    transaction_today_complete INTEGER NOT NULL DEFAULT 0,
+    transaction_yesterday_complete INTEGER NOT NULL DEFAULT 0,
+    burn_today_complete INTEGER NOT NULL DEFAULT 0,
+    block_today_complete INTEGER NOT NULL DEFAULT 0,
+    today_complete INTEGER NOT NULL DEFAULT 0,
+    yesterday_complete INTEGER NOT NULL DEFAULT 0,
+    history_complete INTEGER NOT NULL DEFAULT 0,
+    current_total_addresses TEXT,
+    next_run_at TEXT,
+    last_attempt_at TEXT,
+    last_successful_sync_at TEXT,
+    last_0800_date TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_blocks (
+    height INTEGER PRIMARY KEY,
+    hash TEXT NOT NULL UNIQUE,
+    parent_hash TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    gas_used TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_transactions (
+    hash TEXT PRIMARY KEY,
+    block_number INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    from_address TEXT NOT NULL,
+    to_address TEXT,
+    value_wei TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    gas_used TEXT NOT NULL,
+    gas_price_wei TEXT NOT NULL,
+    input TEXT NOT NULL,
+    to_is_contract INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_internal_transactions (
+    transaction_hash TEXT NOT NULL,
+    trace_index TEXT NOT NULL,
+    block_number INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    from_address TEXT NOT NULL,
+    to_address TEXT,
+    value_wei TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    call_type TEXT NOT NULL,
+    PRIMARY KEY (transaction_hash, trace_index)
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_swaps (
+    transaction_hash TEXT NOT NULL,
+    log_index INTEGER NOT NULL,
+    block_number INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    side TEXT NOT NULL,
+    lrb_wei TEXT NOT NULL,
+    usdt_units TEXT NOT NULL,
+    price_usdt TEXT NOT NULL,
+    initiator TEXT NOT NULL,
+    current_native_balance_wei TEXT,
+    PRIMARY KEY (transaction_hash, log_index)
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_address_baselines (
+    report_date TEXT PRIMARY KEY,
+    total_addresses TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    block_number INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_price (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    status TEXT NOT NULL,
+    price_usdt TEXT,
+    reserve_usdt TEXT,
+    reserve_wlrb TEXT,
+    block_number INTEGER,
+    updated_at TEXT,
+    source TEXT,
+    config_error TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_health (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    rpc_status TEXT NOT NULL,
+    explorer_status TEXT NOT NULL,
+    collector_status TEXT NOT NULL,
+    last_rpc_success_at TEXT,
+    last_explorer_success_at TEXT,
+    last_successful_sync_at TEXT,
+    last_error TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS lora_chain_dashboard_cache (
+    report_date TEXT PRIMARY KEY,
+    dashboard_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    last_successful_sync_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lora_blocks_time
+    ON lora_chain_blocks(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_lora_transactions_time
+    ON lora_chain_transactions(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_lora_internal_time
+    ON lora_chain_internal_transactions(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_lora_internal_to_time
+    ON lora_chain_internal_transactions(to_address, timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_lora_swaps_time
+    ON lora_chain_swaps(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_lora_report_date
+    ON boss_lora_report_opens(report_date, boss_user_id);
+`;
+
+export const LORA_RETENTION_QUERIES = {
+  blocks:
+    "DELETE FROM lora_chain_blocks WHERE datetime(timestamp) < datetime(?)",
+  transactions: `DELETE FROM lora_chain_transactions
+    WHERE datetime(timestamp) < datetime(?)`,
+  nonBurnInternals: `DELETE FROM lora_chain_internal_transactions
+    WHERE datetime(timestamp) < datetime(?)
+      AND lower(COALESCE(to_address, '')) <> ?`,
+  swaps: `DELETE FROM lora_chain_swaps
+    WHERE datetime(timestamp) < datetime(?)
+      AND rowid <> (
+        SELECT rowid FROM lora_chain_swaps
+        ORDER BY datetime(timestamp) DESC LIMIT 1
+      )`,
+} as const;
+
+export const LORA_INSERT_ADDRESS_BASELINE = `INSERT INTO lora_chain_address_baselines
+  (report_date, total_addresses, captured_at, block_number)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(report_date) DO NOTHING`;

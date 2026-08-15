@@ -68,7 +68,7 @@ describe("JsonStore 中央服务持久化", () => {
 
     const store = await JsonStore.open(dataFile);
     const snapshot = await store.read((database) => database);
-    expect(snapshot.version).toBe(4);
+    expect(snapshot.version).toBe(5);
     expect(snapshot.users[0]).toMatchObject({
       id: "legacy-user",
       jobTitle: "",
@@ -81,6 +81,9 @@ describe("JsonStore 中央服务持久化", () => {
     });
     expect(snapshot.taskRolloverDecisions).toEqual([]);
     expect(snapshot.taskAuditEvents).toEqual([]);
+    expect(snapshot.bossLoraReportOpens).toEqual([]);
+    expect(snapshot.loraTransactions).toEqual([]);
+    expect(snapshot.loraCollectorState.checkpointBlock).toBeNull();
   });
 
   it("从版本 2 升级后保留旧任务并允许写入 P4", async () => {
@@ -129,7 +132,7 @@ describe("JsonStore 中央服务持久化", () => {
     });
     const snapshot = await store.read((database) => database);
 
-    expect(snapshot.version).toBe(4);
+    expect(snapshot.version).toBe(5);
     expect(snapshot.tasks).toHaveLength(1);
     expect(snapshot.tasks[0]).toMatchObject({
       id: "v2-task",

@@ -317,9 +317,11 @@
         activeNotificationId = message.notificationId || "";
         openButton.textContent = message.actionLabel || "打开同频";
         expanded = false;
-        pinned = message.requireAcknowledgement === true;
+        const shouldAutoExpand = message.autoExpand === true;
+        pinned =
+          shouldAutoExpand && message.requireAcknowledgement === true;
         root.classList.remove("is-expanded");
-        if (pinned) setExpanded(true);
+        if (shouldAutoExpand) setExpanded(true);
       });
     </script>
   </body>

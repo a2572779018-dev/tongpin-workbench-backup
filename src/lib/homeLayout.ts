@@ -61,3 +61,4 @@ export function saveHomeLayout(userId: string, layout: HomeLayout): void {
     // 本地偏好写入失败时仍可继续使用当前视图。
   }
 }
+

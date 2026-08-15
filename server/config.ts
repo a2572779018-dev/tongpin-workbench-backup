@@ -1,5 +1,9 @@
 import path from "node:path";
 import "dotenv/config";
+import {
+  LORA_DEFAULT_RPC_URL,
+  LORA_EXPLORER_API,
+} from "./lora-chain/constants";
 
 const DEVELOPMENT_JWT_SECRET =
   "tongpin-development-secret-change-before-production";
@@ -15,6 +19,8 @@ export interface AppConfig {
   bootstrapAdminName: string;
   devEmailPreview: boolean;
   isProduction: boolean;
+  loraExplorerApi: string;
+  loraRpcUrl: string;
   resend: {
     apiKey: string;
     from: string;
@@ -66,6 +72,9 @@ export function loadConfig(
       false,
     ),
     isProduction,
+    loraExplorerApi:
+      process.env.LORA_EXPLORER_API_URL ?? LORA_EXPLORER_API,
+    loraRpcUrl: process.env.LORA_RPC_URL ?? LORA_DEFAULT_RPC_URL,
     resend: {
       apiKey: process.env.RESEND_API_KEY ?? "",
       from: process.env.RESEND_FROM ?? "",

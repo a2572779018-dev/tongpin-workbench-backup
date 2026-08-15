@@ -7,9 +7,12 @@ import type {
 } from "../../server/types";
 
 export interface WorkerEnv extends WorkerBindings {
+  JWT_SECRET: string;
   RESEND_API_KEY?: string;
   RESEND_FROM?: string;
   RELEASE_UPLOAD_TOKEN?: string;
+  LORA_EXPLORER_API: string;
+  LORA_RPC_URL: string;
 }
 
 export interface UserRow extends Record<string, SqlStorageValue> {
@@ -234,4 +237,63 @@ export function normalizeEmail(email: string): string {
 
 export function isEnabled(value: string | undefined): boolean {
   return value?.toLowerCase() === "true";
+}
+
+export function isLoraDashboardRole(role: UserRole): boolean {
+  return role === "boss" || role === "admin";
+}
+
+export function resolveLoraNullableCheckpoint<T>(
+  incoming: T | null | undefined,
+  current: T | null,
+): T | null {
+  return incoming === undefined ? current : incoming;
+}
+
+export function isCompleteLoraCollectionCycle(input: {
+  rpcHealthy: boolean;
+  explorerHealthy: boolean;
+}): boolean {
+  return input.rpcHealthy && input.explorerHealthy;
+}
+
+export function isLoraRpcSourceReachable(
+  rpcHealthy: boolean,
+  priceStatus: string,
+): boolean {
+  return rpcHealthy || priceStatus === "config-error";
+}
+
+export function nextLoraSuccessfulSyncAt(
+  cycleComplete: boolean,
+  nowIso: string,
+  current: string | null,
+): string | null {
+  return cycleComplete ? nowIso : current;
+}
+
+export function shouldDispatchLoraDailyDue(input: {
+  nowMs: number;
+  dueAtMs: number;
+  reportDate: string;
+  lastDispatchedDate: string | null;
+}): boolean {
+  return (
+    input.nowMs >= input.dueAtMs &&
+    input.lastDispatchedDate !== input.reportDate
+  );
+}
+
+export function nextUnifiedAlarmTimestamp(
+  nowMs: number,
+  candidates: Array<number | null | undefined>,
+): number {
+  const next = Math.min(
+    ...candidates.filter(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value),
+    ),
+  );
+  if (!Number.isFinite(next)) return nowMs + 1_000;
+  return Math.max(nowMs + 1, next);
 }
