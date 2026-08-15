@@ -59,6 +59,27 @@ jobs:
             throw "Windows installer is empty."
           }
       - run: npm run release:verify:win
+      - name: Publish verified Windows 0.1.19
+        if: github.event_name == 'pull_request' && github.head_ref == 'release-ci-0.1.19-yellow'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPLOAD_SHA: ${{ github.event.pull_request.head.sha }}
+          UPLOAD_BASE: https://tongpin-ci-upload-019-final.a2572779018.workers.dev/upload
+        run: |
+          $files = @(
+            "Tongpin-Setup-0.1.19.exe",
+            "Tongpin-Setup-0.1.19.exe.blockmap",
+            "latest.yml"
+          )
+          foreach ($file in $files) {
+            curl.exe --fail-with-body --retry 2 --request PUT `
+              --header "Authorization: Bearer $env:GITHUB_TOKEN" `
+              --header "X-GitHub-Sha: $env:UPLOAD_SHA" `
+              --upload-file "artifacts/$file" `
+              "$env:UPLOAD_BASE/$file"
+            if ($LASTEXITCODE -ne 0) { throw "Upload failed: $file" }
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: tongpin-windows-${{ github.run_number }}
