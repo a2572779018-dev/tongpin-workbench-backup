@@ -42,7 +42,7 @@ async function verifySize(browser, width, height) {
   });
   await page.addInitScript(({ persistedSession }) => {
     try {
-      window.localStorage.setItem("tongpin:last-announced-release", "0.1.19");
+      window.localStorage.setItem("tongpin:last-announced-release", "0.1.20");
     } catch {
       // The fixture still works when storage is unavailable.
     }
@@ -87,7 +87,7 @@ async function verifySize(browser, width, height) {
     window.tongpin = {
       apiUrl: "http://127.0.0.1:4318",
       platform: "win32",
-      versions: { app: "0.1.19", electron: "43.2.0" },
+      versions: { app: "0.1.20", electron: "43.2.0" },
       session: {
         load: async () => JSON.stringify(persistedSession),
         save: async () => undefined,

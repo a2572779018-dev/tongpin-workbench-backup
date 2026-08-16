@@ -999,6 +999,18 @@ function configureUpdater() {
   });
 }
 
+function configureSystemResumeBridge() {
+  const sendResume = () => {
+    const timer = setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send("desktop:system-resume");
+    }, 700);
+    timer.unref();
+  };
+  powerMonitor.on("resume", sendResume);
+  powerMonitor.on("unlock-screen", sendResume);
+}
+
 app.setName("同频");
 if (process.platform === "win32") {
   app.setAppUserModelId("com.tongpin.workbench");
@@ -1008,6 +1020,7 @@ app.whenReady().then(async () => {
   configureApplicationMenu();
   registerDesktopIpc();
   await createWindow();
+  configureSystemResumeBridge();
   configureUpdater();
   if (!isDevelopment && app.isPackaged) {
     schedulePersistedInstallFailureNotice();

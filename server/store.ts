@@ -9,7 +9,7 @@ import {
 import type { DatabaseShape } from "./types";
 
 const EMPTY_DATABASE: DatabaseShape = {
-  version: 5,
+  version: 6,
   users: [],
   tasks: [],
   verificationCodes: [],
@@ -19,6 +19,7 @@ const EMPTY_DATABASE: DatabaseShape = {
   directMessages: [],
   taskRolloverDecisions: [],
   taskAuditEvents: [],
+  bossWorkReportStatuses: [],
   ...createEmptyLoraDatabaseFields(),
 };
 
@@ -78,13 +79,14 @@ export class JsonStore {
         parsed.version !== 2 &&
         parsed.version !== 3 &&
         parsed.version !== 4 &&
-        parsed.version !== 5
+        parsed.version !== 5 &&
+        parsed.version !== 6
       ) {
         throw new Error(`不支持的数据版本：${String(parsed.version)}`);
       }
       let migrated = false;
-      if (parsed.version < 5) {
-        parsed.version = 5;
+      if (parsed.version < 6) {
+        parsed.version = 6;
         migrated = true;
       }
       for (const user of parsed.users) {
@@ -241,6 +243,10 @@ export class JsonStore {
       }
       if (!Array.isArray(parsed.taskAuditEvents)) {
         parsed.taskAuditEvents = [];
+        migrated = true;
+      }
+      if (!Array.isArray(parsed.bossWorkReportStatuses)) {
+        parsed.bossWorkReportStatuses = [];
         migrated = true;
       }
       const loraArrayFields = [

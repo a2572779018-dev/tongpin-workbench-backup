@@ -83,6 +83,7 @@ interface DesktopSessionBridge {
         },
     ) => void,
   ): () => void;
+  onSystemResume(callback: () => void): () => void;
   installUpdate(): Promise<boolean>;
   windowControls: {
     minimize(): Promise<void>;

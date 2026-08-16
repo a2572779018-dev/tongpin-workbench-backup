@@ -141,6 +141,63 @@ export interface TaskAssignmentEvent {
   assigner: User;
 }
 
+export interface BossWorkReportStatus {
+  bossUserId: string;
+  reportDate: string;
+  trigger: "startup" | "login" | "resume" | "reconnect" | "day-change";
+  openedAt: string;
+  dismissedAt: string | null;
+  readAt: string | null;
+}
+
+export type WorkReportPeriodKind = "daily" | "weekly" | "monthly";
+
+export interface WorkReportPeriod {
+  kind: WorkReportPeriodKind;
+  startDate: string;
+  endDate: string;
+}
+
+export interface BossWorkReportMember {
+  user: User;
+  selfCreated: number;
+  carriedOver: number;
+  assigned: number;
+  completed: number;
+  scheduled: number;
+  scheduledDone: number;
+  doing: number;
+  completionRate: number;
+}
+
+export interface BossWorkReportSummary {
+  people: number;
+  activePeople: number;
+  selfCreated: number;
+  carriedOver: number;
+  assigned: number;
+  completed: number;
+  scheduled: number;
+  scheduledDone: number;
+  doing: number;
+  completionRate: number;
+}
+
+export interface BossWorkReportSection {
+  period: WorkReportPeriod;
+  summary: BossWorkReportSummary;
+  members: BossWorkReportMember[];
+}
+
+export interface BossWorkReportBundle {
+  reportDate: string;
+  generatedAt: string;
+  status: BossWorkReportStatus | null;
+  daily: BossWorkReportSection;
+  weekly: BossWorkReportSection;
+  monthly: BossWorkReportSection;
+}
+
 export type DirectMessageRealtimeEvent =
   | {
       type: "message:new";

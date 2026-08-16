@@ -23,6 +23,7 @@ import { createContactsRouter } from "./routes/contacts";
 import { createNotificationsRouter } from "./routes/notifications";
 import { createLoraChainRouter } from "./routes/lora-chain";
 import { createTasksRouter } from "./routes/tasks";
+import { createWorkReportsRouter } from "./routes/work-reports";
 import { JsonStore } from "./store";
 
 export interface AppRuntime {
@@ -133,6 +134,10 @@ export async function createRuntime(
   app.use(
     "/api/boss/lora-chain",
     createLoraChainRouter(store, requireAuth, loraCollector),
+  );
+  app.use(
+    "/api/boss/work-reports",
+    createWorkReportsRouter(store, requireAuth, realtime),
   );
   app.use("/api/boss", createBossRouter(store, requireAuth, realtime));
   app.use(

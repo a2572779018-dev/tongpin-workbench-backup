@@ -375,6 +375,21 @@ export const DATABASE_MIGRATION_5 = `
     ON boss_lora_report_opens(report_date, boss_user_id);
 `;
 
+export const DATABASE_MIGRATION_6 = `
+  CREATE TABLE IF NOT EXISTS boss_work_report_statuses (
+    boss_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    report_date TEXT NOT NULL,
+    trigger TEXT NOT NULL
+      CHECK (trigger IN ('startup', 'login', 'resume', 'reconnect', 'day-change')),
+    opened_at TEXT NOT NULL,
+    dismissed_at TEXT,
+    read_at TEXT,
+    PRIMARY KEY (boss_user_id, report_date)
+  );
+  CREATE INDEX IF NOT EXISTS idx_work_report_pending
+    ON boss_work_report_statuses(boss_user_id, read_at, report_date DESC);
+`;
+
 export const LORA_RETENTION_QUERIES = {
   blocks:
     "DELETE FROM lora_chain_blocks WHERE datetime(timestamp) < datetime(?)",

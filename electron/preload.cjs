@@ -53,6 +53,11 @@ contextBridge.exposeInMainWorld("tongpin", {
         listener,
       );
   },
+  onSystemResume: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("desktop:system-resume", listener);
+    return () => ipcRenderer.removeListener("desktop:system-resume", listener);
+  },
   installUpdate: () => ipcRenderer.invoke("updater:install"),
   windowControls: {
     minimize: () => ipcRenderer.invoke("window:minimize"),

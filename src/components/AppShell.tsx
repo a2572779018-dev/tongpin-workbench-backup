@@ -27,6 +27,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { UserAvatar } from "./UserAvatar";
 import { ContactCenter } from "./ContactCenter";
+import { BossWorkReportModal } from "./BossWorkReportModal";
 import { ProfileCard } from "./ProfileCard";
 import { useNoticeCenter } from "./NoticeCenter";
 import { StrongReminder } from "./StrongReminder";
@@ -63,12 +64,21 @@ import {
 import type { LoraDailyClaimResult } from "../lib/loraDashboardData";
 import type {
   AppNotification,
+  BossWorkReportBundle,
   DirectMessage,
   DirectMessageRealtimeEvent,
   NotificationReceipt,
   TaskAssignmentEvent,
   User,
 } from "../types";
+import {
+  automaticWorkReportKind,
+  automaticWorkReportLabel,
+  canOpenBossWorkReport,
+  shanghaiReportDate,
+  shouldClaimAfterDateCheck,
+  type WorkReportClaimTrigger,
+} from "../lib/workReportSchedule";
 
 export type AppView = "home" | "boss" | "admin" | "lora-chain";
 
@@ -167,9 +177,9 @@ export function AppShell({
   const { session, logout, api, updateUser } = useAuth();
   const { notify } = useNoticeCenter();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerTab, setDrawerTab] = useState<"notifications" | "contacts">(
-    "notifications",
-  );
+  const [drawerTab, setDrawerTab] = useState<
+    "notifications" | "reports" | "contacts"
+  >("notifications");
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [messageUnread, setMessageUnread] = useState(0);
   const [chatEvent, setChatEvent] =
@@ -187,6 +197,16 @@ export function AppShell({
   const [acknowledgeError, setAcknowledgeError] = useState("");
   const [visibleStrongNotificationId, setVisibleStrongNotificationId] =
     useState<string | null>(null);
+  const [workReport, setWorkReport] =
+    useState<BossWorkReportBundle | null>(null);
+  const [workReportOpen, setWorkReportOpen] = useState(false);
+  const [workReportBusy, setWorkReportBusy] = useState(false);
+  const [workReportError, setWorkReportError] = useState("");
+  const [nudgingWorkReportMemberId, setNudgingWorkReportMemberId] =
+    useState("");
+  const [nudgedWorkReportMemberIds, setNudgedWorkReportMemberIds] = useState(
+    () => new Set<string>(),
+  );
   const notificationsRef = useRef<AppNotification[]>([]);
   const deliveryInFlight = useRef(new Set<string>());
   const handledAssignments = useRef(new Set<string>());
@@ -194,13 +214,20 @@ export function AppShell({
   const loraClaimInFlight = useRef<Promise<void> | null>(null);
   const loraClaimRetryTimer = useRef<number | null>(null);
   const loraClaimFailureCount = useRef(0);
+  const workReportClaimInFlight = useRef<Promise<void> | null>(null);
+  const workReportRetryTimer = useRef<number | null>(null);
+  const workReportFailureCount = useRef(0);
+  const workReportDate = useRef(shanghaiReportDate());
 
   const user = session!.user;
   const isLaneHome = view === "home" && isLaneHomeLayout(homeLayout);
   const notificationUnread = notifications.filter(
     (item) => !item.readAt,
   ).length;
-  const unread = notificationUnread + messageUnread;
+  const workReportUnread = Number(
+    user.role === "boss" && workReport?.status && !workReport.status.readAt,
+  );
+  const unread = notificationUnread + messageUnread + workReportUnread;
   const pendingStrongNotification = useMemo(
     () => selectLatestStrongReminder(notifications),
     [notifications],
@@ -355,6 +382,173 @@ export function AppShell({
       return request;
     },
     [api, onViewChange, user.role],
+  );
+
+  const claimBossWorkReport = useCallback(
+    (trigger: WorkReportClaimTrigger) => {
+      if (!canOpenBossWorkReport(user.role) || workReportClaimInFlight.current) {
+        return workReportClaimInFlight.current ?? Promise.resolve();
+      }
+      if (trigger === "startup" || trigger === "day-change") {
+        workReportFailureCount.current = 0;
+        if (workReportRetryTimer.current !== null) {
+          window.clearTimeout(workReportRetryTimer.current);
+          workReportRetryTimer.current = null;
+        }
+      }
+      const request = api<{
+        shouldOpen: boolean;
+        report: BossWorkReportBundle;
+      }>("/api/boss/work-reports/claim", {
+        method: "POST",
+        body: JSON.stringify({ trigger }),
+      })
+        .then((result) => {
+          workReportFailureCount.current = 0;
+          if (workReportRetryTimer.current !== null) {
+            window.clearTimeout(workReportRetryTimer.current);
+            workReportRetryTimer.current = null;
+          }
+          if (workReportDate.current !== result.report.reportDate) {
+            setNudgedWorkReportMemberIds(new Set());
+          }
+          workReportDate.current = result.report.reportDate;
+          setWorkReport(result.report);
+          if (result.shouldOpen && !result.report.status?.readAt) {
+            setWorkReportError("");
+            setWorkReportOpen(true);
+          }
+        })
+        .catch(() => {
+          const retryDelays = [5_000, 15_000, 60_000] as const;
+          const attempt = workReportFailureCount.current;
+          if (
+            attempt >= retryDelays.length ||
+            workReportRetryTimer.current !== null
+          ) {
+            return;
+          }
+          workReportFailureCount.current = attempt + 1;
+          workReportRetryTimer.current = window.setTimeout(() => {
+            workReportRetryTimer.current = null;
+            void claimBossWorkReport("reconnect");
+          }, retryDelays[attempt]);
+        })
+        .finally(() => {
+          workReportClaimInFlight.current = null;
+        });
+      workReportClaimInFlight.current = request;
+      return request;
+    },
+    [api, user.role],
+  );
+
+  const dismissWorkReport = useCallback(() => {
+    if (!workReport || workReportBusy) return;
+    setWorkReportOpen(false);
+    setDrawerTab("reports");
+    setWorkReportError("");
+    void api<{ report: BossWorkReportBundle }>(
+      "/api/boss/work-reports/current/dismiss",
+      { method: "PATCH" },
+    )
+      .then((result) => setWorkReport(result.report))
+      .catch(() => undefined);
+  }, [api, workReport, workReportBusy]);
+
+  const readWorkReport = useCallback(async () => {
+    if (!workReport || workReportBusy) return;
+    setWorkReportBusy(true);
+    setWorkReportError("");
+    try {
+      const result = await api<{ report: BossWorkReportBundle }>(
+        "/api/boss/work-reports/current/read",
+        { method: "PATCH" },
+      );
+      setWorkReport(result.report);
+      setWorkReportOpen(false);
+    } catch {
+      setWorkReportError("阅读状态未保存，请重试");
+    } finally {
+      setWorkReportBusy(false);
+    }
+  }, [api, workReport, workReportBusy]);
+
+  const nudgeWorkReportMember = useCallback(
+    async (memberId: string) => {
+      if (nudgingWorkReportMemberId || nudgedWorkReportMemberIds.has(memberId)) {
+        return;
+      }
+      setNudgingWorkReportMemberId(memberId);
+      setWorkReportError("");
+      try {
+        await api<{ notification: AppNotification }>(
+          "/api/boss/work-reports/nudge",
+          {
+            method: "POST",
+            body: JSON.stringify({ userId: memberId }),
+          },
+        );
+        setNudgedWorkReportMemberIds((current) =>
+          new Set([...current, memberId]),
+        );
+      } catch {
+        setWorkReportError("催办没有发送成功，请重试");
+      } finally {
+        setNudgingWorkReportMemberId("");
+      }
+    },
+    [api, nudgedWorkReportMemberIds, nudgingWorkReportMemberId],
+  );
+
+  useEffect(() => {
+    if (!canOpenBossWorkReport(user.role)) return;
+    void claimBossWorkReport("startup");
+  }, [claimBossWorkReport, user.role]);
+
+  useEffect(() => {
+    if (!canOpenBossWorkReport(user.role)) return;
+    const checkDate = () => {
+      if (
+        !shouldClaimAfterDateCheck(
+          user.role,
+          workReportDate.current,
+        )
+      ) {
+        return;
+      }
+      workReportDate.current = shanghaiReportDate();
+      setWorkReport(null);
+      setWorkReportOpen(false);
+      setNudgedWorkReportMemberIds(new Set());
+      void claimBossWorkReport("day-change");
+    };
+    const handleFocus = () => {
+      checkDate();
+      void claimBossWorkReport("resume");
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") handleFocus();
+    };
+    const timer = window.setInterval(checkDate, 60_000);
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    const stopSystemResume = window.tongpin?.onSystemResume?.(handleFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      stopSystemResume?.();
+    };
+  }, [claimBossWorkReport, user.role]);
+
+  useEffect(
+    () => () => {
+      if (workReportRetryTimer.current !== null) {
+        window.clearTimeout(workReportRetryTimer.current);
+      }
+    },
+    [],
   );
 
   useEffect(() => {
@@ -625,6 +819,7 @@ export function AppShell({
     function synchronizeAfterReady() {
       if (user.role === "boss") {
         void claimLoraDashboard("reconnect");
+        void claimBossWorkReport("reconnect");
       }
       void syncNotifications().catch(() => undefined);
       void api<{ unread: number }>("/api/contacts")
@@ -878,6 +1073,7 @@ export function AppShell({
     };
   }, [
     api,
+    claimBossWorkReport,
     claimLoraDashboard,
     deliverNotifications,
     notify,
@@ -1197,7 +1393,11 @@ export function AppShell({
               </button>
             </header>
 
-            <div className="drawer-tabs" role="tablist" aria-label="消息类型">
+            <div
+              className={`drawer-tabs${user.role === "boss" ? " is-triple" : ""}`}
+              role="tablist"
+              aria-label="消息类型"
+            >
               <button
                 type="button"
                 role="tab"
@@ -1209,6 +1409,19 @@ export function AppShell({
                 通知
                 {notificationUnread > 0 && <i>{notificationUnread}</i>}
               </button>
+              {user.role === "boss" && (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={drawerTab === "reports"}
+                  className={drawerTab === "reports" ? "is-active" : ""}
+                  onClick={() => setDrawerTab("reports")}
+                >
+                  <ClipboardCheck size={16} />
+                  工作汇报
+                  {workReportUnread > 0 && <i>{workReportUnread}</i>}
+                </button>
+              )}
               <button
                 type="button"
                 role="tab"
@@ -1269,6 +1482,44 @@ export function AppShell({
                     ))}
                   </div>
                 )
+              ) : drawerTab === "reports" ? (
+                workReport?.status && !workReport.status.readAt ? (
+                  <div className="work-report-pending">
+                    <span>
+                      <ClipboardCheck size={22} />
+                      <b>待阅读</b>
+                    </span>
+                    <h3>{automaticWorkReportLabel(workReport.reportDate)}</h3>
+                    <p>
+                      {(() => {
+                        const section =
+                          workReport[
+                            automaticWorkReportKind(workReport.reportDate)
+                          ];
+                        return section.period.startDate === section.period.endDate
+                          ? section.period.startDate
+                          : `${section.period.startDate} 至 ${section.period.endDate}`;
+                      })()}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDrawerOpen(false);
+                        setWorkReportError("");
+                        setWorkReportOpen(true);
+                      }}
+                    >
+                      打开汇报
+                    </button>
+                  </div>
+                ) : (
+                  <div className="drawer-empty">
+                    <span>
+                      <ClipboardCheck size={25} />
+                    </span>
+                    <h3>今日汇报已阅读</h3>
+                  </div>
+                )
               ) : (
                 <ContactCenter
                   api={api}
@@ -1291,6 +1542,19 @@ export function AppShell({
             void acknowledgeStrong(visibleStrongNotification)
           }
           onDismiss={dismissStrong}
+        />
+      )}
+
+      {workReportOpen && workReport && !workReport.status?.readAt && (
+        <BossWorkReportModal
+          report={workReport}
+          busy={workReportBusy}
+          error={workReportError}
+          onClose={dismissWorkReport}
+          onRead={() => void readWorkReport()}
+          onNudge={(memberId) => void nudgeWorkReportMember(memberId)}
+          nudgingMemberId={nudgingWorkReportMemberId}
+          nudgedMemberIds={nudgedWorkReportMemberIds}
         />
       )}
 

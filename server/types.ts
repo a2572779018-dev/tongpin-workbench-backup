@@ -187,8 +187,17 @@ export interface TaskRolloverDecision {
   createdAt: string;
 }
 
+export interface BossWorkReportStatus {
+  bossUserId: string;
+  reportDate: string;
+  trigger: "startup" | "login" | "resume" | "reconnect" | "day-change";
+  openedAt: string;
+  dismissedAt: string | null;
+  readAt: string | null;
+}
+
 export interface DatabaseShape {
-  version: 5;
+  version: 6;
   users: User[];
   tasks: Task[];
   verificationCodes: VerificationCode[];
@@ -198,6 +207,7 @@ export interface DatabaseShape {
   directMessages: DirectMessage[];
   taskRolloverDecisions: TaskRolloverDecision[];
   taskAuditEvents: TaskAuditEvent[];
+  bossWorkReportStatuses: BossWorkReportStatus[];
   bossLoraReportOpens: BossLoraReportOpen[];
   loraBlocks: LoraIndexedBlock[];
   loraTransactions: LoraIndexedTransaction[];

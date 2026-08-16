@@ -68,7 +68,7 @@ describe("JsonStore 中央服务持久化", () => {
 
     const store = await JsonStore.open(dataFile);
     const snapshot = await store.read((database) => database);
-    expect(snapshot.version).toBe(5);
+    expect(snapshot.version).toBe(6);
     expect(snapshot.users[0]).toMatchObject({
       id: "legacy-user",
       jobTitle: "",
@@ -81,6 +81,7 @@ describe("JsonStore 中央服务持久化", () => {
     });
     expect(snapshot.taskRolloverDecisions).toEqual([]);
     expect(snapshot.taskAuditEvents).toEqual([]);
+    expect(snapshot.bossWorkReportStatuses).toEqual([]);
     expect(snapshot.bossLoraReportOpens).toEqual([]);
     expect(snapshot.loraTransactions).toEqual([]);
     expect(snapshot.loraCollectorState.checkpointBlock).toBeNull();
@@ -132,7 +133,7 @@ describe("JsonStore 中央服务持久化", () => {
     });
     const snapshot = await store.read((database) => database);
 
-    expect(snapshot.version).toBe(5);
+    expect(snapshot.version).toBe(6);
     expect(snapshot.tasks).toHaveLength(1);
     expect(snapshot.tasks[0]).toMatchObject({
       id: "v2-task",

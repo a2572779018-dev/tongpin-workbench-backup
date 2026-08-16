@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type {
   AppNotification,
+  BossWorkReportStatus,
   DirectMessage,
   NotificationDispatch,
   NotificationReceipt,
@@ -13,6 +14,11 @@ import type {
   UserRole,
   VerificationPurpose,
 } from "../../server/types";
+import {
+  buildBossWorkReport,
+  workReportPeriods,
+  type BossWorkReportBundle,
+} from "../../server/work-report";
 import {
   ExplorerLoraChainDataSource,
   normalizePendingInternalTransactions,
@@ -92,6 +98,7 @@ import {
   DATABASE_MIGRATION_3,
   DATABASE_MIGRATION_4,
   DATABASE_MIGRATION_5,
+  DATABASE_MIGRATION_6,
   DATABASE_SCHEMA,
   LORA_INSERT_ADDRESS_BASELINE,
   LORA_RETENTION_QUERIES,
@@ -186,6 +193,15 @@ interface TaskAuditRow extends Record<string, SqlStorageValue> {
 
 interface SchemaColumnRow extends Record<string, SqlStorageValue> {
   name: string;
+}
+
+interface BossWorkReportStatusRow extends Record<string, SqlStorageValue> {
+  boss_user_id: string;
+  report_date: string;
+  trigger: BossWorkReportStatus["trigger"];
+  opened_at: string;
+  dismissed_at: string | null;
+  read_at: string | null;
 }
 
 interface LoraCheckpointRow extends Record<string, SqlStorageValue> {
@@ -606,7 +622,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           ),
         )?.version ?? 0,
       );
-      if (currentVersion >= 5) return;
+      if (currentVersion >= 6) return;
     } catch {
       // A fresh database does not have the migration table yet.
     }
@@ -722,6 +738,14 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         );
         this.sql.exec(
           "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (5)",
+        );
+      });
+    }
+    if (version < 6) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec(DATABASE_MIGRATION_6);
+        this.sql.exec(
+          "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (6)",
         );
       });
     }
@@ -882,6 +906,28 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         method === "POST"
       ) {
         return await this.claimLoraDailyPopup(request);
+      }
+
+      if (path === "/api/boss/work-reports/current" && method === "GET") {
+        return await this.getCurrentWorkReport(request);
+      }
+      if (path === "/api/boss/work-reports/claim" && method === "POST") {
+        return await this.claimWorkReport(request);
+      }
+      if (path === "/api/boss/work-reports/nudge" && method === "POST") {
+        return await this.nudgeWorkReportMember(request);
+      }
+      if (
+        path === "/api/boss/work-reports/current/dismiss" &&
+        method === "PATCH"
+      ) {
+        return await this.dismissCurrentWorkReport(request);
+      }
+      if (
+        path === "/api/boss/work-reports/current/read" &&
+        method === "PATCH"
+      ) {
+        return await this.readCurrentWorkReport(request);
       }
 
       if (path === "/api/boss/team" && method === "GET") {
@@ -3209,6 +3255,242 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       userId,
     );
     return json({ user: toPublicUser(this.userById(userId)!) });
+  }
+
+  private workReportStatus(
+    bossUserId: string,
+    reportDate: string,
+  ): BossWorkReportStatus | null {
+    const row = firstRow(
+      this.sql.exec<BossWorkReportStatusRow>(
+        `SELECT * FROM boss_work_report_statuses
+         WHERE boss_user_id = ? AND report_date = ?`,
+        bossUserId,
+        reportDate,
+      ),
+    );
+    return row
+      ? {
+          bossUserId: row.boss_user_id,
+          reportDate: row.report_date,
+          trigger: row.trigger,
+          openedAt: row.opened_at,
+          dismissedAt: row.dismissed_at,
+          readAt: row.read_at,
+        }
+      : null;
+  }
+
+  private buildCurrentWorkReport(
+    bossUserId: string,
+    now = new Date(),
+  ): BossWorkReportBundle {
+    const reportDate = businessDateKey(now);
+    const periods = workReportPeriods(reportDate);
+    const earliestDate = [
+      periods.daily.startDate,
+      periods.weekly.startDate,
+      periods.monthly.startDate,
+    ].sort()[0];
+    const latestDate = [
+      periods.daily.endDate,
+      periods.weekly.endDate,
+      periods.monthly.endDate,
+    ].sort().at(-1)!;
+    const rangeStart = new Date(`${earliestDate}T00:00:00+08:00`).toISOString();
+    const rangeEnd = new Date(`${reportDate}T00:00:00+08:00`).toISOString();
+    const users = this.sql
+      .exec<UserRow>(
+        "SELECT * FROM users WHERE status = 'active' AND role = 'member'",
+      )
+      .toArray()
+      .map(toPublicUser);
+    const tasks = this.sql
+      .exec<TaskRow>(
+        `SELECT tasks.* FROM tasks
+         INNER JOIN users ON users.id = tasks.user_id
+         WHERE users.status = 'active' AND users.role = 'member'
+           AND (
+             tasks.date BETWEEN ? AND ?
+             OR (tasks.created_at >= ? AND tasks.created_at < ?)
+             OR (tasks.completed_at >= ? AND tasks.completed_at < ?)
+           )`,
+        earliestDate,
+        latestDate,
+        rangeStart,
+        rangeEnd,
+        rangeStart,
+        rangeEnd,
+      )
+      .toArray()
+      .map(toTask);
+    const audits = this.sql
+      .exec<TaskAuditRow>(
+        `SELECT task_audit_events.* FROM task_audit_events
+         INNER JOIN users ON users.id = task_audit_events.user_id
+         WHERE users.status = 'active' AND users.role = 'member'
+           AND task_audit_events.created_at >= ?
+           AND task_audit_events.created_at < ?`,
+        rangeStart,
+        rangeEnd,
+      )
+      .toArray()
+      .map(
+        (row): TaskAuditEvent => ({
+          id: row.id,
+          taskId: row.task_id,
+          userId: row.user_id,
+          actorId: row.actor_id,
+          action: row.action,
+          changes: JSON.parse(row.changes_json) as TaskAuditChange[],
+          snapshot: JSON.parse(row.snapshot_json) as Task,
+          createdAt: row.created_at,
+        }),
+      );
+    return buildBossWorkReport({
+      now,
+      reportDate,
+      status: this.workReportStatus(bossUserId, reportDate),
+      users,
+      tasks,
+      audits,
+    });
+  }
+
+  private async getCurrentWorkReport(request: Request): Promise<Response> {
+    const boss = await this.requireUser(request, ["boss"]);
+    return json({ report: this.buildCurrentWorkReport(boss.id) });
+  }
+
+  private async claimWorkReport(request: Request): Promise<Response> {
+    const boss = await this.requireUser(request, ["boss"]);
+    const payload = await parseJson<{ trigger?: unknown }>(request);
+    const triggers = new Set<BossWorkReportStatus["trigger"]>([
+      "startup",
+      "login",
+      "resume",
+      "reconnect",
+      "day-change",
+    ]);
+    if (
+      typeof payload.trigger !== "string" ||
+      !triggers.has(payload.trigger as BossWorkReportStatus["trigger"])
+    ) {
+      throw new ApiError(400, "INVALID_TRIGGER", "无效的工作汇报打开来源");
+    }
+    const reportDate = businessDateKey();
+    let shouldOpen = false;
+    this.ctx.storage.transactionSync(() => {
+      if (this.workReportStatus(boss.id, reportDate)) return;
+      const now = new Date().toISOString();
+      this.sql.exec(
+        `INSERT INTO boss_work_report_statuses
+         (boss_user_id, report_date, trigger, opened_at, dismissed_at, read_at)
+         VALUES (?, ?, ?, ?, NULL, NULL)`,
+        boss.id,
+        reportDate,
+        payload.trigger,
+        now,
+      );
+      shouldOpen = true;
+    });
+    return json({
+      shouldOpen,
+      report: this.buildCurrentWorkReport(boss.id),
+    });
+  }
+
+  private async dismissCurrentWorkReport(request: Request): Promise<Response> {
+    const boss = await this.requireUser(request, ["boss"]);
+    const reportDate = businessDateKey();
+    this.sql.exec(
+      `UPDATE boss_work_report_statuses
+       SET dismissed_at = COALESCE(dismissed_at, ?)
+       WHERE boss_user_id = ? AND report_date = ? AND read_at IS NULL`,
+      new Date().toISOString(),
+      boss.id,
+      reportDate,
+    );
+    return json({ report: this.buildCurrentWorkReport(boss.id) });
+  }
+
+  private async nudgeWorkReportMember(request: Request): Promise<Response> {
+    const boss = await this.requireUser(request, ["boss"]);
+    const memberId = parseContactRequest(await parseJson(request));
+    const member = this.userById(memberId);
+    if (
+      !member ||
+      member.role !== "member" ||
+      member.status !== "active"
+    ) {
+      throw new ApiError(404, "USER_NOT_FOUND", "没有找到该成员");
+    }
+    const now = new Date().toISOString();
+    const dispatchId = crypto.randomUUID();
+    const notification: AppNotification = {
+      id: crypto.randomUUID(),
+      dispatchId,
+      senderId: boss.id,
+      recipientId: member.id,
+      title: "老板提醒您",
+      body: "昨日任务不要忘记完成哦",
+      requiresAcknowledgement: true,
+      deliveredAt: null,
+      acknowledgedAt: null,
+      dingCount: 0,
+      lastDingAt: null,
+      readAt: null,
+      createdAt: now,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(
+        `INSERT INTO notification_dispatches
+         (id, sender_id, title, body, ding_count, last_ding_at, created_at)
+         VALUES (?, ?, ?, ?, 0, NULL, ?)`,
+        dispatchId,
+        boss.id,
+        notification.title,
+        notification.body,
+        now,
+      );
+      this.sql.exec(
+        `INSERT INTO notifications
+         (id, sender_id, recipient_id, title, body, read_at, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+        notification.id,
+        notification.senderId,
+        notification.recipientId,
+        notification.title,
+        notification.body,
+        notification.createdAt,
+      );
+      this.sql.exec(
+        `INSERT INTO notification_receipts
+         (notification_id, dispatch_id, delivered_at, acknowledged_at)
+         VALUES (?, ?, NULL, NULL)`,
+        notification.id,
+        dispatchId,
+      );
+    });
+    this.pushNotification(notification);
+    return json({ notification }, 201);
+  }
+
+  private async readCurrentWorkReport(request: Request): Promise<Response> {
+    const boss = await this.requireUser(request, ["boss"]);
+    const reportDate = businessDateKey();
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `UPDATE boss_work_report_statuses
+       SET dismissed_at = COALESCE(dismissed_at, ?),
+           read_at = COALESCE(read_at, ?)
+       WHERE boss_user_id = ? AND report_date = ?`,
+      now,
+      now,
+      boss.id,
+      reportDate,
+    );
+    return json({ report: this.buildCurrentWorkReport(boss.id) });
   }
 
   private async getTeam(request: Request, url: URL): Promise<Response> {
