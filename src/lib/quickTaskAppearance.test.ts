@@ -6,6 +6,7 @@ const css = readFileSync(
   fileURLToPath(new URL("../quick-task.css", import.meta.url)),
   "utf8",
 );
+const normalizedCss = css.replace(/\r\n/g, "\n");
 const component = readFileSync(
   fileURLToPath(new URL("../components/QuickTaskPanel.tsx", import.meta.url)),
   "utf8",
@@ -24,22 +25,22 @@ describe("quick task priority appearance", () => {
     expect(component).toContain(
       'className={priority === option ? "is-selected" : ""}',
     );
-    expect(css).toContain("background: rgba(255, 253, 248, 0.56);");
-    expect(css).toContain(
+    expect(normalizedCss).toContain("background: rgba(255, 253, 248, 0.56);");
+    expect(normalizedCss).toContain(
       ".quick-task-priorities button.is-selected {\n  background: #171717;\n  color: #fffdf8;",
     );
   });
 
   it("keeps the task card and badge mapped to all five priorities", () => {
     for (const [priority, palette] of Object.entries(colors)) {
-      expect(css).toContain(
+      expect(normalizedCss).toContain(
         `.quick-task-item.priority-${priority} {\n  background: ${palette.card};`,
       );
-      expect(css).toContain(
+      expect(normalizedCss).toContain(
         `.quick-task-item.priority-${priority} .quick-task-priority-label {\n  background: ${palette.label};`,
       );
     }
-    expect(css).toContain(
+    expect(normalizedCss).toContain(
       ".quick-task-item.is-done {\n  background: #c9f3b2;",
     );
   });
