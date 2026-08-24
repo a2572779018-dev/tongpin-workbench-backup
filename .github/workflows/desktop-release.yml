@@ -1,0 +1,168 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck:cloudflare
+      - run: npm run cloudflare:check
+
+  prepare:
+    name: Prepare draft release
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Create or refresh draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "同频 $version" \
+              --notes-file build/release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --draft \
+              --title "同频 $version" \
+              --notes-file build/release-notes.md
+          fi
+
+  windows:
+    name: Windows release package
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run dist:win
+      - run: npm run release:verify:win
+      - name: Upload Windows release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $files = @(
+            (Get-ChildItem -LiteralPath artifacts -Filter "Tongpin-Setup-*.exe").FullName
+            (Get-ChildItem -LiteralPath artifacts -Filter "Tongpin-Setup-*.exe.blockmap").FullName
+            (Resolve-Path -LiteralPath artifacts/latest.yml).Path
+          )
+          if ($files.Count -ne 3) {
+            throw "Expected exactly three Windows release files, found $($files.Count)."
+          }
+          gh release upload $env:GITHUB_REF_NAME @files --clobber
+
+  macos:
+    name: macOS universal release package
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Package unsigned universal app
+        run: >-
+          npm exec electron-builder -- --mac dmg zip --universal --publish never
+          -c.mac.identity=null
+          -c.mac.hardenedRuntime=false
+          -c.mac.notarize=false
+      - run: npm run release:verify:mac
+      - name: Verify macOS artifacts and architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(artifacts/*.dmg)
+          zips=(artifacts/*.zip)
+          [[ ${#dmgs[@]} -eq 1 ]]
+          [[ ${#zips[@]} -eq 1 ]]
+          [[ -f artifacts/latest-mac.yml ]]
+          hdiutil verify "${dmgs[0]}"
+          unzip -t "${zips[0]}"
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rmdir "$mount_dir" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "${dmgs[0]}"
+          app_path="$(find "$mount_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          [[ -n "$app_path" ]]
+          executable="$(plutil -extract CFBundleExecutable raw -o - "$app_path/Contents/Info.plist")"
+          architectures="$(lipo -archs "$app_path/Contents/MacOS/$executable")"
+          [[ "$architectures" == *arm64* ]]
+          [[ "$architectures" == *x86_64* ]]
+      - name: Upload macOS release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            artifacts/Tongpin-*.dmg
+            artifacts/Tongpin-*.dmg.blockmap
+            artifacts/Tongpin-*.zip
+            artifacts/Tongpin-*.zip.blockmap
+            artifacts/latest-mac.yml
+          )
+          [[ ${#files[@]} -eq 5 ]]
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+
+  publish:
+    name: Publish release
+    needs:
+      - windows
+      - macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq .id)"
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false >/dev/null
