@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: desktop-release-${{ github.ref }}
@@ -19,6 +19,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          package_version="$(jq -r .version package.json)"
+          [[ "$GITHUB_REF_NAME" == "v${package_version}" ]]
+          git show-ref --verify refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -32,8 +44,12 @@ jobs:
     name: Prepare draft release
     needs: quality
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Create or refresh draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -42,6 +58,13 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+            [[ "$(jq -r .draft <<<"$release_json")" == "true" ]]
+            while IFS= read -r asset_id; do
+              [[ -n "$asset_id" ]]
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            done < <(jq -r '.assets[].id' <<<"$release_json")
             gh release edit "$GITHUB_REF_NAME" \
               --title "同频 $version" \
               --notes-file build/release-notes.md
@@ -58,8 +81,12 @@ jobs:
     needs: prepare
     runs-on: windows-latest
     timeout-minutes: 35
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -72,14 +99,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $files = @(
-            (Get-ChildItem -LiteralPath artifacts -Filter "Tongpin-Setup-*.exe").FullName
-            (Get-ChildItem -LiteralPath artifacts -Filter "Tongpin-Setup-*.exe.blockmap").FullName
-            (Resolve-Path -LiteralPath artifacts/latest.yml).Path
-          )
-          if ($files.Count -ne 3) {
-            throw "Expected exactly three Windows release files, found $($files.Count)."
+          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          $installers = @(Get-ChildItem -LiteralPath artifacts -Filter "Tongpin-Setup-*.exe")
+          $blockmaps = @(Get-ChildItem -LiteralPath artifacts -Filter "Tongpin-Setup-*.exe.blockmap")
+          $manifest = Get-Item -LiteralPath artifacts/latest.yml
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installers.Count)."
           }
+          if ($blockmaps.Count -ne 1) {
+            throw "Expected exactly one Windows blockmap, found $($blockmaps.Count)."
+          }
+          if ($installers[0].Name -ne "Tongpin-Setup-$version.exe") {
+            throw "Unexpected Windows installer name: $($installers[0].Name)."
+          }
+          if ($blockmaps[0].Name -ne "Tongpin-Setup-$version.exe.blockmap") {
+            throw "Unexpected Windows blockmap name: $($blockmaps[0].Name)."
+          }
+          $files = @(
+            $installers[0].FullName
+            $blockmaps[0].FullName
+            $manifest.FullName
+          )
           gh release upload $env:GITHUB_REF_NAME @files --clobber
 
   macos:
@@ -87,11 +127,15 @@ jobs:
     needs: prepare
     runs-on: macos-15
     timeout-minutes: 45
+    permissions:
+      contents: write
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
       TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -137,15 +181,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
+          version="$(node -p "require('./package.json').version")"
           files=(
-            artifacts/Tongpin-*.dmg
-            artifacts/Tongpin-*.dmg.blockmap
-            artifacts/Tongpin-*.zip
-            artifacts/Tongpin-*.zip.blockmap
+            "artifacts/Tongpin-${version}-mac-universal.dmg"
+            "artifacts/Tongpin-${version}-mac-universal.dmg.blockmap"
+            "artifacts/Tongpin-${version}-mac-universal.zip"
+            "artifacts/Tongpin-${version}-mac-universal.zip.blockmap"
             artifacts/latest-mac.yml
           )
-          [[ ${#files[@]} -eq 5 ]]
+          for file in "${files[@]}"; do
+            [[ -s "$file" ]]
+          done
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
 
   publish:
@@ -154,6 +200,8 @@ jobs:
       - windows
       - macos
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Publish verified release
         env:
@@ -161,7 +209,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq .id)"
+          version="${GITHUB_REF_NAME#v}"
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+          [[ "$(jq -r .draft <<<"$release_json")" == "true" ]]
+          [[ "$(jq -r .tag_name <<<"$release_json")" == "$GITHUB_REF_NAME" ]]
+          jq -e '(.assets | length) == 8 and all(.assets[]; .size > 0)' \
+            <<<"$release_json" >/dev/null
+
+          expected=(
+            "Tongpin-Setup-${version}.exe"
+            "Tongpin-Setup-${version}.exe.blockmap"
+            "latest.yml"
+            "Tongpin-${version}-mac-universal.dmg"
+            "Tongpin-${version}-mac-universal.dmg.blockmap"
+            "Tongpin-${version}-mac-universal.zip"
+            "Tongpin-${version}-mac-universal.zip.blockmap"
+            "latest-mac.yml"
+          )
+          diff -u \
+            <(printf '%s\n' "${expected[@]}" | sort) \
+            <(jq -r '.assets[].name' <<<"$release_json" | sort)
+
+          release_id="$(jq -r .id <<<"$release_json")"
           gh api \
             --method PATCH \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
