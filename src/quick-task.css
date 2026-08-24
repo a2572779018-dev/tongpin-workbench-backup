@@ -240,7 +240,7 @@ body.quick-panel-surface #root {
   padding: 0;
   border: 1.5px solid #171717;
   border-radius: 7px;
-  background: rgba(255, 253, 248, 0.56);
+  background: #fffdf8;
   font-family: "DM Mono", monospace;
   font-size: 10px;
   font-weight: 700;
@@ -250,13 +250,34 @@ body.quick-panel-surface #root {
     transform 120ms ease;
 }
 
+.quick-task-priorities button.priority-p0 {
+  background: #ff6b64;
+}
+
+.quick-task-priorities button.priority-p1 {
+  background: #ffd3d0;
+}
+
+.quick-task-priorities button.priority-p2 {
+  background: #fff0a8;
+}
+
+.quick-task-priorities button.priority-p3 {
+  background: #dcecff;
+}
+
+.quick-task-priorities button.priority-p4 {
+  background: #ebe7df;
+}
+
 .quick-task-priorities button:hover {
   transform: translateY(-1px);
 }
 
 .quick-task-priorities button.is-selected {
-  background: #171717;
-  color: #fffdf8;
+  box-shadow: 2px 2px 0 #171717;
+  color: #171717;
+  transform: translate(-1px, -1px);
 }
 
 .quick-task-list-heading {
@@ -314,19 +335,29 @@ body.quick-panel-surface #root {
   box-shadow: 2px 2px 0 #171717;
 }
 
-.quick-task-item.priority-p0,
+.quick-task-item.priority-p0 {
+  background: #ff7770;
+}
+
 .quick-task-item.priority-p1 {
-  background: rgba(255, 216, 77, 0.35);
+  background: #ffd7d4;
 }
 
 .quick-task-item.priority-p2 {
-  background: rgba(255, 216, 77, 0.2);
+  background: #fff1ad;
+}
+
+.quick-task-item.priority-p3 {
+  background: #e2efff;
+}
+
+.quick-task-item.priority-p4 {
+  background: #ebe7df;
 }
 
 .quick-task-item.is-done {
-  background: #f4efe4;
+  background: #c9f3b2;
   box-shadow: none;
-  opacity: 0.72;
 }
 
 .quick-task-toggle {
@@ -373,17 +404,31 @@ body.quick-panel-surface #root {
   padding: 2px 5px;
   border: 1.5px solid #171717;
   border-radius: 5px;
-  background: #ffd84d;
+  background: #fffdf8;
   font-family: "DM Mono", monospace;
   font-size: 9px;
   font-weight: 700;
   line-height: 1.2;
 }
 
-.quick-task-item.priority-p3 .quick-task-priority-label,
-.quick-task-item.priority-p4 .quick-task-priority-label,
-.quick-task-item.is-done .quick-task-priority-label {
-  background: #fffdf8;
+.quick-task-item.priority-p0 .quick-task-priority-label {
+  background: #ff5e57;
+}
+
+.quick-task-item.priority-p1 .quick-task-priority-label {
+  background: #ffbfbb;
+}
+
+.quick-task-item.priority-p2 .quick-task-priority-label {
+  background: #ffe56b;
+}
+
+.quick-task-item.priority-p3 .quick-task-priority-label {
+  background: #bcd9ff;
+}
+
+.quick-task-item.priority-p4 .quick-task-priority-label {
+  background: #d8d1c5;
 }
 
 .quick-task-state {

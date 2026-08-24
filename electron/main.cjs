@@ -46,6 +46,7 @@ const {
   getQuickPanelBounds,
   normalizeQuickTaskCommand,
   pointInBounds,
+  shouldSuppressMainActivation,
 } = require("./quick-task-policy.cjs");
 
 autoUpdater.logger = null;
@@ -89,6 +90,7 @@ let quickTasksSuspended = false;
 let quickCornerPollTimer = null;
 let quickCornerShowTimer = null;
 let quickCornerHideTimer = null;
+let quickPanelActivationSuppressedUntil = 0;
 const pendingQuickTaskRequests = new Map();
 const recentNoticeSounds = new Map();
 
@@ -330,6 +332,7 @@ function hideQuickCorner({ animate = true } = {}) {
 }
 
 function hideQuickPanel() {
+  quickPanelActivationSuppressedUntil = 0;
   if (!quickPanelWindow || quickPanelWindow.isDestroyed()) return false;
   try {
     quickPanelWindow.webContents.send("quick-task:panel-visibility", false);
@@ -465,6 +468,7 @@ async function ensureQuickPanelWindow() {
   });
   configureQuickTaskWindowSecurity(quickPanelWindow);
   quickPanelWindow.on("closed", () => {
+    quickPanelActivationSuppressedUntil = 0;
     quickPanelWindow = null;
     rejectPendingQuickTaskRequests();
   });
@@ -526,6 +530,7 @@ async function showQuickPanel() {
     getQuickPanelBounds(display.workArea, QUICK_PANEL_SIZE, 16),
     false,
   );
+  quickPanelActivationSuppressedUntil = Date.now() + 750;
   target.show();
   target.focus();
   target.webContents.send("quick-task:panel-visibility", true);
@@ -1570,6 +1575,40 @@ app.whenReady().then(async () => {
       } else {
         void showQuickPanel();
       }
+      return;
+    }
+    const activationNow = Date.now();
+    const hasOpeningGuard =
+      quickPanelActivationSuppressedUntil > 0 &&
+      activationNow <= quickPanelActivationSuppressedUntil;
+    if (
+      quickPanelActivationSuppressedUntil > 0 &&
+      !hasOpeningGuard
+    ) {
+      quickPanelActivationSuppressedUntil = 0;
+    }
+    const cornerVisible = Boolean(
+      quickCornerWindow &&
+        !quickCornerWindow.isDestroyed() &&
+        quickCornerWindow.isVisible(),
+    );
+    const panelVisible = Boolean(
+      quickPanelWindow &&
+        !quickPanelWindow.isDestroyed() &&
+        quickPanelWindow.isVisible(),
+    );
+    const cursorPoint =
+      cornerVisible || panelVisible ? screen.getCursorScreenPoint() : null;
+    if (
+      shouldSuppressMainActivation({
+        now: activationNow,
+        suppressUntil: quickPanelActivationSuppressedUntil,
+        cursorPoint,
+        cornerBounds: cornerVisible ? quickCornerWindow.getBounds() : null,
+        panelBounds: panelVisible ? quickPanelWindow.getBounds() : null,
+      })
+    ) {
+      if (hasOpeningGuard) quickPanelActivationSuppressedUntil = 0;
       return;
     }
     if (!mainWindow || mainWindow.isDestroyed()) {

@@ -8,6 +8,7 @@ const {
   getQuickPanelBounds,
   normalizeQuickTaskCommand,
   pointInBounds,
+  shouldSuppressMainActivation,
 } = require("../../electron/quick-task-policy.cjs");
 
 describe("Electron quick task hot corner policy", () => {
@@ -38,6 +39,50 @@ describe("Electron quick task hot corner policy", () => {
     const bounds = getHotCornerTriggerBounds(workArea);
     expect(pointInBounds({ x: -1, y: 899 }, bounds)).toBe(true);
     expect(pointInBounds({ x: 0, y: 899 }, bounds)).toBe(false);
+  });
+
+  it("keeps quick-surface activation from restoring the main window", () => {
+    const cornerBounds = getCornerWindowBounds(workArea);
+    const panelBounds = getQuickPanelBounds(workArea);
+    expect(
+      shouldSuppressMainActivation({ now: 100, suppressUntil: 800 }),
+    ).toBe(true);
+    expect(
+      shouldSuppressMainActivation({
+        now: 900,
+        suppressUntil: 800,
+        cursorPoint: { x: -100, y: 500 },
+        panelBounds,
+      }),
+    ).toBe(true);
+    expect(
+      shouldSuppressMainActivation({
+        now: 900,
+        suppressUntil: 800,
+        cursorPoint: { x: -1, y: 899 },
+        cornerBounds,
+      }),
+    ).toBe(true);
+    expect(
+      shouldSuppressMainActivation({
+        now: 900,
+        suppressUntil: 800,
+        cursorPoint: { x: -500, y: 500 },
+        cornerBounds,
+        panelBounds,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not let a focused quick panel block a later Dock activation", () => {
+    expect(
+      shouldSuppressMainActivation({
+        now: 900,
+        suppressUntil: 800,
+        cursorPoint: { x: 720, y: 890 },
+        panelBounds: getQuickPanelBounds(workArea),
+      }),
+    ).toBe(false);
   });
 
   it("accepts only narrow task commands", () => {

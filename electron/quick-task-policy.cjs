@@ -55,6 +55,24 @@ function expandBounds(bounds, amount) {
   };
 }
 
+function shouldSuppressMainActivation({
+  now = Date.now(),
+  suppressUntil = 0,
+  cursorPoint = null,
+  cornerBounds = null,
+  panelBounds = null,
+  surfaceMargin = 6,
+} = {}) {
+  if (Number.isFinite(suppressUntil) && now <= suppressUntil) return true;
+  return Boolean(
+    cursorPoint &&
+      ((cornerBounds &&
+        pointInBounds(cursorPoint, expandBounds(cornerBounds, surfaceMargin))) ||
+        (panelBounds &&
+          pointInBounds(cursorPoint, expandBounds(panelBounds, surfaceMargin)))),
+  );
+}
+
 function normalizeQuickTaskCommand(value) {
   if (!value || typeof value !== "object") return null;
   if (value.type === "list-today") return { type: "list-today" };
@@ -90,4 +108,5 @@ module.exports = {
   getQuickPanelBounds,
   normalizeQuickTaskCommand,
   pointInBounds,
+  shouldSuppressMainActivation,
 };
