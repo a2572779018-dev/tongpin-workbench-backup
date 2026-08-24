@@ -57,8 +57,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+          releases_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          release_count="$(jq --arg tag "$GITHUB_REF_NAME" \
+            '[.[] | select(.tag_name == $tag)] | length' <<<"$releases_json")"
+          [[ "$release_count" -le 1 ]]
+          if [[ "$release_count" -eq 1 ]]; then
+            release_json="$(jq -c --arg tag "$GITHUB_REF_NAME" \
+              '.[] | select(.tag_name == $tag)' <<<"$releases_json")"
             [[ "$(jq -r .draft <<<"$release_json")" == "true" ]]
             while IFS= read -r asset_id; do
               [[ -n "$asset_id" ]]
@@ -210,7 +215,12 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+          releases_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          release_count="$(jq --arg tag "$GITHUB_REF_NAME" \
+            '[.[] | select(.tag_name == $tag)] | length' <<<"$releases_json")"
+          [[ "$release_count" -eq 1 ]]
+          release_json="$(jq -c --arg tag "$GITHUB_REF_NAME" \
+            '.[] | select(.tag_name == $tag)' <<<"$releases_json")"
           [[ "$(jq -r .draft <<<"$release_json")" == "true" ]]
           [[ "$(jq -r .tag_name <<<"$release_json")" == "$GITHUB_REF_NAME" ]]
           jq -e '(.assets | length) == 8 and all(.assets[]; .size > 0)' \
