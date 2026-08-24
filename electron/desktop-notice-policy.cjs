@@ -1,3 +1,7 @@
+const {
+  shouldUseCustomNotificationSound,
+} = require("./notification-sound-policy.cjs");
+
 function normalizeDesktopNoticePayload(payload) {
   if (
     !payload ||
@@ -10,6 +14,9 @@ function normalizeDesktopNoticePayload(payload) {
   const requireAcknowledgement = payload.requireAcknowledgement === true;
   const isLoraDashboardAction =
     payload.action?.type === "open-lora-dashboard";
+  const playSound = payload.playSound === true;
+  const soundKey =
+    typeof payload.soundKey === "string" ? payload.soundKey.slice(0, 160) : "";
   return {
     notificationId:
       typeof payload.notificationId === "string"
@@ -25,9 +32,13 @@ function normalizeDesktopNoticePayload(payload) {
     tone: requireAcknowledgement ? "warning" : "info",
     requireAcknowledgement,
     autoExpand: requireAcknowledgement || isLoraDashboardAction,
-    playSound: payload.playSound === true,
-    soundKey:
-      typeof payload.soundKey === "string" ? payload.soundKey.slice(0, 160) : "",
+    playSound,
+    soundKey,
+    customSound: shouldUseCustomNotificationSound({
+      playSound,
+      requireAcknowledgement,
+      soundKey,
+    }),
   };
 }
 

@@ -1,7 +1,6 @@
 import type { AppNotification } from "../types";
 
 export const STRONG_REMINDER_REPEAT_MS = 3 * 60 * 1_000;
-export const STRONG_REMINDER_AUTO_DISMISS_MS = 30 * 1_000;
 
 export function isPendingStrongReminder(
   notification: AppNotification,
@@ -25,4 +24,3 @@ export function selectLatestStrongReminder(
       })[0] ?? null
   );
 }
-

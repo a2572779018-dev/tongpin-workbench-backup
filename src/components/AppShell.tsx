@@ -1541,7 +1541,6 @@ export function AppShell({
           onAcknowledge={() =>
             void acknowledgeStrong(visibleStrongNotification)
           }
-          onDismiss={dismissStrong}
         />
       )}
 

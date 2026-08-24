@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppNotification } from "../types";
 import {
-  STRONG_REMINDER_AUTO_DISMISS_MS,
   STRONG_REMINDER_REPEAT_MS,
   selectLatestStrongReminder,
 } from "./strongReminder";
@@ -29,8 +28,7 @@ function notification(
 }
 
 describe("strong reminder lifecycle", () => {
-  it("uses a 30 second display and a 3 minute repeat interval", () => {
-    expect(STRONG_REMINDER_AUTO_DISMISS_MS).toBe(30_000);
+  it("keeps the three minute server re-alert interval", () => {
     expect(STRONG_REMINDER_REPEAT_MS).toBe(180_000);
   });
 
@@ -55,4 +53,3 @@ describe("strong reminder lifecycle", () => {
     expect(selected?.id).toBe("dinged-message");
   });
 });
-

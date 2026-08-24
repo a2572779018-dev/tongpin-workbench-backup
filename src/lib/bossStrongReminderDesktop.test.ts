@@ -52,11 +52,12 @@ describe("boss strong reminder desktop regression", () => {
         busy: false,
         error: "",
         onAcknowledge: () => undefined,
-        onDismiss: () => undefined,
       }),
     );
     expect(markup).toContain('role="alertdialog"');
     expect(markup).toContain("老板强提醒");
     expect(markup).toContain(fixture.title);
+    expect(markup).not.toContain("30 秒后自动关闭");
+    expect(markup).not.toContain("暂时关闭提醒");
   });
 });

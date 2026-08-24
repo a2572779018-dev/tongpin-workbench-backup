@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; media-src 'self'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>同频通知</title>
@@ -162,6 +162,10 @@
         align-items: center;
       }
 
+      #notice[data-requires-ack="true"] .dismiss {
+        display: none;
+      }
+
       .orb {
         position: absolute;
         bottom: 12px;
@@ -266,6 +270,11 @@
       <button id="orb" class="orb" type="button" aria-label="展开同频通知">
         <span class="orb-mark" aria-hidden="true"><i></i><i></i></span>
       </button>
+      <audio
+        id="notification-sound"
+        preload="auto"
+        src="./assets/boss-notification.mp3"
+      ></audio>
     </main>
     <script>
       const bridge = window.tongpinDesktopNotice;
@@ -276,9 +285,86 @@
       const openButton = document.getElementById("open");
       const dismissButton = document.getElementById("dismiss");
       const acknowledgeButton = document.getElementById("acknowledge");
+      const notificationSound = document.getElementById("notification-sound");
+      const SOUND_REPLAY_DELAY_MS = 1_200;
       let expanded = false;
       let pinned = false;
       let activeNotificationId = "";
+      let soundRequested = false;
+      let activeSoundKey = "";
+      let soundReplayTimer = null;
+
+      function clearSoundReplayTimer() {
+        if (soundReplayTimer !== null) {
+          window.clearTimeout(soundReplayTimer);
+          soundReplayTimer = null;
+        }
+      }
+
+      function haltNotificationSound() {
+        clearSoundReplayTimer();
+        notificationSound.pause();
+        notificationSound.currentTime = 0;
+      }
+
+      function stopNotificationSound() {
+        soundRequested = false;
+        activeSoundKey = "";
+        haltNotificationSound();
+      }
+
+      function canPlayActiveSound(soundKey) {
+        return (
+          soundRequested &&
+          Boolean(soundKey) &&
+          soundKey === activeSoundKey &&
+          document.visibilityState !== "hidden"
+        );
+      }
+
+      function scheduleSoundReplay(soundKey, delay = SOUND_REPLAY_DELAY_MS) {
+        clearSoundReplayTimer();
+        if (!canPlayActiveSound(soundKey)) return;
+        soundReplayTimer = window.setTimeout(() => {
+          soundReplayTimer = null;
+          playNotificationSound(soundKey);
+        }, delay);
+      }
+
+      function playNotificationSound(soundKey) {
+        if (!canPlayActiveSound(soundKey)) return;
+        clearSoundReplayTimer();
+        notificationSound.currentTime = 0;
+        const attempt = notificationSound.play();
+        if (attempt && typeof attempt.catch === "function") {
+          attempt.catch(() => scheduleSoundReplay(soundKey, 3_000));
+        }
+      }
+
+      function startNotificationSound(message) {
+        stopNotificationSound();
+        if (message.customSound !== true) return;
+        soundRequested = true;
+        activeSoundKey = message.soundKey || message.notificationId || "boss-notice";
+        notificationSound.volume = 1;
+        playNotificationSound(activeSoundKey);
+      }
+
+      notificationSound.addEventListener("ended", () => {
+        scheduleSoundReplay(activeSoundKey);
+      });
+      notificationSound.addEventListener("error", () => {
+        scheduleSoundReplay(activeSoundKey, 3_000);
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") {
+          haltNotificationSound();
+        } else if (soundRequested) {
+          playNotificationSound(activeSoundKey);
+        }
+      });
+      window.addEventListener("pagehide", stopNotificationSound);
+      window.addEventListener("beforeunload", stopNotificationSound);
 
       function setExpanded(next) {
         if (expanded === next) return;
@@ -300,7 +386,10 @@
         setExpanded(pinned);
       });
       openButton.addEventListener("click", () => bridge.openApp());
-      dismissButton.addEventListener("click", () => bridge.dismiss());
+      dismissButton.addEventListener("click", () => {
+        stopNotificationSound();
+        bridge.dismiss();
+      });
       acknowledgeButton.addEventListener("click", () => {
         if (activeNotificationId) {
           bridge.acknowledge(activeNotificationId);
@@ -308,6 +397,7 @@
       });
 
       bridge.onMessage((message) => {
+        startNotificationSound(message);
         title.textContent = message.title;
         body.textContent = message.body;
         root.dataset.tone = message.tone || "info";

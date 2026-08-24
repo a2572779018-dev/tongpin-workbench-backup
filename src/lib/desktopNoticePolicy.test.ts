@@ -19,6 +19,7 @@ describe("desktop strong notice regression", () => {
       requireAcknowledgement: true,
       playSound: true,
       soundKey: "boss-notification:boss-notice-1:2",
+      customSound: true,
     });
     expect(normalized).toMatchObject({
       notificationId: "boss-notice-1",

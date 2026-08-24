@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const {
   app,
   BrowserWindow,
@@ -38,31 +39,57 @@ const {
 const {
   normalizeDesktopNoticePayload,
 } = require("./desktop-notice-policy.cjs");
+const {
+  expandBounds,
+  getCornerWindowBounds,
+  getHotCornerTriggerBounds,
+  getQuickPanelBounds,
+  normalizeQuickTaskCommand,
+  pointInBounds,
+} = require("./quick-task-policy.cjs");
 
 autoUpdater.logger = null;
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === "darwin";
+const isQuickTaskPreview =
+  isDevelopment && process.env.TONGPIN_QUICK_PANEL_PREVIEW === "1";
+const quickTaskPreviewTarget =
+  process.env.TONGPIN_QUICK_PREVIEW_TARGET === "corner" ? "corner" : "panel";
 const SESSION_FILE_NAME = "secure-session.bin";
 const CREDENTIAL_VAULT_FILE_NAME = "secure-accounts.bin";
 const MAX_CREDENTIAL_ACCOUNTS = 20;
 const APP_ICON_PATH = path.join(__dirname, "..", "build", "icon.ico");
 const NOTICE_COLLAPSED_SIZE = { width: 82, height: 82 };
 const NOTICE_EXPANDED_SIZE = { width: 430, height: 178 };
-const STRONG_NOTICE_AUTO_HIDE_MS = 30_000;
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const SILENT_INSTALL_CHECK_INTERVAL_MS = 60 * 1000;
 const UPDATE_TEMP_DIR_NAME = ".tongpin-updater-temp";
 const UPDATE_INSTALL_FAILURE_MARKER_NAME = "updater-install-failed";
 const UPDATER_ERROR_DEDUP_WINDOW_MS = 2_000;
+const QUICK_CORNER_SIZE = 54;
+const QUICK_TRIGGER_SIZE = 12;
+const QUICK_PANEL_SIZE = { width: 380, height: 500 };
+const QUICK_CORNER_DWELL_MS = 150;
+const QUICK_CORNER_LEAVE_MS = 250;
+const QUICK_CORNER_POLL_MS = 80;
+const QUICK_TASK_REQUEST_TIMEOUT_MS = 12_000;
 let mainWindow = null;
 let noticeWindow = null;
+let quickCornerWindow = null;
+let quickPanelWindow = null;
 let noticeHideTimer = null;
 let activeNoticeId = "";
 let activeNoticeRequiresAcknowledgement = false;
 let activeNoticeAction = null;
 let updateReady = false;
 let updateInstallInProgress = false;
+let quickTasksAvailable = false;
+let quickTasksSuspended = false;
+let quickCornerPollTimer = null;
+let quickCornerShowTimer = null;
+let quickCornerHideTimer = null;
+const pendingQuickTaskRequests = new Map();
 const recentNoticeSounds = new Map();
 
 function prepareSameVolumeUpdaterTemp() {
@@ -102,6 +129,7 @@ const updateInstallCoordinator = createUpdateInstallCoordinator({
     if (noticeWindow && !noticeWindow.isDestroyed()) {
       noticeWindow.destroy();
     }
+    destroyQuickTaskWindows();
   },
   onInstallError: handleUpdaterInstallError,
   onDeferredInstallError: persistUpdateInstallFailureMarker,
@@ -251,6 +279,403 @@ function focusMainWindow() {
   mainWindow.focus();
 }
 
+function canShowQuickTasks() {
+  return (
+    !quickTasksSuspended &&
+    (isQuickTaskPreview ||
+      (quickTasksAvailable && mainWindow && !mainWindow.isDestroyed()))
+  );
+}
+
+function clearQuickCornerTimers() {
+  if (quickCornerShowTimer) {
+    clearTimeout(quickCornerShowTimer);
+    quickCornerShowTimer = null;
+  }
+  if (quickCornerHideTimer) {
+    clearTimeout(quickCornerHideTimer);
+    quickCornerHideTimer = null;
+  }
+}
+
+function rejectPendingQuickTaskRequests(message = "快捷待办已关闭") {
+  for (const pending of pendingQuickTaskRequests.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error(message));
+  }
+  pendingQuickTaskRequests.clear();
+}
+
+function hideQuickCorner({ animate = true } = {}) {
+  if (!quickCornerWindow || quickCornerWindow.isDestroyed()) return;
+  if (quickCornerHideTimer) {
+    clearTimeout(quickCornerHideTimer);
+    quickCornerHideTimer = null;
+  }
+  try {
+    quickCornerWindow.webContents.send("quick-task:corner-visibility", false);
+  } catch {
+    // The window can be closing while the poller is winding down.
+  }
+  if (!animate) {
+    quickCornerWindow.hide();
+    return;
+  }
+  quickCornerHideTimer = setTimeout(() => {
+    quickCornerHideTimer = null;
+    if (quickCornerWindow && !quickCornerWindow.isDestroyed()) {
+      quickCornerWindow.hide();
+    }
+  }, 190);
+}
+
+function hideQuickPanel() {
+  if (!quickPanelWindow || quickPanelWindow.isDestroyed()) return false;
+  try {
+    quickPanelWindow.webContents.send("quick-task:panel-visibility", false);
+  } catch {
+    // The window can be closing while the event is sent.
+  }
+  quickPanelWindow.hide();
+  return true;
+}
+
+function stopQuickCornerPolling() {
+  if (quickCornerPollTimer) {
+    clearInterval(quickCornerPollTimer);
+    quickCornerPollTimer = null;
+  }
+  clearQuickCornerTimers();
+}
+
+function destroyQuickTaskWindows() {
+  stopQuickCornerPolling();
+  rejectPendingQuickTaskRequests();
+  if (quickCornerWindow && !quickCornerWindow.isDestroyed()) {
+    quickCornerWindow.destroy();
+  }
+  if (quickPanelWindow && !quickPanelWindow.isDestroyed()) {
+    quickPanelWindow.destroy();
+  }
+  quickCornerWindow = null;
+  quickPanelWindow = null;
+}
+
+async function loadQuickTaskSurface(targetWindow, surface) {
+  const query = { surface };
+  if (isQuickTaskPreview) query.preview = "1";
+  if (isDevelopment) {
+    const target = new URL(process.env.VITE_DEV_SERVER_URL);
+    for (const [key, value] of Object.entries(query)) {
+      target.searchParams.set(key, value);
+    }
+    await targetWindow.loadURL(target.toString());
+    return;
+  }
+  await targetWindow.loadFile(
+    path.join(__dirname, "..", "dist", "renderer", "index.html"),
+    { query },
+  );
+}
+
+function configureQuickTaskWindowSecurity(targetWindow) {
+  targetWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  targetWindow.webContents.on("will-navigate", (event, url) => {
+    const developmentUrl = process.env.VITE_DEV_SERVER_URL;
+    const allowed =
+      (developmentUrl && url.startsWith(developmentUrl)) ||
+      url.startsWith("file://");
+    if (!allowed) event.preventDefault();
+  });
+}
+
+async function ensureQuickCornerWindow() {
+  if (quickCornerWindow && !quickCornerWindow.isDestroyed()) {
+    return quickCornerWindow;
+  }
+  quickCornerWindow = new BrowserWindow({
+    width: QUICK_CORNER_SIZE,
+    height: QUICK_CORNER_SIZE,
+    show: false,
+    transparent: true,
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    focusable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    ...(process.platform === "win32" ? { type: "toolbar" } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, "quick-task-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  quickCornerWindow.setAlwaysOnTop(true, "floating");
+  quickCornerWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: false,
+  });
+  configureQuickTaskWindowSecurity(quickCornerWindow);
+  quickCornerWindow.on("closed", () => {
+    quickCornerWindow = null;
+  });
+  await loadQuickTaskSurface(quickCornerWindow, "quick-corner");
+  return quickCornerWindow;
+}
+
+async function ensureQuickPanelWindow() {
+  if (quickPanelWindow && !quickPanelWindow.isDestroyed()) {
+    return quickPanelWindow;
+  }
+  quickPanelWindow = new BrowserWindow({
+    ...QUICK_PANEL_SIZE,
+    show: false,
+    transparent: true,
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    focusable: true,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    roundedCorners: true,
+    backgroundColor: "#00000000",
+    ...(process.platform === "win32" ? { type: "toolbar" } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, "quick-task-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  quickPanelWindow.setAlwaysOnTop(true, "floating");
+  quickPanelWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: false,
+  });
+  configureQuickTaskWindowSecurity(quickPanelWindow);
+  quickPanelWindow.on("closed", () => {
+    quickPanelWindow = null;
+    rejectPendingQuickTaskRequests();
+  });
+  await loadQuickTaskSurface(quickPanelWindow, "quick-panel");
+  return quickPanelWindow;
+}
+
+async function showQuickCorner(display, { force = false } = {}) {
+  if (!canShowQuickTasks()) return false;
+  if (quickPanelWindow && !quickPanelWindow.isDestroyed() && quickPanelWindow.isVisible()) {
+    return false;
+  }
+  if (quickCornerHideTimer) {
+    clearTimeout(quickCornerHideTimer);
+    quickCornerHideTimer = null;
+  }
+  const target = await ensureQuickCornerWindow();
+  if (!canShowQuickTasks()) return false;
+  const currentPoint = screen.getCursorScreenPoint();
+  const currentDisplay = screen.getDisplayNearestPoint(currentPoint);
+  if (
+    !force &&
+    (currentDisplay.id !== display.id ||
+      !pointInBounds(
+        currentPoint,
+        expandBounds(
+          getCornerWindowBounds(currentDisplay.bounds, QUICK_CORNER_SIZE),
+          5,
+        ),
+      ))
+  ) {
+    target.hide();
+    return false;
+  }
+  target.setBounds(
+    getCornerWindowBounds(display.bounds, QUICK_CORNER_SIZE),
+    false,
+  );
+  if (!target.isVisible()) target.showInactive();
+  setTimeout(() => {
+    if (quickCornerWindow && !quickCornerWindow.isDestroyed()) {
+      quickCornerWindow.webContents.send(
+        "quick-task:corner-visibility",
+        true,
+      );
+    }
+  }, 16);
+  return true;
+}
+
+async function showQuickPanel() {
+  if (!canShowQuickTasks()) return false;
+  const point = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(point);
+  const target = await ensureQuickPanelWindow();
+  if (!canShowQuickTasks()) return false;
+  hideQuickCorner({ animate: false });
+  target.setBounds(
+    getQuickPanelBounds(display.workArea, QUICK_PANEL_SIZE, 16),
+    false,
+  );
+  target.show();
+  target.focus();
+  target.webContents.send("quick-task:panel-visibility", true);
+  return true;
+}
+
+function pollQuickCorner() {
+  if (!canShowQuickTasks()) {
+    hideQuickCorner({ animate: false });
+    return;
+  }
+  if (
+    quickPanelWindow &&
+    !quickPanelWindow.isDestroyed() &&
+    quickPanelWindow.isVisible()
+  ) {
+    hideQuickCorner({ animate: false });
+    return;
+  }
+  const point = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(point);
+  const triggerBounds = getHotCornerTriggerBounds(
+    display.bounds,
+    QUICK_TRIGGER_SIZE,
+  );
+  const cornerBounds = getCornerWindowBounds(
+    display.bounds,
+    QUICK_CORNER_SIZE,
+  );
+  const inTrigger = pointInBounds(point, triggerBounds);
+  const inVisibleCorner =
+    quickCornerWindow &&
+    !quickCornerWindow.isDestroyed() &&
+    quickCornerWindow.isVisible() &&
+    pointInBounds(point, expandBounds(cornerBounds, 5));
+
+  if (inTrigger || inVisibleCorner) {
+    const wasHiding = Boolean(quickCornerHideTimer);
+    if (quickCornerHideTimer) {
+      clearTimeout(quickCornerHideTimer);
+      quickCornerHideTimer = null;
+    }
+    if (
+      wasHiding &&
+      quickCornerWindow &&
+      !quickCornerWindow.isDestroyed() &&
+      quickCornerWindow.isVisible()
+    ) {
+      quickCornerWindow.webContents.send(
+        "quick-task:corner-visibility",
+        true,
+      );
+    }
+    if (
+      !inVisibleCorner &&
+      (!quickCornerWindow ||
+        quickCornerWindow.isDestroyed() ||
+        !quickCornerWindow.isVisible()) &&
+      !quickCornerShowTimer
+    ) {
+      const displayId = display.id;
+      quickCornerShowTimer = setTimeout(() => {
+        quickCornerShowTimer = null;
+        const currentPoint = screen.getCursorScreenPoint();
+        const currentDisplay = screen.getDisplayNearestPoint(currentPoint);
+        if (
+          currentDisplay.id === displayId &&
+          pointInBounds(
+            currentPoint,
+            getHotCornerTriggerBounds(
+              currentDisplay.bounds,
+              QUICK_TRIGGER_SIZE,
+            ),
+          )
+        ) {
+          void showQuickCorner(currentDisplay);
+        }
+      }, QUICK_CORNER_DWELL_MS);
+    }
+    return;
+  }
+
+  if (quickCornerShowTimer) {
+    clearTimeout(quickCornerShowTimer);
+    quickCornerShowTimer = null;
+  }
+  if (
+    quickCornerWindow &&
+    !quickCornerWindow.isDestroyed() &&
+    quickCornerWindow.isVisible() &&
+    !quickCornerHideTimer
+  ) {
+    quickCornerHideTimer = setTimeout(() => {
+      quickCornerHideTimer = null;
+      hideQuickCorner();
+    }, QUICK_CORNER_LEAVE_MS);
+  }
+}
+
+function startQuickCornerPolling() {
+  if (quickCornerPollTimer || !canShowQuickTasks()) return;
+  pollQuickCorner();
+  quickCornerPollTimer = setInterval(
+    pollQuickCorner,
+    QUICK_CORNER_POLL_MS,
+  );
+}
+
+function repositionQuickTaskWindows() {
+  const point = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(point);
+  if (quickCornerWindow && !quickCornerWindow.isDestroyed()) {
+    quickCornerWindow.setBounds(
+      getCornerWindowBounds(display.bounds, QUICK_CORNER_SIZE),
+      false,
+    );
+  }
+  if (
+    quickPanelWindow &&
+    !quickPanelWindow.isDestroyed() &&
+    quickPanelWindow.isVisible()
+  ) {
+    quickPanelWindow.setBounds(
+      getQuickPanelBounds(display.workArea, QUICK_PANEL_SIZE, 16),
+      false,
+    );
+  }
+}
+
+function configureQuickTaskLifecycle() {
+  const suspend = () => {
+    quickTasksSuspended = true;
+    stopQuickCornerPolling();
+    hideQuickCorner({ animate: false });
+    hideQuickPanel();
+  };
+  const resume = () => {
+    quickTasksSuspended = false;
+    repositionQuickTaskWindows();
+    startQuickCornerPolling();
+  };
+  powerMonitor.on("suspend", suspend);
+  powerMonitor.on("lock-screen", suspend);
+  powerMonitor.on("resume", resume);
+  powerMonitor.on("unlock-screen", resume);
+  screen.on("display-added", repositionQuickTaskWindows);
+  screen.on("display-removed", repositionQuickTaskWindows);
+  screen.on("display-metrics-changed", repositionQuickTaskWindows);
+}
+
 function clearNoticeHideTimer() {
   if (noticeHideTimer) {
     clearTimeout(noticeHideTimer);
@@ -271,7 +696,8 @@ function playDesktopNoticeSound(payload) {
   }
   if (
     !shouldPlayNotificationSound({
-      enabled: payload?.playSound === true,
+      enabled:
+        payload?.playSound === true && payload?.customSound !== true,
       soundKey,
       lastPlayedAt: recentNoticeSounds.get(soundKey),
       now,
@@ -462,15 +888,10 @@ async function showDesktopNotice(payload) {
   window.showInactive();
   if (window.isVisible()) playDesktopNoticeSound(payload);
   clearNoticeHideTimer();
-  const autoHideMs = activeNoticeRequiresAcknowledgement
-    ? STRONG_NOTICE_AUTO_HIDE_MS
-    : 60_000;
+  if (activeNoticeRequiresAcknowledgement) return true;
   noticeHideTimer = setTimeout(
-    () =>
-      hideDesktopNotice({
-        notifyRenderer: activeNoticeRequiresAcknowledgement,
-      }),
-    autoHideMs,
+    () => hideDesktopNotice(),
+    60_000,
   );
   noticeHideTimer.unref();
   return true;
@@ -519,6 +940,8 @@ async function createWindow() {
   mainWindow.on("unmaximize", sendMaximizedState);
   mainWindow.on("closed", () => {
     mainWindow = null;
+    quickTasksAvailable = false;
+    destroyQuickTaskWindows();
     if (noticeWindow && !noticeWindow.isDestroyed()) {
       noticeWindow.destroy();
     }
@@ -575,6 +998,107 @@ function registerDesktopIpc() {
   });
   ipcMain.on("desktop:get-app-version", (event) => {
     event.returnValue = app.getVersion();
+  });
+
+  ipcMain.on("quick-task:set-availability", (event, enabled) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    quickTasksAvailable = Boolean(enabled);
+    if (quickTasksAvailable) {
+      startQuickCornerPolling();
+      return;
+    }
+    stopQuickCornerPolling();
+    hideQuickCorner({ animate: false });
+    hideQuickPanel();
+    rejectPendingQuickTaskRequests("登录状态已失效");
+  });
+
+  ipcMain.handle("quick-task:open-panel", async (event) => {
+    if (
+      !quickCornerWindow ||
+      event.sender !== quickCornerWindow.webContents
+    ) {
+      return false;
+    }
+    return showQuickPanel();
+  });
+
+  ipcMain.handle("quick-task:close-panel", (event) => {
+    if (!quickPanelWindow || event.sender !== quickPanelWindow.webContents) {
+      return false;
+    }
+    const hidden = hideQuickPanel();
+    startQuickCornerPolling();
+    return hidden;
+  });
+
+  ipcMain.handle("quick-task:open-main", (event) => {
+    if (!quickPanelWindow || event.sender !== quickPanelWindow.webContents) {
+      return false;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    hideQuickPanel();
+    focusMainWindow();
+    return true;
+  });
+
+  ipcMain.handle("quick-task:request", (event, value) => {
+    if (
+      !quickPanelWindow ||
+      event.sender !== quickPanelWindow.webContents ||
+      !quickTasksAvailable ||
+      !mainWindow ||
+      mainWindow.isDestroyed()
+    ) {
+      throw new Error("快捷待办暂不可用");
+    }
+    const command = normalizeQuickTaskCommand(value);
+    if (!command) throw new Error("快捷待办请求无效");
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingQuickTaskRequests.delete(requestId);
+        reject(new Error("快捷待办响应超时，请打开同频重试。"));
+      }, QUICK_TASK_REQUEST_TIMEOUT_MS);
+      pendingQuickTaskRequests.set(requestId, { resolve, reject, timer });
+      try {
+        mainWindow.webContents.send("quick-task:request", {
+          requestId,
+          command,
+        });
+      } catch {
+        clearTimeout(timer);
+        pendingQuickTaskRequests.delete(requestId);
+        reject(new Error("快捷待办暂不可用"));
+      }
+    });
+  });
+
+  ipcMain.on("quick-task:response", (event, requestId, response) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    const normalizedRequestId = String(requestId);
+    const pending = pendingQuickTaskRequests.get(normalizedRequestId);
+    if (!pending) return;
+    pendingQuickTaskRequests.delete(normalizedRequestId);
+    clearTimeout(pending.timer);
+    if (response?.ok === true) {
+      pending.resolve(response.data);
+      return;
+    }
+    pending.reject(
+      new Error(
+        typeof response?.error === "string"
+          ? response.error.slice(0, 240)
+          : "快捷待办操作失败",
+      ),
+    );
+  });
+
+  ipcMain.on("quick-task:changed", (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    if (quickPanelWindow && !quickPanelWindow.isDestroyed()) {
+      quickPanelWindow.webContents.send("quick-task:changed");
+    }
   });
 
   ipcMain.handle("window:minimize", (event) => {
@@ -1011,7 +1535,7 @@ function configureSystemResumeBridge() {
   powerMonitor.on("unlock-screen", sendResume);
 }
 
-app.setName("同频");
+app.setName(isQuickTaskPreview ? "同频快捷待办预览" : "同频");
 if (process.platform === "win32") {
   app.setAppUserModelId("com.tongpin.workbench");
 }
@@ -1019,16 +1543,37 @@ if (process.platform === "win32") {
 app.whenReady().then(async () => {
   configureApplicationMenu();
   registerDesktopIpc();
-  await createWindow();
+  if (isQuickTaskPreview) {
+    quickTasksAvailable = true;
+    if (quickTaskPreviewTarget === "corner") {
+      await showQuickCorner(screen.getPrimaryDisplay(), { force: true });
+    } else {
+      await showQuickPanel();
+    }
+  } else {
+    await createWindow();
+  }
   configureSystemResumeBridge();
+  configureQuickTaskLifecycle();
+  if (!isQuickTaskPreview || quickTaskPreviewTarget !== "corner") {
+    startQuickCornerPolling();
+  }
   configureUpdater();
   if (!isDevelopment && app.isPackaged) {
     schedulePersistedInstallFailureNotice();
   }
 
   app.on("activate", () => {
+    if (isQuickTaskPreview) {
+      if (quickTaskPreviewTarget === "corner") {
+        void showQuickCorner(screen.getPrimaryDisplay(), { force: true });
+      } else {
+        void showQuickPanel();
+      }
+      return;
+    }
     if (!mainWindow || mainWindow.isDestroyed()) {
-      void createWindow();
+      void createWindow().then(() => startQuickCornerPolling());
     } else {
       focusMainWindow();
     }

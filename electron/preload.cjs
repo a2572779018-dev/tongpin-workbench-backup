@@ -58,6 +58,18 @@ contextBridge.exposeInMainWorld("tongpin", {
     ipcRenderer.on("desktop:system-resume", listener);
     return () => ipcRenderer.removeListener("desktop:system-resume", listener);
   },
+  quickTasks: {
+    setAvailability: (enabled) =>
+      ipcRenderer.send("quick-task:set-availability", Boolean(enabled)),
+    onRequest: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("quick-task:request", listener);
+      return () => ipcRenderer.removeListener("quick-task:request", listener);
+    },
+    respond: (requestId, response) =>
+      ipcRenderer.send("quick-task:response", String(requestId), response),
+    notifyChanged: () => ipcRenderer.send("quick-task:changed"),
+  },
   installUpdate: () => ipcRenderer.invoke("updater:install"),
   windowControls: {
     minimize: () => ipcRenderer.invoke("window:minimize"),

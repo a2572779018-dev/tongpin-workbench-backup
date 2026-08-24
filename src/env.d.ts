@@ -84,6 +84,17 @@ interface DesktopSessionBridge {
     ) => void,
   ): () => void;
   onSystemResume(callback: () => void): () => void;
+  quickTasks: {
+    setAvailability(enabled: boolean): void;
+    onRequest(
+      callback: (payload: {
+        requestId: string;
+        command: QuickTaskCommand;
+      }) => void,
+    ): () => void;
+    respond(requestId: string, response: QuickTaskResponse): void;
+    notifyChanged(): void;
+  };
   installUpdate(): Promise<boolean>;
   windowControls: {
     minimize(): Promise<void>;
@@ -110,6 +121,29 @@ interface DesktopSessionBridge {
   ): () => void;
 }
 
+type QuickTaskPriority = "p0" | "p1" | "p2" | "p3" | "p4";
+type QuickTaskStatus = "todo" | "doing" | "done";
+
+type QuickTaskCommand =
+  | { type: "list-today" }
+  | { type: "create"; title: string; priority: QuickTaskPriority }
+  | { type: "update-status"; taskId: string; status: QuickTaskStatus };
+
+type QuickTaskResponse =
+  | { ok: true; data: unknown }
+  | { ok: false; error: string };
+
+interface QuickTaskSurfaceBridge {
+  request<T = unknown>(command: QuickTaskCommand): Promise<T>;
+  openPanel(): Promise<boolean>;
+  closePanel(): Promise<boolean>;
+  openMain(): Promise<boolean>;
+  onCornerVisibility(callback: (visible: boolean) => void): () => void;
+  onPanelVisibility(callback: (visible: boolean) => void): () => void;
+  onTasksChanged(callback: () => void): () => void;
+}
+
 interface Window {
   tongpin?: DesktopSessionBridge;
+  tongpinQuick?: QuickTaskSurfaceBridge;
 }

@@ -18,23 +18,23 @@ describe("release announcement", () => {
   });
 
   it("shows a release once and includes the version changes", () => {
-    const announcement = getReleaseAnnouncement("0.1.20");
+    const announcement = getReleaseAnnouncement("0.1.21");
 
     expect(
       shouldShowReleaseAnnouncement({
-        currentVersion: "0.1.20",
-        lastAnnouncedVersion: "0.1.19",
+        currentVersion: "0.1.21",
+        lastAnnouncedVersion: "0.1.20",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("BOSS 昨日员工工作进度汇报");
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("按员工催办");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("右下角快捷待办");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("即时通知提示音");
   });
 
   it("does not repeat an announcement for the same installed version", () => {
     expect(
       shouldShowReleaseAnnouncement({
-        currentVersion: "0.1.20",
-        lastAnnouncedVersion: "0.1.20",
+        currentVersion: "0.1.21",
+        lastAnnouncedVersion: "0.1.21",
       }),
     ).toBe(false);
   });

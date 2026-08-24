@@ -4,6 +4,7 @@ import { useAuth } from "./auth/AuthContext";
 import { AppShell, type AppView } from "./components/AppShell";
 import { CustomCursor } from "./components/CustomCursor";
 import { DesktopTitlebar } from "./components/DesktopTitlebar";
+import { QuickTaskBridge } from "./components/QuickTaskBridge";
 import { AdminConsole } from "./pages/AdminConsole";
 import { AuthPage } from "./pages/AuthPage";
 import { BossDashboard } from "./pages/BossDashboard";
@@ -138,6 +139,7 @@ export function App() {
 
   return (
     <>
+      <QuickTaskBridge />
       <CustomCursor />
       <DesktopTitlebar
         centerLabel={
