@@ -29,14 +29,14 @@ final result: passed
 
 - 源视觉真值：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-25656e7a-5989-443e-97c9-4a0984a7499d.png`，3008×2084。
 - 源快捷窗裁剪：`artifacts/quick-task-priority-source-crop.png`，从原图 760×1000 区域归一化为 380×500。
-- 实现截图：`artifacts/quick-task-priority-preview.png`，Electron CSS 视口 380×500，截图密度 1×。
-- 并排对照：`artifacts/quick-task-priority-comparison.png`，776×500。
+- 实现截图：`artifacts/quick-task-yellow-row-preview.png`，Electron CSS 视口 380×500，截图密度 1×。
+- 并排对照：`artifacts/quick-task-yellow-row-comparison.png`，776×500。
 - 状态：P2 默认选中；预览数据覆盖 P0 至 P4，P4 为已完成状态。
 
 ## 视觉检查
 
 - 任务卡片：P0 红、P1 粉、P2 黄、P3 蓝、P4 灰；已完成任务保持绿色卡片，等级标签继续显示其等级色。
-- 等级按钮：P0 至 P4 与任务卡片使用同一等级色；选中态用实线边框、硬阴影和轻微位移表达，不覆盖等级色。
+- 等级按钮：P0 至 P4 恢复统一浅黄色，当前选中项为黑底白字；任务卡片继续按等级分色。
 - 字体、间距、窗口尺寸、圆角、阴影、图标、按钮位置和既有文案均未改变。
 - “按轻重缓急”未重新加入；无新增解释文字、渐变或横向溢出。
 - 380×500 完整视图中创建区、等级按钮、任务列表和底部操作均保持可见，长列表继续在卡片内部滚动。
@@ -52,6 +52,7 @@ final result: passed
 
 - 第 1 次：修复全部黄色后，P0 至 P4 的按钮、卡片和标签已与主任务板颜色一致；未发现 P0、P1 或 P2 视觉问题。
 - 第 2 次：修复热角激活边界，避免快捷窗聚焦状态长期阻止 Dock 打开主窗；视觉未受影响。
+- 第 3 次：按确认稿将横排等级按钮恢复为统一黄色和黑色选中态，重新以 380×500 截图并排复核；任务卡片继续保留五档等级色，无 P0、P1 或 P2 视觉问题。
 
 final result: passed
 

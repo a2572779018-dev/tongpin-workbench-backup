@@ -240,7 +240,7 @@ body.quick-panel-surface #root {
   padding: 0;
   border: 1.5px solid #171717;
   border-radius: 7px;
-  background: #fffdf8;
+  background: rgba(255, 253, 248, 0.56);
   font-family: "DM Mono", monospace;
   font-size: 10px;
   font-weight: 700;
@@ -250,34 +250,13 @@ body.quick-panel-surface #root {
     transform 120ms ease;
 }
 
-.quick-task-priorities button.priority-p0 {
-  background: #ff6b64;
-}
-
-.quick-task-priorities button.priority-p1 {
-  background: #ffd3d0;
-}
-
-.quick-task-priorities button.priority-p2 {
-  background: #fff0a8;
-}
-
-.quick-task-priorities button.priority-p3 {
-  background: #dcecff;
-}
-
-.quick-task-priorities button.priority-p4 {
-  background: #ebe7df;
-}
-
 .quick-task-priorities button:hover {
   transform: translateY(-1px);
 }
 
 .quick-task-priorities button.is-selected {
-  box-shadow: 2px 2px 0 #171717;
-  color: #171717;
-  transform: translate(-1px, -1px);
+  background: #171717;
+  color: #fffdf8;
 }
 
 .quick-task-list-heading {

@@ -357,7 +357,7 @@ export function QuickTaskPanel() {
             {QUICK_TASK_PRIORITIES.map((option) => (
               <button
                 key={option}
-                className={`priority-${option}${priority === option ? " is-selected" : ""}`}
+                className={priority === option ? "is-selected" : ""}
                 type="button"
                 aria-pressed={priority === option}
                 title={TASK_PRIORITY_META[option].label}
