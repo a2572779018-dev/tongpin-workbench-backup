@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const require = createRequire(import.meta.url);
 const {
   getCornerWindowBounds,
+  getQuickCornerDisplayArea,
   getHotCornerTriggerBounds,
   getQuickPanelBounds,
   normalizeQuickTaskCommand,
@@ -33,6 +34,30 @@ describe("Electron quick task hot corner policy", () => {
       width: 380,
       height: 500,
     });
+  });
+
+  it("keeps the Windows hot corner above the taskbar", () => {
+    const display = {
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    };
+    const windowsArea = getQuickCornerDisplayArea(display, "win32");
+    expect(windowsArea).toEqual(display.workArea);
+    expect(getHotCornerTriggerBounds(windowsArea)).toEqual({
+      x: 1908,
+      y: 1028,
+      width: 12,
+      height: 12,
+    });
+    expect(getCornerWindowBounds(windowsArea)).toEqual({
+      x: 1866,
+      y: 986,
+      width: 54,
+      height: 54,
+    });
+    expect(getQuickCornerDisplayArea(display, "darwin")).toEqual(
+      display.bounds,
+    );
   });
 
   it("treats the bottom-right edge as inside without crossing displays", () => {

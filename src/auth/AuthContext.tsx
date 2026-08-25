@@ -70,9 +70,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const refreshInFlight = useRef<Promise<Session | null> | null>(null);
 
   const setSession = useCallback(async (next: Session | null) => {
+    await persistSession(next);
     sessionRef.current = next;
     setSessionState(next);
-    await persistSession(next);
   }, []);
 
   const refresh = useCallback(async (): Promise<Session | null> => {
@@ -197,6 +197,14 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const logout = useCallback(async () => {
     const current = sessionRef.current;
+    if (window.tongpin?.relationshipGraph) {
+      try {
+        const flushed = await window.tongpin.relationshipGraph.flushCurrent();
+        if (!flushed) return;
+      } catch {
+        return;
+      }
+    }
     if (current) {
       try {
         await publicRequest("/api/auth/logout", {
@@ -252,4 +260,3 @@ export function useAuth(): AuthContextValue {
   }
   return context;
 }
-

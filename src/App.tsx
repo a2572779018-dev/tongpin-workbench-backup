@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { LogOut, RefreshCw, WifiOff } from "lucide-react";
 import { useAuth } from "./auth/AuthContext";
 import { AppShell, type AppView } from "./components/AppShell";
 import { CustomCursor } from "./components/CustomCursor";
 import { DesktopTitlebar } from "./components/DesktopTitlebar";
 import { QuickTaskBridge } from "./components/QuickTaskBridge";
+import { RelationshipMapErrorBoundary } from "./components/RelationshipMapErrorBoundary";
 import { AdminConsole } from "./pages/AdminConsole";
 import { AuthPage } from "./pages/AuthPage";
 import { BossDashboard } from "./pages/BossDashboard";
@@ -21,6 +22,11 @@ import {
   roleAllowsAppView,
 } from "./lib/loraDashboardAccess";
 
+const RelationshipMapPage = lazy(async () => {
+  const module = await import("./pages/RelationshipMapPage");
+  return { default: module.RelationshipMapPage };
+});
+
 export function App() {
   const {
     loading,
@@ -31,6 +37,26 @@ export function App() {
   } = useAuth();
   const [view, setView] = useState<AppView>("home");
   const [homeLayout, setHomeLayout] = useState<HomeLayout>("lanes");
+  const relationshipExitInFlight = useRef(false);
+
+  const changeView = useCallback((nextView: AppView) => {
+    if (nextView === view || relationshipExitInFlight.current) return;
+    if (view !== "relations" || !window.tongpin?.relationshipGraph) {
+      setView(nextView);
+      return;
+    }
+
+    relationshipExitInFlight.current = true;
+    void window.tongpin.relationshipGraph
+      .flushCurrent()
+      .then((flushed) => {
+        if (flushed) setView(nextView);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        relationshipExitInFlight.current = false;
+      });
+  }, [view]);
 
   useEffect(() => {
     if (!session) return;
@@ -128,6 +154,15 @@ export function App() {
     content =
     view === "lora-chain" && canAccessLoraDashboard(session.user.role) ? (
       <LoraChainDashboard />
+    ) : view === "relations" && session.user.role === "member" ? (
+      <RelationshipMapErrorBoundary
+        resetKey={session.user.id}
+        onReturn={() => changeView("home")}
+      >
+        <Suspense fallback={<div className="relationship-map-loading">正在打开…</div>}>
+          <RelationshipMapPage userId={session.user.id} />
+        </Suspense>
+      </RelationshipMapErrorBoundary>
     ) : session.user.role === "admin" ? (
       <AdminConsole />
     ) : view === "boss" && session.user.role === "boss" ? (
@@ -143,19 +178,19 @@ export function App() {
       <CustomCursor />
       <DesktopTitlebar
         centerLabel={
-          session &&
-          !loading &&
-          !startupError &&
-          view === "home" &&
-          isLaneHomeLayout(homeLayout)
-            ? "今日待办"
+          session && !loading && !startupError
+            ? view === "relations"
+              ? "人物关系爆炸"
+              : view === "home" && isLaneHomeLayout(homeLayout)
+                ? "今日待办"
+                : undefined
             : undefined
         }
       />
       {session && !loading && !startupError ? (
         <AppShell
           view={view}
-          onViewChange={setView}
+          onViewChange={changeView}
           homeLayout={homeLayout}
           onHomeLayoutChange={changeHomeLayout}
         >

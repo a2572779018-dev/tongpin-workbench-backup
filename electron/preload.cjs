@@ -19,6 +19,36 @@ contextBridge.exposeInMainWorld("tongpin", {
     remove: (email) =>
       ipcRenderer.invoke("credentials:remove", String(email)),
   },
+  relationshipGraph: {
+    open: () => ipcRenderer.invoke("relationship-graph:open"),
+    save: ({ scopeToken, content, revision }) =>
+      ipcRenderer.invoke("relationship-graph:save", {
+        scopeToken: String(scopeToken),
+        content: String(content),
+        revision: Number(revision),
+      }),
+    flushCurrent: () => ipcRenderer.invoke("relationship-graph:flush-current"),
+    release: (scopeToken) =>
+      ipcRenderer.invoke("relationship-graph:release", String(scopeToken)),
+    onFlushRequest: (callback) => {
+      const listener = async (_event, requestId) => {
+        let ok = false;
+        try {
+          ok = (await callback()) === true;
+        } catch {
+          ok = false;
+        }
+        ipcRenderer.send(
+          "relationship-graph:flush-response",
+          String(requestId),
+          ok,
+        );
+      };
+      ipcRenderer.on("relationship-graph:flush-request", listener);
+      return () =>
+        ipcRenderer.removeListener("relationship-graph:flush-request", listener);
+    },
+  },
   notify: (payload) => ipcRenderer.invoke("notification:show", payload),
   dismissNotification: (notificationId) =>
     ipcRenderer.invoke("notification:dismiss", notificationId),

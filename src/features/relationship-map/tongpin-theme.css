@@ -1,0 +1,359 @@
+.relationship-map-embedded,
+html,
+body,
+#root {
+  min-width: 0;
+  min-height: 0;
+}
+
+.app-shell {
+  min-height: 0;
+}
+
+.style-button.is-active {
+  color: var(--text-dark);
+  background: var(--accent-soft);
+}
+
+.relationship-theme--tongpin {
+  --bg-color: #f8f1df;
+  --surface-raised: #fffdf7;
+  --surface-muted: #fff1ad;
+  --shadow-light: transparent;
+  --shadow-dark: #1f1f1f;
+  --text-dark: #1f1f1f;
+  --text-muted: #55514a;
+  --text-soft: #756f65;
+  --accent: #1f1f1f;
+  --accent-strong: #1f1f1f;
+  --accent-soft: #ffd84d;
+  --bronze: #795c00;
+  --oxblood: #8b2020;
+  --danger-soft: #ffd4d0;
+  --node-black: #1f1f1f;
+  --line-color: #1f1f1f;
+  color: #1f1f1f;
+  background: #f8f1df;
+}
+
+.relationship-theme--tongpin .app-header {
+  height: 78px;
+  flex-basis: 78px;
+  padding: 10px 20px;
+  border-bottom: 3px solid #1f1f1f;
+  background: #fffdf7;
+  box-shadow: 0 5px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .brand-mark,
+.relationship-theme--tongpin .search-box,
+.relationship-theme--tongpin .data-button,
+.relationship-theme--tongpin .privacy-button,
+.relationship-theme--tongpin .primary-button,
+.relationship-theme--tongpin .secondary-button,
+.relationship-theme--tongpin .icon-button,
+.relationship-theme--tongpin .danger-button,
+.relationship-theme--tongpin .mini-action-button,
+.relationship-theme--tongpin .relation-icon-button {
+  border: 2px solid #1f1f1f;
+  border-radius: 11px;
+  box-shadow: 3px 3px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .brand-mark {
+  color: #1f1f1f;
+  background: #ffd84d;
+}
+
+.relationship-theme--tongpin .brand-lockup p {
+  color: #55514a;
+}
+
+.relationship-theme--tongpin .search-box {
+  height: 46px;
+  color: #1f1f1f;
+  background: #fffdf7;
+}
+
+.relationship-theme--tongpin .search-box:focus-within {
+  box-shadow: 4px 4px 0 #1f1f1f;
+  transform: translate(-1px, -1px);
+}
+
+.relationship-theme--tongpin .data-button,
+.relationship-theme--tongpin .privacy-button,
+.relationship-theme--tongpin .secondary-button,
+.relationship-theme--tongpin .icon-button,
+.relationship-theme--tongpin .relation-icon-button {
+  color: #1f1f1f;
+  background: #fffdf7;
+}
+
+.relationship-theme--tongpin .person-add-button,
+.relationship-theme--tongpin .relation-add-button,
+.relationship-theme--tongpin .style-button.is-active,
+.relationship-theme--tongpin .privacy-button.is-active,
+.relationship-theme--tongpin .primary-button,
+.relationship-theme--tongpin .mini-action-button {
+  color: #1f1f1f;
+  background: #ffd84d;
+}
+
+.relationship-theme--tongpin .primary-button {
+  border: 2px solid #1f1f1f;
+}
+
+.relationship-theme--tongpin .data-button:hover,
+.relationship-theme--tongpin .privacy-button:hover,
+.relationship-theme--tongpin .primary-button:hover,
+.relationship-theme--tongpin .secondary-button:hover,
+.relationship-theme--tongpin .icon-button:hover,
+.relationship-theme--tongpin .mini-action-button:hover,
+.relationship-theme--tongpin .relation-icon-button:hover {
+  color: #1f1f1f;
+  background: #fff1ad;
+  box-shadow: 5px 5px 0 #1f1f1f;
+  transform: translate(-2px, -2px);
+}
+
+.relationship-theme--tongpin .data-button:active,
+.relationship-theme--tongpin .privacy-button:active,
+.relationship-theme--tongpin .primary-button:active,
+.relationship-theme--tongpin .secondary-button:active,
+.relationship-theme--tongpin .icon-button:active,
+.relationship-theme--tongpin .mini-action-button:active,
+.relationship-theme--tongpin .relation-icon-button:active {
+  box-shadow: 1px 1px 0 #1f1f1f;
+  transform: translate(2px, 2px);
+}
+
+.relationship-theme--tongpin .graph-workspace,
+.relationship-theme--tongpin .graph-workspace .react-flow {
+  background: #f8f1df;
+}
+
+.relationship-theme--tongpin .react-flow__edge-path {
+  filter: none;
+  stroke: #1f1f1f !important;
+}
+
+.relationship-theme--tongpin .person-avatar,
+.relationship-theme--tongpin .detail-avatar,
+.relationship-theme--tongpin .avatar-editor__preview {
+  color: #1f1f1f;
+  border: 3px solid #1f1f1f;
+  background: #ffd84d;
+  box-shadow: 4px 4px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .person-node--root .person-avatar {
+  color: #fffdf7;
+  border-width: 4px;
+  background: #1f1f1f;
+  box-shadow: 5px 5px 0 #ffd84d, 8px 8px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .person-node--close .person-avatar {
+  background: #8ab8f5;
+}
+
+.relationship-theme--tongpin .person-node--acquaintance .person-avatar {
+  background: #ffcaca;
+}
+
+.relationship-theme--tongpin .person-node--weak .person-avatar {
+  background: #bfeea5;
+}
+
+.relationship-theme--tongpin .person-node:hover .person-avatar,
+.relationship-theme--tongpin .person-node.is-selected .person-avatar,
+.relationship-theme--tongpin .person-node.is-match .person-avatar {
+  box-shadow: 6px 6px 0 #1f1f1f;
+  transform: translate(-2px, -2px) scale(1.04);
+}
+
+.relationship-theme--tongpin .person-node--root:hover .person-avatar,
+.relationship-theme--tongpin .person-node--root.is-selected .person-avatar {
+  box-shadow: 5px 5px 0 #ffd84d, 9px 9px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .person-caption {
+  border: 2px solid #1f1f1f;
+  border-radius: 9px;
+  background: #fffdf7;
+  box-shadow: 2px 2px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .person-level,
+.relationship-theme--tongpin .quick-card-kicker,
+.relationship-theme--tongpin .detail-kicker,
+.relationship-theme--tongpin .relation-dialog__header p,
+.relationship-theme--tongpin .report-header p {
+  color: #795c00;
+}
+
+.relationship-theme--tongpin .person-quick-card,
+.relationship-theme--tongpin .filter-dock,
+.relationship-theme--tongpin .privacy-status,
+.relationship-theme--tongpin .graph-legend,
+.relationship-theme--tongpin .interaction-hint,
+.relationship-theme--tongpin .detail-panel,
+.relationship-theme--tongpin .clay-controls.react-flow__controls {
+  border: 2px solid #1f1f1f;
+  border-radius: 15px;
+  background: #fffdf7;
+  box-shadow: 4px 4px 0 #1f1f1f;
+  backdrop-filter: none;
+}
+
+.relationship-theme--tongpin .person-quick-card {
+  border-radius: 17px;
+}
+
+.relationship-theme--tongpin .quick-card-detail,
+.relationship-theme--tongpin .quick-card-add {
+  color: #1f1f1f;
+  border: 2px solid #1f1f1f;
+  background: #ffd84d;
+  box-shadow: 3px 3px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .quick-card-add {
+  border-width: 3px;
+}
+
+.relationship-theme--tongpin .quick-card-meta {
+  border-color: #1f1f1f;
+}
+
+.relationship-theme--tongpin .filter-options button,
+.relationship-theme--tongpin .clay-controls .react-flow__controls-button {
+  color: #1f1f1f;
+  border: 2px solid #1f1f1f;
+  border-radius: 8px;
+  background: #fffdf7;
+  box-shadow: 2px 2px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .filter-options button.is-active,
+.relationship-theme--tongpin .filter-options button:hover,
+.relationship-theme--tongpin .clay-controls .react-flow__controls-button:hover {
+  color: #1f1f1f;
+  background: #ffd84d;
+  box-shadow: 2px 2px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .privacy-status {
+  background: #fff1ad;
+}
+
+.relationship-theme--tongpin .status-light {
+  border: 2px solid #1f1f1f;
+  background: #bfeea5;
+  box-shadow: none;
+}
+
+.relationship-theme--tongpin .layout-toggle {
+  color: #fffdf7;
+  border: 2px solid #1f1f1f;
+  border-radius: 12px;
+  background: #1f1f1f;
+  box-shadow: 4px 4px 0 #ffd84d;
+}
+
+.relationship-theme--tongpin .layout-toggle:hover {
+  color: #1f1f1f;
+  background: #ffd84d;
+  box-shadow: 4px 4px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .detail-panel {
+  border-radius: 18px;
+}
+
+.relationship-theme--tongpin .detail-tag,
+.relationship-theme--tongpin .detail-note,
+.relationship-theme--tongpin .report-privacy-note,
+.relationship-theme--tongpin .finding-index,
+.relationship-theme--tongpin .report-icon {
+  color: #1f1f1f;
+  border: 2px solid #1f1f1f;
+  border-radius: 9px;
+  background: #ffd84d;
+  box-shadow: 2px 2px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .detail-section,
+.relationship-theme--tongpin .report-summary article,
+.relationship-theme--tongpin .report-findings,
+.relationship-theme--tongpin .person-form__identity,
+.relationship-theme--tongpin .detail-relation-list li,
+.relationship-theme--tongpin .metric-grid article {
+  border: 2px solid #1f1f1f;
+  border-radius: 12px;
+  background: #fffdf7;
+  box-shadow: none;
+}
+
+.relationship-theme--tongpin .detail-relation-list__content span {
+  color: #1f1f1f;
+  background: #fff1ad;
+}
+
+.relationship-theme--tongpin .form-field input,
+.relationship-theme--tongpin .form-field select,
+.relationship-theme--tongpin .form-field textarea {
+  color: #1f1f1f;
+  border: 2px solid #1f1f1f;
+  border-radius: 10px;
+  background: #fffdf7;
+  box-shadow: none;
+}
+
+.relationship-theme--tongpin .form-field input:focus,
+.relationship-theme--tongpin .form-field select:focus,
+.relationship-theme--tongpin .form-field textarea:focus {
+  border-color: #1f1f1f;
+  box-shadow: 3px 3px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .modal-backdrop {
+  background: rgba(31, 31, 31, 0.32);
+  backdrop-filter: none;
+}
+
+.relationship-theme--tongpin .report-dialog,
+.relationship-theme--tongpin .relation-dialog,
+.relationship-theme--tongpin .person-dialog,
+.relationship-theme--tongpin .confirm-dialog {
+  border: 3px solid #1f1f1f;
+  border-radius: 18px;
+  background: #f8f1df;
+  box-shadow: 7px 7px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .danger-button {
+  color: #1f1f1f;
+  background: #ffcaca;
+}
+
+.relationship-theme--tongpin .import-notice {
+  color: #1f1f1f;
+  border: 2px solid #1f1f1f;
+  border-radius: 10px;
+  background: #ffd84d;
+  box-shadow: 3px 3px 0 #1f1f1f;
+}
+
+@media (max-width: 1500px) and (min-width: 1121px) {
+  .header-actions .data-button:not(.person-add-button):not(.relation-add-button) span,
+  .header-actions .privacy-button span {
+    display: none;
+  }
+
+  .header-actions .data-button:not(.person-add-button):not(.relation-add-button),
+  .header-actions .privacy-button {
+    min-width: 44px;
+    padding-inline: 12px;
+  }
+}

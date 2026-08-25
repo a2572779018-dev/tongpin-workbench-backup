@@ -42,6 +42,21 @@ interface DesktopSessionBridge {
     }): Promise<boolean>;
     remove(email: string): Promise<boolean>;
   };
+  relationshipGraph: {
+    open(): Promise<{
+      scopeToken: string;
+      content: string | null;
+      revision: number;
+    }>;
+    save(payload: {
+      scopeToken: string;
+      content: string;
+      revision: number;
+    }): Promise<{ revision: number }>;
+    flushCurrent(): Promise<boolean>;
+    release(scopeToken: string): Promise<boolean>;
+    onFlushRequest(callback: () => Promise<boolean>): () => void;
+  };
   notify(payload: {
     notificationId?: string;
     title: string;

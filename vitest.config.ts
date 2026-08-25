@@ -7,6 +7,7 @@ export default defineConfig({
       "server/**/*.test.ts",
       "cloudflare/src/**/*.test.ts",
       "src/**/*.test.ts",
+      "src/**/*.test.mjs",
     ],
     testTimeout: 15_000,
     sequence: {

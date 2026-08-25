@@ -1,10 +1,11 @@
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   Menu,
   powerMonitor,
@@ -41,6 +42,7 @@ const {
 } = require("./desktop-notice-policy.cjs");
 const {
   expandBounds,
+  getQuickCornerDisplayArea,
   getCornerWindowBounds,
   getHotCornerTriggerBounds,
   getQuickPanelBounds,
@@ -48,6 +50,10 @@ const {
   pointInBounds,
   shouldSuppressMainActivation,
 } = require("./quick-task-policy.cjs");
+const {
+  atomicWritePrivateFile,
+  createRelationshipGraphVault,
+} = require("./relationship-graph-vault.cjs");
 
 autoUpdater.logger = null;
 
@@ -59,6 +65,7 @@ const quickTaskPreviewTarget =
   process.env.TONGPIN_QUICK_PREVIEW_TARGET === "corner" ? "corner" : "panel";
 const SESSION_FILE_NAME = "secure-session.bin";
 const CREDENTIAL_VAULT_FILE_NAME = "secure-accounts.bin";
+const RELATIONSHIP_GRAPH_BINDING_FILE_NAME = "secure-relationship-binding.bin";
 const MAX_CREDENTIAL_ACCOUNTS = 20;
 const APP_ICON_PATH = path.join(__dirname, "..", "build", "icon.ico");
 const NOTICE_COLLAPSED_SIZE = { width: 82, height: 82 };
@@ -93,6 +100,13 @@ let quickCornerHideTimer = null;
 let quickPanelActivationSuppressedUntil = 0;
 const pendingQuickTaskRequests = new Map();
 const recentNoticeSounds = new Map();
+let relationshipGraphVault = null;
+let activeRelationshipGraphScope = null;
+let relationshipSessionGeneration = 0;
+let relationshipGraphOpenSequence = 0;
+let relationshipWindowCloseApproved = false;
+let relationshipQuitIntent = false;
+const pendingRelationshipFlushRequests = new Map();
 
 function prepareSameVolumeUpdaterTemp() {
   if (process.platform !== "win32") return null;
@@ -138,6 +152,7 @@ const updateInstallCoordinator = createUpdateInstallCoordinator({
 });
 
 function requestSilentInstallIfEligible(now = new Date()) {
+  if (updateInstallInProgress) return false;
   let idleSeconds = 0;
   try {
     idleSeconds = powerMonitor.getSystemIdleTime();
@@ -155,20 +170,33 @@ function requestSilentInstallIfEligible(now = new Date()) {
     return false;
   }
   updateInstallInProgress = true;
-  let started = false;
-  try {
-    started = updateInstallCoordinator.requestInstall();
-  } catch {
-    started = false;
-  }
-  if (!started) {
-    updateInstallInProgress = false;
-    sendUpdaterInstallError();
-  }
-  return started;
+  void (async () => {
+    const flushed = await requestRelationshipRendererFlush();
+    if (!flushed) {
+      updateInstallInProgress = false;
+      sendUpdaterInstallError();
+      return;
+    }
+    relationshipQuitIntent = true;
+    relationshipWindowCloseApproved = true;
+    let started = false;
+    try {
+      started = updateInstallCoordinator.requestInstall();
+    } catch {
+      started = false;
+    }
+    if (!started) {
+      relationshipQuitIntent = false;
+      relationshipWindowCloseApproved = false;
+      updateInstallInProgress = false;
+      sendUpdaterInstallError();
+    }
+  })();
+  return true;
 }
 
 app.on("before-quit", () => {
+  relationshipQuitIntent = true;
   if (process.platform !== "win32") return;
   if (!updateReady || updateInstallCoordinator.isInstallRequested()) return;
   try {
@@ -224,6 +252,8 @@ function sendUpdaterInstallError() {
 
 function handleUpdaterInstallError() {
   updateInstallInProgress = false;
+  relationshipQuitIntent = false;
+  relationshipWindowCloseApproved = false;
   return sendUpdaterInstallError();
 }
 
@@ -489,13 +519,14 @@ async function showQuickCorner(display, { force = false } = {}) {
   if (!canShowQuickTasks()) return false;
   const currentPoint = screen.getCursorScreenPoint();
   const currentDisplay = screen.getDisplayNearestPoint(currentPoint);
+  const currentCornerArea = getQuickCornerDisplayArea(currentDisplay);
   if (
     !force &&
     (currentDisplay.id !== display.id ||
       !pointInBounds(
         currentPoint,
         expandBounds(
-          getCornerWindowBounds(currentDisplay.bounds, QUICK_CORNER_SIZE),
+          getCornerWindowBounds(currentCornerArea, QUICK_CORNER_SIZE),
           5,
         ),
       ))
@@ -503,8 +534,9 @@ async function showQuickCorner(display, { force = false } = {}) {
     target.hide();
     return false;
   }
+  const cornerArea = getQuickCornerDisplayArea(display);
   target.setBounds(
-    getCornerWindowBounds(display.bounds, QUICK_CORNER_SIZE),
+    getCornerWindowBounds(cornerArea, QUICK_CORNER_SIZE),
     false,
   );
   if (!target.isVisible()) target.showInactive();
@@ -552,12 +584,13 @@ function pollQuickCorner() {
   }
   const point = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(point);
+  const cornerArea = getQuickCornerDisplayArea(display);
   const triggerBounds = getHotCornerTriggerBounds(
-    display.bounds,
+    cornerArea,
     QUICK_TRIGGER_SIZE,
   );
   const cornerBounds = getCornerWindowBounds(
-    display.bounds,
+    cornerArea,
     QUICK_CORNER_SIZE,
   );
   const inTrigger = pointInBounds(point, triggerBounds);
@@ -596,12 +629,13 @@ function pollQuickCorner() {
         quickCornerShowTimer = null;
         const currentPoint = screen.getCursorScreenPoint();
         const currentDisplay = screen.getDisplayNearestPoint(currentPoint);
+        const currentCornerArea = getQuickCornerDisplayArea(currentDisplay);
         if (
           currentDisplay.id === displayId &&
           pointInBounds(
             currentPoint,
             getHotCornerTriggerBounds(
-              currentDisplay.bounds,
+              currentCornerArea,
               QUICK_TRIGGER_SIZE,
             ),
           )
@@ -642,9 +676,10 @@ function startQuickCornerPolling() {
 function repositionQuickTaskWindows() {
   const point = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(point);
+  const cornerArea = getQuickCornerDisplayArea(display);
   if (quickCornerWindow && !quickCornerWindow.isDestroyed()) {
     quickCornerWindow.setBounds(
-      getCornerWindowBounds(display.bounds, QUICK_CORNER_SIZE),
+      getCornerWindowBounds(cornerArea, QUICK_CORNER_SIZE),
       false,
     );
   }
@@ -792,6 +827,242 @@ function sessionEmailFromPayload(payload) {
   }
 }
 
+function isMainRendererEvent(event) {
+  return Boolean(
+    mainWindow &&
+      !mainWindow.isDestroyed() &&
+      event?.sender === mainWindow.webContents &&
+      event?.senderFrame === mainWindow.webContents.mainFrame,
+  );
+}
+
+function assertMainRendererEvent(event) {
+  if (!isMainRendererEvent(event)) {
+    throw new Error("不允许从当前窗口访问本机安全数据");
+  }
+}
+
+async function readSecureSession() {
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try {
+    const encrypted = await fsp.readFile(
+      path.join(app.getPath("userData"), SESSION_FILE_NAME),
+    );
+    const payload = safeStorage.decryptString(encrypted);
+    const session = JSON.parse(payload);
+    if (!session || typeof session !== "object" || Array.isArray(session)) {
+      return null;
+    }
+    return { payload, session };
+  } catch {
+    return null;
+  }
+}
+
+function relationshipSessionFingerprint(refreshToken) {
+  return createHash("sha256").update(refreshToken).digest("hex");
+}
+
+function currentRelationshipSession(session) {
+  const userId = typeof session?.user?.id === "string" ? session.user.id.trim() : "";
+  const accessToken =
+    typeof session?.accessToken === "string" ? session.accessToken.trim() : "";
+  const refreshToken =
+    typeof session?.refreshToken === "string" ? session.refreshToken.trim() : "";
+  const role = typeof session?.user?.role === "string" ? session.user.role : "";
+  if (
+    !userId ||
+    userId.length > 160 ||
+    !accessToken ||
+    accessToken.length > 8_000 ||
+    !refreshToken ||
+    refreshToken.length > 8_000
+  ) {
+    throw new Error("登录状态无效，请重新登录后再打开人物关系爆炸");
+  }
+  return {
+    userId,
+    accessToken,
+    refreshToken,
+    role,
+    fingerprint: relationshipSessionFingerprint(refreshToken),
+  };
+}
+
+function getRelationshipGraphVault() {
+  if (!relationshipGraphVault) {
+    relationshipGraphVault = createRelationshipGraphVault({
+      userDataPath: app.getPath("userData"),
+      safeStorage,
+    });
+  }
+  return relationshipGraphVault;
+}
+
+async function writeRelationshipBinding(binding) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("系统安全存储不可用");
+  }
+  const encrypted = safeStorage.encryptString(
+    JSON.stringify({
+      version: 1,
+      userId: binding.userId,
+      role: "member",
+      sessionFingerprint: binding.fingerprint,
+      verifiedAt: new Date().toISOString(),
+    }),
+  );
+  await atomicWritePrivateFile(
+    path.join(app.getPath("userData"), RELATIONSHIP_GRAPH_BINDING_FILE_NAME),
+    encrypted,
+  );
+}
+
+async function readRelationshipBinding() {
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try {
+    const encrypted = await fsp.readFile(
+      path.join(app.getPath("userData"), RELATIONSHIP_GRAPH_BINDING_FILE_NAME),
+    );
+    const binding = JSON.parse(safeStorage.decryptString(encrypted));
+    if (
+      binding?.version !== 1 ||
+      binding.role !== "member" ||
+      typeof binding.userId !== "string" ||
+      typeof binding.sessionFingerprint !== "string"
+    ) {
+      return null;
+    }
+    return binding;
+  } catch {
+    return null;
+  }
+}
+
+async function clearRelationshipBinding() {
+  try {
+    await fsp.unlink(
+      path.join(app.getPath("userData"), RELATIONSHIP_GRAPH_BINDING_FILE_NAME),
+    );
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+async function verifyCurrentRelationshipMember() {
+  const stored = await readSecureSession();
+  if (!stored) {
+    throw new Error("请先登录成员账号");
+  }
+  const current = currentRelationshipSession(stored.session);
+  if (current.role !== "member") {
+    throw new Error("人物关系爆炸仅供当前成员账号使用");
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  timeout.unref?.();
+  let unavailable = false;
+  try {
+    const response = await fetch(`${getApiUrl()}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${current.accessToken}` },
+      signal: controller.signal,
+    });
+    if (response.ok) {
+      const result = await response.json();
+      const verifiedUser = result?.user;
+      if (
+        verifiedUser?.id !== current.userId ||
+        verifiedUser?.role !== "member"
+      ) {
+        throw new Error("人物关系爆炸仅供当前成员账号使用");
+      }
+      await writeRelationshipBinding(current);
+      return current;
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("登录状态已失效，请重新登录");
+    }
+    unavailable = response.status >= 500;
+    if (!unavailable) throw new Error("无法验证当前成员账号");
+  } catch (error) {
+    if (error instanceof Error && /登录状态|仅供|无法验证/.test(error.message)) {
+      throw error;
+    }
+    unavailable = true;
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (unavailable) {
+    const binding = await readRelationshipBinding();
+    if (
+      binding?.userId === current.userId &&
+      binding.sessionFingerprint === current.fingerprint
+    ) {
+      return current;
+    }
+  }
+  throw new Error("网络不可用，当前账号尚未完成本机安全验证");
+}
+
+function resetRelationshipGraphScope({ sessionChanged = false } = {}) {
+  if (sessionChanged) relationshipSessionGeneration += 1;
+  relationshipGraphOpenSequence += 1;
+  activeRelationshipGraphScope = null;
+}
+
+function resolvePendingRelationshipFlushRequests(ok) {
+  for (const [requestId, pending] of pendingRelationshipFlushRequests) {
+    pendingRelationshipFlushRequests.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(ok === true);
+  }
+}
+
+async function assertRelationshipSessionUnchanged(expected) {
+  if (relationshipSessionGeneration !== expected.generation) {
+    throw new Error("登录账号已变更，请重新打开人物关系爆炸");
+  }
+  const stored = await readSecureSession();
+  if (!stored) throw new Error("登录状态已失效，请重新登录");
+  const current = currentRelationshipSession(stored.session);
+  if (
+    current.userId !== expected.userId ||
+    current.fingerprint !== expected.fingerprint ||
+    relationshipSessionGeneration !== expected.generation
+  ) {
+    throw new Error("登录账号已变更，请重新打开人物关系爆炸");
+  }
+  return current;
+}
+
+async function requestRelationshipRendererFlush(timeoutMs = 3_000) {
+  const scope = activeRelationshipGraphScope;
+  if (!scope || !mainWindow || mainWindow.isDestroyed()) return true;
+  const requestId = randomUUID();
+  const acknowledged = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingRelationshipFlushRequests.delete(requestId);
+      resolve(false);
+    }, timeoutMs);
+    timer.unref?.();
+    pendingRelationshipFlushRequests.set(requestId, { resolve, timer });
+    try {
+      mainWindow.webContents.send("relationship-graph:flush-request", requestId);
+    } catch {
+      clearTimeout(timer);
+      pendingRelationshipFlushRequests.delete(requestId);
+      resolve(false);
+    }
+  });
+  try {
+    await getRelationshipGraphVault().flush(scope.userId);
+  } catch {
+    return false;
+  }
+  return acknowledged;
+}
+
 function hideDesktopNotice({ notifyRenderer = false } = {}) {
   const notificationId = activeNoticeId;
   const requiresAcknowledgement = activeNoticeRequiresAcknowledgement;
@@ -903,6 +1174,7 @@ async function showDesktopNotice(payload) {
 }
 
 async function createWindow() {
+  relationshipWindowCloseApproved = false;
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -943,7 +1215,39 @@ async function createWindow() {
   };
   mainWindow.on("maximize", sendMaximizedState);
   mainWindow.on("unmaximize", sendMaximizedState);
+  mainWindow.on("close", (event) => {
+    if (relationshipWindowCloseApproved || !activeRelationshipGraphScope) {
+      return;
+    }
+    event.preventDefault();
+    void requestRelationshipRendererFlush().then(async (flushed) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (!flushed) {
+        const choice = await dialog.showMessageBox(mainWindow, {
+          type: "warning",
+          title: "关系图尚未保存",
+          message: "人物关系图未能保存到本机",
+          detail: "返回后可以先导出 JSON；仍然关闭可能丢失最近修改。",
+          buttons: ["返回并导出", relationshipQuitIntent ? "仍然退出" : "仍然关闭"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (choice.response !== 1) {
+          relationshipQuitIntent = false;
+          return;
+        }
+      }
+      relationshipWindowCloseApproved = true;
+      if (relationshipQuitIntent) {
+        app.quit();
+      } else {
+        mainWindow.close();
+      }
+    });
+  });
   mainWindow.on("closed", () => {
+    resetRelationshipGraphScope();
     mainWindow = null;
     quickTasksAvailable = false;
     destroyQuickTaskWindows();
@@ -1136,25 +1440,48 @@ function registerDesktopIpc() {
     return true;
   });
 
-  ipcMain.handle("session:load", async () => {
-    if (!safeStorage.isEncryptionAvailable()) return null;
-    try {
-      const encrypted = await fsp.readFile(
-        path.join(app.getPath("userData"), SESSION_FILE_NAME),
-      );
-      return safeStorage.decryptString(encrypted);
-    } catch (error) {
-      if (error && error.code === "ENOENT") return null;
-      return null;
-    }
+  ipcMain.handle("session:load", async (event) => {
+    assertMainRendererEvent(event);
+    return (await readSecureSession())?.payload ?? null;
   });
 
-  ipcMain.handle("session:save", async (_event, payload) => {
+  ipcMain.handle("session:save", async (event, payload) => {
+    assertMainRendererEvent(event);
     if (typeof payload !== "string" || payload.length > 20_000) {
       throw new Error("无效的会话内容");
     }
     if (!safeStorage.isEncryptionAvailable()) {
       throw new Error("系统安全存储不可用，拒绝明文保存登录状态");
+    }
+    let nextSession;
+    let nextRelationshipSession;
+    try {
+      nextSession = JSON.parse(payload);
+      nextRelationshipSession = currentRelationshipSession(nextSession);
+    } catch {
+      throw new Error("无效的会话内容");
+    }
+    const previousStoredSession = await readSecureSession();
+    let previousRelationshipSession = null;
+    try {
+      previousRelationshipSession = previousStoredSession
+        ? currentRelationshipSession(previousStoredSession.session)
+        : null;
+    } catch {
+      previousRelationshipSession = null;
+    }
+    const sameMemberIdentity = Boolean(
+      previousRelationshipSession &&
+        previousRelationshipSession.userId === nextRelationshipSession.userId &&
+        previousRelationshipSession.role === "member" &&
+        nextRelationshipSession.role === "member",
+    );
+    const graphFlushed = await requestRelationshipRendererFlush();
+    if (!graphFlushed) {
+      throw new Error("人物关系图尚未保存，请先导出或重试");
+    }
+    if (!sameMemberIdentity) {
+      resetRelationshipGraphScope({ sessionChanged: true });
     }
     const encrypted = safeStorage.encryptString(payload);
     await fsp.mkdir(app.getPath("userData"), { recursive: true });
@@ -1162,6 +1489,30 @@ function registerDesktopIpc() {
       path.join(app.getPath("userData"), SESSION_FILE_NAME),
       encrypted,
     );
+    if (sameMemberIdentity) {
+      relationshipGraphOpenSequence += 1;
+      if (
+        activeRelationshipGraphScope?.userId === nextRelationshipSession.userId &&
+        activeRelationshipGraphScope.ready === true
+      ) {
+        activeRelationshipGraphScope.fingerprint =
+          nextRelationshipSession.fingerprint;
+        activeRelationshipGraphScope.openSequence = relationshipGraphOpenSequence;
+      } else if (activeRelationshipGraphScope) {
+        activeRelationshipGraphScope = null;
+      }
+      try {
+        await writeRelationshipBinding(nextRelationshipSession);
+      } catch {
+        // Session persistence must not fail solely because offline binding failed.
+      }
+    } else if (nextRelationshipSession.role !== "member") {
+      try {
+        await clearRelationshipBinding();
+      } catch {
+        // Session persistence must not fail solely because a stale binding remains.
+      }
+    }
     const sessionEmail = sessionEmailFromPayload(payload);
     if (sessionEmail) {
       try {
@@ -1172,7 +1523,26 @@ function registerDesktopIpc() {
     }
   });
 
-  ipcMain.handle("session:clear", async () => {
+  ipcMain.handle("session:clear", async (event) => {
+    assertMainRendererEvent(event);
+    const scopeToFlush = activeRelationshipGraphScope;
+    const graphFlushed = await requestRelationshipRendererFlush();
+    if (!graphFlushed) {
+      throw new Error("人物关系图尚未保存，请先导出或重试");
+    }
+    if (scopeToFlush) {
+      try {
+        await getRelationshipGraphVault().flush(scopeToFlush.userId);
+      } catch {
+        // Logout must still complete if a previous autosave failed.
+      }
+    }
+    resetRelationshipGraphScope({ sessionChanged: true });
+    try {
+      await clearRelationshipBinding();
+    } catch {
+      // The secure session is still cleared even if stale verification metadata remains.
+    }
     if (safeStorage.isEncryptionAvailable()) {
       try {
         const encrypted = await fsp.readFile(
@@ -1193,7 +1563,8 @@ function registerDesktopIpc() {
     }
   });
 
-  ipcMain.handle("credentials:list", async () => {
+  ipcMain.handle("credentials:list", async (event) => {
+    assertMainRendererEvent(event);
     const accounts = await readCredentialVault();
     return accounts.map((account) => ({
       email: account.email,
@@ -1203,7 +1574,8 @@ function registerDesktopIpc() {
     }));
   });
 
-  ipcMain.handle("credentials:load", async (_event, emailValue) => {
+  ipcMain.handle("credentials:load", async (event, emailValue) => {
+    assertMainRendererEvent(event);
     const email = normalizeCredentialEmail(emailValue);
     const accounts = await readCredentialVault();
     const account = accounts.find((candidate) => candidate.email === email);
@@ -1218,7 +1590,8 @@ function registerDesktopIpc() {
     };
   });
 
-  ipcMain.handle("credentials:save", async (_event, value) => {
+  ipcMain.handle("credentials:save", async (event, value) => {
+    assertMainRendererEvent(event);
     const email = normalizeCredentialEmail(value?.email);
     const password = typeof value?.password === "string" ? value.password : "";
     const rememberPassword = value?.rememberPassword !== false;
@@ -1243,13 +1616,121 @@ function registerDesktopIpc() {
     return true;
   });
 
-  ipcMain.handle("credentials:remove", async (_event, emailValue) => {
+  ipcMain.handle("credentials:remove", async (event, emailValue) => {
+    assertMainRendererEvent(event);
     const email = normalizeCredentialEmail(emailValue);
     const accounts = await readCredentialVault();
     await writeCredentialVault(
       accounts.filter((account) => account.email !== email),
     );
     return true;
+  });
+
+  ipcMain.handle("relationship-graph:open", async (event) => {
+    assertMainRendererEvent(event);
+    const openSequence = ++relationshipGraphOpenSequence;
+    const generation = relationshipSessionGeneration;
+    let scopeToken = null;
+    try {
+      const current = await verifyCurrentRelationshipMember();
+      const expected = {
+        generation,
+        userId: current.userId,
+        fingerprint: current.fingerprint,
+      };
+      await assertRelationshipSessionUnchanged(expected);
+      if (openSequence !== relationshipGraphOpenSequence) {
+        throw new Error("人物关系爆炸正在重新打开，请稍后重试");
+      }
+      scopeToken = randomUUID();
+      activeRelationshipGraphScope = {
+        scopeToken,
+        userId: current.userId,
+        fingerprint: current.fingerprint,
+        generation,
+        openSequence,
+        ready: false,
+      };
+      const loaded = await getRelationshipGraphVault().load(current.userId);
+      await assertRelationshipSessionUnchanged(expected);
+      if (
+        openSequence !== relationshipGraphOpenSequence ||
+        activeRelationshipGraphScope?.scopeToken !== scopeToken
+      ) {
+        throw new Error("人物关系爆炸正在重新打开，请稍后重试");
+      }
+      activeRelationshipGraphScope.ready = true;
+      return {
+        scopeToken,
+        content: loaded?.content ?? null,
+        revision: loaded?.revision ?? 0,
+      };
+    } catch (error) {
+      if (
+        scopeToken &&
+        activeRelationshipGraphScope?.scopeToken === scopeToken
+      ) {
+        resetRelationshipGraphScope();
+      }
+      throw error;
+    }
+  });
+
+  ipcMain.handle("relationship-graph:save", async (event, value) => {
+    assertMainRendererEvent(event);
+    const scope = activeRelationshipGraphScope;
+    if (
+      !scope ||
+      scope.ready !== true ||
+      typeof value?.scopeToken !== "string" ||
+      value.scopeToken !== scope.scopeToken ||
+      typeof value?.content !== "string" ||
+      !Number.isInteger(value?.revision) ||
+      value.revision < 1
+    ) {
+      throw new Error("关系图安全会话已失效，请重新打开此页面");
+    }
+    await assertRelationshipSessionUnchanged(scope);
+    if (
+      activeRelationshipGraphScope !== scope ||
+      relationshipGraphOpenSequence !== scope.openSequence
+    ) throw new Error("关系图安全会话已失效，请重新打开此页面");
+    const revision = await getRelationshipGraphVault().save(
+      scope.userId,
+      value.content,
+      value.revision,
+    );
+    return { revision };
+  });
+
+  ipcMain.handle("relationship-graph:flush-current", async (event) => {
+    assertMainRendererEvent(event);
+    return requestRelationshipRendererFlush();
+  });
+
+  ipcMain.handle("relationship-graph:release", async (event, scopeToken) => {
+    assertMainRendererEvent(event);
+    const scope = activeRelationshipGraphScope;
+    if (!scope || scope.scopeToken !== String(scopeToken)) return false;
+    try {
+      await getRelationshipGraphVault().flush(scope.userId);
+      resolvePendingRelationshipFlushRequests(true);
+    } finally {
+      if (activeRelationshipGraphScope === scope) {
+        resetRelationshipGraphScope();
+      }
+    }
+    return true;
+  });
+
+  ipcMain.on("relationship-graph:flush-response", (event, requestId, ok) => {
+    if (!isMainRendererEvent(event)) return;
+    const normalizedRequestId = String(requestId);
+    const pending = pendingRelationshipFlushRequests.get(normalizedRequestId);
+    if (!pending) return;
+    pendingRelationshipFlushRequests.delete(normalizedRequestId);
+    clearTimeout(pending.timer);
+    pending.resolve(ok === true);
   });
 
   ipcMain.handle("notification:show", async (event, payload) => {
@@ -1272,7 +1753,7 @@ function registerDesktopIpc() {
     return true;
   });
 
-  ipcMain.handle("updater:install", (event) => {
+  ipcMain.handle("updater:install", async (event) => {
     if (
       !mainWindow ||
       event.sender !== mainWindow.webContents ||
@@ -1280,15 +1761,30 @@ function registerDesktopIpc() {
     ) {
       return false;
     }
-    if (updateInstallCoordinator.isInstallRequested()) return false;
+    if (
+      updateInstallInProgress ||
+      updateInstallCoordinator.isInstallRequested()
+    ) return false;
     updateInstallInProgress = true;
+    const flushed = await requestRelationshipRendererFlush();
+    if (!flushed) {
+      updateInstallInProgress = false;
+      sendUpdaterInstallError();
+      return false;
+    }
+    relationshipQuitIntent = true;
+    relationshipWindowCloseApproved = true;
     let started = false;
     try {
       started = updateInstallCoordinator.requestInstall();
     } catch {
       started = false;
     }
-    if (!started) updateInstallInProgress = false;
+    if (!started) {
+      relationshipQuitIntent = false;
+      relationshipWindowCloseApproved = false;
+      updateInstallInProgress = false;
+    }
     return started;
   });
 
@@ -1410,6 +1906,10 @@ function configureUpdater() {
     return errorClass;
   };
 
+  autoUpdater.on("before-quit-for-update", () => {
+    relationshipQuitIntent = true;
+  });
+
   const scheduleRetry = (errorClass) => {
     if (retryTimer || updateReady || errorClass.retry !== "backoff") return;
     checkFailureCount += 1;
@@ -1489,7 +1989,11 @@ function configureUpdater() {
     ) {
       persistUpdateInstallFailureMarker();
     }
-    if (failedDuringInstall) updateInstallInProgress = false;
+    if (failedDuringInstall) {
+      updateInstallInProgress = false;
+      relationshipQuitIntent = false;
+      relationshipWindowCloseApproved = false;
+    }
   });
   autoUpdater.on("update-downloaded", (info) => {
     resetCheckFailures();

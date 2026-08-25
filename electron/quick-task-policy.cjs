@@ -46,6 +46,12 @@ function getQuickPanelBounds(
   };
 }
 
+function getQuickCornerDisplayArea(display, platform = process.platform) {
+  if (!display || typeof display !== "object") return null;
+  if (platform === "win32" && display.workArea) return display.workArea;
+  return display.bounds ?? display.workArea ?? null;
+}
+
 function expandBounds(bounds, amount) {
   return {
     x: bounds.x - amount,
@@ -103,6 +109,7 @@ function normalizeQuickTaskCommand(value) {
 
 module.exports = {
   expandBounds,
+  getQuickCornerDisplayArea,
   getCornerWindowBounds,
   getHotCornerTriggerBounds,
   getQuickPanelBounds,

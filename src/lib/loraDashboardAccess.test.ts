@@ -10,7 +10,13 @@ describe("LORA dashboard client access", () => {
     expect(canAccessLoraDashboard("boss")).toBe(true);
     expect(canAccessLoraDashboard("admin")).toBe(true);
     expect(canAccessLoraDashboard("member")).toBe(false);
-    expect(visibleAppViews("member")).toEqual(["home"]);
+    expect(visibleAppViews("member")).toEqual(["home", "relations"]);
+  });
+
+  it("allows the relationship map for members only", () => {
+    expect(roleAllowsAppView("member", "relations")).toBe(true);
+    expect(roleAllowsAppView("boss", "relations")).toBe(false);
+    expect(roleAllowsAppView("admin", "relations")).toBe(false);
   });
 
   it("rejects a member-selected dashboard view", () => {

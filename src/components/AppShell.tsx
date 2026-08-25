@@ -16,6 +16,7 @@ import {
   ClipboardCheck,
   LogOut,
   MessageCircle,
+  Network,
   RotateCcw,
   ShieldCheck,
   Shirt,
@@ -80,10 +81,16 @@ import {
   type WorkReportClaimTrigger,
 } from "../lib/workReportSchedule";
 
-export type AppView = "home" | "boss" | "admin" | "lora-chain";
+export type AppView =
+  | "home"
+  | "relations"
+  | "boss"
+  | "admin"
+  | "lora-chain";
 
 const PAGE_TITLES: Record<AppView, string> = {
   home: "我的任务",
+  relations: "人物关系爆炸",
   boss: "全员进度",
   admin: "账号与权限",
   "lora-chain": "LORA 链驾驶舱",
@@ -1110,6 +1117,15 @@ export function AppShell({
         label: "我的任务",
         icon: ClipboardCheck,
       },
+      ...(user.role === "member"
+        ? [
+            {
+              view: "relations" as const,
+              label: "人物关系爆炸",
+              icon: Network,
+            },
+          ]
+        : []),
       ...(user.role === "boss"
         ? [
             {
@@ -1225,6 +1241,7 @@ export function AppShell({
         "app-frame",
         isLaneHome ? "app-frame--lane-home" : "",
         view === "home" ? `home-layout-${homeLayout}` : "",
+        view === "relations" ? "app-frame--relations" : "",
         view === "lora-chain" ? "app-frame--lora-chain" : "",
       ]
         .filter(Boolean)
