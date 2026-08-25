@@ -1,42 +1,30 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const page = readFileSync(
+function readSource(url: URL): string {
+  return readFileSync(url, "utf8").replace(/\r\n/g, "\n");
+}
+
+const page = readSource(
   new URL("../pages/RelationshipMapPage.tsx", import.meta.url),
-  "utf8",
 );
-const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
-const viteConfig = readFileSync(
-  new URL("../../vite.config.ts", import.meta.url),
-  "utf8",
-);
-const preview = readFileSync(
+const app = readSource(new URL("../App.tsx", import.meta.url));
+const viteConfig = readSource(new URL("../../vite.config.ts", import.meta.url));
+const preview = readSource(
   new URL("../features/relationship-map/preview.tsx", import.meta.url),
-  "utf8",
 );
-const relationshipStyles = readFileSync(
+const relationshipStyles = readSource(
   new URL("../features/relationship-map/relationship-map.css", import.meta.url),
-  "utf8",
 );
-const appStyles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-const preload = readFileSync(
-  new URL("../../electron/preload.cjs", import.meta.url),
-  "utf8",
-);
-const electronMain = readFileSync(
-  new URL("../../electron/main.cjs", import.meta.url),
-  "utf8",
-);
-const authContext = readFileSync(
-  new URL("../auth/AuthContext.tsx", import.meta.url),
-  "utf8",
-);
-const relationshipApp = readFileSync(
+const appStyles = readSource(new URL("../styles.css", import.meta.url));
+const preload = readSource(new URL("../../electron/preload.cjs", import.meta.url));
+const electronMain = readSource(new URL("../../electron/main.cjs", import.meta.url));
+const authContext = readSource(new URL("../auth/AuthContext.tsx", import.meta.url));
+const relationshipApp = readSource(
   new URL(
     "../features/relationship-map/RelationshipMapApp.jsx",
     import.meta.url,
   ),
-  "utf8",
 );
 
 describe("relationship map integration boundary", () => {
