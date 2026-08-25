@@ -13,7 +13,9 @@ if (!fs.statSync(resolvedArchive).isFile()) {
   throw new Error("Packaged app.asar was not found");
 }
 
-const entries = new Set(asar.listPackage(resolvedArchive));
+const entries = new Set(
+  asar.listPackage(resolvedArchive).map((entry) => entry.replaceAll("\\", "/")),
+);
 const required = [
   "/electron/main.cjs",
   "/electron/preload.cjs",
