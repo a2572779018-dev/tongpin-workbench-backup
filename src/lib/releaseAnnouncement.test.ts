@@ -18,25 +18,23 @@ describe("release announcement", () => {
   });
 
   it("shows a release once and includes the version changes", () => {
-    const announcement = getReleaseAnnouncement("0.1.22");
+    const announcement = getReleaseAnnouncement("0.1.23");
 
     expect(
       shouldShowReleaseAnnouncement({
-        currentVersion: "0.1.22",
-        lastAnnouncedVersion: "0.1.21",
+        currentVersion: "0.1.23",
+        lastAnnouncedVersion: "0.1.22",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("P0–P4");
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "只打开快捷待办窗",
-    );
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("极简同频 Bot");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("双手遮住眼睛");
   });
 
   it("does not repeat an announcement for the same installed version", () => {
     expect(
       shouldShowReleaseAnnouncement({
-        currentVersion: "0.1.22",
-        lastAnnouncedVersion: "0.1.22",
+        currentVersion: "0.1.23",
+        lastAnnouncedVersion: "0.1.23",
       }),
     ).toBe(false);
   });

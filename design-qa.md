@@ -23,6 +23,45 @@ final result: passed
 
 ---
 
+# 登录页视觉跟随预览 QA
+
+## 视觉证据
+
+- 现有登录页对照：`artifacts/login-preview/reference-current-login.png`，1269×714。
+- 新版默认状态：`artifacts/login-preview/preview-login-motion.png`，1269×714。
+- 密码隐私状态：`artifacts/login-preview/preview-password-privacy.png`，1269×714。
+- 同屏对照：`artifacts/login-preview/login-visual-comparison.png`。
+- 密码动作对照：`artifacts/login-preview/password-visual-comparison.png`。
+- 响应式检查：`artifacts/login-preview/preview-900x900.png` 与 `artifacts/login-preview/preview-520x900.png`。
+
+## 视觉检查
+
+- 保留原登录页双栏、品牌标题、工作日票据、右侧表单、字号、边框和硬阴影；只在右侧邮箱输入框上方增加极简 Bot。
+- Bot 使用两张透明 PNG 实体素材：默认姿势双手趴住邮箱框上沿，密码姿势双手抬起并完整遮住双眼；沿用黄色、米白、粉色和墨色。
+- 不显示气泡、状态解释、隐私图标或额外小字；具体错误仍由原表单呈现。
+- 1269×714、900×900、520×900 均无页面横向溢出；账号下拉未被遮挡或裁剪。
+
+## 交互检查
+
+- 鼠标从左侧移到右侧时，Bot 以双手为支点轻微转头，眼睛跟随鼠标；不再上下悬浮。触屏和 `prefers-reduced-motion` 路径会关闭跟随动画。
+- 邮箱获得焦点并输入完整地址后，提示切换为“邮箱格式没问题”。
+- 密码框获得焦点后，Bot 双手遮眼；离开密码框后恢复趴在邮箱框上的默认姿势。显示密码按钮保持原功能和焦点语义。
+- 密码姿势在第二轮视觉复核中下移 15.2px，机身下沿已与邮箱框上沿贴合，不再呈现悬空间隔；默认姿势位置不变。
+- 历史账号下拉可打开并显示空状态；注册、返回登录和找回密码页面均可进入。
+- 登录提交、账号安全存储、会话恢复、注册验证和找回密码逻辑未改动。
+- 生产构建预览无浏览器 warning/error。
+
+## 验证结果
+
+- TypeScript 类型检查通过。
+- 43 个测试文件、206 项测试全部通过。
+- Vite 生产构建通过。
+- 视觉预览通过后进入 0.1.23 正式发布流程。
+
+final result: passed
+
+---
+
 # 快捷待办等级配色与热角行为 QA
 
 ## 视觉证据

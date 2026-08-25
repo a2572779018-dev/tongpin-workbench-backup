@@ -14,7 +14,12 @@ import {
   UserRound,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
+import { AuthCompanion } from "../components/AuthCompanion";
 import { ApiRequestError, publicRequest } from "../lib/api";
+import type {
+  AuthCompanionAction,
+  AuthCompanionField,
+} from "../lib/authCompanion";
 
 type AuthMode =
   | "login"
@@ -57,6 +62,8 @@ export function AuthPage() {
   >([]);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [accountBusyEmail, setAccountBusyEmail] = useState("");
+  const [activeField, setActiveField] = useState<AuthCompanionField>(null);
+  const [authAction, setAuthAction] = useState<AuthCompanionAction>("idle");
   const accountFieldRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -93,6 +100,11 @@ export function AuthPage() {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [accountMenuOpen]);
+
+  useEffect(() => {
+    setActiveField(null);
+    setAuthAction("idle");
+  }, [mode]);
 
   function moveTo(next: AuthMode) {
     setMode(next);
@@ -282,6 +294,16 @@ export function AuthPage() {
   }
 
   const isCodeStep = mode === "verify" || mode === "reset";
+  const activeFieldLength =
+    activeField === "name"
+      ? name.length
+      : activeField === "email"
+        ? email.length
+        : activeField === "password"
+          ? password.length
+          : activeField === "code"
+            ? code.length
+            : 0;
   const title = {
     login: "欢迎回来",
     register: "创建工作账号",
@@ -390,6 +412,17 @@ export function AuthPage() {
                 {isCodeStep && email && <p>{email}</p>}
               </div>
 
+              <AuthCompanion
+                mode={mode}
+                activeField={activeField}
+                fieldLength={activeFieldLength}
+                email={email}
+                loading={loading}
+                error={error}
+                notice={notice}
+                action={authAction}
+              />
+
               <form onSubmit={handleSubmit}>
                 {mode === "register" && (
                   <label className="field">
@@ -401,6 +434,12 @@ export function AuthPage() {
                         placeholder="例如：林小满"
                         value={name}
                         onChange={(event) => setName(event.target.value)}
+                        onFocus={() => setActiveField("name")}
+                        onBlur={() =>
+                          setActiveField((current) =>
+                            current === "name" ? null : current,
+                          )
+                        }
                         required
                         minLength={2}
                       />
@@ -428,6 +467,12 @@ export function AuthPage() {
                           setEmail(event.target.value);
                           setAccountMenuOpen(false);
                         }}
+                        onFocus={() => setActiveField("email")}
+                        onBlur={() =>
+                          setActiveField((current) =>
+                            current === "email" ? null : current,
+                          )
+                        }
                         required
                       />
                       {mode === "login" && (
@@ -527,6 +572,12 @@ export function AuthPage() {
                             event.target.value.replace(/\D/g, "").slice(0, 6),
                           )
                         }
+                        onFocus={() => setActiveField("code")}
+                        onBlur={() =>
+                          setActiveField((current) =>
+                            current === "code" ? null : current,
+                          )
+                        }
                         required
                         pattern="\d{6}"
                       />
@@ -553,6 +604,14 @@ export function AuthPage() {
                         }
                         value={password}
                         onChange={(event) => setPassword(event.target.value)}
+                        onFocus={() => setActiveField("password")}
+                        onBlur={(event) => {
+                          const nextTarget = event.relatedTarget as HTMLElement | null;
+                          if (nextTarget?.closest(".password-toggle")) return;
+                          setActiveField((current) =>
+                            current === "password" ? null : current,
+                          );
+                        }}
                         required
                         minLength={mode === "login" ? 1 : 8}
                       />
@@ -560,6 +619,12 @@ export function AuthPage() {
                         className="password-toggle"
                         type="button"
                         aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                        onFocus={() => setActiveField("password")}
+                        onBlur={() =>
+                          setActiveField((current) =>
+                            current === "password" ? null : current,
+                          )
+                        }
                         onClick={() => setShowPassword((value) => !value)}
                       >
                         {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
@@ -602,6 +667,13 @@ export function AuthPage() {
                   className="primary-button"
                   type="submit"
                   disabled={loading}
+                  onPointerEnter={() => setAuthAction("hover")}
+                  onPointerLeave={() => setAuthAction("idle")}
+                  onPointerDown={() => setAuthAction("pressed")}
+                  onPointerUp={() => setAuthAction("hover")}
+                  onPointerCancel={() => setAuthAction("idle")}
+                  onFocus={() => setAuthAction("hover")}
+                  onBlur={() => setAuthAction("idle")}
                 >
                   {loading
                     ? "正在处理…"
@@ -660,4 +732,3 @@ export function AuthPage() {
     </main>
   );
 }
-
