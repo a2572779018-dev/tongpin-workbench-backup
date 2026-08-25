@@ -57,10 +57,13 @@ export class LoraChainCollector {
     this.schedule(25);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    if (this.inFlight) {
+      await this.inFlight.catch(() => undefined);
+    }
   }
 
   refresh(): Promise<LoraDashboardData> {
@@ -115,4 +118,3 @@ export class LoraChainCollector {
     }
   }
 }
-

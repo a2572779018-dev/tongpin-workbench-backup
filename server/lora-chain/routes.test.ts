@@ -79,7 +79,7 @@ describe("LORA boss API permissions and daily claim persistence", () => {
   });
 
   afterAll(async () => {
-    runtime.loraCollector.stop();
+    await runtime.loraCollector.stop();
     const resolved = path.resolve(temporaryRoot);
     if (!resolved.startsWith(path.resolve(os.tmpdir()))) {
       throw new Error("拒绝清理非临时目录");
@@ -171,7 +171,7 @@ describe("LORA boss API permissions and daily claim persistence", () => {
         (database) => database.bossLoraReportOpens.length,
       ),
     ).toBe(1);
-    reopened.loraCollector.stop();
+    await reopened.loraCollector.stop();
   });
 
   it("accepts manual refresh asynchronously without waiting for Explorer", async () => {

@@ -78,7 +78,7 @@ describe("relationship map integration boundary", () => {
 
   it("flushes encrypted graph changes before navigation, logout, close, and update install", () => {
     expect(app).toContain("relationshipExitInFlight");
-    expect(app).toContain("relationshipGraph\n      .flushCurrent()");
+    expect(app).toMatch(/relationshipGraph\s*\.\s*flushCurrent\(\)/);
     expect(app).toContain("if (flushed) setView(nextView)");
     expect(authContext.indexOf("await persistSession(next)")).toBeLessThan(
       authContext.indexOf("setSessionState(next)"),
