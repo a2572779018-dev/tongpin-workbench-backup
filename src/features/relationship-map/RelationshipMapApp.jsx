@@ -10,36 +10,41 @@ import {
 import { gsap } from "gsap";
 import { Shirt } from "lucide-react";
 import {
-  ArrowsIn,
-  ArrowsOut,
   DownloadSimple,
-  FileText,
+  FlowArrow,
   FolderOpen,
   Graph,
   MagnifyingGlass,
-  Plus,
   ShieldCheck,
-  SlidersHorizontal,
+  TreeStructure,
   UserPlus,
   X,
 } from "@phosphor-icons/react";
 import { ConfirmDialog } from "./components/ConfirmDialog.jsx";
+import { CustomerTreeEdge } from "./components/CustomerTreeEdge.jsx";
 import { DetailPanel } from "./components/DetailPanel.jsx";
 import { PersonNode } from "./components/PersonNode.jsx";
 import { PersonModal } from "./components/PersonModal.jsx";
 import { RelationModal } from "./components/RelationModal.jsx";
-import { ReportModal } from "./components/ReportModal.jsx";
 import {
   createEdges,
   createNodes,
   connections as demoConnections,
   displayName,
-  expandedPositionFromLayout,
-  levelOptions,
   people as demoPeople,
-  positionFor,
-  relationshipLegend,
 } from "./data/graphData.js";
+import {
+  buildCustomerHierarchy,
+  hiddenDescendantCount,
+  isDescendantOf,
+  layoutCustomerTree,
+  visibleCustomerIds,
+} from "./data/customerTreeLayout.js";
+import {
+  CUSTOMER_COOPERATION_STATUS,
+  customerIdForEdge,
+  normalizeCustomerCooperationStatus,
+} from "./data/customerStatus.js";
 import {
   loadGraph,
   parseGraphFromStorage,
@@ -50,20 +55,14 @@ import { parseGraphDocument, serializeGraphDocument } from "./data/importGraph.j
 import { buildPersonRecord, planPersonDeletion } from "./data/personModel.js";
 import {
   createPrivacySafeGraph,
-  createPrivacySafeReportSummary,
-  relationshipReportTitle,
 } from "./data/privacyExport.js";
 import { connectionRecord, connectionsForPerson } from "./data/relationshipModel.js";
 import { focusPlanForNode } from "./data/graphInteraction.js";
 
 const nodeTypes = { person: PersonNode };
+const edgeTypes = { customerTree: CustomerTreeEdge };
 const MAX_GRAPH_BYTES = 25 * 1024 * 1024;
-const DEFAULT_GRAPH_TITLE = "Murmur 本地关系分析";
-
-function isVisibleAtLevel(personLevel, filter) {
-  if (filter === "all" || personLevel === "self") return true;
-  return personLevel === filter;
-}
+const DEFAULT_GRAPH_TITLE = "已合作客户脉络图";
 
 function normalizeSearch(value) {
   return value.trim().toLocaleLowerCase("zh-CN");
@@ -94,7 +93,7 @@ function initialGraphState(storageKey, allowLocalStorage) {
 function peopleWithExpandedPositions(peopleList) {
   return peopleList.map((person) => ({
     ...person,
-    position: positionFor(person.id, "expanded", peopleList),
+    position: person.position,
   }));
 }
 
@@ -129,14 +128,14 @@ export function RelationshipMapApp({
   const [selectedId, setSelectedId] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [privacy, setPrivacy] = useState(false);
-  const [levelFilter, setLevelFilter] = useState("all");
-  const [layout, setLayout] = useState("expanded");
+  const [layout, setLayout] = useState("horizontal");
+  const [expandedIds, setExpandedIds] = useState(() => new Set(["self"]));
   const [search, setSearch] = useState("");
-  const [reportOpen, setReportOpen] = useState(false);
   const [relationEditor, setRelationEditor] = useState(null);
   const [pendingDeleteIndex, setPendingDeleteIndex] = useState(null);
   const [personEditor, setPersonEditor] = useState(null);
   const [pendingPersonDeleteId, setPendingPersonDeleteId] = useState(null);
+  const [pendingRelink, setPendingRelink] = useState(null);
   const [importNotice, setImportNotice] = useState(null);
   const [storageStatus, setStorageStatus] = useState(
     secureStorage
@@ -180,9 +179,9 @@ export function RelationshipMapApp({
     setDetailOpen(true);
   }, []);
 
-  const openQuickRelation = useCallback((personId) => {
+  const openQuickPerson = useCallback((parentId = "self") => {
     modalReturnFocusRef.current = activeElementWithinApp();
-    setRelationEditor({ mode: "create", initialSource: personId || "self" });
+    setPersonEditor({ mode: "create", initialParentId: parentId || "self" });
   }, [activeElementWithinApp]);
 
   const markGraphChanged = useCallback(() => {
@@ -202,6 +201,30 @@ export function RelationshipMapApp({
     })),
     [graphPeople, privacy],
   );
+
+  const hierarchy = useMemo(
+    () => buildCustomerHierarchy(graphPeople, graphConnections),
+    [graphConnections, graphPeople],
+  );
+
+  const treeVisibleIds = useMemo(
+    () => visibleCustomerIds(hierarchy, expandedIds),
+    [expandedIds, hierarchy],
+  );
+
+  const layoutPositions = useMemo(
+    () => layoutCustomerTree(hierarchy, treeVisibleIds, layout),
+    [hierarchy, layout, treeVisibleIds],
+  );
+
+  const toggleBranch = useCallback((personId) => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (next.has(personId)) next.delete(personId);
+      else next.add(personId);
+      return next;
+    });
+  }, []);
 
   const selectedRelations = useMemo(() => {
     if (!selectedPerson) return [];
@@ -226,18 +249,33 @@ export function RelationshipMapApp({
     );
   }, [graphPeople, query]);
 
-  const visibleNodeIds = useMemo(() => {
-    return new Set(
-      graphPeople
-        .filter((person) => isVisibleAtLevel(person.level, levelFilter))
-        .map((person) => person.id),
-    );
-  }, [graphPeople, levelFilter]);
+  const visibleNodeIds = treeVisibleIds;
 
   const visibleSearchMatches = useMemo(
     () => new Set([...searchMatches].filter((personId) => visibleNodeIds.has(personId))),
     [searchMatches, visibleNodeIds],
   );
+
+  useEffect(() => {
+    if (!query || searchMatches.size === 0) return;
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      let changed = false;
+
+      for (const personId of searchMatches) {
+        let ancestorId = hierarchy.parentById.get(personId);
+        while (ancestorId) {
+          if (!next.has(ancestorId)) {
+            next.add(ancestorId);
+            changed = true;
+          }
+          ancestorId = hierarchy.parentById.get(ancestorId);
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [hierarchy, query, searchMatches]);
 
   const renderedNodes = useMemo(
     () =>
@@ -259,12 +297,22 @@ export function RelationshipMapApp({
             quickCardOpen: selectedId === node.id && !detailOpen,
             quickCardSide: "right",
             relationCount: connectionsForPerson(graphConnections, node.id).length,
+            depth: hierarchy.depthById.get(node.id) ?? 0,
+            layerLabel: node.id === "self"
+              ? "客户中心"
+              : `第 ${hierarchy.depthById.get(node.id) ?? 1} 层客户`,
+            hasChildren: (hierarchy.childrenById.get(node.id) ?? []).length > 0,
+            isExpanded: expandedIds.has(node.id),
+            visibleChildCount: (hierarchy.childrenById.get(node.id) ?? [])
+              .filter((childId) => treeVisibleIds.has(childId)).length,
+            hiddenDescendantCount: hiddenDescendantCount(node.id, hierarchy, treeVisibleIds),
             onOpenDetails: openQuickDetails,
-            onAddRelation: openQuickRelation,
+            onAddPerson: openQuickPerson,
+            onToggleExpand: toggleBranch,
           },
         };
       }),
-    [detailOpen, graphConnections, graphPeople, nodes, openQuickDetails, openQuickRelation, privacy, query, selectedId, visibleNodeIds, visibleSearchMatches],
+    [detailOpen, expandedIds, graphConnections, graphPeople, hierarchy, nodes, openQuickDetails, openQuickPerson, privacy, query, selectedId, toggleBranch, treeVisibleIds, visibleNodeIds, visibleSearchMatches],
   );
 
   const renderedEdges = useMemo(
@@ -293,6 +341,60 @@ export function RelationshipMapApp({
     [edges, query, selectedId, visibleNodeIds, visibleSearchMatches],
   );
 
+  useEffect(() => {
+    const peopleById = new Map(graphPeople.map((person) => [person.id, person]));
+    const nextNodes = createNodes("expanded", graphPeople).map((node) => ({
+      ...node,
+      position: layoutPositions.get(node.id) || node.position,
+      selected: node.id === selectedId,
+    }));
+    const nextEdges = createEdges(
+      graphConnections,
+      graphPeople,
+      "expanded",
+      layoutPositions,
+    ).map((edge, index) => {
+      const kind = hierarchy.treeEdgeIndexes.has(index) ? "primary" : "cross";
+      const customerId = customerIdForEdge(edge.source, edge.target, hierarchy.depthById);
+      const cooperationStatus = normalizeCustomerCooperationStatus(
+        peopleById.get(customerId)?.cooperationStatus,
+      );
+      const isPendingCustomer = cooperationStatus === CUSTOMER_COOPERATION_STATUS.PENDING;
+      const isHorizontalTreeEdge = kind === "primary" && layout === "horizontal";
+      const isPyramidTreeEdge = kind === "primary" && layout === "pyramid";
+      return {
+        ...edge,
+        sourceHandle: isHorizontalTreeEdge
+          ? "source-right"
+          : isPyramidTreeEdge
+            ? "source-bottom"
+            : edge.sourceHandle,
+        targetHandle: isHorizontalTreeEdge
+          ? "target-left"
+          : isPyramidTreeEdge
+            ? "target-top"
+            : edge.targetHandle,
+        type: kind === "primary" ? "customerTree" : edge.type,
+        style: {
+          ...edge.style,
+          opacity: kind === "cross" ? 0 : edge.data?.baseOpacity,
+          strokeDasharray: isPendingCustomer ? "7 8" : undefined,
+        },
+        data: { ...edge.data, kind, layout, cooperationStatus, customerId },
+      };
+    });
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    const fitTimer = window.setTimeout(() => {
+      flowInstance?.fitView({
+        nodes: nextNodes.filter((node) => treeVisibleIds.has(node.id)),
+        padding: 0.16,
+        duration: 420,
+      });
+    }, 40);
+    return () => window.clearTimeout(fitTimer);
+  }, [flowInstance, graphConnections, graphPeople, hierarchy, layoutPositions, selectedId, setEdges, setNodes, treeVisibleIds]);
+
   const closeDetails = useCallback(() => {
     setDetailOpen(false);
     setSelectedId(null);
@@ -309,6 +411,24 @@ export function RelationshipMapApp({
   }, [selectedId]);
 
   const selectAndFocusPerson = useCallback((node) => {
+    const children = hierarchy.childrenById.get(node.id) ?? [];
+    const shouldExpand = children.length > 0 && !expandedIds.has(node.id);
+    if (shouldExpand) {
+      setSelectedId(null);
+      setDetailOpen(false);
+      setExpandedIds((current) => new Set(current).add(node.id));
+      setNodes((currentNodes) => currentNodes.map((currentNode) => ({
+        ...currentNode,
+        selected: false,
+      })));
+      window.setTimeout(() => {
+        const branchNodes = [node.id, ...children]
+          .map((personId) => flowInstance?.getNode(personId))
+          .filter(Boolean);
+        flowInstance?.fitView({ nodes: branchNodes, padding: 0.28, duration: 520 });
+      }, 80);
+      return;
+    }
     setSelectedId(node.id);
     setDetailOpen(false);
     setNodes((currentNodes) => currentNodes.map((currentNode) => ({
@@ -317,10 +437,13 @@ export function RelationshipMapApp({
     })));
 
     if (!flowInstance) return;
-    const plan = focusPlanForNode(node, flowInstance.getZoom());
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    flowInstance.setCenter(plan.x, plan.y, { zoom: plan.zoom, duration: reduceMotion ? 0 : 520 });
-  }, [flowInstance, setNodes]);
+    window.setTimeout(() => {
+      const currentNode = flowInstance.getNode(node.id) || node;
+      const plan = focusPlanForNode(currentNode, flowInstance.getZoom());
+      flowInstance.setCenter(plan.x, plan.y, { zoom: plan.zoom, duration: reduceMotion ? 0 : 520 });
+    }, 40);
+  }, [expandedIds, flowInstance, hierarchy, setNodes]);
 
   const rememberModalTrigger = useCallback(() => {
     modalReturnFocusRef.current = activeElementWithinApp();
@@ -361,6 +484,10 @@ export function RelationshipMapApp({
     restoreModalTrigger();
   }, [restoreModalTrigger]);
 
+  const closeRelinkDialog = useCallback(() => {
+    setPendingRelink(null);
+  }, []);
+
   const openCreateRelation = useCallback((sourceId) => {
     rememberModalTrigger();
     setRelationEditor({ mode: "create", initialSource: sourceId || selectedId || "self" });
@@ -376,9 +503,9 @@ export function RelationshipMapApp({
     setPendingDeleteIndex(index);
   }, [rememberModalTrigger]);
 
-  const openCreatePerson = useCallback(() => {
+  const openCreatePerson = useCallback((parentId = "self") => {
     rememberModalTrigger();
-    setPersonEditor({ mode: "create" });
+    setPersonEditor({ mode: "create", initialParentId: parentId || "self" });
   }, [rememberModalTrigger]);
 
   const openEditPerson = useCallback((personId) => {
@@ -400,26 +527,26 @@ export function RelationshipMapApp({
     const onKeyDown = (event) => {
       if (event.key !== "Escape") return;
       if (pendingPersonDeleteId !== null) closePersonDeleteDialog();
+      else if (pendingRelink !== null) closeRelinkDialog();
       else if (pendingDeleteIndex !== null) closeDeleteDialog();
       else if (personEditor) closePersonEditor();
       else if (relationEditor) closeRelationEditor();
-      else if (reportOpen) setReportOpen(false);
       else if (detailOpen) closeDetailPanel();
       else closeDetails();
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeDeleteDialog, closeDetailPanel, closeDetails, closePersonDeleteDialog, closePersonEditor, closeRelationEditor, detailOpen, pendingDeleteIndex, pendingPersonDeleteId, personEditor, relationEditor, reportOpen]);
+  }, [closeDeleteDialog, closeDetailPanel, closeDetails, closePersonDeleteDialog, closePersonEditor, closeRelationEditor, closeRelinkDialog, detailOpen, pendingDeleteIndex, pendingPersonDeleteId, pendingRelink, personEditor, relationEditor]);
 
   const focusFirstMatch = useCallback(() => {
-    if (!flowInstance || visibleSearchMatches.size === 0) return;
-    const matchId = [...visibleSearchMatches][0];
+    if (!flowInstance || searchMatches.size === 0) return;
+    const matchId = [...searchMatches][0];
     const matchingNode = renderedNodes.find((node) => node.id === matchId);
     if (!matchingNode) return;
 
     selectAndFocusPerson(matchingNode);
-  }, [flowInstance, renderedNodes, selectAndFocusPerson, visibleSearchMatches]);
+  }, [flowInstance, renderedNodes, searchMatches, selectAndFocusPerson]);
 
   const showImportNotice = useCallback((type, message) => {
     setImportNotice({ type, message });
@@ -455,8 +582,7 @@ export function RelationshipMapApp({
         setGraphPeople(loaded.graph.people);
         setGraphConnections(loaded.graph.connections);
         setGraphTitle(loaded.graph.title);
-        setNodes(createNodes("expanded", loaded.graph.people));
-        setEdges(createEdges(loaded.graph.connections, loaded.graph.people, "expanded"));
+        setExpandedIds(new Set(["self"]));
         setStorageStatus("已恢复加密本机数据");
       } else {
         setStorageStatus("加密自动保存已开启");
@@ -627,20 +753,17 @@ export function RelationshipMapApp({
     setGraphPeople(document.people);
     setGraphConnections(document.connections);
     setGraphTitle(document.title);
-    setNodes(createNodes("expanded", document.people));
-    setEdges(createEdges(document.connections, document.people, "expanded"));
+    setExpandedIds(new Set(["self"]));
     setSelectedId(null);
     setDetailOpen(false);
-    setLevelFilter("all");
     setSearch("");
-    setLayout("expanded");
-    setReportOpen(false);
+    setLayout("horizontal");
     setRelationEditor(null);
     setPendingDeleteIndex(null);
     setPersonEditor(null);
     setPendingPersonDeleteId(null);
     markGraphChanged();
-    showImportNotice("success", `已载入 ${document.people.length} 个人物 · ${sourceName}`);
+    showImportNotice("success", `已载入 ${Math.max(0, document.people.length - 1)} 位客户 · ${sourceName}`);
     window.setTimeout(() => {
       flowInstance?.fitView({ padding: 0.16, duration: 680, includeHiddenNodes: false });
     }, 120);
@@ -706,36 +829,8 @@ export function RelationshipMapApp({
     }
   }, [graphConnections, graphPeople, graphTitle, privacy, saveJson, showImportNotice]);
 
-  const exportReport = useCallback(async () => {
-    const corePeople = graphPeople.filter((person) => person.level === "core");
-    const mostActive = [...graphPeople].filter((person) => person.id !== "self")
-      .sort((a, b) => b.interactions - a.interactions)[0];
-    const report = {
-      title: relationshipReportTitle(graphTitle, privacy),
-      generatedAt: new Date().toISOString(),
-      summary: privacy
-        ? createPrivacySafeReportSummary()
-        : {
-            people: graphPeople.length,
-            connections: graphConnections.length,
-            corePeople: corePeople.length,
-            mostActive: mostActive
-              ? { id: mostActive.id, name: mostActive.name, interactions: mostActive.interactions }
-              : null,
-          },
-      privacyMode: privacy,
-      note: "报告由本地演示规则生成，不包含聊天正文。",
-    };
-    try {
-      await saveJson("murmur-relationship-report.json", JSON.stringify(report, null, 2));
-      setReportOpen(false);
-    } catch (error) {
-      showImportNotice("error", error instanceof Error ? error.message : "报告导出失败");
-    }
-  }, [graphConnections.length, graphPeople, graphTitle, privacy, saveJson, showImportNotice]);
-
-  const switchLayout = useCallback(() => {
-    const nextLayout = layout === "expanded" ? "compact" : "expanded";
+  const switchLayout = useCallback((nextLayout) => {
+    if (nextLayout === layout) return;
     // React Flow owns the outer node transform for x/y positioning. Animating
     // that same element lets GSAP restore a stale translate after a layout
     // switch, so the feedback animation stays on the inner visual surface.
@@ -748,30 +843,81 @@ export function RelationshipMapApp({
       ease: "power2.inOut",
     });
 
-    setNodes((currentNodes) =>
-      currentNodes.map((node) => ({
-        ...node,
-        position: positionFor(node.id, nextLayout, graphPeople),
-      })),
-    );
-    setEdges(createEdges(graphConnections, graphPeople, nextLayout));
     setLayout(nextLayout);
 
     window.setTimeout(() => {
       flowInstance?.fitView({ padding: 0.16, duration: 680, includeHiddenNodes: false });
     }, 90);
-  }, [flowInstance, graphConnections, graphPeople, layout, setEdges, setNodes]);
+  }, [flowInstance, layout]);
 
-  const refreshEdgeHandles = useCallback((_, movedNode) => {
-    const positionOverrides = new Map(nodes.map((node) => [node.id, node.position]));
-    positionOverrides.set(movedNode.id, movedNode.position);
-    setEdges(createEdges(graphConnections, graphPeople, layout, positionOverrides));
-    const expandedPosition = expandedPositionFromLayout(movedNode.position, layout);
-    setGraphPeople((currentPeople) => currentPeople.map((person) => person.id === movedNode.id
-      ? { ...person, position: expandedPosition }
-      : person));
+  const restoreAutomaticLayout = useCallback(() => {
+    setNodes((currentNodes) => currentNodes.map((node) => ({
+      ...node,
+      position: layoutPositions.get(node.id) || node.position,
+    })));
+  }, [layoutPositions, setNodes]);
+
+  const handleNodeDragStop = useCallback((_, movedNode) => {
+    if (movedNode.id === "self") {
+      restoreAutomaticLayout();
+      return;
+    }
+    const candidates = nodes.filter((node) =>
+      node.id !== movedNode.id
+      && visibleNodeIds.has(node.id)
+      && !isDescendantOf(node.id, movedNode.id, hierarchy));
+    const movedCenter = { x: movedNode.position.x + 38, y: movedNode.position.y + 43 };
+    const nearest = candidates
+      .map((node) => ({
+        node,
+        distance: Math.hypot(
+          movedCenter.x - (node.position.x + 38),
+          movedCenter.y - (node.position.y + 43),
+        ),
+      }))
+      .sort((first, second) => first.distance - second.distance)[0];
+
+    restoreAutomaticLayout();
+    if (!nearest || nearest.distance > 165) return;
+    const previousParentId = hierarchy.parentById.get(movedNode.id) || null;
+    if (previousParentId === nearest.node.id) return;
+
+    if (!previousParentId) {
+      setGraphConnections((current) => [...current, {
+        source: nearest.node.id,
+        target: movedNode.id,
+        relationship: "客户引荐",
+        strength: 0.7,
+      }]);
+      setExpandedIds((current) => new Set(current).add(nearest.node.id));
+      markGraphChanged();
+      showImportNotice("success", "客户已连接到新的脉络");
+      return;
+    }
+
+    setPendingRelink({
+      personId: movedNode.id,
+      previousParentId,
+      nextParentId: nearest.node.id,
+    });
+  }, [hierarchy, markGraphChanged, nodes, restoreAutomaticLayout, showImportNotice, visibleNodeIds]);
+
+  const confirmRelink = useCallback(() => {
+    if (!pendingRelink) return;
+    const previousEdgeIndex = hierarchy.parentEdgeById.get(pendingRelink.personId);
+    const nextConnections = graphConnections.filter((_, index) => index !== previousEdgeIndex);
+    nextConnections.push({
+      source: pendingRelink.nextParentId,
+      target: pendingRelink.personId,
+      relationship: "客户引荐",
+      strength: 0.7,
+    });
+    setGraphConnections(nextConnections);
+    setExpandedIds((current) => new Set(current).add(pendingRelink.nextParentId));
+    setPendingRelink(null);
     markGraphChanged();
-  }, [graphConnections, graphPeople, layout, markGraphChanged, nodes, setEdges]);
+    showImportNotice("success", "客户脉络已调整");
+  }, [graphConnections, hierarchy, markGraphChanged, pendingRelink, showImportNotice]);
 
   const saveRelation = useCallback((relation) => {
     const nextConnections = relationEditor?.mode === "edit"
@@ -786,7 +932,6 @@ export function RelationshipMapApp({
     setEdges(createEdges(nextConnections, graphPeople, layout, positionOverrides));
     setSelectedId(nextSelectedId);
     setNodes((currentNodes) => currentNodes.map((node) => ({ ...node, selected: node.id === nextSelectedId })));
-    setLevelFilter("all");
     setSearch("");
     setRelationEditor(null);
     markGraphChanged();
@@ -811,10 +956,7 @@ export function RelationshipMapApp({
     const editingPerson = personEditor?.mode === "edit"
       ? graphPeople.find((person) => person.id === personEditor.personId) || null
       : null;
-    const peopleWithCanonicalPositions = graphPeople.map((person) => ({
-      ...person,
-      position: positionFor(person.id, "expanded", graphPeople),
-    }));
+    const peopleWithCanonicalPositions = graphPeople.map((person) => ({ ...person }));
     const savedPerson = buildPersonRecord(draft, peopleWithCanonicalPositions, editingPerson);
 
     if (editingPerson) {
@@ -824,21 +966,29 @@ export function RelationshipMapApp({
         ? { ...node, data: { ...node.data, ...savedPerson }, selected: true }
         : { ...node, selected: false }));
       setSelectedId(savedPerson.id);
-      showImportNotice("success", `已更新 ${privacy && savedPerson.id !== "self" ? "人物资料" : savedPerson.name}`);
+      showImportNotice("success", `已更新 ${privacy && savedPerson.id !== "self" ? "客户资料" : savedPerson.name}`);
     } else {
       const nextPeople = [...graphPeople, savedPerson];
       const newNode = createNodes(layout, nextPeople).find((node) => node.id === savedPerson.id);
       setGraphPeople(nextPeople);
+      if (draft.parentId && graphPeople.some((person) => person.id === draft.parentId)) {
+        setGraphConnections((current) => [...current, {
+          source: draft.parentId,
+          target: savedPerson.id,
+          relationship: "客户引荐",
+          strength: 0.7,
+        }]);
+        setExpandedIds((current) => new Set(current).add(draft.parentId));
+      }
       setNodes((currentNodes) => [
         ...currentNodes.map((node) => ({ ...node, selected: false })),
         ...(newNode ? [{ ...newNode, selected: true }] : []),
       ]);
       setSelectedId(savedPerson.id);
       setDetailOpen(false);
-      showImportNotice("success", `已新增 ${privacy ? "人物" : savedPerson.name}`);
+      showImportNotice("success", `已新增 ${privacy ? "客户" : savedPerson.name}`);
     }
 
-    setLevelFilter("all");
     setSearch("");
     setPersonEditor(null);
     markGraphChanged();
@@ -863,7 +1013,7 @@ export function RelationshipMapApp({
     restoreModalTrigger();
     showImportNotice(
       "success",
-      `已删除 ${privacy ? "人物" : deletingPerson?.name || "人物"}，同时删除 ${deletion.deletedConnectionCount} 条相关关系`,
+      `已删除 ${privacy ? "客户" : deletingPerson?.name || "客户"}，同时删除 ${deletion.deletedConnectionCount} 条相关连接`,
     );
   }, [graphConnections, graphPeople, layout, markGraphChanged, nodes, pendingPersonDeleteId, privacy, restoreModalTrigger, setEdges, setNodes, showImportNotice]);
 
@@ -906,8 +1056,8 @@ export function RelationshipMapApp({
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true"><Graph size={25} weight="duotone" /></span>
           <div>
-            <h1>关系爆炸图</h1>
-            <p title={graphTitle}>{graphTitle}</p>
+            <h1>客户脉络图</h1>
+            <p>客户合作管理</p>
           </div>
         </div>
 
@@ -923,39 +1073,28 @@ export function RelationshipMapApp({
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="搜索姓名、圈层或标签"
-            aria-label="搜索关系图"
+            placeholder="搜索客户姓名、备注或标签"
+            aria-label="搜索客户脉络图"
           />
           {search ? (
             <button type="button" onClick={() => setSearch("")} aria-label="清除搜索">
               <X size={16} weight="bold" />
             </button>
           ) : null}
-          {query ? <span className="search-count">{visibleSearchMatches.size} 个结果</span> : null}
+          {query ? <span className="search-count">{searchMatches.size} 个结果</span> : null}
         </form>
 
         <div className="header-actions">
           <button
             className="data-button person-add-button"
             type="button"
-            onClick={openCreatePerson}
-            aria-label="新增人物"
-            title="新增人物"
+            onClick={() => openCreatePerson()}
+            aria-label="新增客户"
+            title="新增客户"
             data-person-focus-fallback="header"
           >
             <UserPlus size={19} weight="bold" />
-            <span>新增人物</span>
-          </button>
-          <button
-            className="data-button relation-add-button"
-            type="button"
-            onClick={() => openCreateRelation()}
-            aria-label="新增关系"
-            title="新增关系"
-            data-relation-focus-fallback="header"
-          >
-            <Plus size={19} weight="bold" />
-            <span>新增关系</span>
+            <span>新增客户</span>
           </button>
           <button className="data-button" type="button" onClick={openImportDialog} aria-label="导入 JSON" title="导入 JSON">
             <FolderOpen size={19} weight="duotone" />
@@ -986,9 +1125,6 @@ export function RelationshipMapApp({
             <ShieldCheck size={19} weight={privacy ? "fill" : "duotone"} />
             <span>{privacy ? "隐私模式已开" : "隐私模式"}</span>
           </button>
-          <button className="primary-button" type="button" onClick={() => setReportOpen(true)}>
-            <FileText size={19} weight="bold" />生成关系报告
-          </button>
         </div>
       </header>
 
@@ -1016,15 +1152,16 @@ export function RelationshipMapApp({
         </div>
       ) : null}
 
-      <section className="graph-workspace" aria-label="人物关系图谱">
+      <section className="graph-workspace" aria-label="客户脉络图">
         <ReactFlow
           nodes={renderedNodes}
           edges={renderedEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
           onInit={setFlowInstance}
           onNodeClick={(_, node) => selectAndFocusPerson(node)}
-          onNodeDragStop={refreshEdgeHandles}
+          onNodeDragStop={handleNodeDragStop}
           onPaneClick={closeDetails}
           fitView
           fitViewOptions={{ padding: 0.14, minZoom: visualTheme === "tongpin" ? 0.5 : 0.68, maxZoom: 1.05 }}
@@ -1036,53 +1173,39 @@ export function RelationshipMapApp({
           elementsSelectable
           zoomOnDoubleClick={false}
           proOptions={{ hideAttribution: true }}
-          aria-label="可拖拽和缩放的人物关系图"
+          aria-label="可展开、拖拽和缩放的客户脉络图"
         >
           <Background variant={BackgroundVariant.Dots} gap={28} size={1.4} color="#c9cdcf" />
           <Controls className="clay-controls" position="bottom-right" showInteractive={false} />
         </ReactFlow>
 
-        <div className="filter-dock" role="group" aria-label="关系层级筛选">
-          <div className="dock-heading">
-            <SlidersHorizontal size={18} weight="bold" />
-            <span>关系层级</span>
-          </div>
-          <div className="filter-options">
-            {levelOptions.map((option) => (
-              <button
-                key={option.id}
-                className={levelFilter === option.id ? "is-active" : ""}
-                type="button"
-                onClick={() => setLevelFilter(option.id)}
-                aria-pressed={levelFilter === option.id}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
         <div className="privacy-status" aria-live="polite">
           <span className={`status-light ${privacy ? "is-active" : ""}`} />
-          <span>{privacy ? "人物身份已脱敏" : `${graphPeople.length} 人 · ${storageStatus}`}</span>
+          <span>{privacy ? "客户身份已脱敏" : `${graphPeople.length - 1} 位客户 · ${storageStatus}`}</span>
         </div>
 
-        <div className="graph-legend" aria-label="关系类型图例">
-          {relationshipLegend.map((item) => (
-            <span key={item.label}>
-              <i className={item.dashed ? "is-dashed" : ""} style={{ color: item.color }} />{item.label}
-            </span>
-          ))}
+        <div className="graph-legend" aria-label="客户脉络图例">
+          <span><i />已合作客户</span>
+          <span><i className="is-dashed" />待合作客户</span>
         </div>
 
-        <button className="layout-toggle" type="button" onClick={switchLayout}>
-          {layout === "expanded" ? <ArrowsIn size={20} weight="bold" /> : <ArrowsOut size={20} weight="bold" />}
-          <span>{layout === "expanded" ? "收拢关系" : "爆炸展开"}</span>
-        </button>
-
-        <div className="interaction-hint">
-          <Graph size={17} weight="duotone" />
-          <span>拖拽节点 · 滚轮缩放 · 点击人物聚焦并打开快捷卡片</span>
+        <div className="layout-toggle" role="group" aria-label="客户脉络排列方式">
+          <button
+            type="button"
+            className={layout === "horizontal" ? "is-active" : ""}
+            onClick={() => switchLayout("horizontal")}
+            aria-pressed={layout === "horizontal"}
+          >
+            <FlowArrow size={18} weight="bold" />横向
+          </button>
+          <button
+            type="button"
+            className={layout === "pyramid" ? "is-active" : ""}
+            onClick={() => switchLayout("pyramid")}
+            aria-pressed={layout === "pyramid"}
+          >
+            <TreeStructure size={18} weight="bold" />金字塔
+          </button>
         </div>
 
         {selectedPerson && detailOpen ? (
@@ -1101,16 +1224,6 @@ export function RelationshipMapApp({
           />
         ) : null}
       </section>
-
-      {reportOpen ? (
-        <ReportModal
-          people={graphPeople}
-          connections={graphConnections}
-          privacy={privacy}
-          onClose={() => setReportOpen(false)}
-          onExport={exportReport}
-        />
-      ) : null}
 
       {relationEditor ? (
         <RelationModal
@@ -1132,6 +1245,8 @@ export function RelationshipMapApp({
           key={personEditor.mode === "edit" ? `edit-${personEditor.personId}` : "create-person"}
           mode={personEditor.mode}
           person={editingPerson}
+          people={relationPeople}
+          initialParentId={personEditor.initialParentId || "self"}
           onClose={closePersonEditor}
           onSave={savePerson}
         />
@@ -1140,7 +1255,7 @@ export function RelationshipMapApp({
       {pendingDeleteRelation ? (
         <ConfirmDialog
           title="删除这条关系？"
-          description={`将删除 ${pendingDeleteSource?.visualName || "未知人物"} 与 ${pendingDeleteTarget?.visualName || "未知人物"} 之间的“${pendingDeleteRelation.relationship}”关系。此操作会立即更新当前图谱。`}
+          description={`将删除 ${pendingDeleteSource?.visualName || "未知客户"} 与 ${pendingDeleteTarget?.visualName || "未知客户"} 之间的“${pendingDeleteRelation.relationship}”连接。`}
           onClose={closeDeleteDialog}
           onConfirm={confirmDeleteRelation}
         />
@@ -1148,10 +1263,21 @@ export function RelationshipMapApp({
 
       {pendingPersonDelete ? (
         <ConfirmDialog
-          title={`删除人物${privacy ? "" : `“${pendingPersonDelete.name}”`}？`}
-          description={`删除人物后，将同时删除 ${pendingPersonRelationCount} 条与该人物相关的关系，并立即重算图上的主干与补充连线。`}
+          title={`删除客户${privacy ? "" : `“${pendingPersonDelete.name}”`}？`}
+          description={`删除客户后，将同时删除 ${pendingPersonRelationCount} 条相关连接。`}
           onClose={closePersonDeleteDialog}
           onConfirm={confirmDeletePerson}
+        />
+      ) : null}
+
+      {pendingRelink ? (
+        <ConfirmDialog
+          title="调整客户脉络？"
+          description={`确认将“${relationPeople.find((person) => person.id === pendingRelink.personId)?.visualName || "该客户"}”从“${relationPeople.find((person) => person.id === pendingRelink.previousParentId)?.visualName || "原客户"}”调整到“${relationPeople.find((person) => person.id === pendingRelink.nextParentId)?.visualName || "新客户"}”下？原有主连接会取消。`}
+          confirmLabel="确认调整"
+          destructive={false}
+          onClose={closeRelinkDialog}
+          onConfirm={confirmRelink}
         />
       ) : null}
     </main>

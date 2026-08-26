@@ -1,4 +1,15 @@
-export const RELATIONSHIP_PRESETS = ["家人", "朋友", "同事", "社群", "弱联系"];
+export const RELATIONSHIP_PRESETS = [
+  "直接合作",
+  "客户引荐",
+  "共同项目",
+  "供应合作",
+  "渠道合作",
+  "家人",
+  "朋友",
+  "同事",
+  "社群",
+  "弱联系",
+];
 
 export const RELATIONSHIP_LIMITS = {
   type: 40,

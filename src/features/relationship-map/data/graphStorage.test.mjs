@@ -46,4 +46,17 @@ describe("Tongpin member relationship storage", () => {
       graph: null,
     });
   });
+
+  it("persists each customer's cooperation status", () => {
+    const storage = memoryStorage();
+    const storageKey = graphStorageKeyForMember("member-status");
+    const peopleWithStatus = people.map((person) => person.id === "lin-lan"
+      ? { ...person, cooperationStatus: "pending" }
+      : person);
+
+    expect(saveGraph(storage, { title: "客户状态", people: peopleWithStatus, connections }, storageKey).ok).toBe(true);
+    const loaded = loadGraph(storage, storageKey);
+    expect(loaded.ok).toBe(true);
+    expect(loaded.graph.people.find((person) => person.id === "lin-lan")?.cooperationStatus).toBe("pending");
+  });
 });

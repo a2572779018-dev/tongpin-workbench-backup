@@ -90,7 +90,7 @@ export type AppView =
 
 const PAGE_TITLES: Record<AppView, string> = {
   home: "我的任务",
-  relations: "人物关系爆炸",
+  relations: "客户脉络图",
   boss: "全员进度",
   admin: "账号与权限",
   "lora-chain": "LORA 链驾驶舱",
@@ -1121,7 +1121,7 @@ export function AppShell({
         ? [
             {
               view: "relations" as const,
-              label: "人物关系爆炸",
+              label: "客户脉络图",
               icon: Network,
             },
           ]

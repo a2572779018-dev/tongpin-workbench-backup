@@ -1,7 +1,9 @@
+import { CUSTOMER_COOPERATION_STATUS, normalizeCustomerCooperationStatus } from "./customerStatus.js";
+
 export const PERSON_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export const PERSON_LEVELS = ["core", "close", "acquaintance", "weak"];
-export const PERSON_RELATIONSHIPS = ["家人", "朋友", "同事", "社群", "弱联系"];
+export const PERSON_RELATIONSHIPS = ["家人", "朋友", "同事", "社群", "弱联系", "已合作客户", "待合作客户"];
 
 export const PERSON_LIMITS = {
   name: 80,
@@ -119,6 +121,10 @@ export function validatePersonDraft(draft = {}, optionsOrEditingPerson = {}) {
 
     if (draft.level === "self") errors.level = "普通人物不能设为中心人物";
     else if (!PERSON_LEVELS.includes(draft.level)) errors.level = "请选择有效的关系层级";
+
+    if (![CUSTOMER_COOPERATION_STATUS.COLLABORATED, CUSTOMER_COOPERATION_STATUS.PENDING].includes(draft.cooperationStatus)) {
+      errors.cooperationStatus = "请选择有效的合作状态";
+    }
   }
 
   if (!community) errors.community = "请输入所属分组";
@@ -254,6 +260,9 @@ export function buildPersonRecord(draft, people = [], editingPersonValue = null)
     initial: normalizedInitial(name),
     level: editingSelf ? "self" : draft.level,
     relationship,
+    cooperationStatus: editingSelf
+      ? CUSTOMER_COOPERATION_STATUS.COLLABORATED
+      : normalizeCustomerCooperationStatus(draft.cooperationStatus),
     community: trimmedString(draft.community),
     phone: trimmedString(draft.phone),
     wechat: trimmedString(draft.wechat),

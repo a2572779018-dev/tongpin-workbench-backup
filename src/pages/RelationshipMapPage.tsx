@@ -86,7 +86,7 @@ export function RelationshipMapPage({
   }, [userId]);
 
   return (
-    <main className="relationship-map-page" aria-label="人物关系爆炸">
+    <main className="relationship-map-page" aria-label="客户脉络图">
       <div key={userId} ref={hostRef} className="relationship-map-host" />
       {mountNode
         ? createPortal(

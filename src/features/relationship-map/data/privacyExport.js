@@ -30,6 +30,7 @@ export function createPrivacySafeGraph({ people = [] } = {}) {
       avatar: null,
       level: isSelf ? "self" : person.level,
       relationship: isSelf ? "自己" : "朋友",
+      cooperationStatus: "collaborated",
       community: "未分组",
       interactions: 0,
       lastContact: "暂无记录",

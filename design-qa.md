@@ -23,6 +23,58 @@ final result: passed
 
 ---
 
+# 已合作客户脉络图与任务刷新 QA
+
+## 视觉证据
+
+- 原始关系图参考：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-f36846e2-5936-4dbd-84ca-87a5ea3b3052.png`。
+- 连线问题标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-22729394-d74e-41d8-8b9a-5f2f10874ad4.png`。
+- 金字塔第二层重叠标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-102f5de5-de51-4537-97cb-76d4774e9b31.png`。
+- 头像变形标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-1664b22a-7b42-42da-b360-365eca657d38.png`。
+- 头像黑色错位投影标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-68199e41-3287-43f5-83df-2115fc436f9e.png`。
+- 横向完整预览：`output/customer-map-horizontal-trunk-1440x900.png`。
+- 展开唐婕预览：`output/customer-map-expanded-trunk-1440x900.png`。
+- 金字塔预览：`output/customer-map-pyramid-1440x900.png`。
+- 金字塔修复预览：`output/customer-map-pyramid-clean-tongpin-1440x900.png`。
+- 1280×720 预览：`output/customer-map-horizontal-1280x720.png`。
+- 原版灰色皮肤：`output/customer-map-original-1440x900.png`。
+- 参考与实现同屏对照：`output/customer-map-reference-comparison.png`、`output/customer-map-trunk-comparison.png`。
+- 金字塔修复前后同屏对照：`output/customer-map-pyramid-before-after.png`。
+- 头像无投影完整预览：`output/customer-avatar-no-shadow-tongpin-1440x900.jpg`；局部前后对照：`output/customer-avatar-shadow-before-after.png`。
+- 客户状态参考：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-c336f902-dcf2-4640-9c9a-96be0ce0f903.png`；完整预览：`output/customer-status-lines-clean-tongpin-1440x900.jpg`；编辑预览：`output/customer-status-edit-form-1440x900.jpg`；图例对照：`output/customer-status-legend-before-after.png`。
+
+## 视觉检查
+
+- 默认横向树以一条中心主干统一分叉，消除了首尾客户的大弧线和交叉绕线；下级客户沿父客户右侧继续使用相同的主干分叉规则。
+- 折叠分支显示未展开人数；展开后人数消失，只保留小型收起箭头。
+- 同频皮肤按层级使用黄色、蓝色、粉色、绿色；原版灰色皮肤未被层级颜色覆盖。
+- 顶部搜索、新增客户、导入、导出、换肤和隐私按钮在 1280×720、1440×900 均不重叠，无横向溢出。
+- 横向和金字塔两种自动排列均完整显示；长层级留在画布内缩放，不增加页面滚动。
+- 金字塔按客户子树独立排位：单个下级垂直对齐，多个下级只在自己的上级下方分叉，不再把不同上级的第二层客户合并到同一条横线上。
+- 上传头像固定为等宽等高的正方形裁切区，再使用圆形遮罩与 `object-fit: cover` 居中裁切，不会被节点布局拉成长扁形。
+- 实际上传头像移除节点的错位黑色投影，默认字母头像、中心头像和展开按钮继续保留原有层次；悬停、选中和搜索命中状态也不会重新加回头像投影。
+- 图例使用“已合作客户 / 待合作客户”；公共主干保持实线，仅客户末端线段按合作状态切换实线或虚线。
+
+## 交互检查
+
+- 点击折叠客户可展开并聚焦其下级客户；唐婕展开后显示罗可、徐妍两个蓝色二级客户且不再显示数字 2。
+- 搜索折叠分支中的宋晴会自动展开祖先路径并显示 1 个结果。
+- 新增客户表单保留手机号、微信号、标签和合作记录，支持选择现有客户作为上级或暂不连接。
+- 拖动未连接客户到现有客户附近可建立连接；调整已有客户主连接前必须确认。
+- 任务板实时同步和新建任务后的刷新改为保留现有卡片的静默更新，仅首次加载显示骨架屏，避免整列卡片闪烁。
+- 客户详情编辑可在“已合作客户 / 待合作客户”之间切换，保存后详情文本和图中线型即时同步；旧数据默认迁移为“已合作客户”，状态继续使用成员隔离的本地加密存储。
+
+## 验证结果
+
+- TypeScript 类型检查通过。
+- 53 个测试文件、252 项测试通过；新增横向/金字塔布局、分支连线、头像圆形裁切、头像无投影、客户合作状态实时线型和任务静默刷新回归测试。
+- Renderer 和服务端生产构建通过。
+- 当前仅提供本地预览，未修改版本号、未制作安装包、未发布更新。
+
+final result: passed
+
+---
+
 # 人物关系爆炸双风格集成 QA
 
 ## 视觉证据

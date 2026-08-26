@@ -165,6 +165,22 @@ body,
   background: #bfeea5;
 }
 
+.relationship-theme--tongpin .person-node--depth-1 .person-avatar {
+  background: #ffd84d;
+}
+
+.relationship-theme--tongpin .person-node--depth-2 .person-avatar {
+  background: #8ab8f5;
+}
+
+.relationship-theme--tongpin .person-node--depth-3 .person-avatar {
+  background: #ffcaca;
+}
+
+.relationship-theme--tongpin .person-node--depth-4 .person-avatar {
+  background: #bfeea5;
+}
+
 .relationship-theme--tongpin .person-node:hover .person-avatar,
 .relationship-theme--tongpin .person-node.is-selected .person-avatar,
 .relationship-theme--tongpin .person-node.is-match .person-avatar {
@@ -175,6 +191,15 @@ body,
 .relationship-theme--tongpin .person-node--root:hover .person-avatar,
 .relationship-theme--tongpin .person-node--root.is-selected .person-avatar {
   box-shadow: 5px 5px 0 #ffd84d, 9px 9px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .person-avatar.person-avatar--photo,
+.relationship-theme--tongpin .person-node:hover .person-avatar.person-avatar--photo,
+.relationship-theme--tongpin .person-node.is-selected .person-avatar.person-avatar--photo,
+.relationship-theme--tongpin .person-node.is-match .person-avatar.person-avatar--photo,
+.relationship-theme--tongpin .person-node--root:hover .person-avatar.person-avatar--photo,
+.relationship-theme--tongpin .person-node--root.is-selected .person-avatar.person-avatar--photo {
+  box-shadow: none;
 }
 
 .relationship-theme--tongpin .person-caption {
@@ -219,7 +244,14 @@ body,
 }
 
 .relationship-theme--tongpin .quick-card-add {
-  border-width: 3px;
+  border-width: 2px;
+}
+
+.relationship-theme--tongpin .person-branch-toggle {
+  color: #1f1f1f;
+  border-color: #1f1f1f;
+  background: #fffdf7;
+  box-shadow: 2px 2px 0 #1f1f1f;
 }
 
 .relationship-theme--tongpin .quick-card-meta {
@@ -261,10 +293,14 @@ body,
   box-shadow: 4px 4px 0 #ffd84d;
 }
 
-.relationship-theme--tongpin .layout-toggle:hover {
+.relationship-theme--tongpin .layout-toggle button {
+  color: #fffdf7;
+}
+
+.relationship-theme--tongpin .layout-toggle button.is-active,
+.relationship-theme--tongpin .layout-toggle button:hover {
   color: #1f1f1f;
   background: #ffd84d;
-  box-shadow: 4px 4px 0 #1f1f1f;
 }
 
 .relationship-theme--tongpin .detail-panel {

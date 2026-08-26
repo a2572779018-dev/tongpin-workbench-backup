@@ -65,6 +65,7 @@ describe("Murmur graph import budgets", () => {
     });
 
     expect(graph.people.map((person) => person.id)).toEqual(["self", "alice"]);
+    expect(graph.people[1].cooperationStatus).toBe("collaborated");
     expect(graph.connections).toEqual([
       {
         source: "self",
@@ -73,5 +74,24 @@ describe("Murmur graph import budgets", () => {
         strength: 0.75,
       },
     ]);
+  });
+
+  it("preserves a pending customer status and migrates a missing status to collaborated", () => {
+    const graph = parseGraphDocument({
+      schemaVersion: "1.0",
+      title: "客户状态",
+      people: [
+        { id: "self", name: "我", level: "self", relationship: "自己" },
+        { id: "pending", name: "待合作", level: "close", relationship: "朋友", cooperationStatus: "pending" },
+        { id: "legacy", name: "旧客户", level: "close", relationship: "朋友" },
+      ],
+      connections: [
+        { source: "self", target: "pending", relationship: "客户引荐", strength: 0.7 },
+        { source: "self", target: "legacy", relationship: "客户引荐", strength: 0.7 },
+      ],
+    });
+
+    expect(graph.people.find((person) => person.id === "pending")?.cooperationStatus).toBe("pending");
+    expect(graph.people.find((person) => person.id === "legacy")?.cooperationStatus).toBe("collaborated");
   });
 });

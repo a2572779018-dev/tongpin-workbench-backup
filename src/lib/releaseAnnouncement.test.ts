@@ -26,8 +26,8 @@ describe("release announcement", () => {
         lastAnnouncedVersion: "0.1.23",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("人物关系爆炸");
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("同频黄白");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("客户脉络图");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("任务区域闪烁");
   });
 
   it("does not repeat an announcement for the same installed version", () => {

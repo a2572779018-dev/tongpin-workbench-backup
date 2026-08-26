@@ -180,7 +180,7 @@ export function App() {
         centerLabel={
           session && !loading && !startupError
             ? view === "relations"
-              ? "人物关系爆炸"
+              ? "客户脉络图"
               : view === "home" && isLaneHomeLayout(homeLayout)
                 ? "今日待办"
                 : undefined

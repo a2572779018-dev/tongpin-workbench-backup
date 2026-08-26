@@ -67,7 +67,7 @@ export function RelationModal({ mode, initialConnection, initialSource, people, 
             <span className="report-icon"><ArrowsLeftRight size={24} weight="duotone" /></span>
             <div>
               <p>{mode === "edit" ? "更新连接" : "补充图谱"}</p>
-              <h2 id={titleId}>{mode === "edit" ? "编辑关系" : "新增关系"}</h2>
+              <h2 id={titleId}>{mode === "edit" ? "编辑客户连接" : "新增客户连接"}</h2>
             </div>
           </div>
           <button className="icon-button icon-button--small" type="button" onClick={onClose} aria-label="关闭关系表单">
@@ -76,13 +76,13 @@ export function RelationModal({ mode, initialConnection, initialSource, people, 
         </header>
 
         <p id={descriptionId} className="relation-dialog__description">
-          选择两个不同的人物，关系类型可从建议中选择，也可直接填写。
+          选择两个不同客户并记录他们的合作或引荐连接。
         </p>
 
         <form className="relation-form" onSubmit={submit} noValidate>
           <div className="relation-form__pair">
             <div className="form-field">
-              <label htmlFor="relation-source">起点人物 <span aria-hidden="true">*</span></label>
+              <label htmlFor="relation-source">上级客户 <span aria-hidden="true">*</span></label>
               <select
                 id="relation-source"
                 value={source}
@@ -104,7 +104,7 @@ export function RelationModal({ mode, initialConnection, initialSource, people, 
             <span className="relation-pair-arrow" aria-hidden="true"><ArrowsLeftRight size={20} weight="bold" /></span>
 
             <div className="form-field">
-              <label htmlFor="relation-target">终点人物 <span aria-hidden="true">*</span></label>
+              <label htmlFor="relation-target">下级客户 <span aria-hidden="true">*</span></label>
               <select
                 id="relation-target"
                 value={target}

@@ -1,17 +1,13 @@
 import { useId, useRef, useState } from "react";
 import { FloppyDisk, ImageSquare, Trash, UserPlus, X } from "@phosphor-icons/react";
-import { RELATIONSHIP_PRESETS } from "../data/relationshipModel.js";
+import {
+  CUSTOMER_COOPERATION_OPTIONS,
+  normalizeCustomerCooperationStatus,
+} from "../data/customerStatus.js";
 import { PERSON_LIMITS, validatePersonDraft } from "../data/personModel.js";
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 const SAFE_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-
-const personLevels = [
-  { value: "core", label: "核心圈" },
-  { value: "close", label: "常联系" },
-  { value: "acquaintance", label: "偶尔联系" },
-  { value: "weak", label: "弱联系" },
-];
 
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -22,16 +18,19 @@ function readFileAsDataUrl(file) {
   });
 }
 
-export function PersonModal({ mode, person, onClose, onSave }) {
+export function PersonModal({ mode, person, people = [], initialParentId = "self", onClose, onSave }) {
   const titleId = useId();
-  const descriptionId = useId();
   const fileInputRef = useRef(null);
   const isSelf = person?.id === "self";
   const [name, setName] = useState(person?.name || "");
   const [alias, setAlias] = useState(person?.alias || "");
-  const [relationship, setRelationship] = useState(person?.relationship || "朋友");
-  const [level, setLevel] = useState(person?.level === "self" ? "self" : person?.level || "acquaintance");
-  const [community, setCommunity] = useState(person?.community || "");
+  const [relationship] = useState(person?.relationship || "已合作客户");
+  const [level] = useState(person?.level === "self" ? "self" : person?.level || "acquaintance");
+  const [community] = useState(person?.community || "已合作客户");
+  const [cooperationStatus, setCooperationStatus] = useState(
+    normalizeCustomerCooperationStatus(person?.cooperationStatus),
+  );
+  const [parentId, setParentId] = useState(mode === "create" ? initialParentId : "");
   const [phone, setPhone] = useState(person?.phone || "");
   const [wechat, setWechat] = useState(person?.wechat || "");
   const [tags, setTags] = useState(person?.tags?.join("、") || "");
@@ -90,11 +89,13 @@ export function PersonModal({ mode, person, onClose, onSave }) {
       relationship: isSelf ? "自己" : relationship,
       level: isSelf ? "self" : level,
       community,
+      cooperationStatus,
       phone,
       wechat,
       tags,
       note,
       avatar,
+      parentId,
     };
     const nextErrors = validatePersonDraft(draft, { editingPerson: person || null });
     setErrors(nextErrors);
@@ -112,28 +113,24 @@ export function PersonModal({ mode, person, onClose, onSave }) {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <section className="person-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId}>
+      <section className="person-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className="relation-dialog__header">
           <div className="report-title-wrap">
             <span className="report-icon"><UserPlus size={24} weight="duotone" /></span>
             <div>
-              <p>{mode === "edit" ? "更新人物资料" : "补充关系图谱"}</p>
-              <h2 id={titleId}>{mode === "edit" ? "编辑人物" : "新增人物"}</h2>
+              <p>{mode === "edit" ? "更新客户资料" : "客户脉络登记"}</p>
+              <h2 id={titleId}>{mode === "edit" ? "编辑客户" : "新增客户"}</h2>
             </div>
           </div>
-          <button className="icon-button icon-button--small" type="button" onClick={onClose} aria-label="关闭人物表单">
+          <button className="icon-button icon-button--small" type="button" onClick={onClose} aria-label="关闭客户表单">
             <X size={18} weight="bold" />
           </button>
         </header>
 
-        <p id={descriptionId} className="relation-dialog__description">
-          人物资料仅保存在当前关系图中，姓名和关系层级用于生成节点。
-        </p>
-
         <form className="person-form" onSubmit={submit} noValidate>
           <div className="person-form__identity">
             <div className="avatar-field">
-              <label htmlFor="person-avatar">人物头像 <span className="label-optional">可选</span></label>
+              <label htmlFor="person-avatar">客户头像 <span className="label-optional">可选</span></label>
               <div className="avatar-editor">
                 <span className="avatar-editor__preview" aria-hidden="true">
                   {avatar ? (
@@ -180,7 +177,7 @@ export function PersonModal({ mode, person, onClose, onSave }) {
 
             <div className="person-form__identity-fields">
               <div className="form-field">
-                <label htmlFor="person-name">姓名 <span aria-hidden="true">*</span></label>
+                <label htmlFor="person-name">客户姓名 <span aria-hidden="true">*</span></label>
                 <input
                   id="person-name"
                   value={name}
@@ -194,13 +191,13 @@ export function PersonModal({ mode, person, onClose, onSave }) {
               </div>
 
               <div className="form-field">
-                <label htmlFor="person-alias">备注名 <span aria-hidden="true">*</span></label>
+                <label htmlFor="person-alias">客户备注 <span aria-hidden="true">*</span></label>
                 <input
                   id="person-alias"
                   value={alias}
                   maxLength={PERSON_LIMITS.alias + 1}
                   onChange={updateField("alias", setAlias)}
-                  placeholder="例如：大学同学"
+                  placeholder="例如：华南区采购负责人"
                   aria-invalid={Boolean(errors.alias)}
                   aria-describedby={errors.alias ? "person-alias-error" : undefined}
                 />
@@ -210,51 +207,39 @@ export function PersonModal({ mode, person, onClose, onSave }) {
           </div>
 
           <div className="person-form__grid">
-            <div className="form-field">
-              <label htmlFor="person-relationship">与你的关系 <span aria-hidden="true">*</span></label>
-              <select
-                id="person-relationship"
-                value={isSelf ? "自己" : relationship}
-                onChange={updateField("relationship", setRelationship)}
-                disabled={isSelf}
-                aria-invalid={Boolean(errors.relationship)}
-                aria-describedby={errors.relationship ? "person-relationship-error" : undefined}
-              >
-                {isSelf ? <option value="自己">自己</option> : null}
-                {RELATIONSHIP_PRESETS.map((type) => <option key={type} value={type}>{type}</option>)}
-              </select>
-              {errors.relationship ? <span id="person-relationship-error" className="field-error" role="alert">{errors.relationship}</span> : null}
-            </div>
+            {mode === "create" ? (
+              <div className="form-field person-form__parent">
+                <label htmlFor="person-parent">连接到</label>
+                <select id="person-parent" value={parentId} onChange={updateField("parentId", setParentId)}>
+                  <option value="">暂不连接</option>
+                  {people.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>{candidate.visualName || candidate.name}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
 
-            <div className="form-field">
-              <label htmlFor="person-level">关系层级 <span aria-hidden="true">*</span></label>
-              <select
-                id="person-level"
-                value={isSelf ? "self" : level}
-                onChange={updateField("level", setLevel)}
-                disabled={isSelf}
-                aria-invalid={Boolean(errors.level)}
-                aria-describedby={errors.level ? "person-level-error" : undefined}
-              >
-                {isSelf ? <option value="self">关系中心</option> : null}
-                {personLevels.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
-              {errors.level ? <span id="person-level-error" className="field-error" role="alert">{errors.level}</span> : null}
-            </div>
-
-            <div className="form-field">
-              <label htmlFor="person-community">所属圈层 <span aria-hidden="true">*</span></label>
-              <input
-                id="person-community"
-                value={community}
-                maxLength={PERSON_LIMITS.community + 1}
-                onChange={updateField("community", setCommunity)}
-                placeholder="例如：家庭、产品组"
-                aria-invalid={Boolean(errors.community)}
-                aria-describedby={errors.community ? "person-community-error" : undefined}
-              />
-              {errors.community ? <span id="person-community-error" className="field-error" role="alert">{errors.community}</span> : null}
-            </div>
+            {!isSelf ? (
+              <div className="form-field person-form__status">
+                <label htmlFor="person-cooperation-status">合作状态</label>
+                <select
+                  id="person-cooperation-status"
+                  value={cooperationStatus}
+                  onChange={updateField("cooperationStatus", setCooperationStatus)}
+                  aria-invalid={Boolean(errors.cooperationStatus)}
+                  aria-describedby={errors.cooperationStatus ? "person-cooperation-status-error" : undefined}
+                >
+                  {CUSTOMER_COOPERATION_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                {errors.cooperationStatus ? (
+                  <span id="person-cooperation-status-error" className="field-error" role="alert">
+                    {errors.cooperationStatus}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="form-field">
               <label htmlFor="person-phone">手机号 <span className="label-optional">可选</span></label>
@@ -284,7 +269,7 @@ export function PersonModal({ mode, person, onClose, onSave }) {
             </div>
 
             <div className="form-field">
-              <label htmlFor="person-tags">人物标签 <span className="label-optional">可选</span></label>
+              <label htmlFor="person-tags">客户标签 <span className="label-optional">可选</span></label>
               <input
                 id="person-tags"
                 value={tags}
@@ -299,14 +284,14 @@ export function PersonModal({ mode, person, onClose, onSave }) {
           </div>
 
           <div className="form-field">
-            <label htmlFor="person-note">关系洞察 <span className="label-optional">可选</span></label>
+            <label htmlFor="person-note">合作记录 <span className="label-optional">可选</span></label>
             <textarea
               id="person-note"
               rows="3"
               value={note}
               maxLength={PERSON_LIMITS.note + 1}
               onChange={updateField("note", setNote)}
-              placeholder="记录这位人物的关系背景或联系建议"
+              placeholder="记录合作项目、需求、跟进事项或客户背景"
               aria-invalid={Boolean(errors.note)}
               aria-describedby={errors.note ? "person-note-error" : undefined}
             />
@@ -317,7 +302,7 @@ export function PersonModal({ mode, person, onClose, onSave }) {
           <div className="relation-form__actions">
             <button className="secondary-button" type="button" onClick={onClose}>取消</button>
             <button className="primary-button" type="submit" disabled={avatarBusy}>
-              <FloppyDisk size={18} weight="bold" />{mode === "edit" ? "保存人物" : "新增人物"}
+              <FloppyDisk size={18} weight="bold" />{mode === "edit" ? "保存客户" : "新增客户"}
             </button>
           </div>
         </form>

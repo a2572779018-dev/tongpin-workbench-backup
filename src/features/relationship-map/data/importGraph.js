@@ -1,5 +1,7 @@
+import { CUSTOMER_COOPERATION_STATUS, normalizeCustomerCooperationStatus } from "./customerStatus.js";
+
 const LEVELS = new Set(["self", "core", "close", "acquaintance", "weak"]);
-const RELATIONSHIPS = new Set(["自己", "家人", "朋友", "同事", "社群", "弱联系"]);
+const RELATIONSHIPS = new Set(["自己", "家人", "朋友", "同事", "社群", "弱联系", "已合作客户", "待合作客户"]);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_PEOPLE = 5000;
 const MAX_CONNECTIONS = 20000;
@@ -67,6 +69,9 @@ function normalizePerson(person, index, total, idMap) {
     avatar: safeAvatar(person.avatar),
     level,
     relationship,
+    cooperationStatus: level === "self"
+      ? CUSTOMER_COOPERATION_STATUS.COLLABORATED
+      : normalizeCustomerCooperationStatus(person.cooperationStatus),
     community: asString(person.community, "未分组", 80),
     interactions: asNonNegativeInteger(person.interactions),
     lastContact: asString(person.lastContact, "暂无记录", 80),
@@ -186,6 +191,7 @@ function adaptMurmurGraph(payload) {
       avatar: null,
       level,
       relationship: level === "self" ? "自己" : "朋友",
+      cooperationStatus: CUSTOMER_COOPERATION_STATUS.COLLABORATED,
       community: clusterLabels.get(node.cluster) || "未分组",
       interactions: asNonNegativeInteger((node.private_msgs || 0) + (node.group_msgs || 0)),
       lastContact: "来自 Murmur 图数据",

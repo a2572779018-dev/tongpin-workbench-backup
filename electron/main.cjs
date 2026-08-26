@@ -878,7 +878,7 @@ function currentRelationshipSession(session) {
     !refreshToken ||
     refreshToken.length > 8_000
   ) {
-    throw new Error("登录状态无效，请重新登录后再打开人物关系爆炸");
+    throw new Error("登录状态无效，请重新登录后再打开客户脉络图");
   }
   return {
     userId,
@@ -956,7 +956,7 @@ async function verifyCurrentRelationshipMember() {
   }
   const current = currentRelationshipSession(stored.session);
   if (current.role !== "member") {
-    throw new Error("人物关系爆炸仅供当前成员账号使用");
+    throw new Error("客户脉络图仅供当前成员账号使用");
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
@@ -974,7 +974,7 @@ async function verifyCurrentRelationshipMember() {
         verifiedUser?.id !== current.userId ||
         verifiedUser?.role !== "member"
       ) {
-        throw new Error("人物关系爆炸仅供当前成员账号使用");
+        throw new Error("客户脉络图仅供当前成员账号使用");
       }
       await writeRelationshipBinding(current);
       return current;
@@ -1021,7 +1021,7 @@ function resolvePendingRelationshipFlushRequests(ok) {
 
 async function assertRelationshipSessionUnchanged(expected) {
   if (relationshipSessionGeneration !== expected.generation) {
-    throw new Error("登录账号已变更，请重新打开人物关系爆炸");
+    throw new Error("登录账号已变更，请重新打开客户脉络图");
   }
   const stored = await readSecureSession();
   if (!stored) throw new Error("登录状态已失效，请重新登录");
@@ -1031,7 +1031,7 @@ async function assertRelationshipSessionUnchanged(expected) {
     current.fingerprint !== expected.fingerprint ||
     relationshipSessionGeneration !== expected.generation
   ) {
-    throw new Error("登录账号已变更，请重新打开人物关系爆炸");
+    throw new Error("登录账号已变更，请重新打开客户脉络图");
   }
   return current;
 }
@@ -1640,7 +1640,7 @@ function registerDesktopIpc() {
       };
       await assertRelationshipSessionUnchanged(expected);
       if (openSequence !== relationshipGraphOpenSequence) {
-        throw new Error("人物关系爆炸正在重新打开，请稍后重试");
+        throw new Error("客户脉络图正在重新打开，请稍后重试");
       }
       scopeToken = randomUUID();
       activeRelationshipGraphScope = {
@@ -1657,7 +1657,7 @@ function registerDesktopIpc() {
         openSequence !== relationshipGraphOpenSequence ||
         activeRelationshipGraphScope?.scopeToken !== scopeToken
       ) {
-        throw new Error("人物关系爆炸正在重新打开，请稍后重试");
+        throw new Error("客户脉络图正在重新打开，请稍后重试");
       }
       activeRelationshipGraphScope.ready = true;
       return {

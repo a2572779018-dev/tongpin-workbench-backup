@@ -27,6 +27,7 @@ const PERSON_FIELDS = [
   "avatar",
   "level",
   "relationship",
+  "cooperationStatus",
   "community",
   "interactions",
   "lastContact",

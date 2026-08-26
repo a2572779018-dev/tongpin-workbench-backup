@@ -161,8 +161,8 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   const isPastDate = selectedDate < toDateKey(new Date());
   const usesLaneLayout = isLaneHomeLayout(layout);
 
-  const loadTasks = useCallback(async () => {
-    setLoading(true);
+  const loadTasks = useCallback(async ({ showLoading = true } = {}) => {
+    if (showLoading) setLoading(true);
     setError("");
     try {
       const result = await api<{ tasks: Task[] }>(
@@ -172,7 +172,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "任务加载失败");
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [api, selectedDate]);
 
@@ -188,7 +188,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   }, [api, from, to]);
 
   useEffect(() => {
-    void loadTasks();
+    void loadTasks({ showLoading: true });
     void loadSummary();
   }, [loadSummary, loadTasks]);
 
@@ -309,7 +309,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
       if (!detail?.taskId || !detail.date) return;
       setSelectedDate(detail.date);
       setHighlightTaskId(detail.taskId);
-      if (detail.date === selectedDate) void loadTasks();
+      if (detail.date === selectedDate) void loadTasks({ showLoading: false });
     };
     window.addEventListener("tongpin:open-task", openTask);
     return () => window.removeEventListener("tongpin:open-task", openTask);
@@ -321,7 +321,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         refreshTimer = null;
-        void loadTasks();
+        void loadTasks({ showLoading: false });
         void loadSummary();
       }, 120);
     };

@@ -4,6 +4,7 @@ import {
   CalendarDots,
   ChatCircleText,
   ClockCounterClockwise,
+  Handshake,
   LockKey,
   PencilSimple,
   Phone,
@@ -12,6 +13,7 @@ import {
   UsersThree,
   X,
 } from "@phosphor-icons/react";
+import { customerCooperationStatusLabel } from "../data/customerStatus.js";
 
 function privateValue(value, privacy, kind) {
   if (!privacy) return value;
@@ -46,19 +48,19 @@ export function DetailPanel({ person, privacy, visualName, relations, onAddRelat
   return (
     <aside ref={panelRef} className="detail-panel" aria-label={`${visualName}的关系详情`}>
       <div className="detail-panel__topline">
-        <span className="detail-kicker">人物详情</span>
+        <span className="detail-kicker">客户详情</span>
         <div className="detail-panel__top-actions">
           {!privacy ? (
-            <button className="icon-button icon-button--small" type="button" onClick={() => onEditPerson(person.id)} aria-label={`编辑${visualName}的人物资料`} title="编辑人物" data-person-focus-fallback="detail">
+            <button className="icon-button icon-button--small" type="button" onClick={() => onEditPerson(person.id)} aria-label={`编辑${visualName}的客户资料`} title="编辑客户" data-person-focus-fallback="detail">
               <PencilSimple size={17} weight="bold" />
             </button>
           ) : null}
           {person.id !== "self" ? (
-            <button className="icon-button icon-button--small person-delete-button" type="button" onClick={() => onDeletePerson(person.id)} aria-label={`删除人物${visualName}`} title="删除人物">
+            <button className="icon-button icon-button--small person-delete-button" type="button" onClick={() => onDeletePerson(person.id)} aria-label={`删除客户${visualName}`} title="删除客户">
               <Trash size={17} weight="bold" />
             </button>
           ) : null}
-          <button className="icon-button icon-button--small" type="button" onClick={onClose} aria-label="关闭人物详情" autoFocus>
+          <button className="icon-button icon-button--small" type="button" onClick={onClose} aria-label="关闭客户详情" autoFocus>
             <X size={18} weight="bold" />
           </button>
         </div>
@@ -80,7 +82,7 @@ export function DetailPanel({ person, privacy, visualName, relations, onAddRelat
         </div>
       </div>
 
-      <div className="tag-row" aria-label="人物标签">
+      <div className="tag-row" aria-label="客户标签">
         {privacy ? <span className="detail-tag">标签已隐藏</span> : person.tags.map((tag) => (
           <span className="detail-tag" key={tag}>{tag}</span>
         ))}
@@ -159,6 +161,12 @@ export function DetailPanel({ person, privacy, visualName, relations, onAddRelat
       <section className="detail-section">
         <h3>联系资料</h3>
         <dl className="profile-list">
+          {person.id !== "self" ? (
+            <div>
+              <dt><Handshake size={18} />合作状态</dt>
+              <dd>{privacy ? "已隐藏" : customerCooperationStatusLabel(person.cooperationStatus)}</dd>
+            </div>
+          ) : null}
           <div>
             <dt><ClockCounterClockwise size={18} />最近联系</dt>
             <dd>{privateValue(person.lastContact, privacy, "contact")}</dd>
@@ -175,8 +183,8 @@ export function DetailPanel({ person, privacy, visualName, relations, onAddRelat
       </section>
 
       <section className="detail-note">
-        <h3>关系洞察</h3>
-        <p>{privacy ? "人物备注已隐藏" : person.note}</p>
+        <h3>合作记录</h3>
+        <p>{privacy ? "客户备注已隐藏" : person.note}</p>
       </section>
     </aside>
   );
