@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld("tongpin", {
     save: (payload) => ipcRenderer.invoke("credentials:save", payload),
     remove: (email) =>
       ipcRenderer.invoke("credentials:remove", String(email)),
+    openSystemStorage: () =>
+      ipcRenderer.invoke("credentials:open-system-storage"),
   },
   relationshipGraph: {
     open: () => ipcRenderer.invoke("relationship-graph:open"),

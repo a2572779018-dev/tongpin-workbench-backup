@@ -48,5 +48,22 @@ describe("API network handling", () => {
       code: "NETWORK_UNAVAILABLE",
     });
   });
-});
 
+  it("reports malformed successful responses without calling them a network outage", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("not-json", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(publicRequest("/api/auth/login")).rejects.toMatchObject({
+      status: 200,
+      code: "INVALID_RESPONSE",
+      message: "服务器返回异常，请稍后重试",
+    });
+  });
+});

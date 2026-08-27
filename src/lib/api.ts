@@ -85,5 +85,13 @@ export async function publicRequest<T>(
   if (response.status === 204) {
     return undefined as T;
   }
-  return (await response.json()) as T;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiRequestError(
+      response.status,
+      "INVALID_RESPONSE",
+      "服务器返回异常，请稍后重试",
+    );
+  }
 }

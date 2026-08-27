@@ -18,6 +18,15 @@ import type { Session, User } from "../types";
 
 const SESSION_KEY = "tongpin.session.v1";
 
+export class LocalSessionPersistenceError extends Error {
+  readonly code = "LOCAL_SESSION_PERSISTENCE_FAILED";
+
+  constructor(message = "本机安全登录状态暂时无法保存，请解锁系统安全存储后重试。") {
+    super(message);
+    this.name = "LocalSessionPersistenceError";
+  }
+}
+
 interface AuthContextValue {
   loading: boolean;
   session: Session | null;
@@ -47,18 +56,22 @@ async function loadPersistedSession(): Promise<Session | null> {
 }
 
 async function persistSession(session: Session | null): Promise<void> {
-  if (window.tongpin) {
-    if (session) {
-      await window.tongpin.session.save(JSON.stringify(session));
-    } else {
-      await window.tongpin.session.clear();
+  try {
+    if (window.tongpin) {
+      if (session) {
+        await window.tongpin.session.save(JSON.stringify(session));
+      } else {
+        await window.tongpin.session.clear();
+      }
+      return;
     }
-    return;
-  }
-  if (session) {
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  } else {
-    localStorage.removeItem(SESSION_KEY);
+    if (session) {
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    } else {
+      localStorage.removeItem(SESSION_KEY);
+    }
+  } catch {
+    throw new LocalSessionPersistenceError();
   }
 }
 

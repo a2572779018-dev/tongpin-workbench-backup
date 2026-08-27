@@ -23,13 +23,14 @@ interface DesktopSessionBridge {
     clear(): Promise<void>;
   };
   credentials: {
-    list(): Promise<
-      Array<{
+    list(): Promise<{
+      state: "ready" | "unavailable";
+      accounts: Array<{
         email: string;
         hasPassword: boolean;
         lastUsedAt: string;
-      }>
-    >;
+      }>;
+    }>;
     load(email: string): Promise<{
       email: string;
       password: string | null;
@@ -41,6 +42,7 @@ interface DesktopSessionBridge {
       rememberPassword: boolean;
     }): Promise<boolean>;
     remove(email: string): Promise<boolean>;
+    openSystemStorage(): Promise<boolean>;
   };
   relationshipGraph: {
     open(): Promise<{

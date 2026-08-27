@@ -30,7 +30,7 @@ jobs:
           package_version="$(jq -r .version package.json)"
           [[ "$GITHUB_REF_NAME" == "v${package_version}" ]]
           git show-ref --verify refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          [[ "$GITHUB_SHA" == "$(git rev-parse refs/remotes/origin/main)" ]]
       - uses: actions/setup-node@v6
         with:
           node-version: "24"

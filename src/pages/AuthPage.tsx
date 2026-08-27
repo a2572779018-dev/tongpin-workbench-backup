@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -13,7 +19,10 @@ import {
   Trash2,
   UserRound,
 } from "lucide-react";
-import { useAuth } from "../auth/AuthContext";
+import {
+  LocalSessionPersistenceError,
+  useAuth,
+} from "../auth/AuthContext";
 import { AuthCompanion } from "../components/AuthCompanion";
 import { ApiRequestError, publicRequest } from "../lib/api";
 import type {
@@ -44,6 +53,8 @@ type RememberedAccount = {
   lastUsedAt: string;
 };
 
+type CredentialListState = "loading" | "ready" | "unavailable";
+
 export function AuthPage() {
   const { login } = useAuth();
   const [mode, setMode] = useState<AuthMode>("login");
@@ -60,25 +71,48 @@ export function AuthPage() {
   const [rememberedAccounts, setRememberedAccounts] = useState<
     RememberedAccount[]
   >([]);
+  const [credentialListState, setCredentialListState] =
+    useState<CredentialListState>("loading");
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [accountBusyEmail, setAccountBusyEmail] = useState("");
   const [activeField, setActiveField] = useState<AuthCompanionField>(null);
   const [authAction, setAuthAction] = useState<AuthCompanionAction>("idle");
   const accountFieldRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    let disposed = false;
-    if (!window.tongpin?.credentials) return;
-    void window.tongpin.credentials
-      .list()
-      .then((accounts) => {
-        if (!disposed) setRememberedAccounts(accounts);
-      })
-      .catch(() => undefined);
-    return () => {
-      disposed = true;
-    };
+  const credentialRequestIdRef = useRef(0);
+
+  const refreshRememberedAccounts = useCallback(async () => {
+    if (!window.tongpin?.credentials) {
+      setCredentialListState("ready");
+      return;
+    }
+    const requestId = credentialRequestIdRef.current + 1;
+    credentialRequestIdRef.current = requestId;
+    setCredentialListState("loading");
+    try {
+      const result = await window.tongpin.credentials.list();
+      if (credentialRequestIdRef.current !== requestId) return;
+      setRememberedAccounts(result.accounts);
+      setCredentialListState(result.state);
+    } catch {
+      if (credentialRequestIdRef.current !== requestId) return;
+      setCredentialListState("unavailable");
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshRememberedAccounts();
+    const handleFocus = () => void refreshRememberedAccounts();
+    window.addEventListener("focus", handleFocus);
+    const removeResumeListener = window.tongpin?.onSystemResume(() => {
+      void refreshRememberedAccounts();
+    });
+    return () => {
+      credentialRequestIdRef.current += 1;
+      window.removeEventListener("focus", handleFocus);
+      removeResumeListener?.();
+    };
+  }, [refreshRememberedAccounts]);
 
   useEffect(() => {
     if (!accountMenuOpen) return;
@@ -213,8 +247,10 @@ export function AuthPage() {
           return;
         }
         setError(caught.message);
+      } else if (caught instanceof LocalSessionPersistenceError) {
+        setError(caught.message);
       } else {
-        setError("无法连接服务器，请确认 API 已启动。");
+        setError("登录处理失败，请稍后重试。");
       }
     } finally {
       setLoading(false);
@@ -256,9 +292,11 @@ export function AuthPage() {
     try {
       const saved = await window.tongpin.credentials.load(account.email);
       if (!saved) {
-        setRememberedAccounts((current) =>
-          current.filter((item) => item.email !== account.email),
-        );
+        setEmail(account.email);
+        setPassword("");
+        setRememberPassword(false);
+        setAccountMenuOpen(false);
+        setError("该账号的安全密码暂时无法读取，请手动输入。");
         return;
       }
       setEmail(saved.email);
@@ -482,9 +520,10 @@ export function AuthPage() {
                           aria-label="选择登录过的账号"
                           aria-haspopup="listbox"
                           aria-expanded={accountMenuOpen}
-                          onClick={() =>
-                            setAccountMenuOpen((current) => !current)
-                          }
+                          onClick={() => {
+                            setAccountMenuOpen((current) => !current);
+                            void refreshRememberedAccounts();
+                          }}
                         >
                           <ChevronDown
                             size={18}
@@ -500,7 +539,40 @@ export function AuthPage() {
                         role="listbox"
                         aria-label="登录过的账号"
                       >
-                        {rememberedAccounts.length === 0 ? (
+                        {credentialListState === "unavailable" && (
+                          <div className="account-picker__warning" role="status">
+                            <span>
+                              {window.tongpin?.platform === "darwin"
+                                ? "登录钥匙串未解锁，账号记录仍安全保留"
+                                : "系统安全存储暂不可用，账号记录仍安全保留"}
+                            </span>
+                            <span className="account-picker__warning-actions">
+                              {window.tongpin?.platform === "darwin" && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void window.tongpin?.credentials.openSystemStorage()
+                                  }
+                                >
+                                  打开钥匙串
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => void refreshRememberedAccounts()}
+                              >
+                                重试
+                              </button>
+                            </span>
+                          </div>
+                        )}
+                        {credentialListState === "loading" &&
+                        rememberedAccounts.length === 0 ? (
+                          <div className="account-picker__empty">
+                            正在读取登录记录…
+                          </div>
+                        ) : rememberedAccounts.length === 0 &&
+                          credentialListState === "ready" ? (
                           <div className="account-picker__empty">
                             暂无登录记录
                           </div>

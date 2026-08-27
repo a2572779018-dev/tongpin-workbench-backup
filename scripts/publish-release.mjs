@@ -32,6 +32,13 @@ const publicBaseUrl =
   process.env.TONGPIN_RELEASE_URL?.trim() ||
   "https://notify.samhubs.com/releases";
 const verifyOnly = process.argv.includes("--verify-only");
+const artifactsOnly = process.argv.includes("--artifacts-only");
+const manifestOnly = process.argv.includes("--manifest-only");
+if ([verifyOnly, artifactsOnly, manifestOnly].filter(Boolean).length > 1) {
+  throw new Error(
+    "--verify-only、--artifacts-only 和 --manifest-only 不能同时使用",
+  );
+}
 const releaseUploadToken = process.env.TONGPIN_RELEASE_UPLOAD_TOKEN?.trim();
 const secureUploadBaseUrl = publicBaseUrl.replace(
   /\/releases\/?$/,
@@ -562,7 +569,18 @@ if (verifyOnly) {
   if (!releaseUploadToken) {
     await Promise.all([access(wranglerPath), access(wranglerConfig)]);
   }
-  for (const upload of uploads) {
+
+  const artifactUploads = uploads.filter(
+    (upload) => upload.name !== manifestName,
+  );
+  const manifestUpload = uploads.find(
+    (upload) => upload.name === manifestName,
+  );
+  if (!manifestUpload) {
+    throw new Error(`缺少 ${manifestName} 上传对象`);
+  }
+
+  const uploadObject = async (upload) => {
     console.log(`上传 ${upload.name}...`);
     let verifiedDuringUpload = false;
     if (releaseUploadToken) {
@@ -592,16 +610,35 @@ if (verifyOnly) {
     if (upload.name !== manifestName && !verifiedDuringUpload) {
       await verifyRemoteArtifact(upload);
     }
+  };
+
+  if (manifestOnly) {
+    console.log(`切换 ${manifestName} 前重新校验全部远端产物...`);
+    for (const upload of artifactUploads) {
+      await verifyRemoteArtifact(upload);
+    }
+    await uploadObject(manifestUpload);
+  } else {
+    const selectedUploads = artifactsOnly ? artifactUploads : uploads;
+    for (const upload of selectedUploads) {
+      await uploadObject(upload);
+    }
   }
 
-  const remoteManifestSource = await readRemoteManifest(manifestSource);
-  const remoteManifest = parseManifest(remoteManifestSource);
-  if (remoteManifest.version !== manifest.version) {
-    throw new Error(
-      `线上 ${manifestName} 未指向版本 ${manifest.version}`,
+  if (artifactsOnly) {
+    console.log(
+      `版本 ${manifest.version} 的 ${platform} 产物已上传并通过线上校验；${manifestName} 仍未切换。`,
+    );
+  } else {
+    const remoteManifestSource = await readRemoteManifest(manifestSource);
+    const remoteManifest = parseManifest(remoteManifestSource);
+    if (remoteManifest.version !== manifest.version) {
+      throw new Error(
+        `线上 ${manifestName} 未指向版本 ${manifest.version}`,
+      );
+    }
+    console.log(
+      `版本 ${manifest.version} 的 ${platform} 产物已发布并通过线上校验。`,
     );
   }
-  console.log(
-    `版本 ${manifest.version} 的 ${platform} 产物已发布并通过线上校验。`,
-  );
 }

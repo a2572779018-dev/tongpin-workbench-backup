@@ -1,6 +1,6 @@
 {
   "name": "tongpin-workbench",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "private": true,
   "engines": {
     "node": ">=24.0.0"
@@ -26,9 +26,11 @@
     "release:verify:remote": "npm run release:verify:remote:win",
     "release:verify:remote:win": "node scripts/verify-remote-release.mjs --platform win",
     "release:verify:remote:mac": "node scripts/verify-remote-release.mjs --platform mac",
-    "release:upload": "npm run release:upload:win",
-    "release:upload:win": "node scripts/publish-release.mjs --platform win",
-    "release:upload:mac": "node scripts/publish-release.mjs --platform mac",
+    "release:upload": "node scripts/publish-release-bundle.mjs",
+    "release:upload:win": "node scripts/publish-release.mjs --platform win --artifacts-only",
+    "release:upload:mac": "node scripts/publish-release.mjs --platform mac --artifacts-only",
+    "release:activate:win": "node scripts/publish-release.mjs --platform win --manifest-only",
+    "release:activate:mac": "node scripts/publish-release.mjs --platform mac --manifest-only",
     "resend:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/configure-resend.ps1",
     "test:cloudflare": "node scripts/verify-cloudflare.mjs",
     "test": "vitest run",

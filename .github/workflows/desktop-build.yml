@@ -45,6 +45,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run dist:win
+      - name: Verify packaged Electron runtime files
+        shell: pwsh
+        run: node scripts/verify-asar-contents.cjs (Resolve-Path "artifacts/win-unpacked/resources/app.asar")
       - name: Verify Windows artifacts
         shell: pwsh
         run: |
@@ -82,6 +85,13 @@ jobs:
           -c.mac.identity=null
           -c.mac.hardenedRuntime=false
           -c.mac.notarize=false
+      - name: Verify packaged Electron runtime files
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_asar="$(find artifacts -path '*/Contents/Resources/app.asar' -print -quit)"
+          [[ -n "$app_asar" ]]
+          node scripts/verify-asar-contents.cjs "$app_asar"
       - run: npm run release:verify:mac
       - name: Verify macOS artifacts and architectures
         shell: bash

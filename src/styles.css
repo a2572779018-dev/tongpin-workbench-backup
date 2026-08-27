@@ -601,6 +601,35 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
   text-align: center;
 }
 
+.account-picker__warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.7rem 0.8rem;
+  border-bottom: 2px solid var(--ink);
+  background: #fff4c8;
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.account-picker__warning button {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.55rem;
+  border: 2px solid var(--ink);
+  border-radius: 0.45rem;
+  background: var(--white);
+  box-shadow: 2px 2px 0 var(--ink);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.account-picker__warning-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.4rem;
+}
+
 .account-picker__row {
   display: flex;
   min-width: 0;

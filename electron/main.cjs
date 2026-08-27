@@ -54,19 +54,23 @@ const {
   atomicWritePrivateFile,
   createRelationshipGraphVault,
 } = require("./relationship-graph-vault.cjs");
+const {
+  atomicWritePrivateFileWithBackup,
+  createCredentialVault,
+  normalizeCredentialEmail,
+} = require("./credential-vault.cjs");
 
 autoUpdater.logger = null;
 
-const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
+const isDevelopment =
+  !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === "darwin";
 const isQuickTaskPreview =
   isDevelopment && process.env.TONGPIN_QUICK_PANEL_PREVIEW === "1";
 const quickTaskPreviewTarget =
   process.env.TONGPIN_QUICK_PREVIEW_TARGET === "corner" ? "corner" : "panel";
 const SESSION_FILE_NAME = "secure-session.bin";
-const CREDENTIAL_VAULT_FILE_NAME = "secure-accounts.bin";
 const RELATIONSHIP_GRAPH_BINDING_FILE_NAME = "secure-relationship-binding.bin";
-const MAX_CREDENTIAL_ACCOUNTS = 20;
 const APP_ICON_PATH = path.join(__dirname, "..", "build", "icon.ico");
 const NOTICE_COLLAPSED_SIZE = { width: 82, height: 82 };
 const NOTICE_EXPANDED_SIZE = { width: 430, height: 178 };
@@ -101,6 +105,7 @@ let quickPanelActivationSuppressedUntil = 0;
 const pendingQuickTaskRequests = new Map();
 const recentNoticeSounds = new Map();
 let relationshipGraphVault = null;
+let credentialVault = null;
 let activeRelationshipGraphScope = null;
 let relationshipSessionGeneration = 0;
 let relationshipGraphOpenSequence = 0;
@@ -222,7 +227,9 @@ function readPackagedConfig() {
 }
 
 function getApiUrl() {
-  if (process.env.TONGPIN_API_URL) return process.env.TONGPIN_API_URL;
+  if (!app.isPackaged && process.env.TONGPIN_API_URL) {
+    return process.env.TONGPIN_API_URL;
+  }
   if (isDevelopment) return "http://127.0.0.1:4318";
   return (
     readPackagedConfig().apiUrl ||
@@ -753,70 +760,14 @@ function playDesktopNoticeSound(payload) {
   }
 }
 
-function normalizeCredentialEmail(value) {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-async function readCredentialVault() {
-  if (!safeStorage.isEncryptionAvailable()) return [];
-  try {
-    const encrypted = await fsp.readFile(
-      path.join(app.getPath("userData"), CREDENTIAL_VAULT_FILE_NAME),
-    );
-    const parsed = JSON.parse(safeStorage.decryptString(encrypted));
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((entry) => ({
-        email: normalizeCredentialEmail(entry?.email),
-        password:
-          typeof entry?.password === "string" ? entry.password : null,
-        rememberPassword: entry?.rememberPassword !== false,
-        lastUsedAt:
-          typeof entry?.lastUsedAt === "string" ? entry.lastUsedAt : "",
-      }))
-      .filter((entry) => entry.email.includes("@"))
-      .sort((left, right) =>
-        right.lastUsedAt.localeCompare(left.lastUsedAt),
-      )
-      .slice(0, MAX_CREDENTIAL_ACCOUNTS);
-  } catch (error) {
-    if (error && error.code === "ENOENT") return [];
-    return [];
+function getCredentialVault() {
+  if (!credentialVault) {
+    credentialVault = createCredentialVault({
+      userDataPath: app.getPath("userData"),
+      safeStorage,
+    });
   }
-}
-
-async function writeCredentialVault(accounts) {
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error("系统安全存储不可用，拒绝明文保存密码");
-  }
-  const payload = JSON.stringify(accounts.slice(0, MAX_CREDENTIAL_ACCOUNTS));
-  if (payload.length > 100_000) {
-    throw new Error("记住的账号数量过多");
-  }
-  const encrypted = safeStorage.encryptString(payload);
-  await fsp.mkdir(app.getPath("userData"), { recursive: true });
-  await fsp.writeFile(
-    path.join(app.getPath("userData"), CREDENTIAL_VAULT_FILE_NAME),
-    encrypted,
-  );
-}
-
-async function touchCredentialAccount(emailValue) {
-  const email = normalizeCredentialEmail(emailValue);
-  if (!email.includes("@")) return false;
-  const accounts = await readCredentialVault();
-  const existing = accounts.find((account) => account.email === email);
-  const next = [
-    {
-      email,
-      password: existing?.password ?? null,
-      rememberPassword: existing?.rememberPassword ?? false,
-      lastUsedAt: new Date().toISOString(),
-    },
-    ...accounts.filter((account) => account.email !== email),
-  ];
-  await writeCredentialVault(next);
-  return true;
+  return credentialVault;
 }
 
 function sessionEmailFromPayload(payload) {
@@ -828,12 +779,26 @@ function sessionEmailFromPayload(payload) {
 }
 
 function isMainRendererEvent(event) {
-  return Boolean(
-    mainWindow &&
-      !mainWindow.isDestroyed() &&
-      event?.sender === mainWindow.webContents &&
-      event?.senderFrame === mainWindow.webContents.mainFrame,
-  );
+  try {
+    if (
+      !mainWindow ||
+      mainWindow.isDestroyed() ||
+      event?.sender !== mainWindow.webContents
+    ) {
+      return false;
+    }
+    const senderFrame = event?.senderFrame;
+    const mainFrame = mainWindow.webContents.mainFrame;
+    return Boolean(
+      senderFrame &&
+        !senderFrame.detached &&
+        mainFrame &&
+        senderFrame.processId === mainFrame.processId &&
+        senderFrame.frameToken === mainFrame.frameToken,
+    );
+  } catch {
+    return false;
+  }
 }
 
 function assertMainRendererEvent(event) {
@@ -1476,20 +1441,33 @@ function registerDesktopIpc() {
         previousRelationshipSession.role === "member" &&
         nextRelationshipSession.role === "member",
     );
-    const graphFlushed = await requestRelationshipRendererFlush();
-    if (!graphFlushed) {
-      throw new Error("人物关系图尚未保存，请先导出或重试");
+    const activeGraphContinuesSameMember = Boolean(
+      activeRelationshipGraphScope &&
+        nextRelationshipSession.role === "member" &&
+        activeRelationshipGraphScope.userId === nextRelationshipSession.userId,
+    );
+    const switchingActiveGraphIdentity = Boolean(
+      activeRelationshipGraphScope && !activeGraphContinuesSameMember,
+    );
+    if (switchingActiveGraphIdentity) {
+      const graphFlushed = await requestRelationshipRendererFlush();
+      if (!graphFlushed) {
+        throw new Error("人物关系图尚未保存，请先导出或重试");
+      }
     }
-    if (!sameMemberIdentity) {
+    const continuingMemberIdentity = Boolean(
+      !switchingActiveGraphIdentity &&
+        (sameMemberIdentity || activeGraphContinuesSameMember),
+    );
+    if (!continuingMemberIdentity) {
       resetRelationshipGraphScope({ sessionChanged: true });
     }
     const encrypted = safeStorage.encryptString(payload);
-    await fsp.mkdir(app.getPath("userData"), { recursive: true });
-    await fsp.writeFile(
+    await atomicWritePrivateFileWithBackup(
       path.join(app.getPath("userData"), SESSION_FILE_NAME),
       encrypted,
     );
-    if (sameMemberIdentity) {
+    if (continuingMemberIdentity) {
       relationshipGraphOpenSequence += 1;
       if (
         activeRelationshipGraphScope?.userId === nextRelationshipSession.userId &&
@@ -1516,7 +1494,7 @@ function registerDesktopIpc() {
     const sessionEmail = sessionEmailFromPayload(payload);
     if (sessionEmail) {
       try {
-        await touchCredentialAccount(sessionEmail);
+        await getCredentialVault().touch(sessionEmail);
       } catch {
         // The encrypted login session remains valid even if account history fails.
       }
@@ -1551,7 +1529,7 @@ function registerDesktopIpc() {
         const sessionEmail = sessionEmailFromPayload(
           safeStorage.decryptString(encrypted),
         );
-        if (sessionEmail) await touchCredentialAccount(sessionEmail);
+        if (sessionEmail) await getCredentialVault().touch(sessionEmail);
       } catch {
         // Missing or unreadable legacy sessions must not block logout.
       }
@@ -1565,65 +1543,31 @@ function registerDesktopIpc() {
 
   ipcMain.handle("credentials:list", async (event) => {
     assertMainRendererEvent(event);
-    const accounts = await readCredentialVault();
-    return accounts.map((account) => ({
-      email: account.email,
-      hasPassword:
-        account.rememberPassword && typeof account.password === "string",
-      lastUsedAt: account.lastUsedAt,
-    }));
+    return getCredentialVault().list();
   });
 
   ipcMain.handle("credentials:load", async (event, emailValue) => {
     assertMainRendererEvent(event);
-    const email = normalizeCredentialEmail(emailValue);
-    const accounts = await readCredentialVault();
-    const account = accounts.find((candidate) => candidate.email === email);
-    if (!account) return null;
-    return {
-      email: account.email,
-      password:
-        account.rememberPassword && typeof account.password === "string"
-          ? account.password
-          : null,
-      rememberPassword: account.rememberPassword,
-    };
+    return getCredentialVault().load(emailValue);
   });
 
   ipcMain.handle("credentials:save", async (event, value) => {
     assertMainRendererEvent(event);
-    const email = normalizeCredentialEmail(value?.email);
-    const password = typeof value?.password === "string" ? value.password : "";
-    const rememberPassword = value?.rememberPassword !== false;
-    if (
-      !email.includes("@") ||
-      password.length < 1 ||
-      password.length > 512
-    ) {
-      throw new Error("无效的登录账号");
-    }
-    const accounts = await readCredentialVault();
-    const next = [
-      {
-        email,
-        password: rememberPassword ? password : null,
-        rememberPassword,
-        lastUsedAt: new Date().toISOString(),
-      },
-      ...accounts.filter((account) => account.email !== email),
-    ];
-    await writeCredentialVault(next);
-    return true;
+    return getCredentialVault().save(value);
   });
 
   ipcMain.handle("credentials:remove", async (event, emailValue) => {
     assertMainRendererEvent(event);
-    const email = normalizeCredentialEmail(emailValue);
-    const accounts = await readCredentialVault();
-    await writeCredentialVault(
-      accounts.filter((account) => account.email !== email),
+    return getCredentialVault().remove(emailValue);
+  });
+
+  ipcMain.handle("credentials:open-system-storage", async (event) => {
+    assertMainRendererEvent(event);
+    if (!isMac) return false;
+    const result = await shell.openPath(
+      "/System/Library/CoreServices/Applications/Keychain Access.app",
     );
-    return true;
+    return result === "";
   });
 
   ipcMain.handle("relationship-graph:open", async (event) => {
