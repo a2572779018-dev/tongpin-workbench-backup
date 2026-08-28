@@ -1,4 +1,11 @@
 import { CUSTOMER_COOPERATION_STATUS, normalizeCustomerCooperationStatus } from "./customerStatus.js";
+import { normalizePersonGender } from "./personModel.js";
+import {
+  LEGACY_IDENTITY_COLOR_SEMANTICS,
+  isIdentityColorKey,
+  migrateLegacyPersonColorKeys,
+  normalizeIdentityColorSemantics,
+} from "./identityColors.js";
 
 const LEVELS = new Set(["self", "core", "close", "acquaintance", "weak"]);
 const RELATIONSHIPS = new Set(["自己", "家人", "朋友", "同事", "社群", "弱联系", "已合作客户", "待合作客户"]);
@@ -72,6 +79,8 @@ function normalizePerson(person, index, total, idMap) {
     cooperationStatus: level === "self"
       ? CUSTOMER_COOPERATION_STATUS.COLLABORATED
       : normalizeCustomerCooperationStatus(person.cooperationStatus),
+    colorKey: isIdentityColorKey(person.colorKey) ? person.colorKey : null,
+    gender: normalizePersonGender(person.gender),
     community: asString(person.community, "未分组", 80),
     interactions: asNonNegativeInteger(person.interactions),
     lastContact: asString(person.lastContact, "暂无记录", 80),
@@ -140,12 +149,16 @@ function normalizeStandardGraph(payload) {
     ids.add(person.id);
   }
 
+  const connections = normalizeConnections(payload.connections, ids, idMap);
   return {
     schemaVersion: "1.0",
     title: asString(payload.title, "我的关系图", 120) || "我的关系图",
     generatedAt: asString(payload.generatedAt, new Date().toISOString(), 64),
-    people,
-    connections: normalizeConnections(payload.connections, ids, idMap),
+    colorSemantics: Object.prototype.hasOwnProperty.call(payload, "colorSemantics")
+      ? normalizeIdentityColorSemantics(payload.colorSemantics)
+      : { ...LEGACY_IDENTITY_COLOR_SEMANTICS },
+    people: migrateLegacyPersonColorKeys(people, connections),
+    connections,
   };
 }
 
@@ -239,12 +252,17 @@ export function parseGraphDocument(input) {
   return normalizeStandardGraph(payload);
 }
 
-export function serializeGraphDocument({ title, people, connections }) {
+export function serializeGraphDocument(document) {
+  const { title, colorSemantics, people, connections } = document;
+  const peopleWithColors = migrateLegacyPersonColorKeys(people, connections);
   return JSON.stringify({
     schemaVersion: "1.0",
     title,
     generatedAt: new Date().toISOString(),
-    people: people.map(({ position, ...person }) => ({ ...person, position })),
+    colorSemantics: Object.prototype.hasOwnProperty.call(document, "colorSemantics")
+      ? normalizeIdentityColorSemantics(colorSemantics)
+      : { ...LEGACY_IDENTITY_COLOR_SEMANTICS },
+    people: peopleWithColors.map(({ position, ...person }) => ({ ...person, position })),
     connections: connections.map((connection) => {
       if (!Array.isArray(connection)) return connection;
       const serialized = {

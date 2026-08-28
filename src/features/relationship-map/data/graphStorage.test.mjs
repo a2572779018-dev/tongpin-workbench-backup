@@ -59,4 +59,48 @@ describe("Tongpin member relationship storage", () => {
     expect(loaded.ok).toBe(true);
     expect(loaded.graph.people.find((person) => person.id === "lin-lan")?.cooperationStatus).toBe("pending");
   });
+
+  it("persists each person's color and the member's global color meanings", () => {
+    const storage = memoryStorage();
+    const storageKey = graphStorageKeyForMember("member-identity-colors");
+    const peopleWithColors = people.map((person) => person.id === "song-qing"
+      ? { ...person, colorKey: "yellow" }
+      : person);
+    const colorSemantics = {
+      yellow: "合伙人",
+      blue: "客户",
+      pink: "渠道",
+      green: "其他",
+    };
+
+    expect(saveGraph(storage, {
+      title: "客户身份",
+      colorSemantics,
+      people: peopleWithColors,
+      connections,
+    }, storageKey).ok).toBe(true);
+
+    const loaded = loadGraph(storage, storageKey);
+    expect(loaded.ok).toBe(true);
+    expect(loaded.graph.colorSemantics).toEqual(colorSemantics);
+    expect(loaded.graph.people.find((person) => person.id === "song-qing")?.colorKey).toBe("yellow");
+  });
+
+  it("persists only normalized customer gender data", () => {
+    const storage = memoryStorage();
+    const storageKey = graphStorageKeyForMember("member-gender");
+    const peopleWithGender = people.map((person) => person.id === "lin-lan"
+      ? { ...person, gender: "女" }
+      : person);
+
+    expect(saveGraph(storage, {
+      title: "客户性别",
+      people: peopleWithGender,
+      connections,
+    }, storageKey).ok).toBe(true);
+    const loaded = loadGraph(storage, storageKey);
+    expect(loaded.ok).toBe(true);
+    expect(loaded.graph.people.find((person) => person.id === "lin-lan")?.gender).toBe("女");
+    expect(loaded.graph.people.find((person) => person.id === "chen-yi")?.gender).toBe("");
+  });
 });

@@ -46,6 +46,13 @@ import {
   normalizeCustomerCooperationStatus,
 } from "./data/customerStatus.js";
 import {
+  DEFAULT_IDENTITY_COLOR_SEMANTICS,
+  identityColorLabel,
+  migrateLegacyPersonColorKeys,
+  normalizeIdentityColorKey,
+  normalizeIdentityColorSemantics,
+} from "./data/identityColors.js";
+import {
   loadGraph,
   parseGraphFromStorage,
   saveGraph,
@@ -68,10 +75,33 @@ function normalizeSearch(value) {
   return value.trim().toLocaleLowerCase("zh-CN");
 }
 
+function graphTopologySignature(people, connections) {
+  return JSON.stringify([
+    people.map((person) => person.id),
+    connections.map((connection) => {
+      const record = connectionRecord(connection);
+      return [record.source, record.target];
+    }),
+  ]);
+}
+
+function hierarchyFromTopologySignature(signature) {
+  const [personIds, connections] = JSON.parse(signature);
+  return buildCustomerHierarchy(
+    personIds.map((id) => ({ id })),
+    connections,
+  );
+}
+
+function expandedSetSignature(expandedIds) {
+  return JSON.stringify([...expandedIds].sort());
+}
+
 function initialGraphState(storageKey, allowLocalStorage) {
   const fallback = {
     title: DEFAULT_GRAPH_TITLE,
-    people: demoPeople,
+    colorSemantics: DEFAULT_IDENTITY_COLOR_SEMANTICS,
+    people: migrateLegacyPersonColorKeys(demoPeople, demoConnections),
     connections: demoConnections,
   };
   if (!allowLocalStorage) {
@@ -122,6 +152,9 @@ export function RelationshipMapApp({
   const [graphPeople, setGraphPeople] = useState(initialGraph.people);
   const [graphConnections, setGraphConnections] = useState(initialGraph.connections);
   const [graphTitle, setGraphTitle] = useState(initialGraph.title);
+  const [graphColorSemantics, setGraphColorSemantics] = useState(
+    normalizeIdentityColorSemantics(initialGraph.colorSemantics),
+  );
   const [nodes, setNodes, onNodesChange] = useNodesState(() => createNodes("expanded", initialGraph.people));
   const [edges, setEdges] = useEdgesState(() => createEdges(initialGraph.connections, initialGraph.people, "expanded"));
   const [flowInstance, setFlowInstance] = useState(null);
@@ -202,14 +235,29 @@ export function RelationshipMapApp({
     [graphPeople, privacy],
   );
 
-  const hierarchy = useMemo(
-    () => buildCustomerHierarchy(graphPeople, graphConnections),
+  const topologySignature = useMemo(
+    () => graphTopologySignature(graphPeople, graphConnections),
     [graphConnections, graphPeople],
   );
 
+  const hierarchy = useMemo(
+    () => hierarchyFromTopologySignature(topologySignature),
+    [topologySignature],
+  );
+
+  const expandedSignature = useMemo(
+    () => expandedSetSignature(expandedIds),
+    [expandedIds],
+  );
+
+  const layoutExpandedIds = useMemo(
+    () => new Set(JSON.parse(expandedSignature)),
+    [expandedSignature],
+  );
+
   const treeVisibleIds = useMemo(
-    () => visibleCustomerIds(hierarchy, expandedIds),
-    [expandedIds, hierarchy],
+    () => visibleCustomerIds(hierarchy, layoutExpandedIds),
+    [hierarchy, layoutExpandedIds],
   );
 
   const layoutPositions = useMemo(
@@ -297,12 +345,15 @@ export function RelationshipMapApp({
             quickCardOpen: selectedId === node.id && !detailOpen,
             quickCardSide: "right",
             relationCount: connectionsForPerson(graphConnections, node.id).length,
+            colorLabel: node.id === "self"
+              ? ""
+              : identityColorLabel(node.data.colorKey, graphColorSemantics),
             depth: hierarchy.depthById.get(node.id) ?? 0,
             layerLabel: node.id === "self"
               ? "客户中心"
               : `第 ${hierarchy.depthById.get(node.id) ?? 1} 层客户`,
             hasChildren: (hierarchy.childrenById.get(node.id) ?? []).length > 0,
-            isExpanded: expandedIds.has(node.id),
+            isExpanded: layoutExpandedIds.has(node.id),
             visibleChildCount: (hierarchy.childrenById.get(node.id) ?? [])
               .filter((childId) => treeVisibleIds.has(childId)).length,
             hiddenDescendantCount: hiddenDescendantCount(node.id, hierarchy, treeVisibleIds),
@@ -312,7 +363,7 @@ export function RelationshipMapApp({
           },
         };
       }),
-    [detailOpen, expandedIds, graphConnections, graphPeople, hierarchy, nodes, openQuickDetails, openQuickPerson, privacy, query, selectedId, toggleBranch, treeVisibleIds, visibleNodeIds, visibleSearchMatches],
+    [detailOpen, graphColorSemantics, graphConnections, graphPeople, hierarchy, layoutExpandedIds, nodes, openQuickDetails, openQuickPerson, privacy, query, selectedId, toggleBranch, treeVisibleIds, visibleNodeIds, visibleSearchMatches],
   );
 
   const renderedEdges = useMemo(
@@ -385,15 +436,19 @@ export function RelationshipMapApp({
     });
     setNodes(nextNodes);
     setEdges(nextEdges);
+  }, [graphConnections, graphPeople, hierarchy, layout, layoutPositions, selectedId, setEdges, setNodes]);
+
+  useEffect(() => {
+    if (!flowInstance) return undefined;
     const fitTimer = window.setTimeout(() => {
-      flowInstance?.fitView({
-        nodes: nextNodes.filter((node) => treeVisibleIds.has(node.id)),
+      flowInstance.fitView({
+        nodes: flowInstance.getNodes().filter((node) => treeVisibleIds.has(node.id)),
         padding: 0.16,
         duration: 420,
       });
     }, 40);
     return () => window.clearTimeout(fitTimer);
-  }, [flowInstance, graphConnections, graphPeople, hierarchy, layoutPositions, selectedId, setEdges, setNodes, treeVisibleIds]);
+  }, [flowInstance, hierarchy, layoutPositions, treeVisibleIds]);
 
   const closeDetails = useCallback(() => {
     setDetailOpen(false);
@@ -582,6 +637,7 @@ export function RelationshipMapApp({
         setGraphPeople(loaded.graph.people);
         setGraphConnections(loaded.graph.connections);
         setGraphTitle(loaded.graph.title);
+        setGraphColorSemantics(normalizeIdentityColorSemantics(loaded.graph.colorSemantics));
         setExpandedIds(new Set(["self"]));
         setStorageStatus("已恢复加密本机数据");
       } else {
@@ -614,6 +670,7 @@ export function RelationshipMapApp({
 
     const graph = {
       title: graphTitle,
+      colorSemantics: graphColorSemantics,
       people: peopleWithExpandedPositions(graphPeople),
       connections: graphConnections,
     };
@@ -718,7 +775,7 @@ export function RelationshipMapApp({
         persistPromisesRef.current.delete(mutationRevision);
       }
     }
-  }, [graphConnections, graphPeople, graphTitle, initialState.storage, mutationRevision, secureStorage, showImportNotice, storageKey, storageReady]);
+  }, [graphColorSemantics, graphConnections, graphPeople, graphTitle, initialState.storage, mutationRevision, secureStorage, showImportNotice, storageKey, storageReady]);
 
   persistGraphRef.current = persistGraph;
 
@@ -753,6 +810,7 @@ export function RelationshipMapApp({
     setGraphPeople(document.people);
     setGraphConnections(document.connections);
     setGraphTitle(document.title);
+    setGraphColorSemantics(normalizeIdentityColorSemantics(document.colorSemantics));
     setExpandedIds(new Set(["self"]));
     setSelectedId(null);
     setDetailOpen(false);
@@ -816,6 +874,7 @@ export function RelationshipMapApp({
     try {
       const graph = {
         title: graphTitle,
+        colorSemantics: graphColorSemantics,
         people: peopleWithExpandedPositions(graphPeople),
         connections: graphConnections,
       };
@@ -827,7 +886,7 @@ export function RelationshipMapApp({
     } catch (error) {
       showImportNotice("error", error instanceof Error ? error.message : "导出失败");
     }
-  }, [graphConnections, graphPeople, graphTitle, privacy, saveJson, showImportNotice]);
+  }, [graphColorSemantics, graphConnections, graphPeople, graphTitle, privacy, saveJson, showImportNotice]);
 
   const switchLayout = useCallback((nextLayout) => {
     if (nextLayout === layout) return;
@@ -952,12 +1011,29 @@ export function RelationshipMapApp({
     showImportNotice("success", `已删除“${deleted.relationship}”关系`);
   }, [graphConnections, graphPeople, layout, markGraphChanged, nodes, pendingDeleteIndex, restoreModalTrigger, setEdges, showImportNotice]);
 
-  const savePerson = useCallback((draft) => {
+  const changePersonIdentityColor = useCallback((personId, colorKey) => {
+    if (personId === "self") return;
+    const normalizedColorKey = normalizeIdentityColorKey(colorKey);
+    setGraphPeople((currentPeople) => currentPeople.map((person) => person.id === personId
+      ? { ...person, colorKey: normalizedColorKey }
+      : person));
+    setNodes((currentNodes) => currentNodes.map((node) => node.id === personId
+      ? { ...node, data: { ...node.data, colorKey: normalizedColorKey } }
+      : node));
+    markGraphChanged();
+    showImportNotice(
+      "success",
+      `身份颜色已设为${identityColorLabel(normalizedColorKey, graphColorSemantics)}`,
+    );
+  }, [graphColorSemantics, markGraphChanged, setNodes, showImportNotice]);
+
+  const savePerson = useCallback((draft, nextColorSemantics) => {
     const editingPerson = personEditor?.mode === "edit"
       ? graphPeople.find((person) => person.id === personEditor.personId) || null
       : null;
     const peopleWithCanonicalPositions = graphPeople.map((person) => ({ ...person }));
     const savedPerson = buildPersonRecord(draft, peopleWithCanonicalPositions, editingPerson);
+    setGraphColorSemantics(normalizeIdentityColorSemantics(nextColorSemantics));
 
     if (editingPerson) {
       const nextPeople = graphPeople.map((person) => person.id === savedPerson.id ? savedPerson : person);
@@ -1215,6 +1291,8 @@ export function RelationshipMapApp({
             privacy={privacy}
             visualName={selectedVisualName}
             relations={selectedRelations}
+            colorSemantics={graphColorSemantics}
+            onChangeIdentityColor={changePersonIdentityColor}
             onAddRelation={openCreateRelation}
             onEditRelation={openEditRelation}
             onDeleteRelation={openDeleteDialog}
@@ -1247,6 +1325,7 @@ export function RelationshipMapApp({
           person={editingPerson}
           people={relationPeople}
           initialParentId={personEditor.initialParentId || "self"}
+          colorSemantics={graphColorSemantics}
           onClose={closePersonEditor}
           onSave={savePerson}
         />

@@ -132,12 +132,38 @@ describe("relationship map integration boundary", () => {
     expect(personModal).toContain('id="person-cooperation-status"');
   });
 
-  it("supports horizontal and pyramid layouts with depth colors only in the Tongpin skin", () => {
+  it("supports both layouts while keeping identity colors independent from hierarchy", () => {
     expect(relationshipApp).toContain('layout === "horizontal"');
     expect(relationshipApp).toContain('layout === "pyramid"');
-    expect(personNode).toContain("person-node--depth-");
-    expect(tongpinTheme).toContain(".relationship-theme--tongpin .person-node--depth-1");
-    expect(relationshipStyles).not.toContain(".person-node--depth-1 .person-avatar");
+    expect(relationshipApp).toContain("changePersonIdentityColor");
+    expect(personNode).toContain("person-node--identity-");
+    expect(personNode).toContain("normalizeIdentityColorKey(data.colorKey)");
+    expect(tongpinTheme).toContain(
+      ".relationship-theme--tongpin .person-node--identity-yellow .person-avatar",
+    );
+    expect(tongpinTheme).toContain(
+      ".relationship-theme--tongpin .person-node--identity-blue .person-avatar",
+    );
+    expect(tongpinTheme).toContain(
+      ".relationship-theme--tongpin .person-node--identity-yellow .person-avatar--photo",
+    );
+    expect(relationshipStyles).not.toContain(
+      ".person-node--identity-yellow .person-avatar",
+    );
+  });
+
+  it("does not refit the viewport for color, gender, or other profile-only edits", () => {
+    expect(relationshipApp).toContain("graphTopologySignature");
+    expect(relationshipApp).toContain("hierarchyFromTopologySignature");
+    const fitEffect = relationshipApp.match(
+      /useEffect\(\(\) => \{\n    if \(!flowInstance\)[\s\S]*?flowInstance\.fitView\([\s\S]*?\n  \}, \[([^\]]+)\]\);/,
+    );
+    expect(fitEffect?.[1]).toContain("hierarchy");
+    expect(fitEffect?.[1]).toContain("layoutPositions");
+    expect(fitEffect?.[1]).toContain("treeVisibleIds");
+    expect(fitEffect?.[1]).not.toContain("graphPeople");
+    expect(fitEffect?.[1]).not.toContain("graphColorSemantics");
+    expect(fitEffect?.[1]).not.toContain("selectedId");
   });
 
   it("routes tree branches from a shared center-side trunk and hides expanded counts", () => {

@@ -23,6 +23,7 @@ describe("privacy-safe relationship export", () => {
 
   it("removes identifiers, precise metrics, coordinates, and topology", () => {
     const safeGraph = createPrivacySafeGraph({
+      colorSemantics: { yellow: "绝密合伙人" },
       people: [
         {
           id: "owner-secret-id",
@@ -90,6 +91,7 @@ describe("privacy-safe relationship export", () => {
       "secret-relation-note",
       "secret-edge-note",
       "重点客户",
+      "绝密合伙人",
     ]) {
       expect(serialized).not.toContain(sensitiveValue);
     }
@@ -100,8 +102,10 @@ describe("privacy-safe relationship export", () => {
       expect(person.activeDays).toBe(0);
       expect(person.mutual).toBe(0);
       expect(person).not.toHaveProperty("position");
+      expect(person.gender).toBe("");
     }
     expect(safeGraph.connections).toEqual([]);
+    expect(safeGraph.people.map((person) => person.colorKey)).toEqual(["yellow", "blue"]);
     expect(serialized).not.toContain('"position"');
     expect(serialized).not.toContain('"strength"');
 

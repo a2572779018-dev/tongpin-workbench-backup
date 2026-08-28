@@ -7,13 +7,28 @@ import {
   Handshake,
   LockKey,
   PencilSimple,
+  Palette,
   Phone,
   Plus,
   Trash,
+  User,
   UsersThree,
   X,
 } from "@phosphor-icons/react";
 import { customerCooperationStatusLabel } from "../data/customerStatus.js";
+import {
+  IDENTITY_COLOR_KEYS,
+  identityColorLabel,
+  normalizeIdentityColorKey,
+  normalizeIdentityColorSemantics,
+} from "../data/identityColors.js";
+
+const COLOR_NAMES = {
+  yellow: "黄色",
+  blue: "蓝色",
+  pink: "粉色",
+  green: "绿色",
+};
 
 function privateValue(value, privacy, kind) {
   if (!privacy) return value;
@@ -23,9 +38,26 @@ function privateValue(value, privacy, kind) {
   return value;
 }
 
-export function DetailPanel({ person, privacy, visualName, relations, onAddRelation, onEditRelation, onDeleteRelation, onEditPerson, onDeletePerson, onClose }) {
+export function DetailPanel({
+  person,
+  privacy,
+  visualName,
+  relations,
+  colorSemantics,
+  onChangeIdentityColor,
+  onAddRelation,
+  onEditRelation,
+  onDeleteRelation,
+  onEditPerson,
+  onDeletePerson,
+  onClose,
+}) {
   const panelRef = useRef(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
+  const identityColorKey = person.id === "self"
+    ? "yellow"
+    : normalizeIdentityColorKey(person.colorKey);
+  const normalizedColorSemantics = normalizeIdentityColorSemantics(colorSemantics);
 
   useEffect(() => {
     setAvatarFailed(false);
@@ -67,7 +99,10 @@ export function DetailPanel({ person, privacy, visualName, relations, onAddRelat
       </div>
 
       <div className="detail-identity">
-        <div className="detail-avatar" aria-hidden="true">
+        <div
+          className={`detail-avatar${person.id === "self" ? " detail-avatar--self" : ` detail-avatar--identity-${identityColorKey}`}${privacy && person.id !== "self" ? " detail-avatar--private" : ""}${!privacy && person.avatar && !avatarFailed ? " detail-avatar--photo" : ""}`}
+          aria-hidden="true"
+        >
           {privacy && person.id !== "self" ? (
             <LockKey size={24} weight="bold" />
           ) : person.avatar && !avatarFailed ? (
@@ -81,6 +116,36 @@ export function DetailPanel({ person, privacy, visualName, relations, onAddRelat
           <p>{privacy && person.id !== "self" ? "身份信息已保护" : person.alias}</p>
         </div>
       </div>
+
+      {person.id !== "self" ? (
+        <div className="detail-identity-color">
+          <label htmlFor={`detail-identity-color-${person.id}`}>
+            <Palette size={17} weight="duotone" />身份颜色
+          </label>
+          {privacy ? (
+            <span className="detail-identity-color__private">已隐藏</span>
+          ) : (
+            <div className={`identity-color-select identity-color-select--${identityColorKey}`}>
+              <span className="identity-color-swatch" aria-hidden="true" />
+              <select
+                id={`detail-identity-color-${person.id}`}
+                value={identityColorKey}
+                onChange={(event) => onChangeIdentityColor?.(
+                  person.id,
+                  normalizeIdentityColorKey(event.target.value),
+                )}
+                aria-label={`${visualName}的身份颜色`}
+              >
+                {IDENTITY_COLOR_KEYS.map((colorKey) => (
+                  <option key={colorKey} value={colorKey}>
+                    {COLOR_NAMES[colorKey]} · {identityColorLabel(colorKey, normalizedColorSemantics)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       <div className="tag-row" aria-label="客户标签">
         {privacy ? <span className="detail-tag">标签已隐藏</span> : person.tags.map((tag) => (
@@ -165,6 +230,12 @@ export function DetailPanel({ person, privacy, visualName, relations, onAddRelat
             <div>
               <dt><Handshake size={18} />合作状态</dt>
               <dd>{privacy ? "已隐藏" : customerCooperationStatusLabel(person.cooperationStatus)}</dd>
+            </div>
+          ) : null}
+          {person.id !== "self" && !privacy && person.gender ? (
+            <div>
+              <dt><User size={18} />性别</dt>
+              <dd>{person.gender}</dd>
             </div>
           ) : null}
           <div>

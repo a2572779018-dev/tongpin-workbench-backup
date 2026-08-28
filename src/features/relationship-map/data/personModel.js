@@ -1,9 +1,15 @@
 import { CUSTOMER_COOPERATION_STATUS, normalizeCustomerCooperationStatus } from "./customerStatus.js";
+import {
+  isIdentityColorKey,
+  legacyIdentityColorKeyForLevel,
+  normalizeIdentityColorKey,
+} from "./identityColors.js";
 
 export const PERSON_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export const PERSON_LEVELS = ["core", "close", "acquaintance", "weak"];
 export const PERSON_RELATIONSHIPS = ["家人", "朋友", "同事", "社群", "弱联系", "已合作客户", "待合作客户"];
+export const PERSON_GENDERS = ["男", "女"];
 
 export const PERSON_LIMITS = {
   name: 80,
@@ -83,6 +89,11 @@ export function splitPersonTags(value) {
 
 export const normalizePersonTags = splitPersonTags;
 
+export function normalizePersonGender(value) {
+  const gender = trimmedString(value);
+  return PERSON_GENDERS.includes(gender) ? gender : "";
+}
+
 export function isPersonAvatarDataUri(value) {
   return typeof value === "string"
     && value.length <= PERSON_LIMITS.avatar
@@ -104,6 +115,7 @@ export function validatePersonDraft(draft = {}, optionsOrEditingPerson = {}) {
   const phone = trimmedString(draft.phone);
   const wechat = trimmedString(draft.wechat);
   const note = trimmedString(draft.note);
+  const gender = trimmedString(draft.gender);
 
   if (!name) errors.name = "请输入姓名";
   else if (characterCount(name) > PERSON_LIMITS.name) errors.name = `姓名不能超过 ${PERSON_LIMITS.name} 个字符`;
@@ -125,6 +137,14 @@ export function validatePersonDraft(draft = {}, optionsOrEditingPerson = {}) {
     if (![CUSTOMER_COOPERATION_STATUS.COLLABORATED, CUSTOMER_COOPERATION_STATUS.PENDING].includes(draft.cooperationStatus)) {
       errors.cooperationStatus = "请选择有效的合作状态";
     }
+  }
+
+  if (draft.colorKey !== undefined && !isIdentityColorKey(draft.colorKey)) {
+    errors.colorKey = "请选择有效的身份颜色";
+  }
+
+  if (draft.gender !== undefined && gender && !PERSON_GENDERS.includes(gender)) {
+    errors.gender = "性别只能选择男或女";
   }
 
   if (!community) errors.community = "请输入所属分组";
@@ -254,6 +274,15 @@ export function buildPersonRecord(draft, people = [], editingPersonValue = null)
   const editingSelf = isSelfPerson(editingPerson);
   const name = trimmedString(draft.name);
   const relationship = editingSelf ? "自己" : trimmedString(draft.relationship);
+  const gender = draft.gender === undefined
+    ? normalizePersonGender(editingPerson?.gender)
+    : normalizePersonGender(draft.gender);
+  const colorFallback = editingSelf
+    ? "yellow"
+    : normalizeIdentityColorKey(
+      editingPerson?.colorKey,
+      legacyIdentityColorKeyForLevel(draft.level),
+    );
   const commonFields = {
     name,
     alias: trimmedString(draft.alias),
@@ -263,6 +292,8 @@ export function buildPersonRecord(draft, people = [], editingPersonValue = null)
     cooperationStatus: editingSelf
       ? CUSTOMER_COOPERATION_STATUS.COLLABORATED
       : normalizeCustomerCooperationStatus(draft.cooperationStatus),
+    colorKey: normalizeIdentityColorKey(draft.colorKey, colorFallback),
+    gender,
     community: trimmedString(draft.community),
     phone: trimmedString(draft.phone),
     wechat: trimmedString(draft.wechat),

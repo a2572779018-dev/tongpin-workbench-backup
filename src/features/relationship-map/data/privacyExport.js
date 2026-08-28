@@ -1,3 +1,5 @@
+import { DEFAULT_IDENTITY_COLOR_SEMANTICS } from "./identityColors.js";
+
 function anonymousPersonId(index, isSelf) {
   return isSelf ? "self" : `contact-${String(index).padStart(3, "0")}`;
 }
@@ -31,6 +33,8 @@ export function createPrivacySafeGraph({ people = [] } = {}) {
       level: isSelf ? "self" : person.level,
       relationship: isSelf ? "自己" : "朋友",
       cooperationStatus: "collaborated",
+      colorKey: isSelf ? "yellow" : "blue",
+      gender: "",
       community: "未分组",
       interactions: 0,
       lastContact: "暂无记录",
@@ -45,6 +49,7 @@ export function createPrivacySafeGraph({ people = [] } = {}) {
 
   return {
     title: "关系图隐私副本",
+    colorSemantics: { ...DEFAULT_IDENTITY_COLOR_SEMANTICS },
     people: anonymousPeople,
     connections: [],
   };

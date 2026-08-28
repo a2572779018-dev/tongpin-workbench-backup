@@ -26,8 +26,8 @@ describe("release announcement", () => {
         lastAnnouncedVersion: "0.1.23",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("API 未启动");
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("账号记录");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("身份颜色");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("男女性别");
   });
 
   it("does not repeat an announcement for the same installed version", () => {

@@ -181,6 +181,64 @@ body,
   background: #bfeea5;
 }
 
+/* Identity colors are graph data, not hierarchy depth. Keep these selectors
+   after legacy level/depth styles so existing graphs retain their migrated
+   appearance while future topology changes never recolor a customer. */
+.relationship-theme--tongpin .person-node--identity-yellow .person-avatar,
+.relationship-theme--tongpin .detail-avatar--identity-yellow,
+.relationship-theme--tongpin .avatar-editor__preview--identity-yellow {
+  background: #ffd84d;
+}
+
+.relationship-theme--tongpin .person-node--identity-blue .person-avatar,
+.relationship-theme--tongpin .detail-avatar--identity-blue,
+.relationship-theme--tongpin .avatar-editor__preview--identity-blue {
+  background: #8ab8f5;
+}
+
+.relationship-theme--tongpin .person-node--identity-pink .person-avatar,
+.relationship-theme--tongpin .detail-avatar--identity-pink,
+.relationship-theme--tongpin .avatar-editor__preview--identity-pink {
+  background: #ffcaca;
+}
+
+.relationship-theme--tongpin .person-node--identity-green .person-avatar,
+.relationship-theme--tongpin .detail-avatar--identity-green,
+.relationship-theme--tongpin .avatar-editor__preview--identity-green {
+  background: #bfeea5;
+}
+
+.relationship-theme--tongpin .person-node--identity-yellow .person-avatar--photo,
+.relationship-theme--tongpin .detail-avatar--identity-yellow.detail-avatar--photo,
+.relationship-theme--tongpin .avatar-editor__preview--identity-yellow.avatar-editor__preview--photo {
+  border-color: #ffd84d;
+}
+
+.relationship-theme--tongpin .person-node--identity-blue .person-avatar--photo,
+.relationship-theme--tongpin .detail-avatar--identity-blue.detail-avatar--photo,
+.relationship-theme--tongpin .avatar-editor__preview--identity-blue.avatar-editor__preview--photo {
+  border-color: #8ab8f5;
+}
+
+.relationship-theme--tongpin .person-node--identity-pink .person-avatar--photo,
+.relationship-theme--tongpin .detail-avatar--identity-pink.detail-avatar--photo,
+.relationship-theme--tongpin .avatar-editor__preview--identity-pink.avatar-editor__preview--photo {
+  border-color: #ffcaca;
+}
+
+.relationship-theme--tongpin .person-node--identity-green .person-avatar--photo,
+.relationship-theme--tongpin .detail-avatar--identity-green.detail-avatar--photo,
+.relationship-theme--tongpin .avatar-editor__preview--identity-green.avatar-editor__preview--photo {
+  border-color: #bfeea5;
+}
+
+.relationship-theme--tongpin .person-node.is-private .person-avatar,
+.relationship-theme--tongpin .detail-avatar--private {
+  color: #1f1f1f;
+  border-color: #1f1f1f;
+  background: #fffdf7;
+}
+
 .relationship-theme--tongpin .person-node:hover .person-avatar,
 .relationship-theme--tongpin .person-node.is-selected .person-avatar,
 .relationship-theme--tongpin .person-node.is-match .person-avatar {
@@ -199,6 +257,11 @@ body,
 .relationship-theme--tongpin .person-node.is-match .person-avatar.person-avatar--photo,
 .relationship-theme--tongpin .person-node--root:hover .person-avatar.person-avatar--photo,
 .relationship-theme--tongpin .person-node--root.is-selected .person-avatar.person-avatar--photo {
+  box-shadow: none;
+}
+
+.relationship-theme--tongpin .detail-avatar--photo,
+.relationship-theme--tongpin .avatar-editor__preview--photo {
   box-shadow: none;
 }
 
@@ -323,12 +386,29 @@ body,
 .relationship-theme--tongpin .report-summary article,
 .relationship-theme--tongpin .report-findings,
 .relationship-theme--tongpin .person-form__identity,
+.relationship-theme--tongpin .person-form__identity-color,
+.relationship-theme--tongpin .detail-identity-color,
 .relationship-theme--tongpin .detail-relation-list li,
 .relationship-theme--tongpin .metric-grid article {
   border: 2px solid #1f1f1f;
   border-radius: 12px;
   background: #fffdf7;
   box-shadow: none;
+}
+
+.relationship-theme--tongpin .identity-color-swatch {
+  border-color: #1f1f1f;
+}
+
+.relationship-theme--tongpin .detail-identity-color .identity-color-select select {
+  color: #1f1f1f;
+  border: 2px solid #1f1f1f;
+  background: #fffdf7;
+  box-shadow: 2px 2px 0 #1f1f1f;
+}
+
+.relationship-theme--tongpin .detail-identity-color .identity-color-select select:focus {
+  box-shadow: 3px 3px 0 #1f1f1f;
 }
 
 .relationship-theme--tongpin .detail-relation-list__content span {

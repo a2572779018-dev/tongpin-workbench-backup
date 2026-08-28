@@ -4,7 +4,15 @@ import {
   CUSTOMER_COOPERATION_OPTIONS,
   normalizeCustomerCooperationStatus,
 } from "../data/customerStatus.js";
-import { PERSON_LIMITS, validatePersonDraft } from "../data/personModel.js";
+import {
+  IDENTITY_COLOR_KEYS,
+  IDENTITY_COLOR_LABEL_MAX_LENGTH,
+  identityColorLabel,
+  normalizeIdentityColorKey,
+  normalizeIdentityColorSemantics,
+  updateIdentityColorSemantic,
+} from "../data/identityColors.js";
+import { PERSON_GENDERS, PERSON_LIMITS, validatePersonDraft } from "../data/personModel.js";
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 const SAFE_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -18,10 +26,26 @@ function readFileAsDataUrl(file) {
   });
 }
 
-export function PersonModal({ mode, person, people = [], initialParentId = "self", onClose, onSave }) {
+const COLOR_NAMES = {
+  yellow: "黄色",
+  blue: "蓝色",
+  pink: "粉色",
+  green: "绿色",
+};
+
+export function PersonModal({
+  mode,
+  person,
+  people = [],
+  initialParentId = "self",
+  colorSemantics,
+  onClose,
+  onSave,
+}) {
   const titleId = useId();
   const fileInputRef = useRef(null);
   const isSelf = person?.id === "self";
+  const normalizedColorSemantics = normalizeIdentityColorSemantics(colorSemantics);
   const [name, setName] = useState(person?.name || "");
   const [alias, setAlias] = useState(person?.alias || "");
   const [relationship] = useState(person?.relationship || "已合作客户");
@@ -29,6 +53,13 @@ export function PersonModal({ mode, person, people = [], initialParentId = "self
   const [community] = useState(person?.community || "已合作客户");
   const [cooperationStatus, setCooperationStatus] = useState(
     normalizeCustomerCooperationStatus(person?.cooperationStatus),
+  );
+  const [gender, setGender] = useState(person?.gender || "");
+  const [colorKey, setColorKey] = useState(
+    isSelf ? "yellow" : normalizeIdentityColorKey(person?.colorKey),
+  );
+  const [colorMeaning, setColorMeaning] = useState(
+    identityColorLabel(isSelf ? "yellow" : person?.colorKey, normalizedColorSemantics),
   );
   const [parentId, setParentId] = useState(mode === "create" ? initialParentId : "");
   const [phone, setPhone] = useState(person?.phone || "");
@@ -83,6 +114,22 @@ export function PersonModal({ mode, person, people = [], initialParentId = "self
 
   const submit = (event) => {
     event.preventDefault();
+    let nextColorSemantics = normalizedColorSemantics;
+    if (!isSelf) {
+      try {
+        nextColorSemantics = updateIdentityColorSemantic(
+          normalizedColorSemantics,
+          colorKey,
+          colorMeaning,
+        );
+      } catch (error) {
+        setErrors((current) => ({
+          ...current,
+          colorMeaning: error instanceof Error ? error.message : "请输入颜色代表的身份",
+        }));
+        return;
+      }
+    }
     const draft = {
       name,
       alias,
@@ -90,6 +137,8 @@ export function PersonModal({ mode, person, people = [], initialParentId = "self
       level: isSelf ? "self" : level,
       community,
       cooperationStatus,
+      gender,
+      colorKey: isSelf ? "yellow" : colorKey,
       phone,
       wechat,
       tags,
@@ -100,7 +149,7 @@ export function PersonModal({ mode, person, people = [], initialParentId = "self
     const nextErrors = validatePersonDraft(draft, { editingPerson: person || null });
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) return;
-    onSave(draft);
+    onSave(draft, nextColorSemantics);
   };
 
   const initial = Array.from(name.trim())[0] || "人";
@@ -132,7 +181,10 @@ export function PersonModal({ mode, person, people = [], initialParentId = "self
             <div className="avatar-field">
               <label htmlFor="person-avatar">客户头像 <span className="label-optional">可选</span></label>
               <div className="avatar-editor">
-                <span className="avatar-editor__preview" aria-hidden="true">
+                <span
+                  className={`avatar-editor__preview${isSelf ? " avatar-editor__preview--self" : ` avatar-editor__preview--identity-${colorKey}`}${avatar ? " avatar-editor__preview--photo" : ""}`}
+                  aria-hidden="true"
+                >
                   {avatar ? (
                     <img
                       src={avatar}
@@ -238,6 +290,80 @@ export function PersonModal({ mode, person, people = [], initialParentId = "self
                     {errors.cooperationStatus}
                   </span>
                 ) : null}
+              </div>
+            ) : null}
+
+            {!isSelf ? (
+              <div className="form-field person-form__gender">
+                <label htmlFor="person-gender">性别</label>
+                <select
+                  id="person-gender"
+                  value={gender}
+                  onChange={updateField("gender", setGender)}
+                  aria-invalid={Boolean(errors.gender)}
+                  aria-describedby={errors.gender ? "person-gender-error" : undefined}
+                >
+                  <option value="" disabled>请选择</option>
+                  {PERSON_GENDERS.map((genderOption) => (
+                    <option key={genderOption} value={genderOption}>{genderOption}</option>
+                  ))}
+                </select>
+                {errors.gender ? (
+                  <span id="person-gender-error" className="field-error" role="alert">{errors.gender}</span>
+                ) : null}
+              </div>
+            ) : null}
+
+            {!isSelf ? (
+              <div className="person-form__identity-color" role="group" aria-label="客户身份颜色">
+                <div className="form-field">
+                  <label htmlFor="person-color-key">身份颜色</label>
+                  <div className={`identity-color-select identity-color-select--${colorKey}`}>
+                    <span className="identity-color-swatch" aria-hidden="true" />
+                    <select
+                      id="person-color-key"
+                      value={colorKey}
+                      onChange={(event) => {
+                        const nextColorKey = normalizeIdentityColorKey(event.target.value);
+                        setColorKey(nextColorKey);
+                        setColorMeaning(identityColorLabel(nextColorKey, normalizedColorSemantics));
+                        setErrors((current) => {
+                          if (!current.colorKey && !current.colorMeaning) return current;
+                          const next = { ...current };
+                          delete next.colorKey;
+                          delete next.colorMeaning;
+                          return next;
+                        });
+                      }}
+                      aria-invalid={Boolean(errors.colorKey)}
+                    >
+                      {IDENTITY_COLOR_KEYS.map((optionColorKey) => (
+                        <option key={optionColorKey} value={optionColorKey}>
+                          {COLOR_NAMES[optionColorKey]} · {identityColorLabel(optionColorKey, normalizedColorSemantics)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {errors.colorKey ? <span className="field-error" role="alert">{errors.colorKey}</span> : null}
+                </div>
+
+                <div className="form-field">
+                  <label htmlFor="person-color-meaning">{COLOR_NAMES[colorKey]}固定含义</label>
+                  <input
+                    id="person-color-meaning"
+                    value={colorMeaning}
+                    maxLength={IDENTITY_COLOR_LABEL_MAX_LENGTH}
+                    onChange={updateField("colorMeaning", setColorMeaning)}
+                    placeholder="例如：合伙人"
+                    aria-invalid={Boolean(errors.colorMeaning)}
+                    aria-describedby={errors.colorMeaning ? "person-color-meaning-error" : undefined}
+                  />
+                  {errors.colorMeaning ? (
+                    <span id="person-color-meaning-error" className="field-error" role="alert">
+                      {errors.colorMeaning}
+                    </span>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 

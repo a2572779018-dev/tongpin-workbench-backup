@@ -1,6 +1,7 @@
 import { memo, useEffect, useState } from "react";
 import { Handle, NodeToolbar, Position } from "@xyflow/react";
 import { CaretDown, CaretRight, LockKey, UserPlus } from "@phosphor-icons/react";
+import { normalizeIdentityColorKey } from "../data/identityColors.js";
 
 const levelLabels = {
   self: "关系中心",
@@ -14,6 +15,12 @@ function PersonNodeComponent({ data, selected }) {
   const isRoot = data.id === "self";
   const [avatarFailed, setAvatarFailed] = useState(false);
   const hasVisibleAvatar = Boolean(data.avatar && !avatarFailed && !(data.privacy && !isRoot));
+  const identityColorKey = isRoot ? "yellow" : normalizeIdentityColorKey(data.colorKey);
+  const identityLabel = isRoot
+    ? levelLabels.self
+    : data.privacy
+      ? "身份已隐藏"
+      : data.colorLabel || data.layerLabel || levelLabels[data.level];
 
   useEffect(() => {
     setAvatarFailed(false);
@@ -22,7 +29,9 @@ function PersonNodeComponent({ data, selected }) {
     "person-node",
     `person-node--${data.level}`,
     `person-node--depth-${Math.min(data.depth ?? 0, 4)}`,
+    isRoot ? "" : `person-node--identity-${identityColorKey}`,
     isRoot ? "person-node--root" : "",
+    data.privacy && !isRoot ? "is-private" : "",
     selected ? "is-selected" : "",
     data.isMatch ? "is-match" : "",
     data.isMuted ? "is-muted" : "",
@@ -38,7 +47,7 @@ function PersonNodeComponent({ data, selected }) {
         className={classNames}
         role="button"
         tabIndex={0}
-        aria-label={`${data.visualName}，${data.layerLabel || levelLabels[data.level]}，点击聚焦`}
+        aria-label={`${data.visualName}，${identityLabel}，点击聚焦`}
         aria-pressed={selected}
         aria-expanded={Boolean(data.quickCardOpen)}
         aria-controls={`quick-card-${data.id}`}
@@ -130,7 +139,9 @@ function PersonNodeComponent({ data, selected }) {
           </button>
 
           <div className="quick-card-copy">
-            <span className="quick-card-kicker">{data.layerLabel || levelLabels[data.level]}</span>
+            <span className="quick-card-kicker">
+              {isRoot ? levelLabels.self : data.privacy ? "客户身份已隐藏" : identityLabel}
+            </span>
             <strong>{data.visualName}</strong>
             <p>{data.privacy ? "客户身份已脱敏" : data.phone || data.wechat || "暂未填写联系方式"}</p>
           </div>

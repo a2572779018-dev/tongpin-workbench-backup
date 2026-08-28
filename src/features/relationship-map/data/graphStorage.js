@@ -1,4 +1,8 @@
 import { parseGraphDocument } from "./importGraph.js";
+import {
+  LEGACY_IDENTITY_COLOR_SEMANTICS,
+  normalizeIdentityColorSemantics,
+} from "./identityColors.js";
 
 export const GRAPH_STORAGE_SCHEMA_VERSION = "1.0";
 export const GRAPH_STORAGE_KEY = `murmur.relationship-map.graph.v${GRAPH_STORAGE_SCHEMA_VERSION}`;
@@ -28,6 +32,8 @@ const PERSON_FIELDS = [
   "level",
   "relationship",
   "cooperationStatus",
+  "colorKey",
+  "gender",
   "community",
   "interactions",
   "lastContact",
@@ -112,6 +118,9 @@ function storageDocument(graph) {
     schemaVersion: GRAPH_STORAGE_SCHEMA_VERSION,
     title: graph?.title,
     generatedAt: new Date().toISOString(),
+    colorSemantics: Object.prototype.hasOwnProperty.call(graph || {}, "colorSemantics")
+      ? normalizeIdentityColorSemantics(graph.colorSemantics)
+      : { ...LEGACY_IDENTITY_COLOR_SEMANTICS },
     people: Array.isArray(graph?.people)
       ? graph.people.map((person) => whitelistPerson(person, positions))
       : graph?.people,
