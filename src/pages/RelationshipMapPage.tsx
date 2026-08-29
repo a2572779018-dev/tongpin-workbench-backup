@@ -12,6 +12,7 @@ import {
 } from "../features/relationship-map/data/graphStorage.js";
 import relationshipMapCss from "../features/relationship-map/relationship-map.css?inline";
 import tongpinThemeCss from "../features/relationship-map/tongpin-theme.css?inline";
+import { useNotificationToolbar } from "../components/NotificationToolbarContext";
 
 const hostCss = `
 :host {
@@ -69,6 +70,7 @@ export function RelationshipMapPage({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [mountNode, setMountNode] = useState<HTMLDivElement | null>(null);
+  const notificationToolbar = useNotificationToolbar();
 
   useLayoutEffect(() => {
     const host = hostRef.current;
@@ -102,6 +104,10 @@ export function RelationshipMapPage({
                 previewMode
                   ? themeStorageKeyForMember(userId)
                   : "tongpin.relationship-map.theme.v1"
+              }
+              notificationUnread={notificationToolbar?.unread ?? 0}
+              onOpenNotifications={
+                notificationToolbar?.openNotificationDrawer
               }
             />,
             mountNode,

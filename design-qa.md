@@ -23,6 +23,53 @@ final result: passed
 
 ---
 
+# 客户脉络顶部空间、通知入口与右上角快捷待办 QA
+
+## 对照与规格化
+
+- 源视觉真值：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-d5f66b29-687d-4484-846b-992cf0d71415.png`，2880×1840，按 2× 密度归一化为 `artifacts/customer-map-toolbar/reference-1440x920.png`，1440×920。
+- 身份标签源视觉：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-896d134d-497f-43cb-81d4-aefed8ec0db0.png`，2880×1840，按 2× 密度归一化为 `artifacts/customer-map-toolbar/reference-editor-1440x920.png`。
+- 浏览器实现：`artifacts/customer-map-toolbar/customer-map-toolbar-1440x920.png`，CSS 视口 1440×920，截图 1440×920；`artifacts/customer-map-toolbar/customer-map-toolbar-1280x720-final.png`，CSS 视口 1280×720，截图 1280×720。
+- 身份编辑实现：`artifacts/customer-map-toolbar/identity-label-editor-1440x900.png`，CSS 视口与截图均为 1440×900。
+- 快捷入口实现：`artifacts/customer-map-toolbar/quick-corner-top-right-240x160.png`，CSS 视口与截图均为 240×160。
+- 全景同屏对照：`artifacts/customer-map-toolbar/reference-vs-toolbar-2880x920.png`；左侧为归一化源界面，右侧为实现。
+- 重点区域同屏对照：`artifacts/customer-map-toolbar/reference-vs-identity-label-1520x160.png`；左侧为“黄色 · 一级关系”，右侧为移除颜色前缀后的身份定义。
+- 状态：同频主题、成员账号、横向客户脉络、默认折叠分支；身份标签重点图为林澜编辑态。源图与实现使用不同数量的本地客户数据，因此只比较本次要求的顶部结构、控件位置和标签表达，不将节点数量视为视觉差异。
+
+## Findings
+
+- 未发现 P0/P1/P2 问题。关系页外层重复标题与独立铃铛行已移除，图内工具栏直接承接导航下方空间；铃铛与导入、导出、换肤、隐私按钮同组且未造成 1280×720 或 1440×920 的横向重叠。
+- 字体与排版：沿用同频原有字体、字号、粗细和单行工具栏层级；新增铃铛使用现有图标库与 44px 图标按钮规格，无额外文案换行。
+- 间距与布局节奏：删除约 3.25rem 的冗余 topbar 轨道，画布从导航后直接开始；图内 header、搜索框和操作组的间距保持原设计系统。
+- 颜色与视觉 token：铃铛沿用现有米白、黄色、黑色描边和硬阴影；未读角标复用关系图的危险提示 token，没有引入新配色。
+- 图像与资产：本次没有新增或替换位图、Logo 或人物素材；铃铛和快捷待办继续使用项目既有图标库，清晰度与原按钮一致。
+- 文案与内容：身份选择项只显示“一级关系 / 合伙人”等当前固定含义，不再重复“黄色 ·”；色点仍保留颜色识别，“黄色固定含义”编辑字段继续承担全图颜色语义设置。
+
+## 交互与平台检查
+
+- 点击图内铃铛已实际打开消息中心，关闭后仍回到原关系图状态。
+- 客户详情和编辑弹窗的身份下拉均通过可见 DOM 验证，只出现语义文本；合作状态、性别、手机号、微信号等既有字段保持不变。
+- 右上角快捷入口的触发区、小角窗和 380×500 快捷面板都按可用桌面区域定位；策略测试覆盖 Windows 顶部/底部/右侧任务栏、macOS 菜单栏和负坐标副屏。
+- 快捷角 `open-panel` IPC 仅显示并聚焦快捷待办窗；只有快捷窗底部显式“打开完整同频”路径才调用主窗恢复。该边界已加入回归测试。
+- Windows 自定义最小化路径隐藏主窗口并从任务栏移除，托盘点击或“打开同频”恢复；关闭按钮仍走原关系图保存/退出流程。当前主机为 macOS，Windows 托盘的真实系统外观与任务栏行为仍需在发布前用 Windows 安装包做一次实机确认。
+- 浏览器控制台 warning/error：0。
+
+## 比较历史
+
+- 第 1 次同屏比较即无 P0/P1/P2 视觉问题；未因 QA 比较追加视觉修复。源码实现前的已知目标差异为：删除外层重复标题行、把铃铛并入图内工具栏、移除身份下拉的颜色名前缀、把快捷角移到右上；上述差异均已在实现证据中消除。
+
+## 自动化与构建
+
+- TypeScript 类型检查通过。
+- 57 个测试文件、290 项测试全部通过。
+- Renderer 与 API 生产构建通过。
+- `git diff --check` 与 Electron 主进程语法检查通过。
+- 本报告对应 v0.1.28 发布候选；安装包、上传和公网更新清单另按正式发布门禁验证。
+
+final result: passed
+
+---
+
 # 客户身份颜色与性别视觉 QA
 
 ## 视觉证据
@@ -230,6 +277,8 @@ final result: passed
 ---
 
 # 右下角快捷待办视觉 QA
+
+> 历史记录：此右下角入口方案已由“客户脉络顶部空间、通知入口与右上角快捷待办 QA”中的右上角方案替代。
 
 ## 视觉证据
 

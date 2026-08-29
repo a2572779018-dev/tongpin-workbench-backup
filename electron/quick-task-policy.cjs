@@ -13,7 +13,7 @@ function pointInBounds(point, bounds) {
 function getHotCornerTriggerBounds(workArea, size = 12) {
   return {
     x: workArea.x + workArea.width - size,
-    y: workArea.y + workArea.height - size,
+    y: workArea.y,
     width: size,
     height: size,
   };
@@ -22,7 +22,7 @@ function getHotCornerTriggerBounds(workArea, size = 12) {
 function getCornerWindowBounds(workArea, size = 54) {
   return {
     x: workArea.x + workArea.width - size,
-    y: workArea.y + workArea.height - size,
+    y: workArea.y,
     width: size,
     height: size,
   };
@@ -40,16 +40,15 @@ function getQuickPanelBounds(
   );
   return {
     x: workArea.x + workArea.width - width - margin,
-    y: workArea.y + workArea.height - height - margin,
+    y: workArea.y + margin,
     width,
     height,
   };
 }
 
-function getQuickCornerDisplayArea(display, platform = process.platform) {
+function getQuickCornerDisplayArea(display) {
   if (!display || typeof display !== "object") return null;
-  if (platform === "win32" && display.workArea) return display.workArea;
-  return display.bounds ?? display.workArea ?? null;
+  return display.workArea ?? display.bounds ?? null;
 }
 
 function expandBounds(bounds, amount) {

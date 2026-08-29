@@ -23,13 +23,6 @@ import {
   normalizeIdentityColorSemantics,
 } from "../data/identityColors.js";
 
-const COLOR_NAMES = {
-  yellow: "黄色",
-  blue: "蓝色",
-  pink: "粉色",
-  green: "绿色",
-};
-
 function privateValue(value, privacy, kind) {
   if (!privacy) return value;
   if (kind === "phone") return "••• •••• ••••";
@@ -138,7 +131,7 @@ export function DetailPanel({
               >
                 {IDENTITY_COLOR_KEYS.map((colorKey) => (
                   <option key={colorKey} value={colorKey}>
-                    {COLOR_NAMES[colorKey]} · {identityColorLabel(colorKey, normalizedColorSemantics)}
+                    {identityColorLabel(colorKey, normalizedColorSemantics)}
                   </option>
                 ))}
               </select>

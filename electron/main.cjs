@@ -12,6 +12,7 @@ const {
   safeStorage,
   screen,
   shell,
+  Tray,
 } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const {
@@ -65,6 +66,7 @@ autoUpdater.logger = null;
 const isDevelopment =
   !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === "darwin";
+const isWindows = process.platform === "win32";
 const isQuickTaskPreview =
   isDevelopment && process.env.TONGPIN_QUICK_PANEL_PREVIEW === "1";
 const quickTaskPreviewTarget =
@@ -87,6 +89,7 @@ const QUICK_CORNER_LEAVE_MS = 250;
 const QUICK_CORNER_POLL_MS = 80;
 const QUICK_TASK_REQUEST_TIMEOUT_MS = 12_000;
 let mainWindow = null;
+let windowsTray = null;
 let noticeWindow = null;
 let quickCornerWindow = null;
 let quickPanelWindow = null;
@@ -311,11 +314,42 @@ function schedulePersistedInstallFailureNotice() {
   timer.unref();
 }
 
+function destroyWindowsTray() {
+  if (!windowsTray) return;
+  windowsTray.destroy();
+  windowsTray = null;
+}
+
 function focusMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (isWindows) mainWindow.setSkipTaskbar(false);
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+function hideMainWindowToTray() {
+  if (!isWindows || !mainWindow || mainWindow.isDestroyed()) return false;
+  mainWindow.setSkipTaskbar(true);
+  mainWindow.hide();
+  return true;
+}
+
+function ensureWindowsTray() {
+  if (!isWindows || isQuickTaskPreview) return null;
+  if (windowsTray) return windowsTray;
+
+  windowsTray = new Tray(APP_ICON_PATH);
+  windowsTray.setToolTip("同频");
+  windowsTray.on("click", focusMainWindow);
+  windowsTray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "打开同频", click: focusMainWindow },
+      { type: "separator" },
+      { label: "退出同频", click: () => app.quit() },
+    ]),
+  );
+  return windowsTray;
 }
 
 function canShowQuickTasks() {
@@ -1146,6 +1180,7 @@ async function createWindow() {
     minWidth: 1050,
     minHeight: 680,
     show: false,
+    minimizable: !isWindows,
     backgroundColor: "#f4efe4",
     title: "同频",
     frame: isMac,
@@ -1180,6 +1215,9 @@ async function createWindow() {
   };
   mainWindow.on("maximize", sendMaximizedState);
   mainWindow.on("unmaximize", sendMaximizedState);
+  mainWindow.on("minimize", () => {
+    if (isWindows) hideMainWindowToTray();
+  });
   mainWindow.on("close", (event) => {
     if (relationshipWindowCloseApproved || !activeRelationshipGraphScope) {
       return;
@@ -1377,6 +1415,10 @@ function registerDesktopIpc() {
 
   ipcMain.handle("window:minimize", (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    if (isWindows) {
+      hideMainWindowToTray();
+      return;
+    }
     mainWindow.minimize();
   });
   ipcMain.handle("window:toggle-maximize", (event) => {
@@ -2005,6 +2047,7 @@ app.whenReady().then(async () => {
     }
   } else {
     await createWindow();
+    ensureWindowsTray();
   }
   configureSystemResumeBridge();
   configureQuickTaskLifecycle();
@@ -2070,3 +2113,5 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+app.on("will-quit", destroyWindowsTray);

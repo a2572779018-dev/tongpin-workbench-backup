@@ -9,6 +9,12 @@ const page = readSource(
   new URL("../pages/RelationshipMapPage.tsx", import.meta.url),
 );
 const app = readSource(new URL("../App.tsx", import.meta.url));
+const appShell = readSource(
+  new URL("../components/AppShell.tsx", import.meta.url),
+);
+const notificationToolbarContext = readSource(
+  new URL("../components/NotificationToolbarContext.tsx", import.meta.url),
+);
 const viteConfig = readSource(new URL("../../vite.config.ts", import.meta.url));
 const preview = readSource(
   new URL("../features/relationship-map/preview.tsx", import.meta.url),
@@ -28,6 +34,9 @@ const relationshipApp = readSource(
 );
 const personModal = readSource(
   new URL("../features/relationship-map/components/PersonModal.jsx", import.meta.url),
+);
+const detailPanel = readSource(
+  new URL("../features/relationship-map/components/DetailPanel.jsx", import.meta.url),
 );
 const personNode = readSource(
   new URL("../features/relationship-map/components/PersonNode.jsx", import.meta.url),
@@ -108,6 +117,37 @@ describe("relationship map integration boundary", () => {
     expect(relationshipApp).not.toContain("生成关系报告");
     expect(relationshipApp).not.toContain("关系层级筛选");
     expect(relationshipApp).not.toContain('className="data-button relation-add-button"');
+  });
+
+  it("uses the graph header as the only relationship-page toolbar and moves notifications into it", () => {
+    expect(appShell).toContain('view !== "relations" ? (');
+    expect(appStyles).toContain(
+      ".app-frame--relations .app-content {\n  display: grid;\n  min-height: 0;\n  grid-template-rows: minmax(0, 1fr);",
+    );
+    expect(notificationToolbarContext).toContain("openNotificationDrawer");
+    expect(page).toContain("useNotificationToolbar");
+    expect(page).toContain("notificationUnread={notificationToolbar?.unread ?? 0}");
+    expect(relationshipApp).toContain("relationship-notification-button");
+    expect(relationshipApp).toContain("onClick={onOpenNotifications}");
+    expect(relationshipApp.indexOf("relationship-notification-button")).toBeGreaterThan(
+      relationshipApp.indexOf('className={`privacy-button'),
+    );
+  });
+
+  it("shows identity meanings without repeating color names in customer selectors", () => {
+    expect(personModal).toContain(
+      "{identityColorLabel(optionColorKey, normalizedColorSemantics)}",
+    );
+    expect(detailPanel).toContain(
+      "{identityColorLabel(colorKey, normalizedColorSemantics)}",
+    );
+    expect(personModal).not.toContain(
+      "{COLOR_NAMES[optionColorKey]} · {identityColorLabel",
+    );
+    expect(detailPanel).not.toContain(
+      "{COLOR_NAMES[colorKey]} · {identityColorLabel",
+    );
+    expect(personModal).toContain("{COLOR_NAMES[colorKey]}固定含义");
   });
 
   it("creates a customer from a node and lets the user choose the existing parent", () => {

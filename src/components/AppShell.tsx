@@ -57,6 +57,7 @@ import {
   type HomeLayout,
 } from "../lib/homeLayout";
 import { showBossStrongReminderDesktop } from "../lib/bossStrongReminderDesktop";
+import { NotificationToolbarProvider } from "./NotificationToolbarContext";
 import {
   millisecondsUntilNextShanghaiEight,
   shouldAutoOpenLoraDashboard,
@@ -235,6 +236,13 @@ export function AppShell({
     user.role === "boss" && workReport?.status && !workReport.status.readAt,
   );
   const unread = notificationUnread + messageUnread + workReportUnread;
+  const openNotificationDrawer = useCallback(() => {
+    setDrawerOpen(true);
+  }, []);
+  const notificationToolbar = useMemo(
+    () => ({ unread, openNotificationDrawer }),
+    [openNotificationDrawer, unread],
+  );
   const pendingStrongNotification = useMemo(
     () => selectLatestStrongReminder(notifications),
     [notifications],
@@ -1309,81 +1317,85 @@ export function AppShell({
       </aside>
 
       <section className="app-content">
-        <header
-          className={[
-            "topbar",
-            isLaneHome ? "topbar--lane-home" : "",
-            isLaneHome && window.tongpin ? "is-desktop" : "",
-          ]
-            .filter(Boolean)
-            .join(" ")}
-        >
-          <div>
-            <h1>{isLaneHome ? "今日待办" : PAGE_TITLES[view]}</h1>
-          </div>
-          <div className="topbar__actions">
-            {view === "home" && (
-              <div className="layout-switcher">
-                <button
-                  className="icon-button layout-switcher__trigger"
-                  type="button"
-                  aria-label="切换任务界面"
-                  aria-expanded={layoutMenuOpen}
-                  title="切换任务界面"
-                  onClick={() => setLayoutMenuOpen((current) => !current)}
-                >
-                  <Shirt size={19} />
-                </button>
-                {layoutMenuOpen && (
-                  <div
-                    className="layout-switcher__menu"
-                    role="menu"
-                    aria-label="任务界面"
+        {view !== "relations" ? (
+          <header
+            className={[
+              "topbar",
+              isLaneHome ? "topbar--lane-home" : "",
+              isLaneHome && window.tongpin ? "is-desktop" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          >
+            <div>
+              <h1>{isLaneHome ? "今日待办" : PAGE_TITLES[view]}</h1>
+            </div>
+            <div className="topbar__actions">
+              {view === "home" && (
+                <div className="layout-switcher">
+                  <button
+                    className="icon-button layout-switcher__trigger"
+                    type="button"
+                    aria-label="切换任务界面"
+                    aria-expanded={layoutMenuOpen}
+                    title="切换任务界面"
+                    onClick={() => setLayoutMenuOpen((current) => !current)}
                   >
-                    {HOME_LAYOUT_OPTIONS.map((layout) => (
-                      <button
-                        key={layout}
-                        type="button"
-                        data-layout-option={layout}
-                        role="menuitemradio"
-                        aria-checked={homeLayout === layout}
-                        className={homeLayout === layout ? "is-active" : ""}
-                        onClick={() => {
-                          onHomeLayoutChange(layout);
-                          setLayoutMenuOpen(false);
-                        }}
-                      >
-                        <i
-                          className={`layout-option__swatch swatch-${layout}`}
-                          aria-hidden="true"
-                        />
-                        <span className="layout-option__copy">
-                          <b>{HOME_LAYOUT_LABELS[layout]}</b>
-                          <small>{HOME_LAYOUT_DESCRIPTIONS[layout]}</small>
-                        </span>
-                        {homeLayout === layout && <CheckCheck size={16} />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {user.role !== "admin" && (
-              <button
-                className="icon-button notification-button"
-                type="button"
-                aria-label={`通知${unread ? `，${unread} 条未读` : ""}`}
-                onClick={() => setDrawerOpen(true)}
-              >
-                <Bell size={19} />
-                {unread > 0 && <span>{unread > 9 ? "9+" : unread}</span>}
-              </button>
-            )}
-          </div>
-        </header>
+                    <Shirt size={19} />
+                  </button>
+                  {layoutMenuOpen && (
+                    <div
+                      className="layout-switcher__menu"
+                      role="menu"
+                      aria-label="任务界面"
+                    >
+                      {HOME_LAYOUT_OPTIONS.map((layout) => (
+                        <button
+                          key={layout}
+                          type="button"
+                          data-layout-option={layout}
+                          role="menuitemradio"
+                          aria-checked={homeLayout === layout}
+                          className={homeLayout === layout ? "is-active" : ""}
+                          onClick={() => {
+                            onHomeLayoutChange(layout);
+                            setLayoutMenuOpen(false);
+                          }}
+                        >
+                          <i
+                            className={`layout-option__swatch swatch-${layout}`}
+                            aria-hidden="true"
+                          />
+                          <span className="layout-option__copy">
+                            <b>{HOME_LAYOUT_LABELS[layout]}</b>
+                            <small>{HOME_LAYOUT_DESCRIPTIONS[layout]}</small>
+                          </span>
+                          {homeLayout === layout && <CheckCheck size={16} />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {user.role !== "admin" && (
+                <button
+                  className="icon-button notification-button"
+                  type="button"
+                  aria-label={`通知${unread ? `，${unread} 条未读` : ""}`}
+                  onClick={openNotificationDrawer}
+                >
+                  <Bell size={19} />
+                  {unread > 0 && <span>{unread > 9 ? "9+" : unread}</span>}
+                </button>
+              )}
+            </div>
+          </header>
+        ) : null}
 
         <div className="page-canvas">
-          {children}
+          <NotificationToolbarProvider value={notificationToolbar}>
+            {children}
+          </NotificationToolbarProvider>
         </div>
       </section>
 

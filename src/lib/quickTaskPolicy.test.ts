@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
@@ -11,59 +12,140 @@ const {
   pointInBounds,
   shouldSuppressMainActivation,
 } = require("../../electron/quick-task-policy.cjs");
+const quickTaskCss = readFileSync(
+  new URL("../quick-task.css", import.meta.url),
+  "utf8",
+).replace(/\r\n/g, "\n");
+const electronMain = readFileSync(
+  new URL("../../electron/main.cjs", import.meta.url),
+  "utf8",
+).replace(/\r\n/g, "\n");
+
+function sourceBetween(start: string, end: string): string {
+  const startIndex = electronMain.indexOf(start);
+  const endIndex = electronMain.indexOf(end, startIndex + start.length);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(endIndex).toBeGreaterThan(startIndex);
+  return electronMain.slice(startIndex, endIndex);
+}
 
 describe("Electron quick task hot corner policy", () => {
   const workArea = { x: -1440, y: 25, width: 1440, height: 875 };
 
-  it("anchors to a negative-coordinate secondary display work area", () => {
+  it("anchors every quick-task surface to the top-right of a negative-coordinate display", () => {
     expect(getHotCornerTriggerBounds(workArea)).toEqual({
       x: -12,
-      y: 888,
+      y: 25,
       width: 12,
       height: 12,
     });
     expect(getCornerWindowBounds(workArea)).toEqual({
       x: -54,
-      y: 846,
+      y: 25,
       width: 54,
       height: 54,
     });
     expect(getQuickPanelBounds(workArea)).toEqual({
       x: -396,
-      y: 384,
+      y: 41,
       width: 380,
       height: 500,
     });
   });
 
-  it("keeps the Windows hot corner above the taskbar", () => {
-    const display = {
+  it("uses the Windows work area with a bottom-docked taskbar", () => {
+    const bottomTaskbarDisplay = {
       bounds: { x: 0, y: 0, width: 1920, height: 1080 },
       workArea: { x: 0, y: 0, width: 1920, height: 1040 },
     };
-    const windowsArea = getQuickCornerDisplayArea(display, "win32");
-    expect(windowsArea).toEqual(display.workArea);
+    const windowsArea = getQuickCornerDisplayArea(bottomTaskbarDisplay);
+    expect(windowsArea).toEqual(bottomTaskbarDisplay.workArea);
     expect(getHotCornerTriggerBounds(windowsArea)).toEqual({
       x: 1908,
-      y: 1028,
+      y: 0,
       width: 12,
       height: 12,
     });
     expect(getCornerWindowBounds(windowsArea)).toEqual({
       x: 1866,
-      y: 986,
+      y: 0,
       width: 54,
       height: 54,
     });
-    expect(getQuickCornerDisplayArea(display, "darwin")).toEqual(
-      display.bounds,
-    );
   });
 
-  it("treats the bottom-right edge as inside without crossing displays", () => {
+  it("avoids Windows taskbars docked to the top or right", () => {
+    const topTaskbarDisplay = {
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      workArea: { x: 0, y: 40, width: 1920, height: 1040 },
+    };
+    const topArea = getQuickCornerDisplayArea(topTaskbarDisplay);
+    expect(getHotCornerTriggerBounds(topArea)).toMatchObject({
+      x: 1908,
+      y: 40,
+    });
+    expect(getQuickPanelBounds(topArea)).toMatchObject({
+      x: 1524,
+      y: 56,
+    });
+
+    const rightTaskbarDisplay = {
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      workArea: { x: 0, y: 0, width: 1880, height: 1080 },
+    };
+    const rightArea = getQuickCornerDisplayArea(rightTaskbarDisplay);
+    expect(getHotCornerTriggerBounds(rightArea)).toMatchObject({
+      x: 1868,
+      y: 0,
+    });
+    expect(getCornerWindowBounds(rightArea)).toMatchObject({
+      x: 1826,
+      y: 0,
+    });
+  });
+
+  it("keeps macOS quick-task surfaces below the menu bar", () => {
+    const display = {
+      bounds: { x: 0, y: 0, width: 1512, height: 982 },
+      workArea: { x: 0, y: 25, width: 1512, height: 932 },
+    };
+    const macArea = getQuickCornerDisplayArea(display);
+    expect(macArea).toEqual(display.workArea);
+    expect(getHotCornerTriggerBounds(macArea)).toMatchObject({
+      x: 1500,
+      y: 25,
+    });
+    expect(getCornerWindowBounds(macArea)).toMatchObject({
+      x: 1458,
+      y: 25,
+    });
+    expect(getQuickPanelBounds(macArea)).toMatchObject({
+      x: 1116,
+      y: 41,
+    });
+  });
+
+  it("falls back to display bounds when no work area is available", () => {
+    const bounds = { x: 10, y: 20, width: 1280, height: 720 };
+    expect(getQuickCornerDisplayArea({ bounds })).toEqual(bounds);
+  });
+
+  it("treats the top-right edge as inside without crossing displays", () => {
     const bounds = getHotCornerTriggerBounds(workArea);
-    expect(pointInBounds({ x: -1, y: 899 }, bounds)).toBe(true);
-    expect(pointInBounds({ x: 0, y: 899 }, bounds)).toBe(false);
+    expect(pointInBounds({ x: -1, y: 25 }, bounds)).toBe(true);
+    expect(pointInBounds({ x: 0, y: 25 }, bounds)).toBe(false);
+    expect(pointInBounds({ x: -1, y: 24 }, bounds)).toBe(false);
+  });
+
+  it("animates and shapes the corner affordance inward from the top-right", () => {
+    expect(quickTaskCss).toContain("align-items: flex-start;");
+    expect(quickTaskCss).toContain(
+      "transform: translate(10px, -10px) scale(0.72);",
+    );
+    expect(quickTaskCss).toContain("transform-origin: right top;");
+    expect(quickTaskCss).toContain("border-radius: 0 0 0 14px;");
+    expect(quickTaskCss).toContain("box-shadow: -3px 3px 0 #171717;");
+    expect(quickTaskCss).toContain("transform: translate(-2px, 2px);");
   });
 
   it("keeps quick-surface activation from restoring the main window", () => {
@@ -84,7 +166,7 @@ describe("Electron quick task hot corner policy", () => {
       shouldSuppressMainActivation({
         now: 900,
         suppressUntil: 800,
-        cursorPoint: { x: -1, y: 899 },
+        cursorPoint: { x: -1, y: 25 },
         cornerBounds,
       }),
     ).toBe(true);
@@ -97,6 +179,31 @@ describe("Electron quick task hot corner policy", () => {
         panelBounds,
       }),
     ).toBe(false);
+  });
+
+  it("opens only the quick panel from the corner and reserves main-window restore for the explicit footer action", () => {
+    const openPanelHandler = sourceBetween(
+      'ipcMain.handle("quick-task:open-panel", async (event) => {',
+      'ipcMain.handle("quick-task:close-panel"',
+    );
+    expect(openPanelHandler).toContain("return showQuickPanel();");
+    expect(openPanelHandler).not.toContain("focusMainWindow");
+    expect(openPanelHandler).not.toContain("mainWindow.show");
+
+    const showPanel = sourceBetween(
+      "async function showQuickPanel() {",
+      "function pollQuickCorner() {",
+    );
+    expect(showPanel).toContain("target.show();");
+    expect(showPanel).toContain("target.focus();");
+    expect(showPanel).not.toContain("focusMainWindow");
+    expect(showPanel).not.toContain("mainWindow.show");
+
+    const openMainHandler = sourceBetween(
+      'ipcMain.handle("quick-task:open-main", (event) => {',
+      'ipcMain.handle("quick-task:request"',
+    );
+    expect(openMainHandler).toContain("focusMainWindow();");
   });
 
   it("does not let a focused quick panel block a later Dock activation", () => {

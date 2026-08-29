@@ -8207,17 +8207,8 @@ body:not(.desktop-runtime) .app-frame--relations {
 .app-frame--relations .app-content {
   display: grid;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
-}
-
-.app-frame--relations .topbar {
-  min-height: 3.25rem;
-  padding: 0.35rem 0.6rem;
-}
-
-.app-frame--relations .topbar h1 {
-  font-size: 1.05rem;
 }
 
 .app-frame--relations .page-canvas {

@@ -8,7 +8,7 @@ import {
   useNodesState,
 } from "@xyflow/react";
 import { gsap } from "gsap";
-import { Shirt } from "lucide-react";
+import { Bell, Shirt } from "lucide-react";
 import {
   DownloadSimple,
   FlowArrow,
@@ -142,6 +142,8 @@ export function RelationshipMapApp({
   secureStorage = null,
   storageKey,
   themeStorageKey,
+  notificationUnread = 0,
+  onOpenNotifications,
 }) {
   const initialState = useMemo(
     () => initialGraphState(storageKey, allowLocalStorage),
@@ -1201,6 +1203,22 @@ export function RelationshipMapApp({
             <ShieldCheck size={19} weight={privacy ? "fill" : "duotone"} />
             <span>{privacy ? "隐私模式已开" : "隐私模式"}</span>
           </button>
+          {typeof onOpenNotifications === "function" ? (
+            <button
+              className="data-button data-button--icon relationship-notification-button"
+              type="button"
+              onClick={onOpenNotifications}
+              aria-label={`通知${notificationUnread ? `，${notificationUnread} 条未读` : ""}`}
+              title="消息中心"
+            >
+              <Bell size={19} strokeWidth={2.35} />
+              {notificationUnread > 0 ? (
+                <i className="relationship-notification-badge">
+                  {notificationUnread > 9 ? "9+" : notificationUnread}
+                </i>
+              ) : null}
+            </button>
+          ) : null}
         </div>
       </header>
 

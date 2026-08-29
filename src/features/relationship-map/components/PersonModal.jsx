@@ -339,7 +339,7 @@ export function PersonModal({
                     >
                       {IDENTITY_COLOR_KEYS.map((optionColorKey) => (
                         <option key={optionColorKey} value={optionColorKey}>
-                          {COLOR_NAMES[optionColorKey]} · {identityColorLabel(optionColorKey, normalizedColorSemantics)}
+                          {identityColorLabel(optionColorKey, normalizedColorSemantics)}
                         </option>
                       ))}
                     </select>
