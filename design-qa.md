@@ -1,4 +1,45 @@
-# LORA 链驾驶舱视觉 QA
+# LORA 链驾驶舱 UI 对接与数据刷新 QA（2026-08-30）
+
+## 视觉真值与实现证据
+
+- 用户视觉 token：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-4e456bb7-2662-4137-ae06-35802fecb247.png`。
+- 用户完整 HTML 设计稿：`/Users/sam/.codex/attachments/f2535135-a733-4346-982a-fbc3cafdffdc/pasted-text.txt`。
+- 桌面首屏：`output/lora-dashboard-preview/desktop-final-top-1440x900.png`。
+- 桌面明细与健康状态：`output/lora-dashboard-preview/desktop-final-bottom-1440x900.png`。
+- 1280×720：`output/lora-dashboard-preview/desktop-final-1280x720.png`。
+- 700×900 与 390×844：`output/lora-dashboard-preview/narrow-final-700x900.png`、`output/lora-dashboard-preview/phone-final-390x844.png`。
+
+## 视觉与交互结论
+
+- 2.5px 墨黑描边、5px/3px 硬投影、Archivo + Space Mono、薄荷/紫/黄/粉/绿五色 KPI 均与设计 token 一致；未使用渐变、柔和阴影、手绘 SVG 或字符图标。
+- KPI 为 5/3/2 列响应式；趋势为 3/2/1 列；明细表在窄屏改为单列并支持键盘聚焦与横向滚动。
+- 1440×900、1280×720、700×900、390×844 均无文档级横向溢出；桌面主状态、KPI、趋势、明细和健康状态完整可访问。
+- 地址恢复值显示为 `≈` 与“恢复后估算”，不会再出现含糊的“无日基线”；stale、unavailable、config-error 分别显示缓存、不可用和配置错误。
+- 价格状态按正常、缓存、采集中、缺失、不可用和配置错误分别显示，不再出现“暂无可信价格”同时写“1 LRB = USDT”的矛盾。
+- 刷新按钮连续点击的浏览器实测为 `≈18 / 420 → ≈19 / 421 → ≈20 / 422`；POST 返回的新快照直接进入页面，推送也直接复用 payload，较晚返回的旧轮询不会覆盖新数据。
+- Swap 完成扫描但没有超过 100 LRB 的记录时显示“暂无 Swap”，不再永久停在“采集中”。
+- 浏览器运行时 warning/error：0。
+
+## 数据链路结论
+
+- RPC、Explorer 与采集器健康状态来自最新聚合快照；Cron 改由 Durable Object 私有采集路由执行，公网同路径返回 404，定时和手动刷新共享同一个进行中的采集任务。
+- 旧 v1 聚合快照仅在 v2 缺失时迁移一次；真实 13.99 MB 旧快照已做只读迁移演练，压缩至 2.08 MB，并保留 checkpoint、累计燃烧/确认数、877038 地址及地址基线。
+- pending 内部交易只保留上海当日、去重并限制 5000 条；Swap 优先采集并使用真实 Blockscout 字符串块高解析。
+- 普通 API 仍保持短超时，LORA 手动刷新单独覆盖完整采集最坏时长；失败仍显示明确错误。
+- 驾驶舱严格只允许老板角色：管理员和成员均无导航入口，桌面动作与实时更新不会打开该页面，本地 Express API 与 Cloudflare API 均返回 403。
+
+## 比较与验证历史
+
+- 第 1 次视觉对照发现地址状态、刷新状态、旧响应覆盖、价格副文案、窄屏换行和趋势图表达问题，均已修复。
+- 第 2 次同屏对照确认边框、硬投影、五色 KPI、字体与贴纸式交互符合 token；未发现新的 P0/P1/P2 视觉问题。
+- 59 个测试文件、310 项测试通过；主工程与 Cloudflare 类型检查通过；Web/API 构建与 Wrangler dry-run 通过；`git diff --check` 通过。
+- 本节记录发布前代码、构建与本地预览门禁；Worker 部署、双平台安装包和公网更新清单需在发布阶段单独核验。
+
+final result: passed
+
+---
+
+# LORA 链驾驶舱视觉 QA（历史版本）
 
 ## 对照
 

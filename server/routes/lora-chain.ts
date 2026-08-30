@@ -18,7 +18,7 @@ export function createLoraChainRouter(
   collector: LoraChainCollector,
 ): Router {
   const router = Router();
-  router.use(requireAuth, requireRole("boss", "admin"));
+  router.use(requireAuth, requireRole("boss"));
 
   router.get("/dashboard", async (_request, response, next) => {
     try {
@@ -33,11 +33,8 @@ export function createLoraChainRouter(
 
   router.post("/refresh", async (_request, response, next) => {
     try {
-      void collector.refresh().catch(() => undefined);
-      const dashboard = await store.read((database) =>
-        dashboardFromDatabase(database),
-      );
-      response.status(202).json({ accepted: true, dashboard });
+      const dashboard = await collector.refresh();
+      response.status(200).json({ accepted: true, dashboard });
     } catch (error) {
       next(error);
     }
@@ -47,7 +44,7 @@ export function createLoraChainRouter(
     try {
       const { trigger } = claimSchema.parse(request.body ?? {});
       const reportDate = shanghaiDateKey();
-      if (request.currentUser!.role === "admin" || trigger === "manual") {
+      if (trigger === "manual") {
         const dashboard = await store.read((database) =>
           dashboardFromDatabase(database),
         );

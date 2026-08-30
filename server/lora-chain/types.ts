@@ -149,6 +149,8 @@ export interface LoraPendingInternalTransaction {
   transaction: LoraIndexedTransaction;
   /** null means the transaction detail has not fetched its first page yet. */
   nextPageParams: Record<string, string | number> | null;
+  /** Event time used to expire the daily queue without retaining old work. */
+  queuedAt: string;
 }
 
 export interface LoraIndexedSwap {
@@ -169,6 +171,13 @@ export interface LoraDailyAddressBaseline {
   totalAddresses: string;
   capturedAt: string;
   blockNumber: number | null;
+  /** Estimated baselines must never be presented as an exact midnight count. */
+  estimated?: boolean;
+  source?:
+    | "midnight-window"
+    | "carry-forward"
+    | "first-observation"
+    | "recovered-observation";
 }
 
 export interface LoraPriceSnapshot {
@@ -212,6 +221,8 @@ export interface LoraCollectorState {
   swapCheckpointBlock?: number | null;
   /** Contract transactions whose internal traces have not been fully collected. */
   pendingInternalTransactions?: LoraPendingInternalTransaction[];
+  /** True once this report date dropped work at the bounded queue limit. */
+  internalQueueOverflow?: boolean;
   internalDetailsComplete?: boolean;
   swapTodayComplete?: boolean;
   bootstrapDate: string | null;
@@ -271,6 +282,7 @@ export interface LoraCollectionBatch {
   burnHeadCandidateKey?: string | null;
   swapCheckpointBlock?: number | null;
   pendingInternalTransactions?: LoraPendingInternalTransaction[];
+  internalQueueOverflow?: boolean;
   internalDetailsComplete?: boolean;
   swapTodayComplete?: boolean;
   transactionTodayComplete: boolean;

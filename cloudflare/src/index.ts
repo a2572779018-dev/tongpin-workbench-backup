@@ -1,11 +1,5 @@
-import { TongpinCore } from "./core";
+import { LORA_INTERNAL_COLLECT_PATH, TongpinCore } from "./core";
 import type { WorkerEnv } from "./platform";
-import { ExplorerLoraChainDataSource } from "../../server/lora-chain/source";
-import {
-  LORA_DEFAULT_RPC_URL,
-  LORA_EXPLORER_API,
-} from "../../server/lora-chain/constants";
-import { collectLoraAggregateSnapshot } from "./lora-aggregate";
 
 export { TongpinCore };
 
@@ -367,6 +361,10 @@ export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
 
+    if (url.pathname === LORA_INTERNAL_COLLECT_PATH) {
+      return new Response(null, { status: 404 });
+    }
+
     if (request.method === "OPTIONS") {
       const origin = request.headers.get("Origin");
       if (origin && !allowedOrigins(env).has(origin)) {
@@ -434,14 +432,23 @@ export default {
     });
   },
   scheduled(_controller, env, ctx) {
-    const source = new ExplorerLoraChainDataSource(
-      env.LORA_EXPLORER_API ?? LORA_EXPLORER_API,
-      env.LORA_RPC_URL ?? LORA_DEFAULT_RPC_URL,
-    );
+    const id = env.TONGPIN_CORE.idFromName("primary");
+    const stub = env.TONGPIN_CORE.get(id);
     ctx.waitUntil(
-      collectLoraAggregateSnapshot({ bucket: env.RELEASES, source }).catch(
-        (error) => console.error("LORA scheduled aggregate failed", error),
-      ),
+      stub
+        .fetch(
+          new Request(`https://tongpin.internal${LORA_INTERNAL_COLLECT_PATH}`, {
+            method: "POST",
+          }),
+        )
+        .then(async (response) => {
+          if (!response.ok) {
+            const detail = await response.text();
+            throw new Error(
+              `LORA scheduled aggregate failed (${response.status}): ${detail}`,
+            );
+          }
+        }),
     );
   },
 } satisfies ExportedHandler<WorkerEnv>;

@@ -72,6 +72,7 @@ const isQuickTaskPreview =
 const quickTaskPreviewTarget =
   process.env.TONGPIN_QUICK_PREVIEW_TARGET === "corner" ? "corner" : "panel";
 const SESSION_FILE_NAME = "secure-session.bin";
+const SESSION_MEMORY_ONLY_MARKER_NAME = "secure-session.memory-only";
 const RELATIONSHIP_GRAPH_BINDING_FILE_NAME = "secure-relationship-binding.bin";
 const APP_ICON_PATH = path.join(__dirname, "..", "build", "icon.ico");
 const NOTICE_COLLAPSED_SIZE = { width: 82, height: 82 };
@@ -109,6 +110,7 @@ const pendingQuickTaskRequests = new Map();
 const recentNoticeSounds = new Map();
 let relationshipGraphVault = null;
 let credentialVault = null;
+let inMemorySessionPayload = null;
 let activeRelationshipGraphScope = null;
 let relationshipSessionGeneration = 0;
 let relationshipGraphOpenSequence = 0;
@@ -841,7 +843,39 @@ function assertMainRendererEvent(event) {
   }
 }
 
+function sessionMemoryOnlyMarkerPath() {
+  return path.join(app.getPath("userData"), SESSION_MEMORY_ONLY_MARKER_NAME);
+}
+
+async function hasSessionMemoryOnlyMarker() {
+  try {
+    await fsp.access(sessionMemoryOnlyMarkerPath());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function clearSessionMemoryOnlyMarker() {
+  try {
+    await fsp.unlink(sessionMemoryOnlyMarkerPath());
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+}
+
 async function readSecureSession() {
+  if (typeof inMemorySessionPayload === "string") {
+    try {
+      const session = JSON.parse(inMemorySessionPayload);
+      if (session && typeof session === "object" && !Array.isArray(session)) {
+        return { payload: inMemorySessionPayload, session };
+      }
+    } catch {
+      inMemorySessionPayload = null;
+    }
+  }
+  if (await hasSessionMemoryOnlyMarker()) return null;
   if (!safeStorage.isEncryptionAvailable()) return null;
   try {
     const encrypted = await fsp.readFile(
@@ -1457,9 +1491,6 @@ function registerDesktopIpc() {
     if (typeof payload !== "string" || payload.length > 20_000) {
       throw new Error("无效的会话内容");
     }
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error("系统安全存储不可用，拒绝明文保存登录状态");
-    }
     let nextSession;
     let nextRelationshipSession;
     try {
@@ -1504,11 +1535,22 @@ function registerDesktopIpc() {
     if (!continuingMemberIdentity) {
       resetRelationshipGraphScope({ sessionChanged: true });
     }
-    const encrypted = safeStorage.encryptString(payload);
-    await atomicWritePrivateFileWithBackup(
-      path.join(app.getPath("userData"), SESSION_FILE_NAME),
-      encrypted,
-    );
+    if (safeStorage.isEncryptionAvailable()) {
+      const encrypted = safeStorage.encryptString(payload);
+      await atomicWritePrivateFileWithBackup(
+        path.join(app.getPath("userData"), SESSION_FILE_NAME),
+        encrypted,
+      );
+      await clearSessionMemoryOnlyMarker();
+    } else {
+      await atomicWritePrivateFile(
+        sessionMemoryOnlyMarkerPath(),
+        "memory-only\n",
+      );
+    }
+    // 安全存储锁定时只保留当前进程内的登录状态，绝不降级为明文落盘。
+    // 这样用户仍可工作；完全退出后需要重新登录，直到系统安全存储恢复。
+    inMemorySessionPayload = payload;
     if (continuingMemberIdentity) {
       relationshipGraphOpenSequence += 1;
       if (
@@ -1563,6 +1605,8 @@ function registerDesktopIpc() {
     } catch {
       // The secure session is still cleared even if stale verification metadata remains.
     }
+    inMemorySessionPayload = null;
+    await clearSessionMemoryOnlyMarker();
     if (safeStorage.isEncryptionAvailable()) {
       try {
         const encrypted = await fsp.readFile(

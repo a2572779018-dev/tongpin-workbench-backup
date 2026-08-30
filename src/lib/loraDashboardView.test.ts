@@ -1,7 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { LoraChainDashboardView } from "../pages/LoraChainDashboard";
+import {
+  LoraChainDashboardView,
+  dashboardFromRefresh,
+} from "../pages/LoraChainDashboard";
 import type { LoraDashboardData } from "./loraDashboardData";
 
 const addressA = "0x1111111111111111111111111111111111111111";
@@ -113,25 +116,97 @@ function render(data: LoraDashboardData | null): string {
 }
 
 describe("LORA dashboard fixed fixture", () => {
+  it("accepts both direct and wrapped refresh snapshots", () => {
+    expect(dashboardFromRefresh(fixture)).toBe(fixture);
+    expect(dashboardFromRefresh({ dashboard: fixture })).toBe(fixture);
+    expect(dashboardFromRefresh({ ok: true })).toBeNull();
+  });
+
   it("renders every required dashboard section without explanatory small text", () => {
     const markup = render(fixture);
-    expect(markup).toContain("LORA 链数据驾驶舱");
-    expect(markup).toContain("按 1000 LRB 销毁规则统计");
+    expect(markup).toContain("LORA 驾驶舱");
+    expect(markup).toContain("趋势 / TRENDS");
+    expect(markup).toContain("明细 / DETAIL");
+    expect(markup).toContain("销毁 3000 LRB");
+    expect(markup).toContain("昨日 680 · 成功率 97.62%");
     expect(markup).toContain("每小时交易趋势");
     expect(markup).toContain("每小时新增节点趋势");
     expect(markup).toContain("超过 100 LRB 的转账 · Top 5");
     expect(markup).toContain("超过 100 LRB 的 Swap");
     expect(markup).toContain("价格时间");
     expect(markup).toContain("RPC 正常");
+    expect(markup.match(/<article/g)).toHaveLength(10);
+    expect(markup.match(/<table/g)).toHaveLength(2);
+    expect(markup).toContain("aria-busy=\"false\"");
+    expect(markup).toContain("aria-live=\"polite\"");
     expect(markup).not.toContain("<small");
   });
 
   it("shows honest unavailable states instead of zero", () => {
     const markup = render(null);
     expect(markup).toContain("采集中");
-    expect(markup).toContain("无日基线");
+    expect(markup).toContain("待建立基线");
     expect(markup).toContain("暂无可信价格");
     expect(markup).not.toContain(">0<");
+  });
+
+  it("keeps recovered address data visible while the exact midnight baseline rebuilds", () => {
+    const markup = render({
+      ...fixture,
+      baselineStatus: "building",
+      addresses: {
+        ...fixture.addresses,
+        todayNew: "≈18",
+        baselineStatus: "building",
+      },
+    });
+    expect(markup).toContain("≈18");
+    expect(markup).toContain("恢复后估算");
+    expect(markup).toContain("同步补齐 · 更新");
+    expect(markup).not.toContain("无日基线");
+  });
+
+  it("distinguishes stale and unavailable address states from a rebuilding estimate", () => {
+    const staleMarkup = render({
+      ...fixture,
+      addresses: {
+        ...fixture.addresses,
+        todayNew: "18",
+        baselineStatus: "stale",
+      },
+    });
+    const unavailableMarkup = render({
+      ...fixture,
+      addresses: {
+        ...fixture.addresses,
+        todayNew: null,
+        baselineStatus: "unavailable",
+      },
+      price: {
+        ...fixture.price,
+        status: "unavailable",
+        priceUsdt: null,
+      },
+    });
+    expect(staleMarkup).toContain("缓存估算");
+    expect(unavailableMarkup).toContain("暂不可用");
+    expect(unavailableMarkup).toContain("价格不可用");
+    expect(unavailableMarkup).not.toContain("1 LRB = USDT");
+  });
+
+  it("announces an active refresh and exposes navigable section headings", () => {
+    const markup = renderToStaticMarkup(
+      createElement(LoraChainDashboardView, {
+        data: fixture,
+        clock: "10:30:00",
+        busy: true,
+        error: "",
+        onRefresh: () => undefined,
+      }),
+    );
+    expect(markup).toContain("正在刷新数据");
+    expect(markup).toContain("<h2 class=\"lora-section-label\">趋势 / TRENDS</h2>");
+    expect(markup).toContain("tabindex=\"0\"");
   });
 
   it("shows a stale cached Pair value as an explicitly cached price", () => {
@@ -141,5 +216,25 @@ describe("LORA dashboard fixed fixture", () => {
     });
     expect(markup).toContain("0.2");
     expect(markup).toContain("缓存价格");
+  });
+
+  it("finishes an empty Swap scan as no matching Swap instead of collecting forever", () => {
+    const markup = render({
+      ...fixture,
+      swaps: {
+        ...fixture.swaps,
+        status: "ready",
+        rows: [],
+        latestPrice: null,
+        latestAt: null,
+      },
+      price: {
+        ...fixture.price,
+        latestSwapPrice: null,
+        latestSwapAt: null,
+      },
+    });
+    expect(markup).toContain("暂无 Swap");
+    expect(markup).not.toContain(">采集中<");
   });
 });

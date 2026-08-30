@@ -757,7 +757,7 @@ export function AppShell({
     if (!window.tongpin?.onDesktopNoticeAction) return;
     return window.tongpin.onDesktopNoticeAction((action) => {
       if (action.type === "open-lora-dashboard") {
-        if (user.role === "boss" || user.role === "admin") {
+        if (user.role === "boss") {
           setDrawerOpen(false);
           onViewChange("lora-chain");
         }
@@ -1011,7 +1011,7 @@ export function AppShell({
               }),
             );
           } else if (message.type === "lora-chain:updated") {
-            if (user.role === "boss" || user.role === "admin") {
+            if (user.role === "boss") {
               window.dispatchEvent(
                 new CustomEvent("tongpin:lora-chain-updated", {
                   detail: message.data,
@@ -1111,11 +1111,6 @@ export function AppShell({
           view: "admin" as const,
           label: "账号与权限",
           icon: ShieldCheck,
-        },
-        {
-          view: "lora-chain" as const,
-          label: "LORA 链驾驶舱",
-          icon: Activity,
         },
       ];
     }

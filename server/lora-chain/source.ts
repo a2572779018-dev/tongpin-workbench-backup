@@ -55,16 +55,32 @@ const REQUEST_CONCURRENCY = 4;
 // Keep the whole cycle below that ceiling, including price/RPC validation and
 // retry headroom, so a busy history backfill never discards its partial page.
 const MAX_REQUEST_ATTEMPTS_PER_TICK = 48;
-const MAX_HEAD_PAGES_PER_TICK = 4;
+const MAX_HEAD_PAGES_PER_TICK = 2;
 const MAX_HISTORY_PAGES_PER_TICK = 24;
-const MAX_CORE_HISTORY_PAGES_PER_TICK = 14;
-const MAX_BURN_DAILY_PAGES_PER_TICK = 2;
+const MAX_CORE_HISTORY_PAGES_PER_TICK = 4;
+const MAX_BURN_DAILY_PAGES_PER_TICK = 1;
 const MAX_BURN_LIFETIME_PAGES_PER_TICK = 1;
 const MAX_DETAIL_PAGES = 100;
 const PAIR_LOG_WINDOW_BLOCKS = 5_000;
 const MAX_PAIR_WINDOWS_PER_TICK = 2;
 const PAIR_CONFIRMATIONS = 6;
 const PAIR_RESERVE_STALE_SECONDS = 10 * 60;
+export const MAX_PENDING_INTERNAL_TRANSACTIONS = 5_000;
+
+/** Nominal first-attempt budget used by production-scale regression tests. */
+export const LORA_SOURCE_REQUEST_BUDGET_LIMITS = {
+  totalAttempts: MAX_REQUEST_ATTEMPTS_PER_TICK,
+  priceRequests: 8,
+  explorerHeadStreams: 3,
+  headPagesPerStream: MAX_HEAD_PAGES_PER_TICK,
+  coreHistoryStreams: 2,
+  coreHistoryPagesPerStream: MAX_CORE_HISTORY_PAGES_PER_TICK,
+  burnDailyPages: MAX_BURN_DAILY_PAGES_PER_TICK,
+  burnLifetimePages: MAX_BURN_LIFETIME_PAGES_PER_TICK,
+  statsRequests: 1,
+  pairBoundaryRequests: 1,
+  pairLogWindows: MAX_PAIR_WINDOWS_PER_TICK,
+} as const;
 
 class HttpStatusError extends Error {
   constructor(
@@ -398,6 +414,32 @@ export function appendExplorerQuery(
   return url.toString();
 }
 
+export function buildExplorerBlockByTimeUrl(
+  explorerApi: string,
+  timestampSeconds: number,
+): string {
+  if (!Number.isSafeInteger(timestampSeconds) || timestampSeconds < 0) {
+    throw new Error("invalid Explorer block timestamp");
+  }
+  const url = new URL("/api", explorerApi);
+  url.searchParams.set("module", "block");
+  url.searchParams.set("action", "getblocknobytime");
+  url.searchParams.set("timestamp", String(timestampSeconds));
+  url.searchParams.set("closest", "after");
+  return url.toString();
+}
+
+/** Parses Blockscout's legacy getblocknobytime response without coercion. */
+export function parseExplorerBlockNumberByTime(payload: unknown): number | null {
+  const record = asRecord(payload);
+  if (!record || (record.status !== "1" && record.status !== 1)) return null;
+  const result = record.result;
+  const blockNumber = asRecord(result)
+    ? numberValue(asRecord(result)?.blockNumber)
+    : numberValue(result);
+  return blockNumber !== null && blockNumber >= 0 ? blockNumber : null;
+}
+
 function parseCursor(value: unknown): Cursor {
   const record = asRecord(value);
   if (!record) return null;
@@ -626,6 +668,19 @@ function parseStoredCursor(value: unknown): Cursor {
   return Object.fromEntries(entries) as Record<string, string | number>;
 }
 
+const LEGACY_PENDING_QUEUED_AT = "1970-01-01T00:00:00.000Z";
+
+function pendingQueuedAt(
+  record: Record<string, unknown>,
+  fallback: string | null,
+): string {
+  const queuedAt = stringValue(record.queuedAt);
+  if (queuedAt && Number.isFinite(Date.parse(queuedAt))) return queuedAt;
+  return fallback && Number.isFinite(Date.parse(fallback))
+    ? fallback
+    : LEGACY_PENDING_QUEUED_AT;
+}
+
 /** Accepts both the current cursor wrapper and the legacy bare transaction JSON. */
 export function normalizePendingInternalTransactions(
   value: unknown,
@@ -653,6 +708,7 @@ export function normalizePendingInternalTransactions(
           input: "0x",
         },
         nextPageParams: parseStoredCursor(record.nextPageParams),
+        queuedAt: pendingQueuedAt(record, null),
       });
       continue;
     }
@@ -666,9 +722,50 @@ export function normalizePendingInternalTransactions(
       nextPageParams: wrapped
         ? parseStoredCursor(record.nextPageParams)
         : null,
+      queuedAt: pendingQueuedAt(record, transaction.timestamp),
     });
   }
   return [...normalized.values()];
+}
+
+export interface BoundedPendingInternalTransactions {
+  queue: LoraPendingInternalTransaction[];
+  overflow: boolean;
+}
+
+/**
+ * Keeps only work queued during the active business day and applies a hard
+ * memory/persistence cap. Once overflowed, the day remains partial even after
+ * the retained work drains because dropped traces cannot be reconstructed.
+ */
+export function boundPendingInternalTransactions(
+  entries: LoraPendingInternalTransaction[],
+  todayStart: Date,
+  now: Date,
+  previousOverflow = false,
+): BoundedPendingInternalTransactions {
+  const start = todayStart.getTime();
+  const end = now.getTime();
+  const unique = new Map<string, LoraPendingInternalTransaction>();
+  for (const entry of entries) {
+    const queuedAt = Date.parse(entry.queuedAt);
+    if (
+      !Number.isFinite(queuedAt) ||
+      queuedAt < start ||
+      queuedAt > end ||
+      unique.has(entry.transaction.hash)
+    ) {
+      continue;
+    }
+    unique.set(entry.transaction.hash, entry);
+  }
+  const currentDay = [...unique.values()];
+  return {
+    queue: currentDay.slice(0, MAX_PENDING_INTERNAL_TRANSACTIONS),
+    overflow:
+      previousOverflow ||
+      currentDay.length > MAX_PENDING_INTERNAL_TRANSACTIONS,
+  };
 }
 
 export interface InternalDetailRoundResult {
@@ -714,7 +811,7 @@ export async function collectInternalDetailRound(options: {
         return {
           items,
           pending: page.next
-            ? [{ transaction: entry.transaction, nextPageParams: page.next }]
+            ? [{ ...entry, nextPageParams: page.next }]
             : [],
           failed: false,
         };
@@ -1167,29 +1264,15 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     });
   }
 
-  private async blockTimestamp(blockNumber: number): Promise<number> {
-    const block = await this.rpc<Record<string, unknown>>(
-      "eth_getBlockByNumber",
-      [`0x${blockNumber.toString(16)}`, false],
+  private async blockNumberAtOrAfter(timestampSeconds: number): Promise<number> {
+    const payload = await this.client.request<unknown>(
+      buildExplorerBlockByTimeUrl(this.explorerApi, timestampSeconds),
     );
-    const timestamp = rpcQuantity(block.timestamp);
-    if (timestamp === null) throw new Error("RPC block timestamp schema mismatch");
-    return timestamp;
-  }
-
-  private async firstBlockAtOrAfter(
-    timestampSeconds: number,
-    latestBlock: number,
-  ): Promise<number> {
-    let low = 0;
-    let high = latestBlock;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      const timestamp = await this.blockTimestamp(middle);
-      if (timestamp < timestampSeconds) low = middle + 1;
-      else high = middle;
+    const blockNumber = parseExplorerBlockNumberByTime(payload);
+    if (blockNumber === null) {
+      throw new Error("Explorer getblocknobytime schema mismatch");
     }
-    return low;
+    return blockNumber;
   }
 
   private async proveSwap(
@@ -1263,11 +1346,10 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     let checkpoint = options.checkpoint;
     try {
       if (checkpoint === null) {
-        const firstBlock = await this.firstBlockAtOrAfter(
+        const firstBlock = await this.blockNumberAtOrAfter(
           Math.floor(options.boundary.getTime() / 1_000),
-          confirmedTip,
         );
-        checkpoint = Math.max(0, firstBlock - 1);
+        checkpoint = Math.max(0, Math.min(firstBlock, confirmedTip + 1) - 1);
       }
       const collected: LoraIndexedSwap[] = [];
       for (
@@ -1586,43 +1668,6 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       }
     }
 
-    const pendingByHash = new Map<string, LoraPendingInternalTransaction>();
-    for (const entry of normalizePendingInternalTransactions(
-      context.state.pendingInternalTransactions,
-    )) {
-      pendingByHash.set(entry.transaction.hash, entry);
-    }
-    for (const transaction of transactions) {
-      if (
-        transaction.to === null ||
-        transaction.toIsContract === true ||
-        transaction.input !== "0x"
-      ) {
-        const existing = pendingByHash.get(transaction.hash);
-        pendingByHash.set(transaction.hash, {
-          transaction,
-          nextPageParams: existing?.nextPageParams ?? null,
-        });
-      }
-    }
-    const detailCandidates = [...pendingByHash.values()];
-    const pairRequestReserve =
-      pairConfigurationVerified && price.blockNumber !== null ? 8 : 0;
-    const detailCapacity = Math.max(
-      0,
-      Math.floor(
-        (this.client.remainingAttemptBudget() - pairRequestReserve) /
-          REQUEST_ATTEMPTS,
-      ),
-    );
-    const detailResult = await this.collectTransactionInternals(
-      detailCandidates,
-      detailCapacity,
-    );
-    internalTransactions.push(...detailResult.items);
-    const pendingInternalTransactions = detailResult.pending;
-    const internalDetailsComplete = pendingInternalTransactions.length === 0;
-
     let swapCheckpointBlock = crossedDate
       ? null
       : context.state.swapCheckpointBlock ?? null;
@@ -1651,6 +1696,56 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       }
     }
 
+    // Pair scanning is bounded and business-critical, so it runs before the
+    // generic per-transaction detail queue can consume the remaining budget.
+    const retainedStateQueue = boundPendingInternalTransactions(
+      crossedDate
+        ? []
+        : normalizePendingInternalTransactions(
+            context.state.pendingInternalTransactions,
+          ),
+      todayStart,
+      now,
+      crossedDate ? false : context.state.internalQueueOverflow ?? false,
+    );
+    const pendingByHash = new Map<string, LoraPendingInternalTransaction>();
+    for (const entry of retainedStateQueue.queue) {
+      pendingByHash.set(entry.transaction.hash, entry);
+    }
+    for (const transaction of transactions) {
+      if (
+        transaction.to === null ||
+        transaction.toIsContract === true ||
+        transaction.input !== "0x"
+      ) {
+        const existing = pendingByHash.get(transaction.hash);
+        pendingByHash.set(transaction.hash, {
+          transaction,
+          nextPageParams: existing?.nextPageParams ?? null,
+          queuedAt: existing?.queuedAt ?? transaction.timestamp,
+        });
+      }
+    }
+    const boundedDetails = boundPendingInternalTransactions(
+      [...pendingByHash.values()],
+      todayStart,
+      now,
+      retainedStateQueue.overflow,
+    );
+    const detailCapacity = Math.max(
+      0,
+      Math.floor(this.client.remainingAttemptBudget() / REQUEST_ATTEMPTS),
+    );
+    const detailResult = await this.collectTransactionInternals(
+      boundedDetails.queue,
+      detailCapacity,
+    );
+    internalTransactions.push(...detailResult.items);
+    const pendingInternalTransactions = detailResult.pending;
+    const internalQueueOverflow = boundedDetails.overflow;
+    const internalDetailsComplete =
+      pendingInternalTransactions.length === 0 && !internalQueueOverflow;
+
     const localParts = Object.fromEntries(
       new Intl.DateTimeFormat("en-CA", {
         timeZone: LORA_BUSINESS_TIME_ZONE,
@@ -1671,6 +1766,8 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         totalAddresses: currentTotalAddresses,
         capturedAt: now.toISOString(),
         blockNumber: checkpointBlock,
+        estimated: false,
+        source: "midnight-window",
       };
     }
 
@@ -1712,6 +1809,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       burnHeadCandidateKey,
       swapCheckpointBlock,
       pendingInternalTransactions,
+      internalQueueOverflow,
       internalDetailsComplete,
       swapTodayComplete,
       transactionTodayComplete,

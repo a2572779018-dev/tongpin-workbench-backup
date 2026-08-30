@@ -240,7 +240,7 @@ export function isEnabled(value: string | undefined): boolean {
 }
 
 export function isLoraDashboardRole(role: UserRole): boolean {
-  return role === "boss" || role === "admin";
+  return role === "boss";
 }
 
 export function resolveLoraNullableCheckpoint<T>(

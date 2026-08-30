@@ -104,7 +104,6 @@ import {
   LORA_RETENTION_QUERIES,
 } from "./schema";
 
-const LORA_RAW_COLLECTION_PAUSED = true;
 import {
   generateCode,
   hashOpaque,
@@ -138,6 +137,9 @@ import {
   parseTaskSync,
   parseVerification,
 } from "./validation";
+
+const LORA_RAW_COLLECTION_PAUSED = true;
+export const LORA_INTERNAL_COLLECT_PATH = "/_internal/lora-chain/collect";
 
 interface RefreshRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -559,6 +561,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   private readonly sql: SqlStorage;
   private readonly loraSource: ExplorerLoraChainDataSource;
   private loraCollectionInFlight: Promise<LoraDashboardData> | null = null;
+  private loraAggregateCollectionInFlight: Promise<LoraDashboardData> | null =
+    null;
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
@@ -778,6 +782,13 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       const url = new URL(request.url);
       const path = url.pathname;
       const method = request.method;
+
+      if (path === LORA_INTERNAL_COLLECT_PATH) {
+        if (method !== "POST") {
+          throw new ApiError(405, "METHOD_NOT_ALLOWED", "请求方法不允许");
+        }
+        return json(await this.runLoraAggregateCollection());
+      }
 
       if (path === "/api/realtime") {
         return this.upgradeRealtime(request);
@@ -1464,19 +1475,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
 
   private async refreshLoraDashboard(request: Request): Promise<Response> {
     await this.requireLoraUser(request);
-    const now = new Date();
-    const current =
-      (await readLoraAggregateDashboard(this.env.RELEASES, now)) ??
-      this.buildLoraDashboardFromSql(now);
-    this.ctx.waitUntil(
-      collectLoraAggregateSnapshot({
-        bucket: this.env.RELEASES,
-        source: this.loraSource,
-      })
-        .then((dashboard) => this.pushLoraDashboard(dashboard))
-        .catch((error) => console.error("LORA aggregate refresh failed", error)),
-    );
-    return json({ accepted: true, dashboard: current }, 202);
+    const dashboard = await this.runLoraAggregateCollection();
+    return json({ accepted: true, dashboard });
   }
 
   private async claimLoraDailyPopup(request: Request): Promise<Response> {
@@ -1501,7 +1501,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     const dashboard =
       (await readLoraAggregateDashboard(this.env.RELEASES)) ??
       this.cachedLoraDashboard();
-    if (user.role === "admin" || trigger === "manual") {
+    if (trigger === "manual") {
       return json({ shouldOpen: false, reportDate, dashboard });
     }
 
@@ -1914,12 +1914,29 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     const recipients = this.sql
       .exec<{ id: string }>(
         `SELECT id FROM users
-         WHERE status = 'active' AND role IN ('boss', 'admin')`,
+         WHERE status = 'active' AND role = 'boss'`,
       )
       .toArray();
     for (const recipient of recipients) {
       this.pushToUser(recipient.id, "lora-chain:updated", { dashboard });
     }
+  }
+
+  private runLoraAggregateCollection(): Promise<LoraDashboardData> {
+    if (this.loraAggregateCollectionInFlight) {
+      return this.loraAggregateCollectionInFlight;
+    }
+    const operation = collectLoraAggregateSnapshot({
+      bucket: this.env.RELEASES,
+      source: this.loraSource,
+    }).then((dashboard) => {
+      this.pushLoraDashboard(dashboard);
+      return dashboard;
+    });
+    this.loraAggregateCollectionInFlight = operation.finally(() => {
+      this.loraAggregateCollectionInFlight = null;
+    });
+    return this.loraAggregateCollectionInFlight;
   }
 
   private runLoraCollection(): Promise<LoraDashboardData> {

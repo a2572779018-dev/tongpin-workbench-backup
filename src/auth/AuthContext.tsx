@@ -38,7 +38,7 @@ interface AuthContextValue {
   ): Promise<void>;
   logout(): Promise<void>;
   retryStartup(): Promise<void>;
-  api<T>(path: string, init?: RequestInit): Promise<T>;
+  api<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T>;
   updateUser(user: User): Promise<void>;
 }
 
@@ -118,6 +118,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
     async function requestWithSession<T>(
       path: string,
       init: RequestInit = {},
+      timeoutMs?: number,
     ): Promise<T> {
       let current = sessionRef.current;
       if (!current) {
@@ -125,26 +126,34 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
 
       try {
-        return await publicRequest<T>(path, {
-          ...init,
-          headers: {
-            ...(init.headers ?? {}),
-            Authorization: `Bearer ${current.accessToken}`,
+        return await publicRequest<T>(
+          path,
+          {
+            ...init,
+            headers: {
+              ...(init.headers ?? {}),
+              Authorization: `Bearer ${current.accessToken}`,
+            },
           },
-        });
+          timeoutMs,
+        );
       } catch (error) {
         if (!(error instanceof ApiRequestError) || error.status !== 401) {
           throw error;
         }
         current = await refresh();
         if (!current) throw error;
-        return publicRequest<T>(path, {
-          ...init,
-          headers: {
-            ...(init.headers ?? {}),
-            Authorization: `Bearer ${current.accessToken}`,
+        return publicRequest<T>(
+          path,
+          {
+            ...init,
+            headers: {
+              ...(init.headers ?? {}),
+              Authorization: `Bearer ${current.accessToken}`,
+            },
           },
-        });
+          timeoutMs,
+        );
       }
     },
     [refresh],

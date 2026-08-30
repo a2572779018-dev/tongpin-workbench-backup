@@ -99,7 +99,7 @@ export class LoraChainCollector {
             .filter(
               (user) =>
                 user.status === "active" &&
-                (user.role === "boss" || user.role === "admin"),
+                user.role === "boss",
             )
             .map((user) => user.id),
         };

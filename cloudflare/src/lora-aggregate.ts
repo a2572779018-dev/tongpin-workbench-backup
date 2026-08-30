@@ -43,10 +43,13 @@ import type {
 } from "../../server/lora-chain/types";
 import {
   ExplorerLoraChainDataSource,
+  MAX_PENDING_INTERNAL_TRANSACTIONS,
   normalizePendingInternalTransactions,
 } from "../../server/lora-chain/source";
 
-export const LORA_AGGREGATE_OBJECT_KEY = "_internal/lora/aggregate-v1.json";
+export const LORA_AGGREGATE_OBJECT_KEY = "_internal/lora/aggregate-v2.json";
+export const LORA_LEGACY_AGGREGATE_OBJECT_KEY =
+  "_internal/lora/aggregate-v1.json";
 
 interface RankedLargeTransfer {
   row: LoraLargeTransferRow;
@@ -91,10 +94,11 @@ interface LoraDayIndexes {
 interface PersistedPendingInternalTransaction {
   transactionHash: string;
   nextPageParams: Record<string, string | number> | null;
+  queuedAt: string;
 }
 
 export interface LoraAggregateSnapshot {
-  version: 1;
+  version: 2;
   state: LoraCollectorState;
   price: LoraPriceSnapshot;
   health: LoraSourceHealth;
@@ -113,6 +117,10 @@ interface LoadedAggregate {
   snapshot: LoraAggregateSnapshot;
   etag: string | null;
 }
+
+type LegacyLoraAggregateSnapshot = Omit<LoraAggregateSnapshot, "version"> & {
+  version: 1;
+};
 
 function zeroHours(): string[] {
   return Array.from({ length: 24 }, () => "0");
@@ -173,7 +181,7 @@ function persistDayIndexes(
 
 export function createEmptyLoraAggregateSnapshot(): LoraAggregateSnapshot {
   return {
-    version: 1,
+    version: 2,
     state: structuredClone(EMPTY_LORA_COLLECTOR_STATE),
     price: structuredClone(EMPTY_LORA_PRICE),
     health: structuredClone(EMPTY_LORA_HEALTH),
@@ -193,7 +201,7 @@ function asAggregateSnapshot(value: unknown): LoraAggregateSnapshot | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<LoraAggregateSnapshot>;
   if (
-    candidate.version !== 1 ||
+    candidate.version !== 2 ||
     !candidate.state ||
     !candidate.price ||
     !candidate.health ||
@@ -205,46 +213,256 @@ function asAggregateSnapshot(value: unknown): LoraAggregateSnapshot | null {
     return null;
   }
   const snapshot = candidate as LoraAggregateSnapshot;
-  snapshot.state.pendingInternalTransactions =
-    normalizePendingInternalTransactions(
-      snapshot.state.pendingInternalTransactions,
-    );
+  const bounded = boundedAggregatePending(snapshot.state);
+  snapshot.state.pendingInternalTransactions = bounded.pending;
+  snapshot.state.internalQueueOverflow = bounded.overflow;
+  if (bounded.overflow) {
+    snapshot.state.internalDetailsComplete = false;
+    snapshot.state.todayComplete = false;
+  }
   return snapshot;
 }
 
-function serializeAggregateSnapshot(snapshot: LoraAggregateSnapshot): string {
-  const pending: PersistedPendingInternalTransaction[] =
-    normalizePendingInternalTransactions(
-      snapshot.state.pendingInternalTransactions,
-    ).map((entry) => ({
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asLegacyAggregateSnapshot(
+  value: unknown,
+): LegacyLoraAggregateSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<LegacyLoraAggregateSnapshot>;
+  if (
+    candidate.version !== 1 ||
+    !candidate.state ||
+    !candidate.price ||
+    !candidate.health ||
+    !candidate.days ||
+    !Array.isArray(candidate.burnKeys) ||
+    !Array.isArray(candidate.addressBaselines) ||
+    !Array.isArray(candidate.recentBlocks)
+  ) {
+    return null;
+  }
+  return candidate as LegacyLoraAggregateSnapshot;
+}
+
+function pendingTransactionHash(value: unknown): string | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const compactHash =
+    typeof record.transactionHash === "string"
+      ? record.transactionHash
+      : null;
+  const transaction = asRecord(record.transaction) ?? record;
+  const hash =
+    compactHash ??
+    (typeof transaction.hash === "string" ? transaction.hash : null);
+  return hash && /^0x[0-9a-f]{64}$/i.test(hash)
+    ? hash.toLowerCase()
+    : null;
+}
+
+function pendingQueuedAt(value: unknown): string | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  if (typeof record.queuedAt === "string") return record.queuedAt;
+  const transaction = asRecord(record.transaction) ?? record;
+  return typeof transaction.timestamp === "string"
+    ? transaction.timestamp
+    : null;
+}
+
+function legacyPendingForCurrentDay(
+  legacy: LegacyLoraAggregateSnapshot,
+  now: Date,
+): {
+  pending: ReturnType<typeof normalizePendingInternalTransactions>;
+  overflow: boolean;
+} {
+  const reportDate = shanghaiDateKey(now);
+  if (legacy.state.bootstrapDate !== reportDate) {
+    return { pending: [], overflow: false };
+  }
+  const currentDayHashes = new Set(
+    (legacy.days[reportDate]?.transactionHashes ?? []).map((hash) =>
+      hash.toLowerCase(),
+    ),
+  );
+  const legacyUpdatedAt =
+    legacy.updatedAt && timestampDate(legacy.updatedAt) === reportDate
+      ? legacy.updatedAt
+      : new Date(`${reportDate}T00:00:00+08:00`).toISOString();
+  const rawPending = Array.isArray(legacy.state.pendingInternalTransactions)
+    ? (legacy.state.pendingInternalTransactions as unknown[])
+    : [];
+  const pending: ReturnType<typeof normalizePendingInternalTransactions> = [];
+  const seen = new Set<string>();
+  let overflow = Boolean(legacy.state.internalQueueOverflow);
+
+  for (const raw of rawPending) {
+    const hash = pendingTransactionHash(raw);
+    if (!hash || seen.has(hash)) continue;
+    const rawQueuedAt = pendingQueuedAt(raw);
+    const belongsToCurrentDay =
+      (rawQueuedAt !== null && timestampDate(rawQueuedAt) === reportDate) ||
+      currentDayHashes.has(hash);
+    if (!belongsToCurrentDay) continue;
+    if (pending.length >= MAX_PENDING_INTERNAL_TRANSACTIONS) {
+      overflow = true;
+      break;
+    }
+    const normalized = normalizePendingInternalTransactions([raw])[0];
+    if (!normalized) continue;
+    seen.add(hash);
+    pending.push({
+      ...normalized,
+      queuedAt:
+        timestampDate(normalized.queuedAt) === reportDate
+          ? normalized.queuedAt
+          : legacyUpdatedAt,
+    });
+  }
+  return { pending, overflow };
+}
+
+export function migrateLegacyLoraAggregateSnapshot(
+  value: unknown,
+  now = new Date(),
+): LoraAggregateSnapshot | null {
+  const legacy = asLegacyAggregateSnapshot(value);
+  if (!legacy) return null;
+  const bounded = legacyPendingForCurrentDay(legacy, now);
+  return asAggregateSnapshot({
+    ...legacy,
+    version: 2,
+    state: {
+      ...legacy.state,
+      pendingInternalTransactions: bounded.pending,
+      internalQueueOverflow: bounded.overflow,
+      internalDetailsComplete: bounded.overflow
+        ? false
+        : legacy.state.internalDetailsComplete,
+      todayComplete: bounded.overflow
+        ? false
+        : legacy.state.todayComplete,
+    },
+  });
+}
+
+function boundedAggregatePending(state: LoraCollectorState): {
+  pending: ReturnType<typeof normalizePendingInternalTransactions>;
+  overflow: boolean;
+} {
+  const normalized = normalizePendingInternalTransactions(
+    state.pendingInternalTransactions,
+  );
+  const currentDay = state.bootstrapDate
+    ? normalized.filter(
+        (entry) => timestampDate(entry.queuedAt) === state.bootstrapDate,
+      )
+    : [];
+  return {
+    pending: currentDay.slice(0, MAX_PENDING_INTERNAL_TRANSACTIONS),
+    overflow:
+      Boolean(state.internalQueueOverflow) ||
+      currentDay.length > MAX_PENDING_INTERNAL_TRANSACTIONS,
+  };
+}
+
+export function serializeLoraAggregateSnapshot(
+  snapshot: LoraAggregateSnapshot,
+): string {
+  const bounded = boundedAggregatePending(snapshot.state);
+  const pending: PersistedPendingInternalTransaction[] = bounded.pending.map(
+    (entry) => ({
       transactionHash: entry.transaction.hash,
       nextPageParams: entry.nextPageParams,
-    }));
+      queuedAt: entry.queuedAt,
+    }),
+  );
   return JSON.stringify({
     ...snapshot,
     state: {
       ...snapshot.state,
       pendingInternalTransactions: pending,
+      internalQueueOverflow: bounded.overflow,
+      internalDetailsComplete: bounded.overflow
+        ? false
+        : snapshot.state.internalDetailsComplete,
+      todayComplete: bounded.overflow ? false : snapshot.state.todayComplete,
     },
   });
 }
 
 export async function loadLoraAggregateSnapshot(
   bucket: R2Bucket,
+  now = new Date(),
 ): Promise<LoadedAggregate> {
   const object = await bucket.get(LORA_AGGREGATE_OBJECT_KEY);
-  if (!object) {
+  if (object) {
+    try {
+      const snapshot = asAggregateSnapshot(await object.json<unknown>());
+      return {
+        snapshot: snapshot ?? createEmptyLoraAggregateSnapshot(),
+        etag: object.etag,
+      };
+    } catch {
+      return {
+        snapshot: createEmptyLoraAggregateSnapshot(),
+        etag: object.etag,
+      };
+    }
+  }
+
+  const legacyObject = await bucket.get(LORA_LEGACY_AGGREGATE_OBJECT_KEY);
+  if (!legacyObject) {
     return { snapshot: createEmptyLoraAggregateSnapshot(), etag: null };
   }
+  let migrated: LoraAggregateSnapshot | null = null;
   try {
-    const snapshot = asAggregateSnapshot(await object.json<unknown>());
-    return {
-      snapshot: snapshot ?? createEmptyLoraAggregateSnapshot(),
-      etag: snapshot ? object.etag : null,
-    };
+    migrated = migrateLegacyLoraAggregateSnapshot(
+      await legacyObject.json<unknown>(),
+      now,
+    );
   } catch {
+    // Invalid legacy data is treated like a clean bootstrap.
+  }
+  if (!migrated) {
     return { snapshot: createEmptyLoraAggregateSnapshot(), etag: null };
   }
+  const result = await bucket.put(
+    LORA_AGGREGATE_OBJECT_KEY,
+    serializeLoraAggregateSnapshot(migrated),
+    {
+      onlyIf: { etagDoesNotMatch: "*" },
+      httpMetadata: {
+        contentType: "application/json",
+        cacheControl: "private, no-store",
+      },
+    },
+  );
+  if (result) return { snapshot: migrated, etag: result.etag };
+
+  const concurrentObject = await bucket.get(LORA_AGGREGATE_OBJECT_KEY);
+  if (concurrentObject) {
+    try {
+      const concurrentSnapshot = asAggregateSnapshot(
+        await concurrentObject.json<unknown>(),
+      );
+      if (concurrentSnapshot) {
+        return { snapshot: concurrentSnapshot, etag: concurrentObject.etag };
+      }
+    } catch {
+      // The regular conditional update below will repair an invalid v2 object.
+    }
+  }
+  return {
+    snapshot: migrated,
+    etag: concurrentObject?.etag ?? null,
+  };
 }
 
 function addDecimal(left: string, right: string): string {
@@ -488,6 +706,12 @@ function applyBatchState(
   now: Date,
 ): void {
   const previous = snapshot.state;
+  const reportDate = shanghaiDateKey(now);
+  const internalQueueOverflow =
+    batch.internalQueueOverflow ??
+    (previous.bootstrapDate === reportDate
+      ? previous.internalQueueOverflow ?? false
+      : false);
   const rpcReachable = batch.rpcHealthy || batch.price.status === "config-error";
   const sourceCycleSuccessful = rpcReachable && batch.explorerHealthy;
   snapshot.state = {
@@ -530,16 +754,19 @@ function applyBatchState(
         : batch.swapCheckpointBlock,
     pendingInternalTransactions:
       batch.pendingInternalTransactions ?? previous.pendingInternalTransactions ?? [],
+    internalQueueOverflow,
     internalDetailsComplete:
-      batch.internalDetailsComplete ?? previous.internalDetailsComplete ?? false,
+      internalQueueOverflow
+        ? false
+        : batch.internalDetailsComplete ?? previous.internalDetailsComplete ?? false,
     swapTodayComplete:
       batch.swapTodayComplete ?? previous.swapTodayComplete ?? false,
-    bootstrapDate: shanghaiDateKey(now),
+    bootstrapDate: reportDate,
     transactionTodayComplete: batch.transactionTodayComplete,
     transactionYesterdayComplete: batch.transactionYesterdayComplete,
     burnTodayComplete: batch.burnTodayComplete,
     blockTodayComplete: batch.blockTodayComplete,
-    todayComplete: batch.todayComplete,
+    todayComplete: internalQueueOverflow ? false : batch.todayComplete,
     yesterdayComplete: batch.yesterdayComplete,
     historyComplete: batch.historyComplete,
     nextRunAt: new Date(now.getTime() + 60_000).toISOString(),
@@ -642,16 +869,52 @@ export function applyLoraAggregateBatch(
   snapshot.recentBlocks = [...recentBlocks.values()]
     .sort((left, right) => right.height - left.height)
     .slice(0, 180);
+  const previousTotalAddresses = snapshot.currentTotalAddresses;
+  const previousSnapshotDate = snapshot.state.bootstrapDate;
+  const previousUpdatedAt = snapshot.updatedAt;
+  const baselineIndex = snapshot.addressBaselines.findIndex(
+    (baseline) => baseline.reportDate === reportDate,
+  );
+  const exactBaseline =
+    batch.addressBaseline?.reportDate === reportDate
+      ? {
+          ...batch.addressBaseline,
+          estimated: false,
+          source: batch.addressBaseline.source ?? "midnight-window",
+        }
+      : null;
+  if (exactBaseline) {
+    if (baselineIndex < 0) {
+      snapshot.addressBaselines.push(exactBaseline);
+    } else if (snapshot.addressBaselines[baselineIndex].estimated) {
+      snapshot.addressBaselines[baselineIndex] = exactBaseline;
+    }
+  } else if (baselineIndex < 0) {
+    if (previousTotalAddresses !== null) {
+      snapshot.addressBaselines.push({
+        reportDate,
+        totalAddresses: previousTotalAddresses,
+        capturedAt: previousUpdatedAt ?? now.toISOString(),
+        blockNumber: null,
+        estimated: true,
+        source:
+          previousSnapshotDate === reportDate
+            ? "recovered-observation"
+            : "carry-forward",
+      });
+    } else if (batch.currentTotalAddresses !== null) {
+      snapshot.addressBaselines.push({
+        reportDate,
+        totalAddresses: batch.currentTotalAddresses,
+        capturedAt: now.toISOString(),
+        blockNumber: batch.checkpointBlock,
+        estimated: true,
+        source: "first-observation",
+      });
+    }
+  }
   if (batch.currentTotalAddresses !== null) {
     snapshot.currentTotalAddresses = batch.currentTotalAddresses;
-  }
-  if (
-    batch.addressBaseline &&
-    !snapshot.addressBaselines.some(
-      (baseline) => baseline.reportDate === batch.addressBaseline?.reportDate,
-    )
-  ) {
-    snapshot.addressBaselines.push(batch.addressBaseline);
   }
   snapshot.addressBaselines = snapshot.addressBaselines
     .sort((left, right) => right.reportDate.localeCompare(left.reportDate))
@@ -742,8 +1005,8 @@ export function buildLoraAggregateDashboard(
       parseUnsignedInteger(snapshot.currentTotalAddresses) -
       parseUnsignedInteger(baseline.totalAddresses);
     if (difference >= 0n) {
-      addressStatus = "ready";
-      addressToday = difference.toString();
+      addressStatus = baseline.estimated ? "building" : "ready";
+      addressToday = `${baseline.estimated ? "≈" : ""}${difference.toString()}`;
     } else {
       addressStatus = "unavailable";
     }
@@ -929,12 +1192,12 @@ export async function collectLoraAggregateSnapshot(options: {
   now?: Date;
 }): Promise<LoraDashboardData> {
   const now = options.now ?? new Date();
-  const loaded = await loadLoraAggregateSnapshot(options.bucket);
+  const loaded = await loadLoraAggregateSnapshot(options.bucket, now);
   const batch = await options.source.collect({ state: loaded.snapshot.state, now });
   const snapshot = applyLoraAggregateBatch(loaded.snapshot, batch, now);
   const result = await options.bucket.put(
     LORA_AGGREGATE_OBJECT_KEY,
-    serializeAggregateSnapshot(snapshot),
+    serializeLoraAggregateSnapshot(snapshot),
     {
       onlyIf: loaded.etag
         ? { etagMatches: loaded.etag }

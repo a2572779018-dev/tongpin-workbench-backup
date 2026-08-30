@@ -1,9 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyLoraAggregateBatch,
   buildLoraAggregateDashboard,
   createEmptyLoraAggregateSnapshot,
+  loadLoraAggregateSnapshot,
+  LORA_AGGREGATE_OBJECT_KEY,
+  LORA_LEGACY_AGGREGATE_OBJECT_KEY,
+  migrateLegacyLoraAggregateSnapshot,
+  serializeLoraAggregateSnapshot,
 } from "./lora-aggregate";
+import { MAX_PENDING_INTERNAL_TRANSACTIONS } from "../../server/lora-chain/source";
 import type { LoraCollectionBatch } from "../../server/lora-chain/types";
 
 const NOW = new Date("2026-08-15T06:00:00.000Z");
@@ -217,5 +223,237 @@ describe("LORA R2 aggregate", () => {
     expect(dashboard.price.status).toBe("config-error");
     expect(dashboard.swaps.enabled).toBe(false);
     expect(dashboard.swaps.rows).toEqual([]);
+  });
+
+  it("carries forward a missing daily address baseline as an explicit estimate", () => {
+    const snapshot = createEmptyLoraAggregateSnapshot();
+    snapshot.currentTotalAddresses = "1000";
+    snapshot.state.bootstrapDate = "2026-08-14";
+    snapshot.updatedAt = "2026-08-14T15:59:00.000Z";
+
+    applyLoraAggregateBatch(
+      snapshot,
+      batch({ currentTotalAddresses: "1012" }),
+      NOW,
+    );
+
+    expect(snapshot.addressBaselines).toContainEqual({
+      reportDate: "2026-08-15",
+      totalAddresses: "1000",
+      capturedAt: "2026-08-14T15:59:00.000Z",
+      blockNumber: null,
+      estimated: true,
+      source: "carry-forward",
+    });
+    const dashboard = buildLoraAggregateDashboard(snapshot, NOW);
+    expect(dashboard.addresses.todayNew).toBe("≈12");
+    expect(dashboard.addresses.baselineStatus).toBe("building");
+  });
+
+  it("replaces a recovered estimate when an exact midnight baseline arrives", () => {
+    const snapshot = createEmptyLoraAggregateSnapshot();
+    snapshot.currentTotalAddresses = "1000";
+    snapshot.state.bootstrapDate = "2026-08-14";
+    snapshot.updatedAt = "2026-08-14T15:59:00.000Z";
+    applyLoraAggregateBatch(
+      snapshot,
+      batch({ currentTotalAddresses: "1012" }),
+      NOW,
+    );
+
+    applyLoraAggregateBatch(
+      snapshot,
+      batch({
+        currentTotalAddresses: "1015",
+        addressBaseline: {
+          reportDate: "2026-08-15",
+          totalAddresses: "1001",
+          capturedAt: "2026-08-14T16:01:00.000Z",
+          blockNumber: 99,
+          estimated: false,
+          source: "midnight-window",
+        },
+      }),
+      NOW,
+    );
+
+    expect(snapshot.addressBaselines[0].source).toBe("midnight-window");
+    expect(snapshot.addressBaselines[0].estimated).toBe(false);
+    const dashboard = buildLoraAggregateDashboard(snapshot, NOW);
+    expect(dashboard.addresses.todayNew).toBe("14");
+    expect(dashboard.addresses.baselineStatus).toBe("ready");
+  });
+
+  it("stores a first observation as approximate instead of inventing midnight precision", () => {
+    const snapshot = applyLoraAggregateBatch(
+      createEmptyLoraAggregateSnapshot(),
+      batch({ currentTotalAddresses: "1012" }),
+      NOW,
+    );
+    expect(snapshot.addressBaselines[0].source).toBe("first-observation");
+    expect(snapshot.addressBaselines[0].capturedAt).toBe(NOW.toISOString());
+    const dashboard = buildLoraAggregateDashboard(snapshot, NOW);
+    expect(dashboard.addresses.todayNew).toBe("≈0");
+    expect(dashboard.addresses.baselineStatus).toBe("building");
+  });
+
+  it("writes aggregate v2 with a compact bounded queue and honest partial flags", () => {
+    const snapshot = createEmptyLoraAggregateSnapshot();
+    snapshot.state.bootstrapDate = "2026-08-15";
+    snapshot.state.internalDetailsComplete = true;
+    snapshot.state.todayComplete = true;
+    snapshot.state.pendingInternalTransactions = Array.from(
+      { length: MAX_PENDING_INTERNAL_TRANSACTIONS + 1_000 },
+      (_, index) => ({
+        transaction: {
+          hash: `0x${index.toString(16).padStart(64, "0")}`,
+          blockNumber: 100,
+          timestamp: NOW.toISOString(),
+          from: ADDRESS_A,
+          to: ADDRESS_B,
+          valueWei: "0",
+          success: true,
+          gasUsed: "21000",
+          gasPriceWei: "1",
+          input: "0x1234",
+          toIsContract: true,
+        },
+        nextPageParams: null,
+        queuedAt: NOW.toISOString(),
+      }),
+    );
+
+    const serialized = serializeLoraAggregateSnapshot(snapshot);
+    const persisted = JSON.parse(serialized) as {
+      version: number;
+      state: {
+        pendingInternalTransactions: Array<{
+          transactionHash: string;
+          nextPageParams: unknown;
+          queuedAt: string;
+        }>;
+        internalQueueOverflow: boolean;
+        internalDetailsComplete: boolean;
+        todayComplete: boolean;
+      };
+    };
+    expect(LORA_AGGREGATE_OBJECT_KEY).toBe("_internal/lora/aggregate-v2.json");
+    expect(persisted.version).toBe(2);
+    expect(persisted.state.pendingInternalTransactions).toHaveLength(
+      MAX_PENDING_INTERNAL_TRANSACTIONS,
+    );
+    expect(persisted.state.pendingInternalTransactions[0]).toEqual({
+      transactionHash: `0x${"0".repeat(64)}`,
+      nextPageParams: null,
+      queuedAt: NOW.toISOString(),
+    });
+    expect(persisted.state.internalQueueOverflow).toBe(true);
+    expect(persisted.state.internalDetailsComplete).toBe(false);
+    expect(persisted.state.todayComplete).toBe(false);
+    expect(new TextEncoder().encode(serialized).byteLength).toBeLessThan(1_000_000);
+  });
+
+  it("migrates legacy v1 once while preserving mature aggregates and bounded current-day work", async () => {
+    const snapshot = createEmptyLoraAggregateSnapshot();
+    snapshot.state.bootstrapDate = "2026-08-15";
+    snapshot.state.checkpointBlock = 998_877;
+    snapshot.state.checkpointHash = HASH_D;
+    snapshot.cumulativeBurnWei = "12345000000000000000000";
+    snapshot.cumulativeConfirmedCount = "321";
+    snapshot.currentTotalAddresses = "877038";
+    snapshot.addressBaselines = [
+      {
+        reportDate: "2026-08-15",
+        totalAddresses: "876900",
+        capturedAt: "2026-08-14T16:01:00.000Z",
+        blockNumber: 998_000,
+        estimated: false,
+        source: "midnight-window",
+      },
+    ];
+    applyLoraAggregateBatch(snapshot, batch(), NOW);
+    snapshot.state.checkpointBlock = 998_877;
+    snapshot.state.checkpointHash = HASH_D;
+    const currentHashes = Array.from(
+      { length: MAX_PENDING_INTERNAL_TRANSACTIONS + 1 },
+      (_, index) => `0x${index.toString(16).padStart(64, "0")}`,
+    );
+    snapshot.days["2026-08-15"].transactionHashes = currentHashes;
+    const legacyPayload = {
+      ...snapshot,
+      version: 1,
+      state: {
+        ...snapshot.state,
+        pendingInternalTransactions: [
+          {
+            transactionHash: HASH_C,
+            nextPageParams: null,
+            queuedAt: "2026-08-14T05:00:00.000Z",
+          },
+          ...currentHashes.map((transactionHash) => ({
+            transactionHash,
+            nextPageParams: null,
+          })),
+        ],
+      },
+    };
+
+    const migrated = migrateLegacyLoraAggregateSnapshot(legacyPayload, NOW);
+    expect(migrated).not.toBeNull();
+    expect(migrated).toMatchObject({
+      version: 2,
+      cumulativeBurnWei: "12345000000000000000000",
+      cumulativeConfirmedCount: "321",
+      currentTotalAddresses: "877038",
+      state: {
+        checkpointBlock: 998_877,
+        checkpointHash: HASH_D,
+        internalQueueOverflow: true,
+        internalDetailsComplete: false,
+        todayComplete: false,
+      },
+    });
+    expect(migrated?.addressBaselines).toEqual(snapshot.addressBaselines);
+    expect(migrated?.state.pendingInternalTransactions).toHaveLength(
+      MAX_PENDING_INTERNAL_TRANSACTIONS,
+    );
+    expect(
+      migrated?.state.pendingInternalTransactions?.every(
+        (entry) => entry.queuedAt === snapshot.updatedAt,
+      ),
+    ).toBe(true);
+
+    const objects = new Map<string, { body: string; etag: string }>([
+      [
+        LORA_LEGACY_AGGREGATE_OBJECT_KEY,
+        { body: JSON.stringify(legacyPayload), etag: "legacy-etag" },
+      ],
+    ]);
+    const get = vi.fn(async (key: string) => {
+      const stored = objects.get(key);
+      return stored
+        ? ({
+            etag: stored.etag,
+            json: async () => JSON.parse(stored.body) as unknown,
+          } as unknown as R2ObjectBody)
+        : null;
+    });
+    const put = vi.fn(async (key: string, value: unknown) => {
+      const etag = `etag-${put.mock.calls.length}`;
+      objects.set(key, { body: String(value), etag });
+      return { etag } as unknown as R2Object;
+    });
+    const bucket = { get, put } as unknown as R2Bucket;
+
+    const first = await loadLoraAggregateSnapshot(bucket, NOW);
+    const second = await loadLoraAggregateSnapshot(bucket, NOW);
+    expect(first.snapshot.version).toBe(2);
+    expect(second.snapshot.state.checkpointBlock).toBe(998_877);
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(
+      get.mock.calls.filter(
+        ([key]) => key === LORA_LEGACY_AGGREGATE_OBJECT_KEY,
+      ),
+    ).toHaveLength(1);
   });
 });

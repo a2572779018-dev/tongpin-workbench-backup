@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createRuntime, type AppRuntime } from "../app";
 import { loadConfig, type AppConfig } from "../config";
 import { issueAccessToken } from "../security";
@@ -87,7 +87,7 @@ describe("LORA boss API permissions and daily claim persistence", () => {
     await rm(resolved, { recursive: true, force: true });
   });
 
-  it("returns 403 to member and allows boss/admin dashboard reads", async () => {
+  it("allows only the boss to read the dashboard", async () => {
     await request(runtime.app)
       .get("/api/boss/lora-chain/dashboard")
       .set("Authorization", `Bearer ${memberToken}`)
@@ -96,12 +96,11 @@ describe("LORA boss API permissions and daily claim persistence", () => {
       .get("/api/boss/lora-chain/dashboard")
       .set("Authorization", `Bearer ${bossToken}`)
       .expect(200);
-    const admin = await request(runtime.app)
+    await request(runtime.app)
       .get("/api/boss/lora-chain/dashboard")
       .set("Authorization", `Bearer ${adminToken}`)
-      .expect(200);
+      .expect(403);
     expect(boss.body.timezone).toBe("Asia/Shanghai");
-    expect(admin.body.reportDate).toBe(shanghaiDateKey());
     expect(boss.body.nodes.todayCount).toBeNull();
   });
 
@@ -131,19 +130,18 @@ describe("LORA boss API permissions and daily claim persistence", () => {
     });
   });
 
-  it("manual/admin access never consumes a boss automatic-popup claim", async () => {
+  it("keeps manual access non-consuming and rejects the admin", async () => {
     const manual = await request(runtime.app)
       .post("/api/boss/lora-chain/daily-popup/claim")
       .set("Authorization", `Bearer ${bossToken}`)
       .send({ trigger: "manual" })
       .expect(200);
-    const admin = await request(runtime.app)
+    await request(runtime.app)
       .post("/api/boss/lora-chain/daily-popup/claim")
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ trigger: "startup" })
-      .expect(200);
+      .expect(403);
     expect(manual.body.shouldOpen).toBe(false);
-    expect(admin.body.shouldOpen).toBe(false);
     expect(
       await runtime.store.read(
         (database) => database.bossLoraReportOpens.length,
@@ -174,11 +172,59 @@ describe("LORA boss API permissions and daily claim persistence", () => {
     await reopened.loraCollector.stop();
   });
 
-  it("accepts manual refresh asynchronously without waiting for Explorer", async () => {
-    const response = await request(runtime.app)
-      .post("/api/boss/lora-chain/refresh")
+  it("waits for manual refresh and returns the completed dashboard", async () => {
+    const current = await request(runtime.app)
+      .get("/api/boss/lora-chain/dashboard")
       .set("Authorization", `Bearer ${bossToken}`)
-      .expect(202);
-    expect(response.body).toMatchObject({ accepted: true });
+      .expect(200);
+    const freshGeneratedAt = "2040-01-02T03:04:05.000Z";
+    const freshDashboard = {
+      ...current.body,
+      generatedAt: freshGeneratedAt,
+    };
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const refreshSpy = vi
+      .spyOn(runtime.loraCollector, "refresh")
+      .mockImplementation(async () => {
+        await refreshGate;
+        return freshDashboard;
+      });
+
+    try {
+      let settled = false;
+      const pendingResponse = request(runtime.app)
+        .post("/api/boss/lora-chain/refresh")
+        .set("Authorization", `Bearer ${bossToken}`)
+        .expect(200)
+        .then((response) => {
+          settled = true;
+          return response;
+        });
+      for (
+        let attempt = 0;
+        attempt < 20 && !refreshSpy.mock.calls.length;
+        attempt += 1
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+
+      releaseRefresh();
+      const response = await pendingResponse;
+      expect(response.body).toMatchObject({
+        accepted: true,
+        dashboard: {
+          reportDate: shanghaiDateKey(),
+          generatedAt: freshGeneratedAt,
+        },
+      });
+    } finally {
+      releaseRefresh();
+      refreshSpy.mockRestore();
+    }
   });
 });

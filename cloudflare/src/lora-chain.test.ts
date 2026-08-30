@@ -16,9 +16,9 @@ import {
 } from "./schema";
 
 describe("Cloudflare LORA dashboard security and persistence", () => {
-  it("allows only boss and admin roles", () => {
+  it("allows only the boss role", () => {
     expect(isLoraDashboardRole("boss")).toBe(true);
-    expect(isLoraDashboardRole("admin")).toBe(true);
+    expect(isLoraDashboardRole("admin")).toBe(false);
     expect(isLoraDashboardRole("member")).toBe(false);
   });
 

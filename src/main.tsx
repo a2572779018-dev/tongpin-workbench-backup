@@ -1,8 +1,14 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/space-grotesk";
+import "@fontsource/archivo/latin-500.css";
+import "@fontsource/archivo/latin-700.css";
+import "@fontsource/archivo/latin-800.css";
+import "@fontsource/archivo/latin-900.css";
 import "@fontsource/dm-mono/400.css";
 import "@fontsource/dm-mono/500.css";
+import "@fontsource/space-mono/latin-400.css";
+import "@fontsource/space-mono/latin-700.css";
 import { App } from "./App";
 import { AuthProvider } from "./auth/AuthContext";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";

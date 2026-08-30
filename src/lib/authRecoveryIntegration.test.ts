@@ -49,6 +49,26 @@ describe("cross-platform login recovery", () => {
     );
   });
 
+  it("keeps a successful login in memory when system secure storage is locked", () => {
+    expect(electronMain).toContain("let inMemorySessionPayload = null");
+    expect(electronMain).toContain(
+      'typeof inMemorySessionPayload === "string"',
+    );
+    expect(electronMain).toContain("inMemorySessionPayload = payload");
+    expect(electronMain).toContain('"memory-only\\n"');
+    expect(electronMain).toContain("hasSessionMemoryOnlyMarker()");
+    expect(electronMain).toContain("clearSessionMemoryOnlyMarker()");
+    expect(electronMain).toContain(
+      "安全存储锁定时只保留当前进程内的登录状态，绝不降级为明文落盘",
+    );
+    expect(electronMain).not.toContain(
+      "系统安全存储不可用，拒绝明文保存登录状态",
+    );
+    expect(electronMain.indexOf("JSON.parse(payload)")).toBeLessThan(
+      electronMain.indexOf("inMemorySessionPayload = payload"),
+    );
+  });
+
   it("distinguishes an unreadable credential vault from an empty history", () => {
     expect(authPage).toContain('result.state');
     expect(authPage).toContain("登录钥匙串未解锁，账号记录仍安全保留");

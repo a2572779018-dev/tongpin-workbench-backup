@@ -8,10 +8,15 @@ import {
   ONE_LRB_WEI,
 } from "./constants";
 import {
+  boundPendingInternalTransactions,
+  buildExplorerBlockByTimeUrl,
   collectPaginatedHead,
   collectInternalDetailRound,
   isPairReserveFresh,
+  LORA_SOURCE_REQUEST_BUDGET_LIMITS,
+  MAX_PENDING_INTERNAL_TRANSACTIONS,
   normalizePendingInternalTransactions,
+  parseExplorerBlockNumberByTime,
   parseExplorerInternalTransaction,
   parseExplorerPagePayload,
   parseExplorerSwap,
@@ -153,10 +158,15 @@ describe("LORA internal detail cursor queue fixtures", () => {
         },
       ]),
     ).toEqual([
-      { transaction: legacy, nextPageParams: null },
+      {
+        transaction: legacy,
+        nextPageParams: null,
+        queuedAt: legacy.timestamp,
+      },
       {
         transaction: current,
         nextPageParams: { block_number: 10, index: 50 },
+        queuedAt: current.timestamp,
       },
     ]);
   });
@@ -167,10 +177,70 @@ describe("LORA internal detail cursor queue fixtures", () => {
       {
         transactionHash: transaction.hash,
         nextPageParams: { block_number: 20, index: 7 },
+        queuedAt: "2026-08-15T01:02:03.000Z",
       },
     ]);
     expect(restored.transaction.hash).toBe(transaction.hash);
     expect(restored.nextPageParams).toEqual({ block_number: 20, index: 7 });
+    expect(restored.queuedAt).toBe("2026-08-15T01:02:03.000Z");
+  });
+
+  it("expires old compact entries and caps a production-scale daily queue", () => {
+    const todayStart = new Date("2026-08-14T16:00:00.000Z");
+    const now = new Date("2026-08-15T06:00:00.000Z");
+    const legacyCompact = normalizePendingInternalTransactions([
+      { transactionHash: HASH, nextPageParams: null },
+    ]);
+    expect(legacyCompact[0].queuedAt).toBe("1970-01-01T00:00:00.000Z");
+
+    const currentDay = Array.from(
+      { length: MAX_PENDING_INTERNAL_TRANSACTIONS + 100 },
+      (_, index) => {
+        const transaction = {
+          ...indexedTransaction("4"),
+          hash: `0x${index.toString(16).padStart(64, "0")}`,
+          timestamp: "2026-08-15T05:00:00.000Z",
+        };
+        return {
+          transaction,
+          nextPageParams: null,
+          queuedAt: transaction.timestamp,
+        } satisfies LoraPendingInternalTransaction;
+      },
+    );
+    const bounded = boundPendingInternalTransactions(
+      [
+        ...legacyCompact,
+        ...currentDay,
+        {
+          transaction: {
+            ...indexedTransaction("5"),
+            timestamp: "2026-08-15T07:00:00.000Z",
+          },
+          nextPageParams: null,
+          queuedAt: "2026-08-15T07:00:00.000Z",
+        },
+      ],
+      todayStart,
+      now,
+    );
+    expect(bounded.queue).toHaveLength(MAX_PENDING_INTERNAL_TRANSACTIONS);
+    expect(bounded.overflow).toBe(true);
+    expect(
+      bounded.queue.every(
+        (entry) =>
+          Date.parse(entry.queuedAt) >= todayStart.getTime() &&
+          Date.parse(entry.queuedAt) <= now.getTime(),
+      ),
+    ).toBe(true);
+    expect(
+      boundPendingInternalTransactions(
+        bounded.queue.slice(0, 1),
+        todayStart,
+        now,
+        bounded.overflow,
+      ).overflow,
+    ).toBe(true);
   });
 
   it("rotates failed and incomplete work behind untouched transactions", async () => {
@@ -178,7 +248,11 @@ describe("LORA internal detail cursor queue fixtures", () => {
     const broken = indexedTransaction("2");
     const later = indexedTransaction("3");
     let queue: LoraPendingInternalTransaction[] = [first, broken, later].map(
-      (transaction) => ({ transaction, nextPageParams: null }),
+      (transaction) => ({
+        transaction,
+        nextPageParams: null,
+        queuedAt: transaction.timestamp,
+      }),
     );
 
     const firstRound = await collectInternalDetailRound({
@@ -223,7 +297,11 @@ describe("LORA internal detail cursor queue fixtures", () => {
     });
     expect(secondRound.items).toHaveLength(2);
     expect(secondRound.pending).toEqual([
-      { transaction: broken, nextPageParams: null },
+      {
+        transaction: broken,
+        nextPageParams: null,
+        queuedAt: broken.timestamp,
+      },
     ]);
   });
 
@@ -232,6 +310,7 @@ describe("LORA internal detail cursor queue fixtures", () => {
     const entry = {
       transaction,
       nextPageParams: { index: 50 },
+      queuedAt: transaction.timestamp,
     } satisfies LoraPendingInternalTransaction;
     const result = await collectInternalDetailRound({
       queue: [entry],
@@ -250,7 +329,11 @@ describe("LORA internal detail cursor queue fixtures", () => {
   it("continues beyond 100 pages across ticks until next_page_params is null", async () => {
     const transaction = indexedTransaction("5");
     let queue: LoraPendingInternalTransaction[] = [
-      { transaction, nextPageParams: null },
+      {
+        transaction,
+        nextPageParams: null,
+        queuedAt: transaction.timestamp,
+      },
     ];
     let requests = 0;
     let indexed = 0;
@@ -275,6 +358,46 @@ describe("LORA internal detail cursor queue fixtures", () => {
     }
     expect(requests).toBe(101);
     expect(indexed).toBe(101);
+  });
+});
+
+describe("LORA source production request budget", () => {
+  it("leaves bounded room for Swap proofs and internal details", () => {
+    const limits = LORA_SOURCE_REQUEST_BUDGET_LIMITS;
+    const nominalScanAttempts =
+      limits.priceRequests +
+      limits.explorerHeadStreams * limits.headPagesPerStream +
+      limits.coreHistoryStreams * limits.coreHistoryPagesPerStream +
+      limits.burnDailyPages +
+      limits.burnLifetimePages +
+      limits.statsRequests +
+      limits.pairBoundaryRequests +
+      limits.pairLogWindows;
+    expect(nominalScanAttempts).toBe(28);
+    expect(limits.totalAttempts - nominalScanAttempts).toBeGreaterThanOrEqual(20);
+  });
+
+  it("locates the Swap boundary with Blockscout's single decimal response", () => {
+    const url = new URL(
+      buildExplorerBlockByTimeUrl(
+        "https://explorer.lorachain.org/api/v2",
+        1_777_568_400,
+      ),
+    );
+    expect(url.origin + url.pathname).toBe("https://explorer.lorachain.org/api");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      module: "block",
+      action: "getblocknobytime",
+      timestamp: "1777568400",
+      closest: "after",
+    });
+    expect(
+      parseExplorerBlockNumberByTime({
+        message: "OK",
+        result: { blockNumber: "15588962" },
+        status: "1",
+      }),
+    ).toBe(15_588_962);
   });
 });
 

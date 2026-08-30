@@ -26,9 +26,9 @@ describe("release announcement", () => {
         lastAnnouncedVersion: "0.1.23",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("可视区域");
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("右上角");
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("系统托盘");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("老板专属");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("每次点击刷新");
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain("安全存储");
   });
 
   it("does not repeat an announcement for the same installed version", () => {
