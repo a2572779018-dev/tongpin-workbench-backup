@@ -10,18 +10,20 @@ function pointInBounds(point, bounds) {
   );
 }
 
-function getHotCornerTriggerBounds(workArea, size = 12) {
+function getHotCornerTriggerBounds(workArea, size = 12, side = "right") {
   return {
-    x: workArea.x + workArea.width - size,
+    x:
+      side === "left" ? workArea.x : workArea.x + workArea.width - size,
     y: workArea.y,
     width: size,
     height: size,
   };
 }
 
-function getCornerWindowBounds(workArea, size = 54) {
+function getCornerWindowBounds(workArea, size = 54, side = "right") {
   return {
-    x: workArea.x + workArea.width - size,
+    x:
+      side === "left" ? workArea.x : workArea.x + workArea.width - size,
     y: workArea.y,
     width: size,
     height: size,

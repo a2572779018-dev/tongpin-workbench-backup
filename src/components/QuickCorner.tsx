@@ -15,17 +15,22 @@ function getBridge(): QuickCornerBridge | undefined {
 }
 
 export function QuickCorner() {
-  const isPreview = new URLSearchParams(window.location.search).get("preview") === "1";
+  const searchParams = new URLSearchParams(window.location.search);
+  const isPreview = searchParams.get("preview") === "1";
+  const cornerSide =
+    searchParams.get("cornerSide") === "left" ? "left" : "right";
   const [visible, setVisible] = useState(isPreview);
 
   useLayoutEffect(() => {
     document.documentElement.dataset.surface = "quick-corner";
+    document.documentElement.dataset.cornerSide = cornerSide;
     document.body.classList.add("quick-corner-surface");
     return () => {
       delete document.documentElement.dataset.surface;
+      delete document.documentElement.dataset.cornerSide;
       document.body.classList.remove("quick-corner-surface");
     };
-  }, []);
+  }, [cornerSide]);
 
   useEffect(() => {
     const bridge = getBridge();

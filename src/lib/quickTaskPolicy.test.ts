@@ -20,6 +20,10 @@ const electronMain = readFileSync(
   new URL("../../electron/main.cjs", import.meta.url),
   "utf8",
 ).replace(/\r\n/g, "\n");
+const quickCornerComponent = readFileSync(
+  new URL("../components/QuickCorner.tsx", import.meta.url),
+  "utf8",
+).replace(/\r\n/g, "\n");
 
 function sourceBetween(start: string, end: string): string {
   const startIndex = electronMain.indexOf(start);
@@ -32,7 +36,7 @@ function sourceBetween(start: string, end: string): string {
 describe("Electron quick task hot corner policy", () => {
   const workArea = { x: -1440, y: 25, width: 1440, height: 875 };
 
-  it("anchors every quick-task surface to the top-right of a negative-coordinate display", () => {
+  it("keeps the default and quick panel anchored to the top-right", () => {
     expect(getHotCornerTriggerBounds(workArea)).toEqual({
       x: -12,
       y: 25,
@@ -60,28 +64,28 @@ describe("Electron quick task hot corner policy", () => {
     };
     const windowsArea = getQuickCornerDisplayArea(bottomTaskbarDisplay);
     expect(windowsArea).toEqual(bottomTaskbarDisplay.workArea);
-    expect(getHotCornerTriggerBounds(windowsArea)).toEqual({
-      x: 1908,
+    expect(getHotCornerTriggerBounds(windowsArea, 12, "left")).toEqual({
+      x: 0,
       y: 0,
       width: 12,
       height: 12,
     });
-    expect(getCornerWindowBounds(windowsArea)).toEqual({
-      x: 1866,
+    expect(getCornerWindowBounds(windowsArea, 54, "left")).toEqual({
+      x: 0,
       y: 0,
       width: 54,
       height: 54,
     });
   });
 
-  it("avoids Windows taskbars docked to the top or right", () => {
+  it("avoids Windows taskbars docked to the top, right, or left", () => {
     const topTaskbarDisplay = {
       bounds: { x: 0, y: 0, width: 1920, height: 1080 },
       workArea: { x: 0, y: 40, width: 1920, height: 1040 },
     };
     const topArea = getQuickCornerDisplayArea(topTaskbarDisplay);
-    expect(getHotCornerTriggerBounds(topArea)).toMatchObject({
-      x: 1908,
+    expect(getHotCornerTriggerBounds(topArea, 12, "left")).toMatchObject({
+      x: 0,
       y: 40,
     });
     expect(getQuickPanelBounds(topArea)).toMatchObject({
@@ -94,12 +98,26 @@ describe("Electron quick task hot corner policy", () => {
       workArea: { x: 0, y: 0, width: 1880, height: 1080 },
     };
     const rightArea = getQuickCornerDisplayArea(rightTaskbarDisplay);
-    expect(getHotCornerTriggerBounds(rightArea)).toMatchObject({
-      x: 1868,
+    expect(getHotCornerTriggerBounds(rightArea, 12, "left")).toMatchObject({
+      x: 0,
       y: 0,
     });
-    expect(getCornerWindowBounds(rightArea)).toMatchObject({
-      x: 1826,
+    expect(getCornerWindowBounds(rightArea, 54, "left")).toMatchObject({
+      x: 0,
+      y: 0,
+    });
+
+    const leftTaskbarDisplay = {
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      workArea: { x: 48, y: 0, width: 1872, height: 1080 },
+    };
+    const leftArea = getQuickCornerDisplayArea(leftTaskbarDisplay);
+    expect(getHotCornerTriggerBounds(leftArea, 12, "left")).toMatchObject({
+      x: 48,
+      y: 0,
+    });
+    expect(getCornerWindowBounds(leftArea, 54, "left")).toMatchObject({
+      x: 48,
       y: 0,
     });
   });
@@ -130,14 +148,15 @@ describe("Electron quick task hot corner policy", () => {
     expect(getQuickCornerDisplayArea({ bounds })).toEqual(bounds);
   });
 
-  it("treats the top-right edge as inside without crossing displays", () => {
-    const bounds = getHotCornerTriggerBounds(workArea);
-    expect(pointInBounds({ x: -1, y: 25 }, bounds)).toBe(true);
-    expect(pointInBounds({ x: 0, y: 25 }, bounds)).toBe(false);
-    expect(pointInBounds({ x: -1, y: 24 }, bounds)).toBe(false);
+  it("treats the Windows top-left edge as inside without crossing displays", () => {
+    const bounds = getHotCornerTriggerBounds(workArea, 12, "left");
+    expect(pointInBounds({ x: -1440, y: 25 }, bounds)).toBe(true);
+    expect(pointInBounds({ x: -1439, y: 25 }, bounds)).toBe(true);
+    expect(pointInBounds({ x: -1441, y: 25 }, bounds)).toBe(false);
+    expect(pointInBounds({ x: -1440, y: 24 }, bounds)).toBe(false);
   });
 
-  it("animates and shapes the corner affordance inward from the top-right", () => {
+  it("mirrors the Windows affordance inward from the top-left", () => {
     expect(quickTaskCss).toContain("align-items: flex-start;");
     expect(quickTaskCss).toContain(
       "transform: translate(10px, -10px) scale(0.72);",
@@ -146,6 +165,23 @@ describe("Electron quick task hot corner policy", () => {
     expect(quickTaskCss).toContain("border-radius: 0 0 0 14px;");
     expect(quickTaskCss).toContain("box-shadow: -3px 3px 0 #171717;");
     expect(quickTaskCss).toContain("transform: translate(-2px, 2px);");
+    expect(quickTaskCss).toContain(
+      'html[data-corner-side="left"] .quick-corner-stage',
+    );
+    expect(quickTaskCss).toContain("justify-content: flex-start;");
+    expect(quickTaskCss).toContain(
+      "transform: translate(-10px, -10px) scale(0.72);",
+    );
+    expect(quickTaskCss).toContain("transform-origin: left top;");
+    expect(quickTaskCss).toContain("border-radius: 0 0 14px 0;");
+    expect(quickTaskCss).toContain("box-shadow: 3px 3px 0 #171717;");
+    expect(quickTaskCss).toContain("transform: translate(2px, 2px);");
+    expect(electronMain).toContain(
+      'const QUICK_CORNER_SIDE = isWindows ? "left" : "right";',
+    );
+    expect(electronMain).toContain(
+      'query.cornerSide = QUICK_CORNER_SIDE;',
+    );
   });
 
   it("keeps quick-surface activation from restoring the main window", () => {
@@ -182,6 +218,9 @@ describe("Electron quick task hot corner policy", () => {
   });
 
   it("opens only the quick panel from the corner and reserves main-window restore for the explicit footer action", () => {
+    expect(quickCornerComponent).toContain("getBridge()?.openPanel()");
+    expect(quickCornerComponent).not.toContain("openMain");
+
     const openPanelHandler = sourceBetween(
       'ipcMain.handle("quick-task:open-panel", async (event) => {',
       'ipcMain.handle("quick-task:close-panel"',

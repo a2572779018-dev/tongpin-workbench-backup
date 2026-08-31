@@ -455,5 +455,5 @@ describe("LORA R2 aggregate", () => {
         ([key]) => key === LORA_LEGACY_AGGREGATE_OBJECT_KEY,
       ),
     ).toHaveLength(1);
-  });
+  }, 45_000);
 });

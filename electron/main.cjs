@@ -67,6 +67,7 @@ const isDevelopment =
   !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === "darwin";
 const isWindows = process.platform === "win32";
+const QUICK_CORNER_SIDE = isWindows ? "left" : "right";
 const isQuickTaskPreview =
   isDevelopment && process.env.TONGPIN_QUICK_PANEL_PREVIEW === "1";
 const quickTaskPreviewTarget =
@@ -439,6 +440,7 @@ function destroyQuickTaskWindows() {
 
 async function loadQuickTaskSurface(targetWindow, surface) {
   const query = { surface };
+  if (surface === "quick-corner") query.cornerSide = QUICK_CORNER_SIDE;
   if (isQuickTaskPreview) query.preview = "1";
   if (isDevelopment) {
     const target = new URL(process.env.VITE_DEV_SERVER_URL);
@@ -569,7 +571,11 @@ async function showQuickCorner(display, { force = false } = {}) {
       !pointInBounds(
         currentPoint,
         expandBounds(
-          getCornerWindowBounds(currentCornerArea, QUICK_CORNER_SIZE),
+          getCornerWindowBounds(
+            currentCornerArea,
+            QUICK_CORNER_SIZE,
+            QUICK_CORNER_SIDE,
+          ),
           5,
         ),
       ))
@@ -579,7 +585,7 @@ async function showQuickCorner(display, { force = false } = {}) {
   }
   const cornerArea = getQuickCornerDisplayArea(display);
   target.setBounds(
-    getCornerWindowBounds(cornerArea, QUICK_CORNER_SIZE),
+    getCornerWindowBounds(cornerArea, QUICK_CORNER_SIZE, QUICK_CORNER_SIDE),
     false,
   );
   if (!target.isVisible()) target.showInactive();
@@ -631,10 +637,12 @@ function pollQuickCorner() {
   const triggerBounds = getHotCornerTriggerBounds(
     cornerArea,
     QUICK_TRIGGER_SIZE,
+    QUICK_CORNER_SIDE,
   );
   const cornerBounds = getCornerWindowBounds(
     cornerArea,
     QUICK_CORNER_SIZE,
+    QUICK_CORNER_SIDE,
   );
   const inTrigger = pointInBounds(point, triggerBounds);
   const inVisibleCorner =
@@ -680,6 +688,7 @@ function pollQuickCorner() {
             getHotCornerTriggerBounds(
               currentCornerArea,
               QUICK_TRIGGER_SIZE,
+              QUICK_CORNER_SIDE,
             ),
           )
         ) {
@@ -722,7 +731,11 @@ function repositionQuickTaskWindows() {
   const cornerArea = getQuickCornerDisplayArea(display);
   if (quickCornerWindow && !quickCornerWindow.isDestroyed()) {
     quickCornerWindow.setBounds(
-      getCornerWindowBounds(cornerArea, QUICK_CORNER_SIZE),
+      getCornerWindowBounds(
+        cornerArea,
+        QUICK_CORNER_SIZE,
+        QUICK_CORNER_SIDE,
+      ),
       false,
     );
   }
