@@ -76,6 +76,14 @@ describe("Electron quick task hot corner policy", () => {
       width: 54,
       height: 54,
     });
+    expect(
+      getQuickPanelBounds(windowsArea, { width: 380, height: 500 }, 16, "left"),
+    ).toEqual({
+      x: 16,
+      y: 16,
+      width: 380,
+      height: 500,
+    });
   });
 
   it("avoids Windows taskbars docked to the top, right, or left", () => {
@@ -88,8 +96,10 @@ describe("Electron quick task hot corner policy", () => {
       x: 0,
       y: 40,
     });
-    expect(getQuickPanelBounds(topArea)).toMatchObject({
-      x: 1524,
+    expect(
+      getQuickPanelBounds(topArea, { width: 380, height: 500 }, 16, "left"),
+    ).toMatchObject({
+      x: 16,
       y: 56,
     });
 
@@ -120,6 +130,33 @@ describe("Electron quick task hot corner policy", () => {
       x: 48,
       y: 0,
     });
+    expect(
+      getQuickPanelBounds(leftArea, { width: 380, height: 500 }, 16, "left"),
+    ).toMatchObject({
+      x: 64,
+      y: 16,
+    });
+  });
+
+  it("keeps a Windows panel on the same top-left display as its corner", () => {
+    const secondaryArea = { x: -1920, y: 30, width: 1920, height: 1040 };
+    const panelBounds = getQuickPanelBounds(
+      secondaryArea,
+      { width: 380, height: 500 },
+      16,
+      "left",
+    );
+
+    expect(panelBounds).toEqual({
+      x: -1904,
+      y: 46,
+      width: 380,
+      height: 500,
+    });
+    expect(panelBounds.x).toBeGreaterThanOrEqual(secondaryArea.x);
+    expect(panelBounds.x + panelBounds.width).toBeLessThanOrEqual(
+      secondaryArea.x + secondaryArea.width,
+    );
   });
 
   it("keeps macOS quick-task surfaces below the menu bar", () => {
@@ -182,6 +219,17 @@ describe("Electron quick task hot corner policy", () => {
     expect(electronMain).toContain(
       'query.cornerSide = QUICK_CORNER_SIDE;',
     );
+    const showPanel = sourceBetween(
+      "async function showQuickPanel() {",
+      "function pollQuickCorner() {",
+    );
+    expect(showPanel).toContain("QUICK_CORNER_SIDE");
+
+    const reposition = sourceBetween(
+      "function repositionQuickTaskWindows() {",
+      "function configureQuickTaskLifecycle() {",
+    );
+    expect(reposition).toContain("QUICK_CORNER_SIDE");
   });
 
   it("keeps quick-surface activation from restoring the main window", () => {

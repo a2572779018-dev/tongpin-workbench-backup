@@ -85,6 +85,27 @@ describe("relationship map integration boundary", () => {
     expect(electronMain).not.toContain('ipcMain.handle("relationship-graph:list"');
   });
 
+  it("keeps preview demo data out of the production loading and recovery states", () => {
+    expect(relationshipApp).toContain("if (!allowLocalStorage) {");
+    expect(relationshipApp).toContain("graph: blankGraphState()");
+    expect(relationshipApp.indexOf("if (!allowLocalStorage) {")).toBeLessThan(
+      relationshipApp.indexOf("const previewFallback = {")
+    );
+    expect(relationshipApp).toContain("if (!storageReady) {");
+    expect(relationshipApp).toContain("本机安全存储服务暂时不可用，请重新打开同频后重试。");
+    expect(relationshipApp).toContain("本机加密数据未被删除，也不会在此状态下被编辑或覆盖。");
+  });
+
+  it("shows a readable blocking recovery card with an explicit retry", () => {
+    expect(relationshipApp).toContain("readableRelationshipStorageError(error)");
+    expect(relationshipApp).toContain("Error invoking remote method");
+    expect(relationshipApp).toContain("无法打开加密客户脉络图");
+    expect(relationshipApp).toContain("onClick={retrySecureStorageOpen}");
+    expect(relationshipApp).toContain("重新尝试");
+    expect(relationshipStyles).toContain(".secure-storage-gate");
+    expect(relationshipStyles).toContain("z-index: var(--layer-modal, 40)");
+  });
+
   it("flushes encrypted graph changes before navigation, logout, close, and update install", () => {
     expect(app).toContain("relationshipExitInFlight");
     expect(app).toMatch(/relationshipGraph\s*\.\s*flushCurrent\(\)/);

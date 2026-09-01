@@ -28,10 +28,16 @@ describe("release announcement", () => {
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain("Windows");
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "从屏幕右上角迁移到左上角",
+      "入口与快捷窗现在统一位于左上角",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "只打开快捷待办窗口",
+      "不会唤醒同频主窗口",
+    );
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
+      "安全存储异常时不会覆盖原数据",
+    );
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
+      "不再显示示例客户",
     );
   });
 

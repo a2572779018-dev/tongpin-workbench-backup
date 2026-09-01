@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
 const {
@@ -58,6 +58,22 @@ function fakeSafeStorage() {
       const encoded = value.toString().replace(/^encrypted:/, "");
       return Buffer.from(encoded, "base64").toString();
     },
+  };
+}
+
+function asyncCompatibleSafeStorage() {
+  const sync = fakeSafeStorage();
+  return {
+    isEncryptionAvailable: vi.fn(sync.isEncryptionAvailable),
+    encryptString: vi.fn(sync.encryptString),
+    decryptString: vi.fn(sync.decryptString),
+    isAsyncEncryptionAvailable: vi.fn().mockResolvedValue(true),
+    encryptStringAsync: vi.fn(async (value: string) =>
+      sync.encryptString(value)),
+    decryptStringAsync: vi.fn(async (value: Buffer) => ({
+      result: sync.decryptString(value),
+      shouldReEncrypt: false,
+    })),
   };
 }
 
@@ -122,6 +138,76 @@ describe("relationship graph encrypted vault", () => {
     });
     const storedFiles = await readdir(join(directory, "relationship-graphs"));
     expect(storedFiles).toEqual([graphFileName("member-a")]);
+  });
+
+  it("loads a legacy sync-encrypted graph through the async provider without rewriting it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tongpin-graph-vault-"));
+    temporaryDirectories.push(directory);
+    const legacyVault = createRelationshipGraphVault({
+      userDataPath: directory,
+      safeStorage: fakeSafeStorage(),
+    });
+    await legacyVault.save("member-a", graph("旧版加密客户图"), 1);
+    const target = join(
+      directory,
+      "relationship-graphs",
+      graphFileName("member-a"),
+    );
+    const originalCiphertext = await readFile(target);
+    const safeStorage = asyncCompatibleSafeStorage();
+    const asyncVault = createRelationshipGraphVault({
+      userDataPath: directory,
+      safeStorage,
+    });
+
+    await expect(asyncVault.load("member-a")).resolves.toMatchObject({
+      content: graph("旧版加密客户图"),
+      revision: 1,
+    });
+    expect(safeStorage.decryptStringAsync).toHaveBeenCalledOnce();
+    expect(safeStorage.encryptStringAsync).not.toHaveBeenCalled();
+    expect(await readFile(target)).toEqual(originalCiphertext);
+  });
+
+  it("writes new graph revisions with the async provider", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tongpin-graph-vault-"));
+    temporaryDirectories.push(directory);
+    const safeStorage = asyncCompatibleSafeStorage();
+    const vault = createRelationshipGraphVault({
+      userDataPath: directory,
+      safeStorage,
+    });
+
+    await vault.save("member-a", graph("异步加密客户图"), 1);
+
+    expect(safeStorage.encryptStringAsync).toHaveBeenCalledOnce();
+    expect(safeStorage.encryptString).not.toHaveBeenCalled();
+    await expect(vault.load("member-a")).resolves.toMatchObject({
+      content: graph("异步加密客户图"),
+      revision: 1,
+    });
+  });
+
+  it("reports safeStorage decryption failures without calling the graph damaged", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tongpin-graph-vault-"));
+    temporaryDirectories.push(directory);
+    const legacyVault = createRelationshipGraphVault({
+      userDataPath: directory,
+      safeStorage: fakeSafeStorage(),
+    });
+    await legacyVault.save("member-a", graph("原加密客户图"), 1);
+    const safeStorage = asyncCompatibleSafeStorage();
+    safeStorage.decryptStringAsync.mockRejectedValue(
+      new Error("Keychain denied access"),
+    );
+    const vault = createRelationshipGraphVault({
+      userDataPath: directory,
+      safeStorage,
+    });
+
+    await expect(vault.load("member-a")).rejects.toThrow(
+      "系统安全存储无法解密本机客户脉络图，原加密文件已保留",
+    );
   });
 
   it("rejects invalid and oversized graph structures before writing", () => {

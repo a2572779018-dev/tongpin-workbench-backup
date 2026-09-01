@@ -82,6 +82,22 @@ function fakeSafeStorage() {
   };
 }
 
+function asyncCompatibleSafeStorage() {
+  const sync = fakeSafeStorage();
+  return {
+    isEncryptionAvailable: vi.fn(sync.isEncryptionAvailable),
+    encryptString: vi.fn(sync.encryptString),
+    decryptString: vi.fn(sync.decryptString),
+    isAsyncEncryptionAvailable: vi.fn().mockResolvedValue(true),
+    encryptStringAsync: vi.fn(async (value: string) =>
+      sync.encryptString(value)),
+    decryptStringAsync: vi.fn(async (value: Buffer) => ({
+      result: sync.decryptString(value),
+      shouldReEncrypt: false,
+    })),
+  };
+}
+
 async function temporaryDirectory() {
   const directory = await mkdtemp(join(tmpdir(), "tongpin-credential-vault-"));
   temporaryDirectories.push(directory);
@@ -166,6 +182,89 @@ describe("credential vault", () => {
     await expect(vault.load("member@example.com")).resolves.toMatchObject({
       password: "second-password",
     });
+  });
+
+  it("reads legacy sync ciphertext through async without rewriting the login vault", async () => {
+    const directory = await temporaryDirectory();
+    const legacyVault = createCredentialVault({
+      userDataPath: directory,
+      safeStorage: fakeSafeStorage(),
+      now: () => new Date("2026-08-27T01:02:03.000Z"),
+    });
+    await legacyVault.save({
+      email: "member@example.com",
+      password: "legacy-password",
+      rememberPassword: true,
+    });
+    const target = join(directory, CREDENTIAL_VAULT_FILE_NAME);
+    const originalCiphertext = await readFile(target);
+    const safeStorage = asyncCompatibleSafeStorage();
+    const asyncVault = createCredentialVault({
+      userDataPath: directory,
+      safeStorage,
+    });
+
+    await expect(asyncVault.load("member@example.com")).resolves.toMatchObject({
+      email: "member@example.com",
+      password: "legacy-password",
+      rememberPassword: true,
+    });
+    expect(safeStorage.decryptStringAsync).toHaveBeenCalledOnce();
+    expect(safeStorage.encryptStringAsync).not.toHaveBeenCalled();
+    expect(await readFile(target)).toEqual(originalCiphertext);
+  });
+
+  it("writes new login records with async encryption", async () => {
+    const directory = await temporaryDirectory();
+    const safeStorage = asyncCompatibleSafeStorage();
+    const vault = createCredentialVault({
+      userDataPath: directory,
+      safeStorage,
+      now: () => new Date("2026-08-31T01:02:03.000Z"),
+    });
+
+    await vault.save({
+      email: "member@example.com",
+      password: "async-password",
+      rememberPassword: true,
+    });
+
+    expect(safeStorage.encryptStringAsync).toHaveBeenCalledOnce();
+    expect(safeStorage.encryptString).not.toHaveBeenCalled();
+    await expect(vault.load("member@example.com")).resolves.toMatchObject({
+      password: "async-password",
+    });
+  });
+
+  it("reports safeStorage decryption failure without calling credentials damaged", async () => {
+    const directory = await temporaryDirectory();
+    const legacyVault = createCredentialVault({
+      userDataPath: directory,
+      safeStorage: fakeSafeStorage(),
+    });
+    await legacyVault.save({
+      email: "member@example.com",
+      password: "encrypted-password",
+      rememberPassword: true,
+    });
+    const safeStorage = asyncCompatibleSafeStorage();
+    safeStorage.decryptStringAsync.mockRejectedValue(
+      new Error("Keychain denied access"),
+    );
+    const vault = createCredentialVault({
+      userDataPath: directory,
+      safeStorage,
+    });
+
+    await expect(
+      vault.save({
+        email: "new@example.com",
+        password: "new-password",
+        rememberPassword: true,
+      }),
+    ).rejects.toThrow(
+      "系统安全存储无法解密本机登录记录，原加密文件已保留",
+    );
   });
 
   it("uses the non-secret index when ciphertext is unreadable and never overwrites it", async () => {

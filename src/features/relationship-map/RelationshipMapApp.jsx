@@ -70,6 +70,37 @@ const nodeTypes = { person: PersonNode };
 const edgeTypes = { customerTree: CustomerTreeEdge };
 const MAX_GRAPH_BYTES = 25 * 1024 * 1024;
 const DEFAULT_GRAPH_TITLE = "已合作客户脉络图";
+const BLANK_CENTER_PERSON = Object.freeze({
+  id: "self",
+  name: "你",
+  alias: "关系中心",
+  initial: "我",
+  avatar: null,
+  level: "self",
+  relationship: "自己",
+  cooperationStatus: CUSTOMER_COOPERATION_STATUS.COLLABORATED,
+  colorKey: "yellow",
+  gender: "",
+  community: "客户脉络",
+  interactions: 0,
+  lastContact: "暂无记录",
+  activeDays: 0,
+  mutual: 0,
+  phone: "",
+  wechat: "",
+  tags: ["关系中心"],
+  note: "",
+  position: { x: 620, y: 315 },
+});
+
+function blankGraphState() {
+  return {
+    title: DEFAULT_GRAPH_TITLE,
+    colorSemantics: { ...DEFAULT_IDENTITY_COLOR_SEMANTICS },
+    people: [{ ...BLANK_CENTER_PERSON, tags: [...BLANK_CENTER_PERSON.tags], position: { ...BLANK_CENTER_PERSON.position } }],
+    connections: [],
+  };
+}
 
 function normalizeSearch(value) {
   return value.trim().toLocaleLowerCase("zh-CN");
@@ -97,27 +128,47 @@ function expandedSetSignature(expandedIds) {
   return JSON.stringify([...expandedIds].sort());
 }
 
-function initialGraphState(storageKey, allowLocalStorage) {
-  const fallback = {
+export function initialGraphState(storageKey, allowLocalStorage) {
+  if (!allowLocalStorage) {
+    return { graph: blankGraphState(), storage: null, storageError: null, restored: false };
+  }
+
+  const previewFallback = {
     title: DEFAULT_GRAPH_TITLE,
     colorSemantics: DEFAULT_IDENTITY_COLOR_SEMANTICS,
     people: migrateLegacyPersonColorKeys(demoPeople, demoConnections),
     connections: demoConnections,
   };
-  if (!allowLocalStorage) {
-    return { graph: fallback, storage: null, storageError: null, restored: false };
-  }
   let storage = null;
   try {
     storage = window.localStorage;
   } catch {
-    return { graph: fallback, storage: null, storageError: "当前环境无法使用本地自动保存。", restored: false };
+    return { graph: previewFallback, storage: null, storageError: "当前环境无法使用本地自动保存。", restored: false };
   }
 
   const loaded = loadGraph(storage, storageKey);
   if (loaded.ok && loaded.found) return { graph: loaded.graph, storage, storageError: null, restored: true };
-  if (!loaded.ok) return { graph: fallback, storage, storageError: loaded.error, restored: false };
-  return { graph: fallback, storage, storageError: null, restored: false };
+  if (!loaded.ok) return { graph: previewFallback, storage, storageError: loaded.error, restored: false };
+  return { graph: previewFallback, storage, storageError: null, restored: false };
+}
+
+export function readableRelationshipStorageError(error) {
+  const rawMessage = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : "";
+  const firstLine = rawMessage.split(/\r?\n/, 1)[0].trim();
+  const withoutIpcPrefix = firstLine
+    .replace(/^Error invoking remote method\s+['"][^'"]+['"]:\s*/i, "")
+    .replace(/^(?:Error:\s*)+/i, "")
+    .trim();
+  const firstChineseCharacter = withoutIpcPrefix.search(/[\u3400-\u9fff]/);
+
+  if (firstChineseCharacter === -1) {
+    return "暂时无法打开本机加密客户脉络图，请稍后重新尝试。";
+  }
+  return withoutIpcPrefix.slice(firstChineseCharacter);
 }
 
 function peopleWithExpandedPositions(peopleList) {
@@ -175,11 +226,19 @@ export function RelationshipMapApp({
   const [storageStatus, setStorageStatus] = useState(
     secureStorage
       ? "正在载入本机数据"
-      : initialState.storage
-        ? (initialState.restored ? "已恢复本地数据" : "自动保存已开启")
-        : "请手动导出保存",
+      : allowLocalStorage
+        ? initialState.storage
+          ? (initialState.restored ? "已恢复本地数据" : "自动保存已开启")
+          : "请手动导出保存"
+        : "本机安全存储服务不可用",
   );
-  const [storageReady, setStorageReady] = useState(!secureStorage);
+  const [storageReady, setStorageReady] = useState(allowLocalStorage && !secureStorage);
+  const [storageLoadError, setStorageLoadError] = useState(
+    !allowLocalStorage && !secureStorage
+      ? "本机安全存储服务暂时不可用，请重新打开同频后重试。"
+      : null,
+  );
+  const [storageRetryRevision, setStorageRetryRevision] = useState(0);
   const [mutationRevision, setMutationRevision] = useState(0);
   const appRootRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -617,9 +676,17 @@ export function RelationshipMapApp({
   }, [initialState.storageError, showImportNotice]);
 
   useEffect(() => {
-    if (!secureStorage) return undefined;
+    if (!secureStorage) {
+      if (!allowLocalStorage) {
+        setStorageReady(false);
+        setStorageStatus("本机安全存储服务不可用");
+        setStorageLoadError("本机安全存储服务暂时不可用，请重新打开同频后重试。");
+      }
+      return undefined;
+    }
     let cancelled = false;
     setStorageReady(false);
+    setStorageLoadError(null);
     setStorageStatus("正在载入本机数据");
 
     void secureStorage.open().then((result) => {
@@ -643,24 +710,36 @@ export function RelationshipMapApp({
         setExpandedIds(new Set(["self"]));
         setStorageStatus("已恢复加密本机数据");
       } else {
+        const blankGraph = blankGraphState();
+        setGraphPeople(blankGraph.people);
+        setGraphConnections(blankGraph.connections);
+        setGraphTitle(blankGraph.title);
+        setGraphColorSemantics(blankGraph.colorSemantics);
+        setExpandedIds(new Set(["self"]));
         setStorageStatus("加密自动保存已开启");
       }
+      setStorageLoadError(null);
       setStorageReady(true);
     }).catch((error) => {
       if (cancelled) return;
+      const scopeToken = secureScopeTokenRef.current;
       secureScopeTokenRef.current = null;
-      setStorageReady(true);
-      setStorageStatus("请手动导出保存");
-      showImportNotice(
-        "error",
-        error instanceof Error ? error.message : "无法打开本机加密关系图",
-      );
+      if (scopeToken) void secureStorage.release(scopeToken);
+      setStorageReady(false);
+      setStorageStatus("本机加密数据未载入");
+      setStorageLoadError(readableRelationshipStorageError(error));
     });
 
     return () => {
       cancelled = true;
     };
-  }, [secureStorage, setEdges, setNodes, showImportNotice]);
+  }, [allowLocalStorage, secureStorage, setEdges, setNodes, storageRetryRevision]);
+
+  const retrySecureStorageOpen = useCallback(() => {
+    setStorageLoadError(null);
+    setStorageStatus("正在载入本机数据");
+    setStorageRetryRevision((current) => current + 1);
+  }, []);
 
   latestMutationRevisionRef.current = mutationRevision;
 
@@ -1121,15 +1200,55 @@ export function RelationshipMapApp({
     ? displayName(selectedPerson, privacy, graphPeople.findIndex((person) => person.id === selectedPerson.id))
     : "";
 
+  if (!storageReady) {
+    return (
+      <main
+        ref={appRootRef}
+        className={`app-shell relationship-theme--${visualTheme} is-storage-loading`}
+        aria-busy={!storageLoadError}
+      >
+        <section
+          className={`secure-storage-gate${storageLoadError ? " is-error" : ""}`}
+          aria-live="polite"
+        >
+          <div className="secure-storage-card" role={storageLoadError ? "alert" : "status"}>
+            <span className="secure-storage-card__icon" aria-hidden="true">
+              <ShieldCheck size={32} weight={storageLoadError ? "duotone" : "fill"} />
+            </span>
+            {storageLoadError ? (
+              <>
+                <p className="secure-storage-card__eyebrow">本机安全保护</p>
+                <h2>无法打开加密客户脉络图</h2>
+                <p className="secure-storage-card__error">{storageLoadError}</p>
+                <p className="secure-storage-card__reassurance">
+                  本机加密数据未被删除，也不会在此状态下被编辑或覆盖。
+                </p>
+                <button
+                  className="primary-button secure-storage-card__retry"
+                  type="button"
+                  onClick={retrySecureStorageOpen}
+                >
+                  重新尝试
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="secure-storage-card__eyebrow">本机安全保护</p>
+                <h2>正在载入加密客户脉络图</h2>
+                <p>数据载入完成前，客户脉络图保持锁定。</p>
+              </>
+            )}
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main
       ref={appRootRef}
-      className={`app-shell relationship-theme--${visualTheme}${storageReady ? "" : " is-storage-loading"}`}
-      aria-busy={!storageReady}
+      className={`app-shell relationship-theme--${visualTheme}`}
     >
-      {!storageReady ? (
-        <div className="secure-storage-loading" role="status">正在载入关系数据</div>
-      ) : null}
       <header className="app-header">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true"><Graph size={25} weight="duotone" /></span>

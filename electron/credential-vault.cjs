@@ -3,6 +3,10 @@ const path = require("node:path");
 const {
   atomicWritePrivateFile,
 } = require("./relationship-graph-vault.cjs");
+const {
+  createSafeStorageAdapter,
+  isSafeStorageUnavailableError,
+} = require("./safe-storage-adapter.cjs");
 
 const CREDENTIAL_VAULT_FILE_NAME = "secure-accounts.bin";
 const CREDENTIAL_VAULT_BACKUP_FILE_NAME = "secure-accounts.bin.bak";
@@ -122,6 +126,7 @@ async function atomicWritePrivateFileWithBackup(
 function createCredentialVault({
   userDataPath,
   safeStorage,
+  safeStorageAdapter,
   fileSystem = fsp,
   atomicWrite = atomicWritePrivateFile,
   now = () => new Date(),
@@ -136,12 +141,17 @@ function createCredentialVault({
   );
   const indexPath = path.join(userDataPath, CREDENTIAL_INDEX_FILE_NAME);
   let mutationQueue = Promise.resolve();
+  const secureStorage =
+    safeStorageAdapter ?? createSafeStorageAdapter(safeStorage);
 
-  function assertEncryptionAvailable() {
-    if (!safeStorage?.isEncryptionAvailable?.()) {
+  async function assertEncryptionAvailable() {
+    try {
+      await secureStorage.ensureAvailable();
+    } catch (error) {
       throw new CredentialVaultError(
         "CREDENTIAL_VAULT_UNAVAILABLE",
         "系统安全存储暂时不可用，原加密登录记录已保留",
+        error,
       );
     }
   }
@@ -180,7 +190,7 @@ function createCredentialVault({
   }
 
   async function readEncryptedVault() {
-    assertEncryptionAvailable();
+    await assertEncryptionAvailable();
     let encrypted;
     try {
       encrypted = await fileSystem.readFile(vaultPath);
@@ -195,13 +205,28 @@ function createCredentialVault({
       );
     }
     try {
-      const decrypted = safeStorage.decryptString(encrypted);
+      const { result: decrypted } =
+        await secureStorage.decryptString(encrypted);
       return {
         state: "ready",
         accounts: normalizeEncryptedAccounts(JSON.parse(decrypted)),
       };
     } catch (error) {
       if (error instanceof CredentialVaultError) throw error;
+      if (isSafeStorageUnavailableError(error)) {
+        throw new CredentialVaultError(
+          "CREDENTIAL_VAULT_UNAVAILABLE",
+          "系统安全存储暂时不可用，原加密登录记录已保留",
+          error,
+        );
+      }
+      if (error?.code === "SAFE_STORAGE_DECRYPT_FAILED") {
+        throw new CredentialVaultError(
+          "CREDENTIAL_VAULT_DECRYPT_FAILED",
+          "系统安全存储无法解密本机登录记录，原加密文件已保留",
+          error,
+        );
+      }
       throw new CredentialVaultError(
         "CREDENTIAL_VAULT_UNREADABLE",
         "本机登录记录无法解密或已损坏，原加密文件已保留",
@@ -211,14 +236,26 @@ function createCredentialVault({
   }
 
   async function writeEncryptedAccounts(accounts) {
-    assertEncryptionAvailable();
+    await assertEncryptionAvailable();
     const payload = JSON.stringify(
       normalizeEncryptedAccounts(accounts).slice(0, MAX_CREDENTIAL_ACCOUNTS),
     );
     if (payload.length > MAX_CREDENTIAL_PAYLOAD_LENGTH) {
       throw new Error("记住的账号数量过多");
     }
-    const encrypted = safeStorage.encryptString(payload);
+    let encrypted;
+    try {
+      encrypted = await secureStorage.encryptString(payload);
+    } catch (error) {
+      if (isSafeStorageUnavailableError(error)) {
+        throw new CredentialVaultError(
+          "CREDENTIAL_VAULT_UNAVAILABLE",
+          "系统安全存储暂时不可用，原加密登录记录已保留",
+          error,
+        );
+      }
+      throw error;
+    }
     await atomicWritePrivateFileWithBackup(vaultPath, encrypted, {
       fileSystem,
       atomicWrite,

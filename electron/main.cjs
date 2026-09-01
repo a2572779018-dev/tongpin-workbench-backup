@@ -8,6 +8,7 @@ const {
   dialog,
   ipcMain,
   Menu,
+  net,
   powerMonitor,
   safeStorage,
   screen,
@@ -56,12 +57,24 @@ const {
   createRelationshipGraphVault,
 } = require("./relationship-graph-vault.cjs");
 const {
-  atomicWritePrivateFileWithBackup,
+  verifyRelationshipMemberAccess,
+} = require("./relationship-member-verifier.cjs");
+const {
   createCredentialVault,
   normalizeCredentialEmail,
 } = require("./credential-vault.cjs");
+const {
+  createSafeStorageAdapter,
+  isSafeStorageUnavailableError,
+} = require("./safe-storage-adapter.cjs");
+const {
+  createRelationshipBindingStore,
+  createSecureSessionStore,
+  persistSecureSessionWithMemoryFallback,
+} = require("./secure-session-binding-store.cjs");
 
 autoUpdater.logger = null;
+const safeStorageAdapter = createSafeStorageAdapter(safeStorage);
 
 const isDevelopment =
   !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -111,6 +124,8 @@ const pendingQuickTaskRequests = new Map();
 const recentNoticeSounds = new Map();
 let relationshipGraphVault = null;
 let credentialVault = null;
+let secureSessionStore = null;
+let relationshipBindingStore = null;
 let inMemorySessionPayload = null;
 let activeRelationshipGraphScope = null;
 let relationshipSessionGeneration = 0;
@@ -608,7 +623,12 @@ async function showQuickPanel() {
   if (!canShowQuickTasks()) return false;
   hideQuickCorner({ animate: false });
   target.setBounds(
-    getQuickPanelBounds(display.workArea, QUICK_PANEL_SIZE, 16),
+    getQuickPanelBounds(
+      display.workArea,
+      QUICK_PANEL_SIZE,
+      16,
+      QUICK_CORNER_SIDE,
+    ),
     false,
   );
   quickPanelActivationSuppressedUntil = Date.now() + 750;
@@ -745,7 +765,12 @@ function repositionQuickTaskWindows() {
     quickPanelWindow.isVisible()
   ) {
     quickPanelWindow.setBounds(
-      getQuickPanelBounds(display.workArea, QUICK_PANEL_SIZE, 16),
+      getQuickPanelBounds(
+        display.workArea,
+        QUICK_PANEL_SIZE,
+        16,
+        QUICK_CORNER_SIDE,
+      ),
       false,
     );
   }
@@ -813,10 +838,30 @@ function getCredentialVault() {
   if (!credentialVault) {
     credentialVault = createCredentialVault({
       userDataPath: app.getPath("userData"),
-      safeStorage,
+      safeStorageAdapter,
     });
   }
   return credentialVault;
+}
+
+function getSecureSessionStore() {
+  if (!secureSessionStore) {
+    secureSessionStore = createSecureSessionStore({
+      userDataPath: app.getPath("userData"),
+      safeStorageAdapter,
+    });
+  }
+  return secureSessionStore;
+}
+
+function getRelationshipBindingStore() {
+  if (!relationshipBindingStore) {
+    relationshipBindingStore = createRelationshipBindingStore({
+      userDataPath: app.getPath("userData"),
+      safeStorageAdapter,
+    });
+  }
+  return relationshipBindingStore;
 }
 
 function sessionEmailFromPayload(payload) {
@@ -889,18 +934,10 @@ async function readSecureSession() {
     }
   }
   if (await hasSessionMemoryOnlyMarker()) return null;
-  if (!safeStorage.isEncryptionAvailable()) return null;
   try {
-    const encrypted = await fsp.readFile(
-      path.join(app.getPath("userData"), SESSION_FILE_NAME),
-    );
-    const payload = safeStorage.decryptString(encrypted);
-    const session = JSON.parse(payload);
-    if (!session || typeof session !== "object" || Array.isArray(session)) {
-      return null;
-    }
-    return { payload, session };
-  } catch {
+    return await getSecureSessionStore().read();
+  } catch (error) {
+    if (isSafeStorageUnavailableError(error)) throw error;
     return null;
   }
 }
@@ -939,50 +976,18 @@ function getRelationshipGraphVault() {
   if (!relationshipGraphVault) {
     relationshipGraphVault = createRelationshipGraphVault({
       userDataPath: app.getPath("userData"),
-      safeStorage,
+      safeStorageAdapter,
     });
   }
   return relationshipGraphVault;
 }
 
 async function writeRelationshipBinding(binding) {
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error("系统安全存储不可用");
-  }
-  const encrypted = safeStorage.encryptString(
-    JSON.stringify({
-      version: 1,
-      userId: binding.userId,
-      role: "member",
-      sessionFingerprint: binding.fingerprint,
-      verifiedAt: new Date().toISOString(),
-    }),
-  );
-  await atomicWritePrivateFile(
-    path.join(app.getPath("userData"), RELATIONSHIP_GRAPH_BINDING_FILE_NAME),
-    encrypted,
-  );
+  await getRelationshipBindingStore().write(binding);
 }
 
 async function readRelationshipBinding() {
-  if (!safeStorage.isEncryptionAvailable()) return null;
-  try {
-    const encrypted = await fsp.readFile(
-      path.join(app.getPath("userData"), RELATIONSHIP_GRAPH_BINDING_FILE_NAME),
-    );
-    const binding = JSON.parse(safeStorage.decryptString(encrypted));
-    if (
-      binding?.version !== 1 ||
-      binding.role !== "member" ||
-      typeof binding.userId !== "string" ||
-      typeof binding.sessionFingerprint !== "string"
-    ) {
-      return null;
-    }
-    return binding;
-  } catch {
-    return null;
-  }
+  return getRelationshipBindingStore().read();
 }
 
 async function clearRelationshipBinding() {
@@ -1007,48 +1012,18 @@ async function verifyCurrentRelationshipMember() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   timeout.unref?.();
-  let unavailable = false;
   try {
-    const response = await fetch(`${getApiUrl()}/api/auth/me`, {
-      headers: { Authorization: `Bearer ${current.accessToken}` },
+    return await verifyRelationshipMemberAccess({
+      apiUrl: getApiUrl(),
+      current,
+      fetchImpl: (...args) => net.fetch(...args),
+      readBinding: readRelationshipBinding,
+      writeBinding: writeRelationshipBinding,
       signal: controller.signal,
     });
-    if (response.ok) {
-      const result = await response.json();
-      const verifiedUser = result?.user;
-      if (
-        verifiedUser?.id !== current.userId ||
-        verifiedUser?.role !== "member"
-      ) {
-        throw new Error("客户脉络图仅供当前成员账号使用");
-      }
-      await writeRelationshipBinding(current);
-      return current;
-    }
-    if (response.status === 401 || response.status === 403) {
-      throw new Error("登录状态已失效，请重新登录");
-    }
-    unavailable = response.status >= 500;
-    if (!unavailable) throw new Error("无法验证当前成员账号");
-  } catch (error) {
-    if (error instanceof Error && /登录状态|仅供|无法验证/.test(error.message)) {
-      throw error;
-    }
-    unavailable = true;
   } finally {
     clearTimeout(timeout);
   }
-
-  if (unavailable) {
-    const binding = await readRelationshipBinding();
-    if (
-      binding?.userId === current.userId &&
-      binding.sessionFingerprint === current.fingerprint
-    ) {
-      return current;
-    }
-  }
-  throw new Error("网络不可用，当前账号尚未完成本机安全验证");
 }
 
 function resetRelationshipGraphScope({ sessionChanged = false } = {}) {
@@ -1512,7 +1487,13 @@ function registerDesktopIpc() {
     } catch {
       throw new Error("无效的会话内容");
     }
-    const previousStoredSession = await readSecureSession();
+    let previousStoredSession = null;
+    try {
+      previousStoredSession = await readSecureSession();
+    } catch (error) {
+      if (!isSafeStorageUnavailableError(error)) throw error;
+      // A temporarily locked system store must not discard the new online login.
+    }
     let previousRelationshipSession = null;
     try {
       previousRelationshipSession = previousStoredSession
@@ -1548,19 +1529,16 @@ function registerDesktopIpc() {
     if (!continuingMemberIdentity) {
       resetRelationshipGraphScope({ sessionChanged: true });
     }
-    if (safeStorage.isEncryptionAvailable()) {
-      const encrypted = safeStorage.encryptString(payload);
-      await atomicWritePrivateFileWithBackup(
-        path.join(app.getPath("userData"), SESSION_FILE_NAME),
-        encrypted,
-      );
-      await clearSessionMemoryOnlyMarker();
-    } else {
-      await atomicWritePrivateFile(
-        sessionMemoryOnlyMarkerPath(),
-        "memory-only\n",
-      );
-    }
+    await persistSecureSessionWithMemoryFallback({
+      secureSessionStore: getSecureSessionStore(),
+      payload,
+      clearMemoryOnlyMarker: clearSessionMemoryOnlyMarker,
+      writeMemoryOnlyMarker: () =>
+        atomicWritePrivateFile(
+          sessionMemoryOnlyMarkerPath(),
+          "memory-only\n",
+        ),
+    });
     // 安全存储锁定时只保留当前进程内的登录状态，绝不降级为明文落盘。
     // 这样用户仍可工作；完全退出后需要重新登录，直到系统安全存储恢复。
     inMemorySessionPayload = payload;
@@ -1620,18 +1598,14 @@ function registerDesktopIpc() {
     }
     inMemorySessionPayload = null;
     await clearSessionMemoryOnlyMarker();
-    if (safeStorage.isEncryptionAvailable()) {
-      try {
-        const encrypted = await fsp.readFile(
-          path.join(app.getPath("userData"), SESSION_FILE_NAME),
-        );
-        const sessionEmail = sessionEmailFromPayload(
-          safeStorage.decryptString(encrypted),
-        );
-        if (sessionEmail) await getCredentialVault().touch(sessionEmail);
-      } catch {
-        // Missing or unreadable legacy sessions must not block logout.
-      }
+    try {
+      const storedSession = await getSecureSessionStore().read();
+      const sessionEmail = storedSession
+        ? sessionEmailFromPayload(storedSession.payload)
+        : "";
+      if (sessionEmail) await getCredentialVault().touch(sessionEmail);
+    } catch {
+      // Missing, unavailable, or unreadable legacy sessions must not block logout.
     }
     try {
       await fsp.unlink(path.join(app.getPath("userData"), SESSION_FILE_NAME));

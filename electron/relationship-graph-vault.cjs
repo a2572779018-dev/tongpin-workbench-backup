@@ -1,6 +1,10 @@
 const fsp = require("node:fs/promises");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
+const {
+  createSafeStorageAdapter,
+  isSafeStorageUnavailableError,
+} = require("./safe-storage-adapter.cjs");
 
 const RELATIONSHIP_GRAPH_VAULT_VERSION = 1;
 const RELATIONSHIP_GRAPH_MAX_BYTES = 25 * 1024 * 1024;
@@ -92,16 +96,35 @@ async function atomicWritePrivateFile(target, content) {
   }
 }
 
-function createRelationshipGraphVault({ userDataPath, safeStorage }) {
+function createRelationshipGraphVault({
+  userDataPath,
+  safeStorage,
+  safeStorageAdapter,
+}) {
   if (typeof userDataPath !== "string" || !path.isAbsolute(userDataPath)) {
     throw new Error("关系图存储目录无效");
   }
   const vaultDirectory = path.join(userDataPath, "relationship-graphs");
   const writeQueues = new Map();
+  const secureStorage =
+    safeStorageAdapter ?? createSafeStorageAdapter(safeStorage);
 
-  function assertEncryptionAvailable() {
-    if (!safeStorage?.isEncryptionAvailable?.()) {
-      throw new Error("系统安全存储不可用，拒绝明文保存关系图");
+  async function assertEncryptionAvailable() {
+    try {
+      await secureStorage.ensureAvailable();
+    } catch (error) {
+      if (error?.code === "SAFE_STORAGE_TEMPORARILY_UNAVAILABLE") {
+        throw new Error(
+          "系统安全存储暂时不可用，客户脉络图仍保持加密，请稍后重试",
+          { cause: error },
+        );
+      }
+      if (isSafeStorageUnavailableError(error)) {
+        throw new Error("系统安全存储不可用，拒绝明文保存关系图", {
+          cause: error,
+        });
+      }
+      throw error;
     }
   }
 
@@ -110,7 +133,7 @@ function createRelationshipGraphVault({ userDataPath, safeStorage }) {
   }
 
   async function readStoredGraph(userId) {
-    assertEncryptionAvailable();
+    await assertEncryptionAvailable();
     const normalizedUserId = validateUserId(userId);
     let encrypted;
     try {
@@ -122,8 +145,16 @@ function createRelationshipGraphVault({ userDataPath, safeStorage }) {
 
     let envelope;
     try {
-      envelope = JSON.parse(safeStorage.decryptString(encrypted));
-    } catch {
+      const { result } = await secureStorage.decryptString(encrypted);
+      envelope = JSON.parse(result);
+    } catch (error) {
+      if (isSafeStorageUnavailableError(error)) throw error;
+      if (error?.code === "SAFE_STORAGE_DECRYPT_FAILED") {
+        throw new Error(
+          "系统安全存储无法解密本机客户脉络图，原加密文件已保留",
+          { cause: error },
+        );
+      }
       throw new Error("本机关系图数据无法解密或已损坏");
     }
     if (
@@ -150,7 +181,7 @@ function createRelationshipGraphVault({ userDataPath, safeStorage }) {
   }
 
   async function write(userId, graphDocument, revision) {
-    assertEncryptionAvailable();
+    await assertEncryptionAvailable();
     const normalizedUserId = validateUserId(userId);
     validateGraphDocument(graphDocument);
     const envelope = JSON.stringify({
@@ -160,7 +191,7 @@ function createRelationshipGraphVault({ userDataPath, safeStorage }) {
       savedAt: new Date().toISOString(),
       graphDocument,
     });
-    const encrypted = safeStorage.encryptString(envelope);
+    const encrypted = await secureStorage.encryptString(envelope);
     await atomicWritePrivateFile(filePathForUser(normalizedUserId), encrypted);
     return revision;
   }

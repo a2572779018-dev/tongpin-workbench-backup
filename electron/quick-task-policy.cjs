@@ -34,6 +34,7 @@ function getQuickPanelBounds(
   workArea,
   preferred = { width: 380, height: 500 },
   margin = 16,
+  side = "right",
 ) {
   const width = Math.min(preferred.width, Math.max(320, workArea.width - margin * 2));
   const height = Math.min(
@@ -41,7 +42,10 @@ function getQuickPanelBounds(
     Math.max(380, workArea.height - margin * 2),
   );
   return {
-    x: workArea.x + workArea.width - width - margin,
+    x:
+      side === "left"
+        ? workArea.x + margin
+        : workArea.x + workArea.width - width - margin,
     y: workArea.y + margin,
     width,
     height,
