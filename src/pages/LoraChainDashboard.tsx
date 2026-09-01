@@ -370,7 +370,7 @@ export function LoraChainDashboardView({
           <b>{priceStateLabel(data)}</b>
         </article>
         <article>
-          <span>今日活跃地址数</span>
+          <span>今日活跃地址数（顶层交易）</span>
           <strong>{displayMetric(data?.transactions.activeAddresses ?? null, baselineLabel)}</strong>
           <b>去重</b>
         </article>
@@ -443,7 +443,7 @@ export function LoraChainDashboardView({
               <caption className="sr-only">超过 100 LRB 的 Swap 记录</caption>
               <thead>
                 <tr>
-                  <th scope="col">时间</th><th scope="col">方向</th><th scope="col">LRB</th><th scope="col">USDT</th><th scope="col">价格</th><th scope="col">发起地址</th><th scope="col">余额</th><th scope="col">交易</th>
+                  <th scope="col">时间</th><th scope="col">方向</th><th scope="col">LRB</th><th scope="col">USDT</th><th scope="col">价格</th><th scope="col">发起地址</th><th scope="col">当前余额</th><th scope="col">交易</th>
                 </tr>
               </thead>
               <SwapRows
@@ -461,7 +461,7 @@ export function LoraChainDashboardView({
         <span>最后出块 {formatShanghaiDateTime(data?.chain.lastBlockAt ?? null)}</span>
         <span>平均出块 {displayLoraValue(data?.chain.averageBlockTime, "—")}</span>
         <span>今日 Gas {displayLoraValue(data?.chain.gasUsed, "—")}</span>
-        <span>Gas Price {displayLoraValue(data?.chain.averageGasPrice, "—")}</span>
+        <span>平均 Gas Price {displayLoraValue(data?.chain.averageGasPrice, "—")}</span>
         <button type="button" onClick={() => void window.tongpin?.openLoraExplorer({ kind: "address", value: data?.price.pair || LORA_PAIR_ADDRESS })}>
           Pair {compactExplorerValue(data?.price.pair || LORA_PAIR_ADDRESS)}
         </button>

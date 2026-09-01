@@ -50,6 +50,7 @@ import {
 export const LORA_AGGREGATE_OBJECT_KEY = "_internal/lora/aggregate-v2.json";
 export const LORA_LEGACY_AGGREGATE_OBJECT_KEY =
   "_internal/lora/aggregate-v1.json";
+export const LORA_COVERAGE_REVISION = 1;
 
 interface RankedLargeTransfer {
   row: LoraLargeTransferRow;
@@ -99,6 +100,7 @@ interface PersistedPendingInternalTransaction {
 
 export interface LoraAggregateSnapshot {
   version: 2;
+  coverageRevision: number;
   state: LoraCollectorState;
   price: LoraPriceSnapshot;
   health: LoraSourceHealth;
@@ -108,6 +110,9 @@ export interface LoraAggregateSnapshot {
   burnKeys: string[];
   cumulativeBurnWei: string;
   cumulativeConfirmedCount: string;
+  burnBalanceWei: string | null;
+  burnBalanceBlockNumber: number | null;
+  burnBalanceUpdatedAt: string | null;
   latestSwap: LoraIndexedSwap | null;
   recentBlocks: LoraIndexedBlock[];
   updatedAt: string | null;
@@ -182,6 +187,7 @@ function persistDayIndexes(
 export function createEmptyLoraAggregateSnapshot(): LoraAggregateSnapshot {
   return {
     version: 2,
+    coverageRevision: LORA_COVERAGE_REVISION,
     state: structuredClone(EMPTY_LORA_COLLECTOR_STATE),
     price: structuredClone(EMPTY_LORA_PRICE),
     health: structuredClone(EMPTY_LORA_HEALTH),
@@ -191,10 +197,66 @@ export function createEmptyLoraAggregateSnapshot(): LoraAggregateSnapshot {
     burnKeys: [],
     cumulativeBurnWei: "0",
     cumulativeConfirmedCount: "0",
+    burnBalanceWei: null,
+    burnBalanceBlockNumber: null,
+    burnBalanceUpdatedAt: null,
     latestSwap: null,
     recentBlocks: [],
     updatedAt: null,
   };
+}
+
+/**
+ * Invalidates completeness from collectors that could advance a historical
+ * cursor while no longer replaying the live Explorer head. Existing rows and
+ * their de-duplication keys are retained as an honest lower bound; subsequent
+ * bounded backfills fill the missing coverage without double counting.
+ */
+export function migrateLoraCoverageSnapshot(
+  snapshot: LoraAggregateSnapshot,
+): LoraAggregateSnapshot {
+  if (snapshot.coverageRevision === LORA_COVERAGE_REVISION) return snapshot;
+  snapshot.coverageRevision = LORA_COVERAGE_REVISION;
+  snapshot.addressBaselines = snapshot.addressBaselines.map((baseline) =>
+    baseline.source === "midnight-window"
+      ? { ...baseline, estimated: true }
+      : baseline,
+  );
+  snapshot.state = {
+    ...snapshot.state,
+    checkpointBlock: null,
+    checkpointHash: null,
+    blockCursor: null,
+    transactionCursor: null,
+    burnCursor: null,
+    burnHistoryCursor: null,
+    headTransactionHash: null,
+    headBurnKey: null,
+    blockHeadCursor: null,
+    blockHeadCandidateKey: null,
+    transactionHeadCursor: null,
+    transactionHeadCandidateHash: null,
+    burnHeadCursor: null,
+    burnHeadCandidateKey: null,
+    blockHeadConnected: false,
+    transactionHeadConnected: false,
+    burnHeadConnected: false,
+    swapCheckpointBlock: null,
+    pendingInternalTransactions: [],
+    internalQueueOverflow: false,
+    internalDetailsComplete: false,
+    swapTodayComplete: false,
+    transactionTodayComplete: false,
+    burnTodayComplete: false,
+    blockTodayComplete: false,
+    todayComplete: false,
+    historyComplete: false,
+  };
+  snapshot.health = {
+    ...snapshot.health,
+    collector: "building",
+  };
+  return snapshot;
 }
 
 function asAggregateSnapshot(value: unknown): LoraAggregateSnapshot | null {
@@ -335,7 +397,7 @@ export function migrateLegacyLoraAggregateSnapshot(
   const legacy = asLegacyAggregateSnapshot(value);
   if (!legacy) return null;
   const bounded = legacyPendingForCurrentDay(legacy, now);
-  return asAggregateSnapshot({
+  const snapshot = asAggregateSnapshot({
     ...legacy,
     version: 2,
     state: {
@@ -345,11 +407,10 @@ export function migrateLegacyLoraAggregateSnapshot(
       internalDetailsComplete: bounded.overflow
         ? false
         : legacy.state.internalDetailsComplete,
-      todayComplete: bounded.overflow
-        ? false
-        : legacy.state.todayComplete,
+      todayComplete: bounded.overflow ? false : legacy.state.todayComplete,
     },
   });
+  return snapshot ? migrateLoraCoverageSnapshot(snapshot) : null;
 }
 
 function boundedAggregatePending(state: LoraCollectorState): {
@@ -406,7 +467,9 @@ export async function loadLoraAggregateSnapshot(
     try {
       const snapshot = asAggregateSnapshot(await object.json<unknown>());
       return {
-        snapshot: snapshot ?? createEmptyLoraAggregateSnapshot(),
+        snapshot: snapshot
+          ? migrateLoraCoverageSnapshot(snapshot)
+          : createEmptyLoraAggregateSnapshot(),
         etag: object.etag,
       };
     } catch {
@@ -453,7 +516,10 @@ export async function loadLoraAggregateSnapshot(
         await concurrentObject.json<unknown>(),
       );
       if (concurrentSnapshot) {
-        return { snapshot: concurrentSnapshot, etag: concurrentObject.etag };
+        return {
+          snapshot: migrateLoraCoverageSnapshot(concurrentSnapshot),
+          etag: concurrentObject.etag,
+        };
       }
     } catch {
       // The regular conditional update below will repair an invalid v2 object.
@@ -714,6 +780,10 @@ function applyBatchState(
       : false);
   const rpcReachable = batch.rpcHealthy || batch.price.status === "config-error";
   const sourceCycleSuccessful = rpcReachable && batch.explorerHealthy;
+  const liveCoverageConnected =
+    batch.blockHeadConnected === true &&
+    batch.transactionHeadConnected === true &&
+    batch.burnHeadConnected === true;
   snapshot.state = {
     ...previous,
     checkpointBlock: batch.checkpointBlock,
@@ -748,6 +818,9 @@ function applyBatchState(
       batch.burnHeadCandidateKey === undefined
         ? previous.burnHeadCandidateKey ?? null
         : batch.burnHeadCandidateKey,
+    blockHeadConnected: batch.blockHeadConnected ?? false,
+    transactionHeadConnected: batch.transactionHeadConnected ?? false,
+    burnHeadConnected: batch.burnHeadConnected ?? false,
     swapCheckpointBlock:
       batch.swapCheckpointBlock === undefined
         ? previous.swapCheckpointBlock ?? null
@@ -786,7 +859,17 @@ function applyBatchState(
   ) {
     snapshot.price = batch.price;
   } else {
-    snapshot.price = { ...snapshot.price, status: "stale" };
+    snapshot.price = {
+      ...snapshot.price,
+      status: "stale",
+      blockNumber: batch.price.blockNumber ?? snapshot.price.blockNumber,
+      blockTimestamp:
+        batch.price.blockTimestamp ?? snapshot.price.blockTimestamp ?? null,
+      averageBlockTimeMs:
+        batch.price.averageBlockTimeMs ??
+        snapshot.price.averageBlockTimeMs ??
+        null,
+    };
   }
   snapshot.health = {
     rpc: batch.rpcHealthy
@@ -795,7 +878,11 @@ function applyBatchState(
         ? "config-error"
         : "unavailable",
     explorer: batch.explorerHealthy ? "ready" : "unavailable",
-    collector: sourceCycleSuccessful ? "ready" : "unavailable",
+    collector: sourceCycleSuccessful
+      ? liveCoverageConnected
+        ? "ready"
+        : "building"
+      : "unavailable",
     lastRpcSuccessAt: rpcReachable
       ? now.toISOString()
       : snapshot.health.lastRpcSuccessAt,
@@ -875,19 +962,19 @@ export function applyLoraAggregateBatch(
   const baselineIndex = snapshot.addressBaselines.findIndex(
     (baseline) => baseline.reportDate === reportDate,
   );
-  const exactBaseline =
+  const observedBaseline =
     batch.addressBaseline?.reportDate === reportDate
       ? {
           ...batch.addressBaseline,
-          estimated: false,
+          estimated: batch.addressBaseline.estimated ?? true,
           source: batch.addressBaseline.source ?? "midnight-window",
         }
       : null;
-  if (exactBaseline) {
+  if (observedBaseline) {
     if (baselineIndex < 0) {
-      snapshot.addressBaselines.push(exactBaseline);
+      snapshot.addressBaselines.push(observedBaseline);
     } else if (snapshot.addressBaselines[baselineIndex].estimated) {
-      snapshot.addressBaselines[baselineIndex] = exactBaseline;
+      snapshot.addressBaselines[baselineIndex] = observedBaseline;
     }
   } else if (baselineIndex < 0) {
     if (previousTotalAddresses !== null) {
@@ -916,6 +1003,12 @@ export function applyLoraAggregateBatch(
   if (batch.currentTotalAddresses !== null) {
     snapshot.currentTotalAddresses = batch.currentTotalAddresses;
   }
+  if (batch.burnBalanceWei !== null && batch.burnBalanceWei !== undefined) {
+    snapshot.burnBalanceWei = batch.burnBalanceWei;
+    snapshot.burnBalanceBlockNumber = batch.burnBalanceBlockNumber ?? null;
+    snapshot.burnBalanceUpdatedAt =
+      batch.burnBalanceUpdatedAt ?? batch.collectedAt;
+  }
   snapshot.addressBaselines = snapshot.addressBaselines
     .sort((left, right) => right.reportDate.localeCompare(left.reportDate))
     .slice(0, 8);
@@ -940,23 +1033,33 @@ function hourly(counts: string[], available: boolean) {
 
 function averageBlockTime(blocks: LoraIndexedBlock[]): string | null {
   const sorted = [...blocks]
-    .sort((left, right) => left.height - right.height)
-    .map((block) => Date.parse(block.timestamp))
-    .filter(Number.isFinite);
+    .filter((block) => Number.isFinite(Date.parse(block.timestamp)))
+    .sort((left, right) => left.height - right.height);
   if (sorted.length < 2) return null;
   let total = 0n;
-  let count = 0n;
+  let heights = 0n;
   for (let index = 1; index < sorted.length; index += 1) {
-    const difference = sorted[index] - sorted[index - 1];
-    if (difference <= 0) continue;
-    total += BigInt(difference);
-    count += 1n;
+    const heightDifference = sorted[index].height - sorted[index - 1].height;
+    const timeDifference =
+      Date.parse(sorted[index].timestamp) -
+      Date.parse(sorted[index - 1].timestamp);
+    if (heightDifference <= 0 || timeDifference <= 0) continue;
+    total += BigInt(timeDifference);
+    heights += BigInt(heightDifference);
   }
-  if (count === 0n) return null;
-  const hundredths = (total * 100n) / (count * 1_000n);
+  if (heights === 0n) return null;
+  const hundredths = (total * 100n) / (heights * 1_000n);
   const whole = hundredths / 100n;
   const fraction = (hundredths % 100n).toString().padStart(2, "0").replace(/0+$/, "");
   return `${whole.toString()}${fraction ? `.${fraction}` : ""} 秒`;
+}
+
+function averageBlockTimeFromMilliseconds(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return null;
+  const seconds = milliseconds / 1_000;
+  return `${Number(seconds.toFixed(2)).toString()} 秒`;
 }
 
 function staleStatus(status: LoraDataStatus, stale: boolean): LoraDataStatus {
@@ -971,9 +1074,20 @@ export function buildLoraAggregateDashboard(
   const day = snapshot.days[reportDate] ?? emptyDay();
   const yesterday = snapshot.days[addCalendarDays(reportDate, -1)] ?? emptyDay();
   const stateMatches = snapshot.state.bootstrapDate === reportDate;
-  const transactionComplete = stateMatches && snapshot.state.transactionTodayComplete;
-  const burnComplete = stateMatches && snapshot.state.burnTodayComplete;
-  const blockComplete = stateMatches && snapshot.state.blockTodayComplete;
+  const transactionHeadConnected =
+    snapshot.state.transactionHeadConnected ?? false;
+  const burnHeadConnected =
+    snapshot.state.burnHeadConnected ?? false;
+  const blockHeadConnected =
+    snapshot.state.blockHeadConnected ?? false;
+  const transactionComplete =
+    stateMatches &&
+    snapshot.state.transactionTodayComplete &&
+    transactionHeadConnected;
+  const burnComplete =
+    stateMatches && snapshot.state.burnTodayComplete && burnHeadConnected;
+  const blockComplete =
+    stateMatches && snapshot.state.blockTodayComplete && blockHeadConnected;
   const internalComplete = stateMatches && Boolean(snapshot.state.internalDetailsComplete);
   const largeComplete = transactionComplete && internalComplete;
   const swapComplete = stateMatches && Boolean(snapshot.state.swapTodayComplete);
@@ -1011,7 +1125,13 @@ export function buildLoraAggregateDashboard(
       addressStatus = "unavailable";
     }
   }
-  const latestBlock = snapshot.recentBlocks[0];
+  const indexedLatestBlock = snapshot.recentBlocks[0];
+  const rpcBlockTimestamp = snapshot.price.blockTimestamp ?? null;
+  const rpcBlockNumber = snapshot.price.blockNumber;
+  const hasLiveRpcBlock =
+    rpcBlockNumber !== null &&
+    rpcBlockTimestamp !== null &&
+    Number.isFinite(Date.parse(rpcBlockTimestamp));
   const largeTop5 = [...day.recentLargeTransfers]
     .sort((left, right) => {
       const leftWei = parseUnsignedInteger(left.wei);
@@ -1027,6 +1147,15 @@ export function buildLoraAggregateDashboard(
     parseUnsignedInteger(day.otherBurnWei) > 0n;
   const hasLarge = parseUnsignedInteger(day.largeTransferCount) > 0n;
   const hasHistory = snapshot.burnKeys.length > 0;
+  const burnBalanceWei = snapshot.burnBalanceWei ?? null;
+  const burnBalanceUpdatedAt = snapshot.burnBalanceUpdatedAt ?? null;
+  const burnBalanceFresh =
+    burnBalanceWei !== null &&
+    burnBalanceUpdatedAt !== null &&
+    Number.isFinite(Date.parse(burnBalanceUpdatedAt)) &&
+    now.getTime() - Date.parse(burnBalanceUpdatedAt) <=
+      LORA_CACHE_STALE_AFTER_MS &&
+    snapshot.health.rpc === "ready";
   const latestSwap = pairEnabled ? snapshot.latestSwap : null;
 
   return {
@@ -1054,12 +1183,16 @@ export function buildLoraAggregateDashboard(
         hasBurns,
         formatUnits(day.otherBurnWei),
       ),
-      cumulativeBurnLrb: snapshot.state.historyComplete
-        ? formatUnits(snapshot.cumulativeBurnWei)
-        : hasHistory
-          ? `${formatUnits(snapshot.cumulativeBurnWei)}+`
-          : null,
-      cumulativeConfirmedCount: snapshot.state.historyComplete
+      cumulativeBurnLrb:
+        burnBalanceWei !== null
+          ? `${formatUnits(burnBalanceWei)}${burnBalanceFresh ? "" : "+"}`
+          : snapshot.state.historyComplete && burnHeadConnected
+            ? formatUnits(snapshot.cumulativeBurnWei)
+            : hasHistory
+              ? `${formatUnits(snapshot.cumulativeBurnWei)}+`
+              : null,
+      cumulativeConfirmedCount:
+        snapshot.state.historyComplete && burnHeadConnected
         ? snapshot.cumulativeConfirmedCount
         : hasHistory
           ? `${snapshot.cumulativeConfirmedCount}+`
@@ -1086,7 +1219,8 @@ export function buildLoraAggregateDashboard(
         String(day.activeAddresses.length),
       ),
       yesterdayTotal:
-        stateMatches && snapshot.state.yesterdayComplete
+        stateMatches &&
+        snapshot.state.yesterdayComplete
           ? yesterday.transactionTotal
           : parseUnsignedInteger(yesterday.transactionTotal) > 0n
             ? `${yesterday.transactionTotal}+`
@@ -1150,9 +1284,17 @@ export function buildLoraAggregateDashboard(
       latestSwapAt: latestSwap?.timestamp ?? null,
     },
     chain: {
-      blockHeight: latestBlock ? String(latestBlock.height) : null,
-      lastBlockAt: latestBlock?.timestamp ?? null,
-      averageBlockTime: averageBlockTime(snapshot.recentBlocks),
+      blockHeight: hasLiveRpcBlock
+        ? String(rpcBlockNumber)
+        : indexedLatestBlock
+          ? String(indexedLatestBlock.height)
+          : null,
+      lastBlockAt: hasLiveRpcBlock
+        ? rpcBlockTimestamp
+        : indexedLatestBlock?.timestamp ?? null,
+      averageBlockTime:
+        averageBlockTimeFromMilliseconds(snapshot.price.averageBlockTimeMs) ??
+        averageBlockTime(snapshot.recentBlocks),
       gasUsed: partialValue(blockComplete, hasBlocks, day.gasUsed),
       averageGasPrice:
         averageGasPriceWei === null
@@ -1179,7 +1321,8 @@ export async function readLoraAggregateDashboard(
   const object = await bucket.get(LORA_AGGREGATE_OBJECT_KEY);
   if (!object) return null;
   try {
-    const snapshot = asAggregateSnapshot(await object.json<unknown>());
+    const parsed = asAggregateSnapshot(await object.json<unknown>());
+    const snapshot = parsed ? migrateLoraCoverageSnapshot(parsed) : null;
     return snapshot ? buildLoraAggregateDashboard(snapshot, now) : null;
   } catch {
     return null;
@@ -1193,7 +1336,14 @@ export async function collectLoraAggregateSnapshot(options: {
 }): Promise<LoraDashboardData> {
   const now = options.now ?? new Date();
   const loaded = await loadLoraAggregateSnapshot(options.bucket, now);
-  const batch = await options.source.collect({ state: loaded.snapshot.state, now });
+  const reportDate = shanghaiDateKey(now);
+  const batch = await options.source.collect({
+    state: loaded.snapshot.state,
+    now,
+    knownTransactionHashes: new Set(
+      loaded.snapshot.days[reportDate]?.transactionHashes ?? [],
+    ),
+  });
   const snapshot = applyLoraAggregateBatch(loaded.snapshot, batch, now);
   const result = await options.bucket.put(
     LORA_AGGREGATE_OBJECT_KEY,

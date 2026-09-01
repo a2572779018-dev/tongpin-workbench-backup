@@ -2,7 +2,7 @@ import releaseNotes from "../../build/release-notes.md?raw";
 
 export const RELEASE_ANNOUNCEMENT_STORAGE_KEY =
   "tongpin:last-announced-release";
-export const CURRENT_RELEASE_VERSION = "0.1.31";
+export const CURRENT_RELEASE_VERSION = "0.1.32";
 
 export interface ReleaseAnnouncement {
   version: string;

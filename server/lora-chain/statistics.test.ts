@@ -83,6 +83,9 @@ function completeState(): LoraCollectorState {
     transactionCursor: null,
     burnCursor: null,
     burnHistoryCursor: null,
+    blockHeadConnected: true,
+    transactionHeadConnected: true,
+    burnHeadConnected: true,
     internalDetailsComplete: true,
     swapTodayComplete: true,
     bootstrapDate: "2026-08-14",
@@ -449,6 +452,44 @@ describe("LORA pair, Swap and cache honesty", () => {
       label: "今日新增链上地址",
       todayNew: null,
       baselineStatus: "missing",
+    });
+  });
+
+  it("never presents an estimated midnight address baseline as exact", () => {
+    const dashboard = buildLoraDashboard({
+      now: new Date("2026-08-14T02:01:00.000Z"),
+      blocks: [],
+      transactions: [],
+      internalTransactions: [],
+      swaps: [],
+      addressBaselines: [
+        {
+          reportDate: "2026-08-14",
+          totalAddresses: "100",
+          capturedAt: "2026-08-13T16:00:55.000Z",
+          blockNumber: 10,
+          estimated: true,
+          source: "midnight-window",
+        },
+      ],
+      currentTotalAddresses: "103",
+      price: {
+        status: "unavailable",
+        priceUsdt: null,
+        reserveUsdt: null,
+        reserveWlrb: null,
+        blockNumber: null,
+        updatedAt: null,
+        source: null,
+        configError: null,
+      },
+      state: completeState(),
+      health: healthy(),
+    });
+
+    expect(dashboard.addresses).toMatchObject({
+      todayNew: "≈3",
+      baselineStatus: "building",
     });
   });
 

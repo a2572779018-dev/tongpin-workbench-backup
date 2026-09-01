@@ -186,6 +186,10 @@ export interface LoraPriceSnapshot {
   reserveUsdt: string | null;
   reserveWlrb: string | null;
   blockNumber: number | null;
+  /** Timestamp of the live RPC block used for this observation. */
+  blockTimestamp?: string | null;
+  /** Explorer rolling average block interval, expressed in milliseconds. */
+  averageBlockTimeMs?: string | null;
   updatedAt: string | null;
   source: string | null;
   configError: string | null;
@@ -217,6 +221,10 @@ export interface LoraCollectorState {
   transactionHeadCandidateHash?: string | null;
   burnHeadCursor?: Record<string, string | number> | null;
   burnHeadCandidateKey?: string | null;
+  /** Whether the newest Explorer stream reconnected to its prior checkpoint. */
+  blockHeadConnected?: boolean;
+  transactionHeadConnected?: boolean;
+  burnHeadConnected?: boolean;
   /** Last Pair block whose Swap logs and mandatory proofs were fully indexed. */
   swapCheckpointBlock?: number | null;
   /** Contract transactions whose internal traces have not been fully collected. */
@@ -266,6 +274,10 @@ export interface LoraCollectionBatch {
   currentTotalAddresses: string | null;
   addressBaseline?: LoraDailyAddressBaseline;
   price: LoraPriceSnapshot;
+  /** Exact current balance of the burn address from RPC, independent of indexer history. */
+  burnBalanceWei?: string | null;
+  burnBalanceBlockNumber?: number | null;
+  burnBalanceUpdatedAt?: string | null;
   nextTransactionCursor: Record<string, string | number> | null;
   nextBurnCursor: Record<string, string | number> | null;
   nextBurnHistoryCursor: Record<string, string | number> | null;
@@ -280,6 +292,9 @@ export interface LoraCollectionBatch {
   transactionHeadCandidateHash?: string | null;
   burnHeadCursor?: Record<string, string | number> | null;
   burnHeadCandidateKey?: string | null;
+  blockHeadConnected?: boolean;
+  transactionHeadConnected?: boolean;
+  burnHeadConnected?: boolean;
   swapCheckpointBlock?: number | null;
   pendingInternalTransactions?: LoraPendingInternalTransaction[];
   internalQueueOverflow?: boolean;

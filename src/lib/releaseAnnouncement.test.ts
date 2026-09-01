@@ -26,18 +26,17 @@ describe("release announcement", () => {
         lastAnnouncedVersion: "0.1.23",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain("Windows");
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "入口与快捷窗现在统一位于左上角",
+      "在线成员身份验证成功后",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "不会唤醒同频主窗口",
+      "不覆盖已有加密数据",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "安全存储异常时不会覆盖原数据",
+      "平均出块时间",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "不再显示示例客户",
+      "每次刷新都会推进采集",
     );
   });
 

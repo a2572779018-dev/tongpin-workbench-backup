@@ -24,6 +24,7 @@ import type {
   LoraDashboardData,
   LoraDashboardInput,
   LoraHourlyPoint,
+  LoraIndexedBlock,
   LoraIndexedInternalTransaction,
   LoraIndexedTransaction,
   LoraLargeTransferRow,
@@ -174,25 +175,34 @@ function nativeMovementFingerprint(values: {
   ].join(":");
 }
 
-function averageBlockTimeSeconds(
-  timestamps: string[],
-): string | null {
-  const sorted = timestamps
-    .map(Date.parse)
-    .filter(Number.isFinite)
-    .sort((left, right) => left - right);
+function averageBlockTimeSeconds(blocks: LoraIndexedBlock[]): string | null {
+  const sorted = blocks
+    .filter((block) => Number.isFinite(Date.parse(block.timestamp)))
+    .sort((left, right) => left.height - right.height);
   if (sorted.length < 2) return null;
   let totalMilliseconds = 0n;
-  let intervals = 0n;
+  let totalHeights = 0n;
   for (let index = 1; index < sorted.length; index += 1) {
-    const difference = sorted[index] - sorted[index - 1];
-    if (difference <= 0) continue;
-    totalMilliseconds += BigInt(difference);
-    intervals += 1n;
+    const heightDifference = sorted[index].height - sorted[index - 1].height;
+    const timeDifference =
+      Date.parse(sorted[index].timestamp) -
+      Date.parse(sorted[index - 1].timestamp);
+    if (heightDifference <= 0 || timeDifference <= 0) continue;
+    totalMilliseconds += BigInt(timeDifference);
+    totalHeights += BigInt(heightDifference);
   }
-  return intervals === 0n
+  return totalHeights === 0n
     ? null
-    : divideToDecimal(totalMilliseconds, intervals * 1_000n, 2);
+    : divideToDecimal(totalMilliseconds, totalHeights * 1_000n, 2);
+}
+
+function averageBlockTimeFromMilliseconds(
+  value: string | null | undefined,
+): string | null {
+  if (value === null || value === undefined) return null;
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return null;
+  return Number((milliseconds / 1_000).toFixed(2)).toString();
 }
 
 export function buildLoraDashboard(
@@ -246,18 +256,28 @@ export function buildLoraDashboard(
       ),
   );
   const todayComplete = stateMatchesReportDate && input.state.todayComplete;
+  const transactionHeadConnected =
+    input.state.transactionHeadConnected ?? false;
+  const burnHeadConnected =
+    input.state.burnHeadConnected ?? false;
+  const blockHeadConnected =
+    input.state.blockHeadConnected ?? false;
   const nodeTodayReady =
-    stateMatchesReportDate && input.state.burnTodayComplete;
+    stateMatchesReportDate &&
+    input.state.burnTodayComplete &&
+    burnHeadConnected;
   const transactionTodayReady =
-    stateMatchesReportDate && input.state.transactionTodayComplete;
+    stateMatchesReportDate &&
+    input.state.transactionTodayComplete &&
+    transactionHeadConnected;
   const internalTodayReady =
     stateMatchesReportDate && Boolean(input.state.internalDetailsComplete);
   const largeTransferReady = transactionTodayReady && internalTodayReady;
   const swapTodayReady =
     stateMatchesReportDate && Boolean(input.state.swapTodayComplete);
   const blockTodayReady =
-    stateMatchesReportDate && input.state.blockTodayComplete;
-  const historyComplete = input.state.historyComplete;
+    stateMatchesReportDate && input.state.blockTodayComplete && blockHeadConnected;
+  const historyComplete = input.state.historyComplete && burnHeadConnected;
 
   const todayNodeBurns = todayInternal.filter(isConfirmedNodeBurn);
   const todayOtherBurns = todayInternal.filter(isOtherBurn);
@@ -334,8 +354,8 @@ export function buildLoraDashboard(
       parseUnsignedInteger(input.currentTotalAddresses) -
       parseUnsignedInteger(baseline.totalAddresses);
     if (difference >= 0n) {
-      addressStatus = "ready";
-      todayNewAddresses = difference.toString();
+      addressStatus = baseline.estimated ? "building" : "ready";
+      todayNewAddresses = `${baseline.estimated ? "≈" : ""}${difference.toString()}`;
     } else {
       addressStatus = "unavailable";
     }
@@ -367,6 +387,12 @@ export function buildLoraDashboard(
   const latestBlock = [...input.blocks].sort(
     (left, right) => right.height - left.height,
   )[0];
+  const rpcBlockTimestamp = input.price.blockTimestamp ?? null;
+  const rpcBlockNumber = input.price.blockNumber;
+  const hasLiveRpcBlock =
+    rpcBlockNumber !== null &&
+    rpcBlockTimestamp !== null &&
+    Number.isFinite(Date.parse(rpcBlockTimestamp));
   const todayBlocks = input.blocks.filter((block) =>
     timestampInRange(block.timestamp, todayStart, input.now),
   );
@@ -496,9 +522,11 @@ export function buildLoraDashboard(
         hasIndexedTransactions,
         String(activeAddresses.size),
       ),
-      yesterdayTotal: stateMatchesReportDate && input.state.yesterdayComplete
-        ? String(yesterdayTransactions.length)
-        : null,
+      yesterdayTotal:
+        stateMatchesReportDate &&
+        input.state.yesterdayComplete
+          ? String(yesterdayTransactions.length)
+          : null,
       hourly: hourlyPoints(
         todayTransactions.map((transaction) => transaction.timestamp),
         transactionTodayReady || hasIndexedTransactions,
@@ -565,12 +593,18 @@ export function buildLoraDashboard(
       latestSwapAt: latestSwap?.timestamp ?? null,
     },
     chain: {
-      blockHeight: latestBlock ? String(latestBlock.height) : null,
-      lastBlockAt: latestBlock?.timestamp ?? null,
+      blockHeight: hasLiveRpcBlock
+        ? String(rpcBlockNumber)
+        : latestBlock
+          ? String(latestBlock.height)
+          : null,
+      lastBlockAt: hasLiveRpcBlock
+        ? rpcBlockTimestamp
+        : latestBlock?.timestamp ?? null,
       averageBlockTime: (() => {
-        const seconds = averageBlockTimeSeconds(
-          input.blocks.map((block) => block.timestamp),
-        );
+        const seconds =
+          averageBlockTimeFromMilliseconds(input.price.averageBlockTimeMs) ??
+          averageBlockTimeSeconds(input.blocks);
         return seconds === null ? null : `${seconds} 秒`;
       })(),
       gasUsed: blockTodayReady

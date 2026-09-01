@@ -6,6 +6,7 @@ import {
   markLoraCollectionFailure,
 } from "./state";
 import { buildLoraDashboard } from "./statistics";
+import { shanghaiDateKey } from "./time";
 import type {
   LoraCollectionBatch,
   LoraCollectorState,
@@ -15,6 +16,7 @@ import type {
 export interface LoraCollectionContext {
   state: Readonly<LoraCollectorState>;
   now: Date;
+  knownTransactionHashes?: ReadonlySet<string>;
 }
 
 export interface LoraChainDataSource {
@@ -88,9 +90,20 @@ export class LoraChainCollector {
 
   private async collectOnce(): Promise<LoraDashboardData> {
     const now = this.clock();
-    const state = await this.store.read((database) => database.loraCollectorState);
+    const context = await this.store.read((database) => ({
+      state: database.loraCollectorState,
+      knownTransactionHashes: new Set(
+        database.loraTransactions
+          .filter(
+            (transaction) =>
+              shanghaiDateKey(new Date(transaction.timestamp)) ===
+              shanghaiDateKey(now),
+          )
+          .map((transaction) => transaction.hash.toLowerCase()),
+      ),
+    }));
     try {
-      const batch = await this.source.collect({ state, now });
+      const batch = await this.source.collect({ ...context, now });
       const result = await this.store.mutate((database) => {
         applyLoraCollectionBatch(database, batch, now);
         return {

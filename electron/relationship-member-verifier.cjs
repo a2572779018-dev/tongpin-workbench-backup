@@ -140,12 +140,14 @@ async function verifyRelationshipMemberAccess({
 
   try {
     await writeBinding(current);
-  } catch (cause) {
-    throw verificationError(
-      "LOCAL_SECURITY_UNAVAILABLE",
-      RELATIONSHIP_MEMBER_VERIFICATION_ERRORS.LOCAL_SECURITY,
-      cause,
-    );
+  } catch {
+    return {
+      ...current,
+      bindingWarning: {
+        code: "LOCAL_SECURITY_UNAVAILABLE",
+        message: RELATIONSHIP_MEMBER_VERIFICATION_ERRORS.LOCAL_SECURITY,
+      },
+    };
   }
   return current;
 }

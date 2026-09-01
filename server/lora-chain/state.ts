@@ -31,6 +31,9 @@ export const EMPTY_LORA_COLLECTOR_STATE: LoraCollectorState = {
   transactionHeadCandidateHash: null,
   burnHeadCursor: null,
   burnHeadCandidateKey: null,
+  blockHeadConnected: false,
+  transactionHeadConnected: false,
+  burnHeadConnected: false,
   swapCheckpointBlock: null,
   pendingInternalTransactions: [],
   internalDetailsComplete: false,
@@ -55,6 +58,8 @@ export const EMPTY_LORA_PRICE: LoraPriceSnapshot = {
   reserveUsdt: null,
   reserveWlrb: null,
   blockNumber: null,
+  blockTimestamp: null,
+  averageBlockTimeMs: null,
   updatedAt: null,
   source: null,
   configError: null,
@@ -152,10 +157,21 @@ export function applyLoraCollectionBatch(
     database.loraPrice = {
       ...database.loraPrice,
       status: "stale",
+      blockNumber: batch.price.blockNumber ?? database.loraPrice.blockNumber,
+      blockTimestamp:
+        batch.price.blockTimestamp ?? database.loraPrice.blockTimestamp ?? null,
+      averageBlockTimeMs:
+        batch.price.averageBlockTimeMs ??
+        database.loraPrice.averageBlockTimeMs ??
+        null,
     };
   }
 
   const successful = batch.rpcHealthy && batch.explorerHealthy;
+  const liveCoverageConnected =
+    batch.blockHeadConnected === true &&
+    batch.transactionHeadConnected === true &&
+    batch.burnHeadConnected === true;
   database.loraCollectorState = {
     ...database.loraCollectorState,
     checkpointBlock: batch.checkpointBlock,
@@ -192,6 +208,12 @@ export function applyLoraCollectionBatch(
       batch.burnHeadCandidateKey === undefined
         ? database.loraCollectorState.burnHeadCandidateKey ?? null
         : batch.burnHeadCandidateKey,
+    blockHeadConnected:
+      batch.blockHeadConnected ?? false,
+    transactionHeadConnected:
+      batch.transactionHeadConnected ?? false,
+    burnHeadConnected:
+      batch.burnHeadConnected ?? false,
     swapCheckpointBlock:
       batch.swapCheckpointBlock === undefined
         ? database.loraCollectorState.swapCheckpointBlock ?? null
@@ -231,7 +253,11 @@ export function applyLoraCollectionBatch(
   database.loraHealth = {
     rpc: batch.rpcHealthy ? "ready" : database.loraPrice.status === "config-error" ? "config-error" : "unavailable",
     explorer: batch.explorerHealthy ? "ready" : "unavailable",
-    collector: successful ? "ready" : "unavailable",
+    collector: successful
+      ? liveCoverageConnected
+        ? "ready"
+        : "building"
+      : "unavailable",
     lastRpcSuccessAt: batch.rpcHealthy
       ? now.toISOString()
       : database.loraHealth.lastRpcSuccessAt,

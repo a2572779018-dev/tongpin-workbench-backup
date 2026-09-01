@@ -68,14 +68,20 @@ describe("relationship member verification", () => {
     expect(input.readBinding).not.toHaveBeenCalled();
   });
 
-  it("reports a local security-storage error when a verified binding cannot be written", async () => {
+  it("keeps online member access available and reports a non-blocking warning when the binding cannot be written", async () => {
     const input = options({
       writeBinding: vi.fn().mockRejectedValue(new Error("系统安全存储不可用")),
     });
 
-    await expect(verifyRelationshipMemberAccess(input)).rejects.toMatchObject({
-      code: "LOCAL_SECURITY_UNAVAILABLE",
-      message: "本机安全验证状态无法读写，请恢复系统安全存储后重试",
+    await expect(verifyRelationshipMemberAccess(input)).resolves.toMatchObject({
+      userId: current.userId,
+      accessToken: current.accessToken,
+      fingerprint: current.fingerprint,
+      bindingWarning: {
+        code: "LOCAL_SECURITY_UNAVAILABLE",
+        message:
+          "本机安全验证状态无法读写，请恢复系统安全存储后重试",
+      },
     });
     expect(input.readBinding).not.toHaveBeenCalled();
   });

@@ -5,7 +5,9 @@ import {
   createEmptyLoraAggregateSnapshot,
   loadLoraAggregateSnapshot,
   LORA_AGGREGATE_OBJECT_KEY,
+  LORA_COVERAGE_REVISION,
   LORA_LEGACY_AGGREGATE_OBJECT_KEY,
+  migrateLoraCoverageSnapshot,
   migrateLegacyLoraAggregateSnapshot,
   serializeLoraAggregateSnapshot,
 } from "./lora-aggregate";
@@ -44,6 +46,9 @@ function batch(overrides: Partial<LoraCollectionBatch> = {}): LoraCollectionBatc
     nextBlockCursor: null,
     checkpointBlock: 100,
     checkpointHash: HASH_D,
+    blockHeadConnected: false,
+    transactionHeadConnected: false,
+    burnHeadConnected: false,
     transactionTodayComplete: false,
     transactionYesterdayComplete: false,
     burnTodayComplete: false,
@@ -61,6 +66,78 @@ function batch(overrides: Partial<LoraCollectionBatch> = {}): LoraCollectionBatc
 }
 
 describe("LORA R2 aggregate", () => {
+  it("invalidates legacy coverage once while retaining de-duplicated lower bounds", () => {
+    const snapshot = applyLoraAggregateBatch(
+      createEmptyLoraAggregateSnapshot(),
+      batch({
+        transactions: [
+          {
+            hash: HASH_A,
+            blockNumber: 100,
+            timestamp: "2026-08-15T05:20:00.000Z",
+            from: ADDRESS_A,
+            to: ADDRESS_B,
+            valueWei: "1",
+            success: true,
+            gasUsed: "21000",
+            gasPriceWei: "1000000000",
+            input: "0x",
+          },
+        ],
+      }),
+      NOW,
+    );
+    snapshot.coverageRevision = 0;
+    snapshot.currentTotalAddresses = "1001";
+    snapshot.addressBaselines = [
+      {
+        reportDate: "2026-08-15",
+        totalAddresses: "1000",
+        capturedAt: "2026-08-14T16:00:55.000Z",
+        blockNumber: 100,
+        estimated: false,
+        source: "midnight-window",
+      },
+    ];
+    snapshot.state = {
+      ...snapshot.state,
+      checkpointBlock: 100,
+      checkpointHash: HASH_A,
+      transactionCursor: { block_number: 90 },
+      transactionTodayComplete: true,
+      transactionYesterdayComplete: true,
+      blockTodayComplete: true,
+      burnTodayComplete: true,
+      historyComplete: true,
+      todayComplete: true,
+    };
+
+    const migrated = migrateLoraCoverageSnapshot(snapshot);
+    expect(migrated.coverageRevision).toBe(LORA_COVERAGE_REVISION);
+    expect(migrated.state).toMatchObject({
+      checkpointBlock: null,
+      checkpointHash: null,
+      transactionCursor: null,
+      transactionTodayComplete: false,
+      transactionYesterdayComplete: true,
+      blockTodayComplete: false,
+      burnTodayComplete: false,
+      historyComplete: false,
+      todayComplete: false,
+    });
+    expect(migrated.days["2026-08-15"].transactionHashes).toEqual([HASH_A]);
+    expect(migrated.addressBaselines[0].estimated).toBe(true);
+    expect(buildLoraAggregateDashboard(migrated, NOW).addresses).toMatchObject({
+      todayNew: "≈1",
+      baselineStatus: "building",
+    });
+
+    migrated.state.transactionTodayComplete = true;
+    expect(migrateLoraCoverageSnapshot(migrated).state.transactionTodayComplete).toBe(
+      true,
+    );
+  });
+
   it("deduplicates batches and keeps honest partial lower bounds", () => {
     const exact100 = "100000000000000000000";
     const over100 = "100000000000000000001";
@@ -187,6 +264,9 @@ describe("LORA R2 aggregate", () => {
         transactionYesterdayComplete: true,
         burnTodayComplete: true,
         blockTodayComplete: true,
+        blockHeadConnected: true,
+        transactionHeadConnected: true,
+        burnHeadConnected: true,
         internalDetailsComplete: true,
         swapTodayComplete: true,
         todayComplete: true,
@@ -200,6 +280,75 @@ describe("LORA R2 aggregate", () => {
     expect(dashboard.transactions.nativeTransfers).toBe("1");
     expect(dashboard.nodes.todayCount).toBe("0");
     expect(dashboard.nodes.cumulativeBurnLrb).toBe("0");
+  });
+
+  it("uses the live RPC head and never treats sparse block samples as adjacent", () => {
+    const snapshot = applyLoraAggregateBatch(
+      createEmptyLoraAggregateSnapshot(),
+      batch({
+        blocks: [
+          {
+            height: 100,
+            hash: HASH_A,
+            parentHash: HASH_B,
+            timestamp: "2026-08-15T00:00:00.000Z",
+            gasUsed: "1",
+          },
+          {
+            height: 101,
+            hash: HASH_B,
+            parentHash: HASH_A,
+            timestamp: "2026-08-15T00:00:02.000Z",
+            gasUsed: "1",
+          },
+          {
+            height: 10_884,
+            hash: HASH_C,
+            parentHash: HASH_B,
+            timestamp: "2026-08-15T05:59:28.000Z",
+            gasUsed: "1",
+          },
+        ],
+        price: {
+          ...batch().price,
+          blockNumber: 20_000,
+          blockTimestamp: NOW.toISOString(),
+          averageBlockTimeMs: null,
+        },
+      }),
+      NOW,
+    );
+
+    const dashboard = buildLoraAggregateDashboard(snapshot, NOW);
+    expect(dashboard.chain.blockHeight).toBe("20000");
+    expect(dashboard.chain.lastBlockAt).toBe(NOW.toISOString());
+    expect(dashboard.chain.averageBlockTime).toBe("2 秒");
+
+    snapshot.price.averageBlockTimeMs = "2000";
+    expect(buildLoraAggregateDashboard(snapshot, NOW).chain.averageBlockTime).toBe(
+      "2 秒",
+    );
+  });
+
+  it("uses the fresh RPC burn-address balance for cumulative burn", () => {
+    const snapshot = applyLoraAggregateBatch(
+      createEmptyLoraAggregateSnapshot(),
+      batch({
+        burnBalanceWei: "44309933970257000000000000",
+        burnBalanceBlockNumber: 15_750_292,
+        burnBalanceUpdatedAt: NOW.toISOString(),
+      }),
+      NOW,
+    );
+    expect(buildLoraAggregateDashboard(snapshot, NOW).nodes.cumulativeBurnLrb).toBe(
+      "44309933.970257",
+    );
+    expect(
+      buildLoraAggregateDashboard(
+        snapshot,
+        new Date(NOW.getTime() + 20 * 60_000),
+      ).nodes.cumulativeBurnLrb,
+    ).toBe("44309933.970257+");
   });
 
   it("disables Swap and price rows when Pair validation fails", () => {

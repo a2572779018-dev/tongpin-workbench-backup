@@ -367,14 +367,16 @@ describe("LORA source production request budget", () => {
     const nominalScanAttempts =
       limits.priceRequests +
       limits.explorerHeadStreams * limits.headPagesPerStream +
+      limits.transactionLiveExtraPages +
+      limits.explorerHeadStreams * limits.resumePagesPerStream +
       limits.coreHistoryStreams * limits.coreHistoryPagesPerStream +
       limits.burnDailyPages +
       limits.burnLifetimePages +
       limits.statsRequests +
       limits.pairBoundaryRequests +
       limits.pairLogWindows;
-    expect(nominalScanAttempts).toBe(28);
-    expect(limits.totalAttempts - nominalScanAttempts).toBeGreaterThanOrEqual(20);
+    expect(nominalScanAttempts).toBe(35);
+    expect(limits.totalAttempts - nominalScanAttempts).toBeGreaterThanOrEqual(13);
   });
 
   it("locates the Swap boundary with Blockscout's single decimal response", () => {
@@ -402,6 +404,53 @@ describe("LORA source production request budget", () => {
 });
 
 describe("LORA source head continuation fixtures", () => {
+  it("keeps scanning the live overlap after the previous key to catch late index rows", async () => {
+    type Item = { id: string; timestamp: string };
+    const pages = new Map([
+      [
+        "head",
+        {
+          items: ["id-201", "id-200", "id-199"].map((id) => ({
+            id,
+            timestamp: "2026-09-01T09:00:00.000Z",
+          })),
+          next: { cursor: "p2" },
+          oldestTimestamp: "2026-09-01T08:59:56.000Z",
+        },
+      ],
+      [
+        "p2",
+        {
+          items: ["id-late", "id-198"].map((id) => ({
+            id,
+            timestamp: "2026-09-01T08:59:54.000Z",
+          })),
+          next: null,
+          oldestTimestamp: "2026-09-01T08:59:52.000Z",
+        },
+      ],
+    ]);
+    const calls: string[] = [];
+    const result = await collectPaginatedHead<Item>({
+      fetchPage: async (cursor) => {
+        const key = cursor ? String(cursor.cursor) : "head";
+        calls.push(key);
+        const page = pages.get(key);
+        if (!page) throw new Error(`missing fixture page ${key}`);
+        return page;
+      },
+      parse: (value) => value as Item,
+      key: (item) => item.id,
+      previousKey: "id-200",
+      label: "late fixture",
+      maxPages: 2,
+    });
+
+    expect(result.connected).toBe(true);
+    expect(result.items.map((item) => item.id)).toContain("id-late");
+    expect(calls).toEqual(["head", "p2"]);
+  });
+
   it("persists a catch-up cursor beyond the page budget and commits only after reconnect", async () => {
     type Item = { id: string; timestamp: string };
     const ids = Array.from({ length: 150 }, (_, index) => 150 - index);
@@ -467,8 +516,13 @@ describe("LORA source head continuation fixtures", () => {
       pendingNewestKey: null,
       resumeCursor: null,
     });
-    expect(second.items).toHaveLength(49);
-    expect(calls).toEqual(["head", "p2", "p3"]);
+    expect(second.items).toHaveLength(150);
+    expect(second.items.slice(0, 3).map((item) => item.id)).toEqual([
+      "id-150",
+      "id-149",
+      "id-148",
+    ]);
+    expect(calls).toEqual(["head", "p2", "head", "p2", "p3"]);
 
     pages.set(
       "head",
@@ -483,9 +537,15 @@ describe("LORA source head continuation fixtures", () => {
       maxPages: 2,
     });
     expect(arrivalsDuringCatchUp.connected).toBe(true);
-    expect(arrivalsDuringCatchUp.items.map((item) => item.id)).toEqual([
+    expect(arrivalsDuringCatchUp.items.slice(0, 4).map((item) => item.id)).toEqual([
       "id-151",
+      "id-150",
+      "id-149",
+      "id-148",
     ]);
+    expect(arrivalsDuringCatchUp.items.map((item) => item.id)).toContain(
+      "id-100",
+    );
   });
 });
 

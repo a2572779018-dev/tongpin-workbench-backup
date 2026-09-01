@@ -41,6 +41,13 @@ interface RpcEnvelope<T> {
   error?: { code?: number; message?: string };
 }
 
+interface LiveRpcBlock {
+  blockHex: string;
+  blockNumber: number;
+  timestamp: string;
+  averageBlockTimeMs: string | null;
+}
+
 interface ParsedExplorerPage<T> {
   items: T[];
   next: Cursor;
@@ -56,6 +63,7 @@ const REQUEST_CONCURRENCY = 4;
 // retry headroom, so a busy history backfill never discards its partial page.
 const MAX_REQUEST_ATTEMPTS_PER_TICK = 48;
 const MAX_HEAD_PAGES_PER_TICK = 2;
+const MAX_TRANSACTION_LIVE_PAGES_PER_TICK = 4;
 const MAX_HISTORY_PAGES_PER_TICK = 24;
 const MAX_CORE_HISTORY_PAGES_PER_TICK = 4;
 const MAX_BURN_DAILY_PAGES_PER_TICK = 1;
@@ -70,9 +78,12 @@ export const MAX_PENDING_INTERNAL_TRANSACTIONS = 5_000;
 /** Nominal first-attempt budget used by production-scale regression tests. */
 export const LORA_SOURCE_REQUEST_BUDGET_LIMITS = {
   totalAttempts: MAX_REQUEST_ATTEMPTS_PER_TICK,
-  priceRequests: 8,
+  priceRequests: 10,
   explorerHeadStreams: 3,
   headPagesPerStream: MAX_HEAD_PAGES_PER_TICK,
+  transactionLiveExtraPages:
+    MAX_TRANSACTION_LIVE_PAGES_PER_TICK - MAX_HEAD_PAGES_PER_TICK,
+  resumePagesPerStream: 1,
   coreHistoryStreams: 2,
   coreHistoryPagesPerStream: MAX_CORE_HISTORY_PAGES_PER_TICK,
   burnDailyPages: MAX_BURN_DAILY_PAGES_PER_TICK,
@@ -176,47 +187,87 @@ export async function collectPaginatedHead<T>(options: {
   pendingNewestKey?: string | null;
   label: string;
   maxPages?: number;
+  livePages?: number;
 }): Promise<PaginatedHeadResult<T>> {
   const maxPages = options.maxPages ?? MAX_HEAD_PAGES_PER_TICK;
+  const livePages = options.livePages ?? maxPages;
   const collected: T[] = [];
+  const collectedKeys = new Set<string>();
+  const appendUnique = (items: T[]) => {
+    for (const item of items) {
+      const itemKey = options.key(item);
+      if (collectedKeys.has(itemKey)) continue;
+      collectedKeys.add(itemKey);
+      collected.push(item);
+    }
+  };
   const isResume = options.resumeCursor !== undefined && options.resumeCursor !== null;
   let cursor: Cursor = options.resumeCursor ?? null;
-  let newestKey: string | null = isResume
-    ? options.pendingNewestKey ?? options.previousKey
-    : null;
+  let newestKey: string | null =
+    isResume ? options.pendingNewestKey ?? options.previousKey : null;
   let firstPageNext: Cursor = null;
   let firstPageOldestTimestamp: string | null = null;
   let connected = false;
+  let liveNewestKey: string | null = null;
+  let liveCursor: Cursor = null;
 
-  for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
-    const page = await options.fetchPage(cursor);
+  // Always replay a bounded newest-first overlap window. Explorer items can be
+  // indexed late behind the last checkpoint, so slicing only the rows before
+  // previousKey would permanently miss them. Downstream aggregation is keyed
+  // and idempotent, making the overlap safe.
+  for (let pageIndex = 0; pageIndex < livePages; pageIndex += 1) {
+    const page = await options.fetchPage(liveCursor);
     const parsed = strictParseItems(page.items, options.parse, options.label);
-    if (pageIndex === 0 && !isResume) {
-      newestKey = parsed[0] ? options.key(parsed[0]) : options.previousKey;
+    if (pageIndex === 0) {
+      liveNewestKey = parsed[0] ? options.key(parsed[0]) : options.previousKey;
       firstPageNext = page.next;
       firstPageOldestTimestamp = page.oldestTimestamp;
     }
+    appendUnique(parsed);
     if (options.previousKey === null) {
-      collected.push(...parsed);
       connected = true;
-      break;
+      newestKey = liveNewestKey;
     }
     const priorIndex = parsed.findIndex(
       (item) => options.key(item) === options.previousKey,
     );
     if (priorIndex >= 0) {
-      collected.push(...parsed.slice(0, priorIndex));
       connected = true;
-      break;
+      newestKey = liveNewestKey;
     }
-    collected.push(...parsed);
     if (page.next === null) {
-      // We traversed the complete stream, so continuity is proven even if an
-      // Explorer reorg/prune removed the exact prior key.
       connected = true;
+      newestKey = liveNewestKey;
       break;
     }
-    cursor = page.next;
+    liveCursor = page.next;
+  }
+
+  if (!connected && !isResume) {
+    newestKey = liveNewestKey;
+    cursor = liveCursor;
+  }
+
+  // If an older continuity repair is still pending, spend one additional page
+  // on it after the live overlap. This keeps current data moving without ever
+  // advancing the durable checkpoint across an unproven gap.
+  if (!connected && isResume) {
+    const page = await options.fetchPage(cursor);
+    const parsed = strictParseItems(page.items, options.parse, options.label);
+    appendUnique(parsed);
+    if (options.previousKey === null) {
+      connected = true;
+      newestKey = liveNewestKey;
+    } else {
+      const priorIndex = parsed.findIndex(
+        (item) => options.key(item) === options.previousKey,
+      );
+      if (priorIndex >= 0 || page.next === null) {
+        connected = true;
+      } else {
+        cursor = page.next;
+      }
+    }
   }
 
   return {
@@ -225,7 +276,7 @@ export async function collectPaginatedHead<T>(options: {
     connected,
     resumeCursor: connected ? null : cursor,
     pendingNewestKey: connected ? null : newestKey,
-    startedAtHead: !isResume,
+    startedAtHead: true,
     firstPageNext,
     firstPageOldestTimestamp,
   };
@@ -1173,33 +1224,80 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     throw new Error(`${path} exceeded detail page budget`);
   }
 
-  private async collectPrice(now: Date): Promise<LoraPriceSnapshot> {
-    const chainId = await this.rpc<string>("eth_chainId", []);
+  private async collectLiveBlock(): Promise<LiveRpcBlock> {
     const blockHex = await this.rpc<string>("eth_blockNumber", []);
-    const token0Raw = await this.rpc<string>("eth_call", [
-      { to: LORA_PAIR_ADDRESS, data: "0x0dfe1681" },
-      blockHex,
-    ]);
-    const token1Raw = await this.rpc<string>("eth_call", [
-      { to: LORA_PAIR_ADDRESS, data: "0xd21220a7" },
-      blockHex,
-    ]);
-    const token0DecimalsRaw = await this.rpc<string>("eth_call", [
-      { to: LORA_USDT_ADDRESS, data: "0x313ce567" },
-      blockHex,
-    ]);
-    const token1DecimalsRaw = await this.rpc<string>("eth_call", [
-      { to: LORA_WLRB_ADDRESS, data: "0x313ce567" },
-      blockHex,
-    ]);
-    const reservesRaw = await this.rpc<string>("eth_call", [
-      { to: LORA_PAIR_ADDRESS, data: "0x0902f1ac" },
-      blockHex,
-    ]);
+    if (!/^0x[0-9a-fA-F]+$/.test(blockHex)) {
+      throw new Error("invalid live block number");
+    }
     const block = await this.rpc<Record<string, unknown>>(
       "eth_getBlockByNumber",
       [blockHex, false],
     );
+    const blockTimestampRaw = stringValue(block.timestamp);
+    if (!blockTimestampRaw || !/^0x[0-9a-fA-F]+$/.test(blockTimestampRaw)) {
+      throw new Error("invalid live block timestamp");
+    }
+    const liveBlockAt = new Date(Number(BigInt(blockTimestampRaw)) * 1_000);
+    if (Number.isNaN(liveBlockAt.getTime())) {
+      throw new Error("invalid live block timestamp");
+    }
+    const blockNumber = Number(BigInt(blockHex));
+    let averageBlockTimeMs: string | null = null;
+    const sampleBlockNumber = Math.max(0, blockNumber - 300);
+    if (sampleBlockNumber < blockNumber) {
+      try {
+        const sample = await this.rpc<Record<string, unknown>>(
+          "eth_getBlockByNumber",
+          [`0x${sampleBlockNumber.toString(16)}`, false],
+        );
+        const sampleTimestampRaw = stringValue(sample.timestamp);
+        if (
+          sampleTimestampRaw &&
+          /^0x[0-9a-fA-F]+$/.test(sampleTimestampRaw)
+        ) {
+          const sampleTimestamp = Number(BigInt(sampleTimestampRaw)) * 1_000;
+          const elapsed = liveBlockAt.getTime() - sampleTimestamp;
+          const heights = blockNumber - sampleBlockNumber;
+          if (elapsed > 0 && heights > 0) {
+            averageBlockTimeMs = (elapsed / heights).toString();
+          }
+        }
+      } catch {
+        // Explorer's rolling average remains available as a fallback.
+      }
+    }
+    return {
+      blockHex,
+      blockNumber,
+      timestamp: liveBlockAt.toISOString(),
+      averageBlockTimeMs,
+    };
+  }
+
+  private async collectPrice(
+    liveBlock: LiveRpcBlock,
+  ): Promise<LoraPriceSnapshot> {
+    const chainId = await this.rpc<string>("eth_chainId", []);
+    const token0Raw = await this.rpc<string>("eth_call", [
+      { to: LORA_PAIR_ADDRESS, data: "0x0dfe1681" },
+      liveBlock.blockHex,
+    ]);
+    const token1Raw = await this.rpc<string>("eth_call", [
+      { to: LORA_PAIR_ADDRESS, data: "0xd21220a7" },
+      liveBlock.blockHex,
+    ]);
+    const token0DecimalsRaw = await this.rpc<string>("eth_call", [
+      { to: LORA_USDT_ADDRESS, data: "0x313ce567" },
+      liveBlock.blockHex,
+    ]);
+    const token1DecimalsRaw = await this.rpc<string>("eth_call", [
+      { to: LORA_WLRB_ADDRESS, data: "0x313ce567" },
+      liveBlock.blockHex,
+    ]);
+    const reservesRaw = await this.rpc<string>("eth_call", [
+      { to: LORA_PAIR_ADDRESS, data: "0x0902f1ac" },
+      liveBlock.blockHex,
+    ]);
     const token0 = decodeAbiAddress(token0Raw);
     const token1 = decodeAbiAddress(token1Raw);
     const token0Decimals = decodeAbiUint(token0DecimalsRaw);
@@ -1207,11 +1305,6 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     const reserve0 = decodeAbiUint(reservesRaw, 0);
     const reserve1 = decodeAbiUint(reservesRaw, 1);
     const reserveTimestamp = decodeAbiUint(reservesRaw, 2);
-    const blockTimestampRaw = stringValue(block.timestamp);
-    const blockTimestamp =
-      blockTimestampRaw && /^0x[0-9a-fA-F]+$/.test(blockTimestampRaw)
-        ? BigInt(blockTimestampRaw)
-        : null;
     if (
       !token0 ||
       !token1 ||
@@ -1219,25 +1312,31 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       token1Decimals === null ||
       reserve0 === null ||
       reserve1 === null ||
-      reserveTimestamp === null ||
-      blockTimestamp === null
+      reserveTimestamp === null
     ) {
       throw new Error("invalid pair response");
     }
-    const validated = validatePairConfiguration({
-      chainId,
-      token0,
-      token1,
-      token0Decimals,
-      token1Decimals,
-      reserve0,
-      reserve1,
-      blockNumber: Number(BigInt(blockHex)),
-      updatedAt: new Date(Number(reserveTimestamp) * 1_000).toISOString(),
-    });
+    const validated = {
+      ...validatePairConfiguration({
+        chainId,
+        token0,
+        token1,
+        token0Decimals,
+        token1Decimals,
+        reserve0,
+        reserve1,
+        blockNumber: liveBlock.blockNumber,
+        updatedAt: new Date(Number(reserveTimestamp) * 1_000).toISOString(),
+      }),
+      blockTimestamp: liveBlock.timestamp,
+      averageBlockTimeMs: liveBlock.averageBlockTimeMs,
+    };
     if (
       validated.status === "ready" &&
-      !isPairReserveFresh(reserveTimestamp, blockTimestamp)
+      !isPairReserveFresh(
+        reserveTimestamp,
+        BigInt(Math.floor(Date.parse(liveBlock.timestamp) / 1_000)),
+      )
     ) {
       return {
         ...validated,
@@ -1425,6 +1524,10 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     const crossedDate = context.state.bootstrapDate !== reportDate;
     let rpcHealthy = false;
     let pairConfigurationVerified = false;
+    let liveBlock: LiveRpcBlock | null = null;
+    let burnBalanceWei: string | null = null;
+    let burnBalanceBlockNumber: number | null = null;
+    let burnBalanceUpdatedAt: string | null = null;
     let price: LoraPriceSnapshot = {
       status: "unavailable",
       priceUsdt: null,
@@ -1436,11 +1539,40 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       configError: null,
     };
     try {
-      price = await this.collectPrice(now);
+      liveBlock = await this.collectLiveBlock();
       rpcHealthy = true;
-      pairConfigurationVerified = price.status !== "config-error";
+      price = {
+        ...price,
+        blockNumber: liveBlock.blockNumber,
+        blockTimestamp: liveBlock.timestamp,
+        averageBlockTimeMs: liveBlock.averageBlockTimeMs,
+      };
     } catch {
       rpcHealthy = false;
+    }
+    if (liveBlock) {
+      try {
+        const balanceHex = await this.rpc<string>("eth_getBalance", [
+          LORA_BURN_ADDRESS,
+          "latest",
+        ]);
+        if (!/^0x[0-9a-fA-F]+$/.test(balanceHex)) {
+          throw new Error("invalid burn balance");
+        }
+        burnBalanceWei = BigInt(balanceHex).toString();
+        burnBalanceBlockNumber = liveBlock.blockNumber;
+        burnBalanceUpdatedAt = liveBlock.timestamp;
+      } catch {
+        // Event history remains a lower bound when the independent RPC balance
+        // is unavailable; never replace a previous exact balance with null.
+      }
+      try {
+        price = await this.collectPrice(liveBlock);
+        pairConfigurationVerified = price.status !== "config-error";
+      } catch {
+        // Chain head remains usable even when Pair calls are unavailable.
+        pairConfigurationVerified = false;
+      }
     }
 
     const blocks: LoraIndexedBlock[] = [];
@@ -1468,17 +1600,34 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       ? false
       : context.state.burnTodayComplete;
     let historyComplete = context.state.historyComplete;
-    let checkpointBlock = context.state.checkpointBlock;
-    let checkpointHash = context.state.checkpointHash;
-    let headTransactionHash = context.state.headTransactionHash ?? null;
-    let headBurnKey = context.state.headBurnKey ?? null;
-    let blockHeadCursor = context.state.blockHeadCursor ?? null;
-    let blockHeadCandidateKey = context.state.blockHeadCandidateKey ?? null;
-    let transactionHeadCursor = context.state.transactionHeadCursor ?? null;
+    // A previous day's head key falls outside the small live replay window
+    // after midnight. Start a fresh continuity proof for the new report day,
+    // while retaining cumulative aggregates and the lifetime repair cursor.
+    let checkpointBlock = crossedDate ? null : context.state.checkpointBlock;
+    let checkpointHash = crossedDate ? null : context.state.checkpointHash;
+    let headTransactionHash = crossedDate
+      ? null
+      : context.state.headTransactionHash ?? null;
+    let headBurnKey = crossedDate ? null : context.state.headBurnKey ?? null;
+    let blockHeadCursor = crossedDate
+      ? null
+      : context.state.blockHeadCursor ?? null;
+    let blockHeadCandidateKey = crossedDate
+      ? null
+      : context.state.blockHeadCandidateKey ?? null;
+    let transactionHeadCursor = crossedDate
+      ? null
+      : context.state.transactionHeadCursor ?? null;
     let transactionHeadCandidateHash =
-      context.state.transactionHeadCandidateHash ?? null;
-    let burnHeadCursor = context.state.burnHeadCursor ?? null;
-    let burnHeadCandidateKey = context.state.burnHeadCandidateKey ?? null;
+      crossedDate
+        ? null
+        : context.state.transactionHeadCandidateHash ?? null;
+    let burnHeadCursor = crossedDate
+      ? null
+      : context.state.burnHeadCursor ?? null;
+    let burnHeadCandidateKey = crossedDate
+      ? null
+      : context.state.burnHeadCandidateKey ?? null;
     let blockHeadConnected = false;
     let transactionHeadConnected = false;
     let burnHeadConnected = false;
@@ -1531,7 +1680,9 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         resumeCursor: transactionHeadCursor,
         pendingNewestKey: transactionHeadCandidateHash,
         label: "transaction",
+        livePages: MAX_TRANSACTION_LIVE_PAGES_PER_TICK,
       });
+      const repairingYesterday = !transactionYesterdayComplete;
       const history = await collectBackfill({
         fetchPage,
         parse: parseExplorerTransaction,
@@ -1540,12 +1691,14 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         seedCursor: head.firstPageNext,
         seedOldestTimestamp: head.firstPageOldestTimestamp,
         seedPageLoaded: head.startedAtHead,
-        alreadyComplete: transactionYesterdayComplete,
-        boundary: yesterdayStart,
+        alreadyComplete: repairingYesterday
+          ? transactionYesterdayComplete
+          : transactionTodayComplete,
+        boundary: repairingYesterday ? yesterdayStart : todayStart,
         label: "transaction backfill",
         maxPages: MAX_CORE_HISTORY_PAGES_PER_TICK,
       });
-      return { head, history };
+      return { head, history, repairingYesterday };
     })();
 
     const burnPath = `/addresses/${LORA_BURN_ADDRESS}/internal-transactions`;
@@ -1622,22 +1775,26 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
     }
 
     if (transactionResult.status === "fulfilled") {
-      const { head, history } = transactionResult.value;
+      const { head, history, repairingYesterday } = transactionResult.value;
       transactions.push(...head.items, ...history.items);
       transactionHeadConnected = head.connected;
       transactionHeadCursor = head.resumeCursor;
       transactionHeadCandidateHash = head.pendingNewestKey;
       nextTransactionCursor = history.next;
-      transactionYesterdayComplete = history.complete;
-      transactionTodayComplete =
-        transactionTodayComplete ||
-        history.complete ||
-        (head.firstPageOldestTimestamp !== null &&
-          Date.parse(head.firstPageOldestTimestamp) < todayStart.getTime()) ||
-        history.items.some(
-          (transaction) =>
-            Date.parse(transaction.timestamp) < todayStart.getTime(),
-        );
+      if (repairingYesterday) {
+        transactionYesterdayComplete = history.complete;
+        transactionTodayComplete =
+          transactionTodayComplete ||
+          history.complete ||
+          (head.firstPageOldestTimestamp !== null &&
+            Date.parse(head.firstPageOldestTimestamp) < todayStart.getTime()) ||
+          history.items.some(
+            (transaction) =>
+              Date.parse(transaction.timestamp) < todayStart.getTime(),
+          );
+      } else {
+        transactionTodayComplete = history.complete;
+      }
       if (head.connected && head.newestKey) {
         headTransactionHash = head.newestKey;
       }
@@ -1665,6 +1822,17 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       if (totalAddresses && /^\d+$/.test(totalAddresses)) {
         currentTotalAddresses = totalAddresses;
         statsHealthy = true;
+      }
+      const averageBlockTime = Number(statsResult.value.average_block_time);
+      if (
+        !price.averageBlockTimeMs &&
+        Number.isFinite(averageBlockTime) &&
+        averageBlockTime > 0
+      ) {
+        price = {
+          ...price,
+          averageBlockTimeMs: String(averageBlockTime),
+        };
       }
     }
 
@@ -1694,6 +1862,8 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         // RPC is reachable; Swap readiness is tracked independently.
         swapTodayComplete = false;
       }
+    } else {
+      swapTodayComplete = false;
     }
 
     // Pair scanning is bounded and business-critical, so it runs before the
@@ -1719,6 +1889,12 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         transaction.input !== "0x"
       ) {
         const existing = pendingByHash.get(transaction.hash);
+        if (
+          !existing &&
+          context.knownTransactionHashes?.has(transaction.hash.toLowerCase())
+        ) {
+          continue;
+        }
         pendingByHash.set(transaction.hash, {
           transaction,
           nextPageParams: existing?.nextPageParams ?? null,
@@ -1766,7 +1942,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         totalAddresses: currentTotalAddresses,
         capturedAt: now.toISOString(),
         blockNumber: checkpointBlock,
-        estimated: false,
+        estimated: true,
         source: "midnight-window",
       };
     }
@@ -1793,6 +1969,9 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       currentTotalAddresses,
       addressBaseline,
       price,
+      burnBalanceWei,
+      burnBalanceBlockNumber,
+      burnBalanceUpdatedAt,
       nextTransactionCursor,
       nextBurnCursor,
       nextBurnHistoryCursor,
@@ -1807,6 +1986,9 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       transactionHeadCandidateHash,
       burnHeadCursor,
       burnHeadCandidateKey,
+      blockHeadConnected,
+      transactionHeadConnected,
+      burnHeadConnected,
       swapCheckpointBlock,
       pendingInternalTransactions,
       internalQueueOverflow,
