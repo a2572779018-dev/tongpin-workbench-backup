@@ -299,13 +299,13 @@ describe("AI durable member workspace", () => {
       const state = fixture(); state.artifacts[0].data = { padding: "x".repeat(900000) };
       const saved = await request(runtime.app).put("/api/ai/workspace").set(headers).send(saveRequest(state)).expect(200);
       expect(saved.body.revision).toBe(1);
-      runtime.closeAi();
+      await runtime.close();
       runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });
       const restored = await request(runtime.app).get("/api/ai/workspace").set(headers).expect(200);
       expect(restored.body).toEqual(saved.body);
       await request(runtime.app).get("/api/ai/workspace").expect(401);
       const admin = await request(runtime.app).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
       await request(runtime.app).get("/api/ai/workspace").set("Authorization", `Bearer ${admin.body.accessToken}`).expect(403);
-    } finally { await runtime.loraCollector.stop(); runtime.closeAi(); }
+    } finally { await runtime.close(); }
   });
 });

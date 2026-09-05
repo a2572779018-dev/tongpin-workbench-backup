@@ -27,12 +27,23 @@ const required = [
   "/electron/relationship-graph-vault.cjs",
   "/electron/ai-source-policy.cjs",
   "/THIRD_PARTY_NOTICES.md",
+  "/AI_DOCUMENT_LIBRARY_NOTICES.md",
   "/package.json",
 ];
 for (const entry of required) {
   if (!entries.has(entry)) {
     throw new Error(`Packaged app.asar is missing ${entry}`);
   }
+}
+
+// PDF/PPT/DOCX code is browser-bundled by Vite. A Node-only native canvas
+// dependency must not enter a desktop archive or break universal architecture
+// merging; it is neither needed nor loaded in the sandboxed renderer.
+if ([...entries].some(entry => entry.startsWith("/node_modules/@napi-rs/canvas"))) {
+  throw new Error("Packaged app unexpectedly includes Node-only canvas binaries");
+}
+if (![...entries].some(entry => /^\/dist\/renderer\/assets\/pdf\.worker[^/]*\.mjs$/.test(entry))) {
+  throw new Error("Packaged app is missing the bundled PDF text worker");
 }
 
 const packagedConfig = JSON.parse(

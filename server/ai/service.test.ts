@@ -21,14 +21,23 @@ describe("AI transactional service", () => {
     await runtime.service.saveProvider(provider);
   });
   afterEach(async () => { runtime.close(); await rm(directory, { recursive: true }); });
-  it("normalizes endpoint paths and encrypts write-only keys at rest with private local files", async () => {
+  it("normalizes endpoint paths, encrypts write-only keys and applies supported file permissions", async () => {
     expect(runtime.service.provider()).toMatchObject({ baseUrl: "https://api.example.com/v1", apiKeyConfigured: true });
     expect(JSON.stringify(runtime.service.provider())).not.toContain(provider.apiKey);
     expect(JSON.stringify(runtime.store.provider())).not.toContain(provider.apiKey);
     const disk = await readFile(path.join(directory, "test.json.ai.sqlite"));
     expect(disk.includes(Buffer.from(provider.apiKey!))).toBe(false);
-    expect((await stat(path.join(directory, "test.json.ai-key"))).mode & 0o777).toBe(0o600);
-    expect((await stat(path.join(directory, "test.json.ai.sqlite"))).mode & 0o777).toBe(0o600);
+    // Windows chmod/stat do not implement POSIX owner/group/other isolation.
+    // Verify owner read/write there; Unix continues to require exact 0600.
+    const permissionMask = process.platform === "win32" ? 0o600 : 0o777;
+    for (const filename of ["test.json.ai-key", "test.json.ai.sqlite"]) {
+      const info = await stat(path.join(directory, filename));
+      expect(info.isFile()).toBe(true);
+      expect(info.mode & permissionMask).toBe(0o600);
+    }
+    const localEncryptionKey = await readFile(path.join(directory, "test.json.ai-key"), "utf8");
+    expect(/^[a-f0-9]{64}$/.test(localEncryptionKey)).toBe(true);
+    expect(localEncryptionKey.includes(provider.apiKey!)).toBe(false);
     expect(safeBaseUrl("https://api.example.com/v1/chat/completions")).toBe("https://api.example.com/v1");
   });
   it("keeps existing key only for same normalized base and rejects changing host/path without a new key", async () => {

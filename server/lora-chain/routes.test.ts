@@ -79,7 +79,7 @@ describe("LORA boss API permissions and daily claim persistence", () => {
   });
 
   afterAll(async () => {
-    await runtime.loraCollector.stop();
+    await runtime.close();
     const resolved = path.resolve(temporaryRoot);
     if (!resolved.startsWith(path.resolve(os.tmpdir()))) {
       throw new Error("拒绝清理非临时目录");
@@ -158,18 +158,21 @@ describe("LORA boss API permissions and daily claim persistence", () => {
         },
       },
     });
-    const response = await request(reopened.app)
-      .post("/api/boss/lora-chain/daily-popup/claim")
-      .set("Authorization", `Bearer ${bossToken}`)
-      .send({ trigger: "startup" })
-      .expect(200);
-    expect(response.body.shouldOpen).toBe(false);
-    expect(
-      await reopened.store.read(
-        (database) => database.bossLoraReportOpens.length,
-      ),
-    ).toBe(1);
-    await reopened.loraCollector.stop();
+    try {
+      const response = await request(reopened.app)
+        .post("/api/boss/lora-chain/daily-popup/claim")
+        .set("Authorization", `Bearer ${bossToken}`)
+        .send({ trigger: "startup" })
+        .expect(200);
+      expect(response.body.shouldOpen).toBe(false);
+      expect(
+        await reopened.store.read(
+          (database) => database.bossLoraReportOpens.length,
+        ),
+      ).toBe(1);
+    } finally {
+      await reopened.close();
+    }
   });
 
   it("waits for manual refresh and returns the completed dashboard", async () => {

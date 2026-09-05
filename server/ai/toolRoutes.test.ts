@@ -56,7 +56,7 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
   });
   beforeEach(() => { transport.mockClear(); });
   afterAll(async () => {
-    if (runtime) { await runtime.loraCollector.stop(); runtime.closeAi(); }
+    if (runtime) await runtime.close();
     if (directory) await rm(directory, { recursive: true });
   });
 

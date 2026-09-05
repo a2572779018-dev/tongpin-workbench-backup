@@ -41,6 +41,8 @@ export interface AppRuntime {
   loraCollector: LoraChainCollector;
   aiStore: AiStore;
   closeAi: () => void;
+  /** Stop background work and HTTP requests before releasing the AI database. Safe before listen and on repeated calls. */
+  close: () => Promise<void>;
 }
 
 export async function ensureBootstrapAdmin(
@@ -177,5 +179,21 @@ export async function createRuntime(
 
   if (options.startLoraCollector) loraCollector.start();
 
-  return { app, server, store, loraCollector, aiStore: ai.store, closeAi: ai.close };
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => closing ??= (async () => {
+    try {
+      await loraCollector.stop();
+      await new Promise<void>((resolve, reject) => {
+        server.close(error => {
+          if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+          else resolve();
+        });
+      });
+    } finally {
+      // Supertest creates its own HTTP server around app, so this server may
+      // never have listened. SQLite must still close before Windows can remove it.
+      ai.close();
+    }
+  })();
+  return { app, server, store, loraCollector, aiStore: ai.store, closeAi: ai.close, close };
 }

@@ -49,7 +49,7 @@ describe("同频 API 纵向流程", () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => runtime.server.close(() => resolve()));
+    await runtime.close();
     const resolved = path.resolve(temporaryRoot);
     if (!resolved.startsWith(path.resolve(os.tmpdir()))) {
       throw new Error("拒绝清理非临时目录");

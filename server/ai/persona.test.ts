@@ -144,12 +144,12 @@ describe("member-owned AI persona", () => {
       expect(saved.body.profile.name).toBe("小频");
       await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile("不能覆盖") }).expect(409);
       await request(runtime.app).put("/api/ai/persona").set(headers).send({ oversized: "x".repeat(AI_PERSONA_LIMITS.requestBytes) }).expect(413);
-      runtime.closeAi(); runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });
+      await runtime.close(); runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });
       const restored = await request(runtime.app).get("/api/ai/persona").set(headers).expect(200); expect(restored.body).toEqual(saved.body);
       const reset = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 1, reset: true }).expect(200);
       expect(reset.body).toEqual({ revision: 2, profile: defaultAiPersonaProfile() });
       const memberName = await runtime.store.read(db => db.users.find(user => user.id === "persona-member")?.name);
       expect(memberName).toBe("真实成员姓名");
-    } finally { await runtime.loraCollector.stop(); runtime.closeAi(); }
+    } finally { await runtime.close(); }
   });
 });

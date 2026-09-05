@@ -81,7 +81,7 @@ describe("boss work report routes", () => {
   });
 
   afterAll(async () => {
-    await runtime.loraCollector.stop();
+    await runtime.close();
     await rm(root, { recursive: true, force: true });
   });
 

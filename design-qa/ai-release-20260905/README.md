@@ -23,6 +23,13 @@
 
 Cloudflare 测试实际启动 workerd 和 SQLite Durable Object，覆盖注册/审批/登录、Provider 加密存储、可信域名限制、禁止跟随重定向、工作区/专属 AI/资产保存与跨账号拒绝。仅上游模型传输被注入合成响应。
 
+## 0.1.34 平台打包校验
+
+- 0.1.33 的跨平台 CI 质量门通过，但 Mac 通用包受到 PDF 库的 Node 可选 canvas 原生依赖影响，Windows 暴露了 POSIX 权限测试假设及测试结束未释放 SQLite 句柄。该版本没有正式发布；未改写原 tag，后续发布使用 0.1.34。
+- PDF/PPT/DOCX 依赖改为 Vite 构建依赖，保留浏览器功能，不把不需要的 Node 原生组件装入 Electron。真实本地 macOS universal DMG/ZIP 打包通过，二进制同时含 x86_64 与 arm64；最终 asar 必需入口、PDF worker、许可证、生产 API/更新 URL 与无 native canvas 校验通过。
+- 增加统一、幂等的 Node 关闭流程，等待运行中的 HTTP/付费请求完成结算后再关闭 SQLite；所有测试实例（含重新打开的实例）均正确清理。Windows 仅检查其支持的文件权限位，不伪称 POSIX 位可验证 Windows ACL；Unix 仍严格检查 0600。
+- 0.1.34 本地最终 `npm run build` 92 个文件、716 项测试通过；两端类型检查、前后端构建、Cloudflare dry-run、macOS 本地完整包校验均通过。跨平台 CI 和正式远端激活另行验收。
+
 ## 必须明确的边界
 
 - 没有取得完整真实服务商密钥，因此未验证用户购买的上游模型、真实图片质量或真实联网搜索。正式管理员需在 AI 管理内输入密钥、测试连接、选择模型、分配成员额度；截图中的掩码不是可用密钥。

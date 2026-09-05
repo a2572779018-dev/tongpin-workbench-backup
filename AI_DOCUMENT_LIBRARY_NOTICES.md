@@ -4,6 +4,8 @@ Verified against the installed packages and package-lock.json on 2026-09-05.
 
 This implementation uses npm libraries through their public APIs. It does not transplant a LibreChat, Dify, Open WebUI, LobeHub or AnythingLLM workspace, and does not claim that those projects were installed as the backend. Exact npm artifacts are pinned by lockfile integrity below; an upstream Git commit was not separately pinned.
 
+PDF/PPT/DOCX libraries are installed as build-time dependencies and bundled into the renderer by Vite. Their Node-only dependency trees are not shipped in Electron; in particular, the optional native canvas package is not needed by browser PDF text extraction. Final archive verification requires the bundled PDF worker and this license document and rejects native canvas binaries.
+
 | Package | Installed version | License | Runtime use |
 | --- | --- | --- | --- |
 | [pdfjs-dist](https://github.com/mozilla/pdf.js) | 6.3.289 | Apache-2.0 | Local PDF text extraction |

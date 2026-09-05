@@ -188,8 +188,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     vi.restoreAllMocks();
     releaseChat?.();
     if (runtime) {
-      await runtime.loraCollector.stop();
-      runtime.closeAi();
+      await runtime.close();
     }
     if (!temporaryRoot) return;
     const resolved = path.resolve(temporaryRoot);
@@ -342,7 +341,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   });
 
   it("persists provider settings, usage and member caps through a server restart", async () => {
-    runtime.closeAi();
+    await runtime.close();
     runtime = await startRuntime();
     memberA.token = (await login(memberA.email)).accessToken;
     memberB.token = (await login(memberB.email)).accessToken;
