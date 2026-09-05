@@ -41,9 +41,8 @@ export async function publicRequest<T>(
     sourceSignal?.addEventListener("abort", abortFromSource, { once: true });
   }
 
-  let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
+    const response = await fetch(`${API_URL}${path}`, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -51,6 +50,33 @@ export async function publicRequest<T>(
         ...(init.headers ?? {}),
       },
     });
+
+    if (!response.ok) {
+      let payload: ApiErrorPayload = {};
+      try {
+        payload = (await response.json()) as ApiErrorPayload;
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        // 接口若没有 JSON 错误体，使用统一兜底文案。
+      }
+      throw new ApiRequestError(
+        response.status,
+        payload.error?.code ?? "REQUEST_FAILED",
+        payload.error?.message ?? "请求失败，请稍后重试",
+      );
+    }
+
+    if (response.status === 204) return undefined as T;
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      if (controller.signal.aborted || error instanceof TypeError) throw error;
+      throw new ApiRequestError(
+        response.status,
+        "INVALID_RESPONSE",
+        "服务器返回异常，请稍后重试",
+      );
+    }
   } catch (error) {
     if (
       controller.signal.aborted ||
@@ -66,32 +92,5 @@ export async function publicRequest<T>(
   } finally {
     clearTimeout(timeout);
     sourceSignal?.removeEventListener("abort", abortFromSource);
-  }
-
-  if (!response.ok) {
-    let payload: ApiErrorPayload = {};
-    try {
-      payload = (await response.json()) as ApiErrorPayload;
-    } catch {
-      // 接口若没有 JSON 错误体，使用统一兜底文案。
-    }
-    throw new ApiRequestError(
-      response.status,
-      payload.error?.code ?? "REQUEST_FAILED",
-      payload.error?.message ?? "请求失败，请稍后重试",
-    );
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-  try {
-    return (await response.json()) as T;
-  } catch {
-    throw new ApiRequestError(
-      response.status,
-      "INVALID_RESPONSE",
-      "服务器返回异常，请稍后重试",
-    );
   }
 }

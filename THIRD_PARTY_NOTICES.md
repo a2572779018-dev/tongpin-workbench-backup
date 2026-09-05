@@ -1,5 +1,33 @@
 # Third-party notices
 
+## AI document processing and export
+
+The AI workbench uses pdfjs-dist, Mammoth, PptxGenJS and JSZip through their npm
+APIs. Exact versions, artifact integrity, license texts and security boundaries
+are included in [AI_DOCUMENT_LIBRARY_NOTICES.md](AI_DOCUMENT_LIBRARY_NOTICES.md).
+That companion notice is distributed with the application and must be retained.
+
+## AI workspace reference screening
+
+The following projects were reviewed as architecture and interaction references,
+not installed or transplanted as Tongpin's backend. This release's AI workspace,
+account isolation and quota service are implemented within Tongpin; no source
+code from these five platforms is vendored by this integration. The license
+screening below records upstream LICENSE snapshots checked on 2026-09-05, not a
+claim that all five have unrestricted commercial or rebranding permissions.
+
+| Reference | Screened upstream license and condition |
+| --- | --- |
+| [LibreChat](https://github.com/danny-avila/LibreChat/blob/622a934a82ebf427d111922bd7c0c1560edb5730/LICENSE) | MIT; retain the required copyright and license notice when reusing code. |
+| [AnythingLLM](https://github.com/Mintplex-Labs/anything-llm/blob/27c58541bd555b8b9791ed6e2d8d7bdb252230ca/LICENSE) | MIT; retain the required copyright and license notice when reusing code. |
+| [Dify](https://github.com/langgenius/dify/blob/d565802ea119de3b4aba5ec9e20e40162eef1d64/LICENSE) | Modified Apache-2.0 terms, including multi-tenant and frontend logo/copyright conditions. |
+| [Open WebUI](https://github.com/open-webui/open-webui/blob/26a645f9e64914799bafa343413d95bd295cf6b7/LICENSE) | Open WebUI License, including branding-retention rules with defined exceptions. Earlier materials may retain their original licenses. |
+| [LobeHub / LobeChat](https://github.com/lobehub/lobehub/blob/f25fda6de2fdae57cc54f1610d085cf8af845e95/LICENSE) | LobeHub Community License, based on Apache-2.0 with additional commercial-usage terms for developing and distributing derivative works. |
+
+Future code reuse must be reviewed against the exact selected revision and
+applicable terms, with its required notices added. These references do not imply
+endorsement or permission to reuse their trademarks.
+
 ## Murmur
 
 The member relationship-map feature is compatible with and inspired by the
@@ -221,3 +249,65 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+
+## Liquid Orb
+
+The AI status identity vendors a subset of [LerSent001/orb](https://github.com/LerSent001/orb),
+commit `047c58cc93587c21dac12183fc0fb1e4101c8e1a`. Local renderer changes limit
+pixel ratio and idle frame rate, and guard asynchronous cleanup. The host adds
+visibility, reduced-motion, device-loss and static-logo fallback handling.
+
+MIT License
+
+Copyright (c) 2026 LerSent001
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## MetalFx and Border Beam
+
+The AI welcome identity uses `metal-fx` 1.0.4 from
+[Jakubantalik/metal-fx](https://github.com/Jakubantalik/metal-fx), source commit
+`be1bf89c63056521a4e8224f368768314c9006f7`.
+The composer vendors the unchanged `packages/border-beam/src` files from
+[Jakubantalik/Libraries.dev](https://github.com/Jakubantalik/Libraries.dev),
+commit `999866f33df216dab0f8956f91c8d2e918d46328`.
+Both packages carry the following license. The central logo is Tongpin's existing
+artwork. No MetalForge paid export or Avatar Lab AGPL runtime is included.
+
+MIT License
+
+Copyright (c) 2026 Jakub Antalik
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

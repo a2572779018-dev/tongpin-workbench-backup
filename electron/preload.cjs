@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld("tongpin", {
     ipcRenderer.invoke("notification:dismiss", notificationId),
   openLoraExplorer: (target) =>
     ipcRenderer.invoke("lora-explorer:open", target),
+  openAiSource: (url) => ipcRenderer.invoke("ai-source:open", url),
   onDesktopNoticeAcknowledge: (callback) => {
     const listener = (_event, notificationId) =>
       callback(String(notificationId));

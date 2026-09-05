@@ -66,4 +66,34 @@ describe("API network handling", () => {
       message: "服务器返回异常，请稍后重试",
     });
   });
+
+  function stalledBodyFetch(status = 200) {
+    return vi.fn(async (_url: string, init?: RequestInit) => new Response(
+      new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        },
+      }),
+      { status, headers: { "Content-Type": "application/json" } },
+    ));
+  }
+
+  it.each([200, 502])("keeps the timeout active while reading a %s response body", async (status) => {
+    vi.stubGlobal("fetch", stalledBodyFetch(status));
+    await expect(publicRequest("/api/ai/chat", {}, 5)).rejects.toMatchObject({
+      status: 0,
+      code: "NETWORK_UNAVAILABLE",
+    });
+  });
+
+  it("honors stop while waiting for the response body", async () => {
+    vi.stubGlobal("fetch", stalledBodyFetch());
+    const controller = new AbortController();
+    const request = publicRequest("/api/ai/chat", { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ code: "NETWORK_UNAVAILABLE" });
+  });
 });

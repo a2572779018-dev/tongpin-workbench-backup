@@ -155,20 +155,39 @@ Electron 已实现以下流程：
 - 选择立即安装后关闭软件并执行升级
 - 选择稍后安装时退出软件后自动安装
 
-更新地址已经接入 Cloudflare R2。发布 Windows 新版本时执行：
+更新地址已经接入 Cloudflare R2。发布前先同步 `package.json`、`package-lock.json` 的版本与 `build/release-notes.md`，完成以下检查：
 
 ```powershell
-npm.cmd run dist:win
-npm.cmd run release:verify
-npm.cmd exec -- wrangler login
-npm.cmd run release:upload
+npm.cmd ci
+npm.cmd run build
+npm.cmd run typecheck:cloudflare
+npm.cmd run cloudflare:check
 ```
 
-`release:upload` 会校验安装包大小和 SHA-512，先上传版本化安装包与差分
-`.blockmap`，最后才更新 `latest.yml`，并通过公开更新地址复核线上文件。
+`Desktop release` 由推送 `v主版本.次版本.修订号` 标签触发；标签必须与包版本一致，且指向远端 `main` 的当前提交。工作流通过质量检查、双平台打包及附件校验后发布 GitHub Release；它不会部署中央 API，也不会切换 Cloudflare R2 更新清单。涉及 API 变更时，另行执行 `npm.cmd run cloudflare:deploy` 并验证线上健康与受影响的业务流程，再开放客户端更新。
 
-正式大范围分发前仍应配置 Windows 代码签名证书。未签名安装包可以完成内部
-升级测试，但会触发 SmartScreen 警告。
+从已通过检查的 GitHub Release 获取对应平台的安装包、blockmap 和清单到 `artifacts/`；也可设置 `RELEASE_DIR` 指向独立发布目录。不要混入其他版本的文件。在 Windows 本机打包时可改用 `npm.cmd run dist:win` 生成这些文件。
+
+Windows 按阶段发布：
+
+```powershell
+npm.cmd run release:verify:win
+npm.cmd run release:upload:win
+npm.cmd run release:activate:win
+npm.cmd run release:verify:remote:win
+```
+
+`release:verify:win` 检查本地版本、更新说明、文件大小和 SHA-512。`release:upload:win` 只上传安装包与 blockmap，并完整校验远端文件；它不改变 `latest.yml`。`release:activate:win` 会再次完整校验远端产物，再切换清单。最后独立验证公开更新源的版本、Range 下载和完整性。上传使用已有 Wrangler 登录身份，或经安全方式注入的 `TONGPIN_RELEASE_UPLOAD_TOKEN`；不要将凭证写进代码、命令历史或发布说明。
+
+不要把 `npm run release:upload` 当作 Windows 单端命令：它会上传并激活 Windows 和 macOS 两份清单。当前 GitHub 工作流明确生成未签名、未公证的 macOS 包，不能用它切换 Mac 自动更新；Mac 手动分发及签名要求见 [docs/MACOS.md](docs/MACOS.md)。GitHub 仓库为私有时，向成员提供公开更新源上的安装包链接，而不是要求他们访问私有 Release。
+
+当前 Windows 工作流未配置代码签名证书，安装包可能触发 SmartScreen 提示。正式版本号与签名、公证是不同的状态；不要将构建或校验成功描述为已通过操作系统信任验证。大范围分发前应配置并验证 Windows 代码签名。
+
+### 4. 同频 AI 接入
+
+管理员在管理端配置兼容的 API 地址、密钥、协议和模型，为成员分配额度后才可使用 AI。密钥由服务端加密保存，成员界面不接触密钥。额度不足会阻止继续生成，只有管理员可以增加额度。
+
+图片生成需要管理员配置兼容的图片接口、模型及折算额度；联网搜索需要支持搜索工具的 Responses 接口及对应配置。拥有文字聊天 API 并不代表同时具备这两项能力。接入后应分别验证文字、图片、搜索和额度扣减，不把自动化测试当成真实服务商的验收结果。Cloudflare 端的 AI 密钥加密依赖现有 `JWT_SECRET`；轮换该秘密前必须规划已保存密钥的迁移。
 
 ## 安全设计
 

@@ -25,6 +25,7 @@ const required = [
   "/electron/secure-session-binding-store.cjs",
   "/electron/relationship-member-verifier.cjs",
   "/electron/relationship-graph-vault.cjs",
+  "/electron/ai-source-policy.cjs",
   "/THIRD_PARTY_NOTICES.md",
   "/package.json",
 ];

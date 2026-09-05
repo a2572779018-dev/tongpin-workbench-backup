@@ -36,6 +36,7 @@ const {
   buildLoraExplorerUrl,
   validateLoraExplorerUrl,
 } = require("./lora-explorer-policy.cjs");
+const { createAiSourceOpener } = require("./ai-source-policy.cjs");
 const {
   normalizeDesktopNoticeAction,
 } = require("./desktop-notice-action-policy.cjs");
@@ -1468,6 +1469,25 @@ function registerDesktopIpc() {
     await shell.openExternal(explorerUrl);
     return true;
   });
+
+  ipcMain.handle("ai-source:open", createAiSourceOpener({
+    isAllowedSender: isMainRendererEvent,
+    confirmOpen: async (sourceUrl) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false;
+      const choice = await dialog.showMessageBox(mainWindow, {
+        type: "question",
+        title: "打开参考来源",
+        message: `在默认浏览器中打开 ${new URL(sourceUrl).hostname}？`,
+        detail: sourceUrl,
+        buttons: ["打开", "取消"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      return choice.response === 0;
+    },
+    openExternal: (sourceUrl) => shell.openExternal(sourceUrl),
+  }));
 
   ipcMain.handle("session:load", async (event) => {
     assertMainRendererEvent(event);

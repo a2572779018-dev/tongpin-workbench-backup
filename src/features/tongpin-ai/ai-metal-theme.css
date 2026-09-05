@@ -1,0 +1,124 @@
+/* Keep Tongpin's existing warm light theme; material effects are accents only. */
+.tp-ai-page {
+  color-scheme: light;
+}
+.tp-ai-page button:active:not(:disabled) {
+  transform: none;
+}
+.tp-ai-page .tp-ai-sidebar__mark {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.tp-ai-page .tp-ai-sidebar__mark img {
+  display: block;
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  filter: saturate(0.65);
+}
+.tp-ai-page .tp-ai-composer-orb {
+  flex: none;
+}
+.tp-ai-page .tp-ai-orb > img {
+  filter: saturate(0.65);
+}
+.tp-ai-page .tp-ai-chat-welcome {
+  padding-top: 0;
+}
+.tp-ai-page .tp-ai-metal-identity {
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 96px;
+}
+.tp-ai-page .tp-ai-identity-ring {
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: #f8f4e9;
+  border: 1px solid #c6bea9;
+  box-shadow: 0 6px 18px #63552c18;
+}
+.tp-ai-page .tp-ai-metal-identity__logo {
+  display: block;
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
+  filter: saturate(0.65);
+}
+.tp-ai-page .tp-ai-message__avatar {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.tp-ai-page .tp-ai-message__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: saturate(0.65);
+}
+.tp-ai-page .tp-ai-beam-wrap {
+  display: block;
+  width: min(100%, 46rem);
+  margin: 0 auto;
+  min-width: 0;
+  border-radius: 16px;
+  isolation: isolate;
+  /* Upstream clips decoration; our attachment/tool menus must escape it. */
+  overflow: visible;
+}
+.tp-ai-page .tp-ai-beam-wrap > .tp-ai-composer {
+  width: 100%;
+  margin: 0;
+}
+.tp-ai-page .tp-ai-composer textarea:focus-visible {
+  /* The whole composer retains its visible warm-yellow focus outline. */
+  outline: none;
+}
+.tp-ai-sidebar-menu.tp-ai-metal-menu {
+  color-scheme: light;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tp-ai-page *,
+  .tp-ai-page *::before,
+  .tp-ai-page *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media (max-width: 760px) {
+  .app-frame--ai > .sidebar .side-nav {
+    padding-top: 0;
+    gap: 0.35rem;
+  }
+  .app-frame--ai > .sidebar .side-nav button {
+    padding: 0 0.6rem;
+    font-size: 0.8rem;
+    transform: none;
+  }
+  .tp-ai-page .tp-ai-composer-orb {
+    display: none !important;
+  }
+  .tp-ai-page .tp-ai-metal-identity {
+    width: 80px;
+    height: 80px;
+  }
+  .tp-ai-page .tp-ai-identity-ring {
+    width: 74px;
+    height: 74px;
+  }
+  .tp-ai-page .tp-ai-metal-identity__logo {
+    width: 64px;
+    height: 64px;
+  }
+}

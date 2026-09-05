@@ -8327,6 +8327,10 @@ html[data-app-view="relations"] body {
   overflow: hidden;
 }
 
+html[data-app-view="ai"] body {
+  overflow: hidden;
+}
+
 .app-frame--relations {
   display: grid;
   height: calc(100dvh - var(--desktop-titlebar-height));
@@ -8359,6 +8363,48 @@ body:not(.desktop-runtime) .app-frame--relations {
 }
 
 .app-frame--relations .page-canvas {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Tongpin AI keeps the trusted Tongpin navigation in place while the
+   workbench owns the remaining desktop viewport. */
+.app-frame--ai {
+  display: grid;
+  height: calc(100dvh - var(--desktop-titlebar-height));
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.5rem 0 0.7rem;
+  overflow: hidden;
+}
+
+body:not(.desktop-runtime) .app-frame--ai {
+  height: 100dvh;
+}
+
+.app-frame--ai .sidebar {
+  position: relative;
+  top: auto;
+  min-height: 4.25rem;
+  padding-top: 0.55rem;
+  padding-bottom: 0.55rem;
+  border-radius: 0.8rem;
+  box-shadow: 4px 4px 0 var(--ink);
+}
+
+.app-frame--ai .sidebar > .user-chip {
+  display: none;
+}
+
+.app-frame--ai .app-content {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.app-frame--ai .page-canvas {
   min-height: 0;
   overflow: hidden;
 }

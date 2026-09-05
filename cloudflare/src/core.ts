@@ -1,4 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
+import { createWorkerAi } from "./ai/runtime";
+import { handleAiRequest } from "./ai/routes";
+import { AiWorkspaceRepository } from "../../server/ai/workspace";
+import { handleAiWorkspaceRequest } from "./ai/workspaceRoutes";
+import { AiPersonaRepository } from "../../server/ai/persona";
+import { handleAiPersonaRequest } from "./ai/personaRoutes";
 import type {
   AppNotification,
   BossWorkReportStatus,
@@ -558,6 +564,9 @@ function isDurableObjectRowWriteLimit(error: unknown): boolean {
 }
 
 export class TongpinCore extends DurableObject<WorkerEnv> {
+  private readonly ai: ReturnType<typeof createWorkerAi>;
+  private readonly aiWorkspace: AiWorkspaceRepository;
+  private readonly aiPersona: AiPersonaRepository;
   private readonly sql: SqlStorage;
   private readonly loraSource: ExplorerLoraChainDataSource;
   private loraCollectionInFlight: Promise<LoraDashboardData> | null = null;
@@ -567,12 +576,19 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.ai = createWorkerAi(ctx.storage, () => env.JWT_SECRET, env.AI_ALLOWED_HOSTS);
+    this.aiWorkspace = new AiWorkspaceRepository(this.ai.store.sql);
+    this.aiPersona = new AiPersonaRepository(this.ai.store.sql);
     this.loraSource = new ExplorerLoraChainDataSource(
       env.LORA_EXPLORER_API ?? LORA_EXPLORER_API,
       env.LORA_RPC_URL ?? LORA_DEFAULT_RPC_URL,
     );
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
+      // AI has its own additive schema. Always initialize even when the legacy migration exits early.
+      this.ai.store.initialize();
+      this.aiWorkspace.initialize();
+      this.aiPersona.initialize();
       if (!LORA_RAW_COLLECTION_PAUSED) {
         await this.scheduleNextAlarm();
       }
@@ -782,6 +798,13 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       const url = new URL(request.url);
       const path = url.pathname;
       const method = request.method;
+
+      if (path.startsWith("/api/ai/") || path.startsWith("/api/admin/ai/")) {
+        const user = await this.requireUser(request, path.startsWith("/api/admin/") ? ["admin"] : undefined);
+        if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
+        if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);
+        return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray());
+      }
 
       if (path === LORA_INTERNAL_COLLECT_PATH) {
         if (method !== "POST") {

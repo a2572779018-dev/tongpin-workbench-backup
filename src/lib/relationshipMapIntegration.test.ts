@@ -141,7 +141,7 @@ describe("relationship map integration boundary", () => {
   });
 
   it("uses the graph header as the only relationship-page toolbar and moves notifications into it", () => {
-    expect(appShell).toContain('view !== "relations" ? (');
+    expect(appShell).toContain('view !== "relations" && view !== "ai" ? (');
     expect(appStyles).toContain(
       ".app-frame--relations .app-content {\n  display: grid;\n  min-height: 0;\n  grid-template-rows: minmax(0, 1fr);",
     );

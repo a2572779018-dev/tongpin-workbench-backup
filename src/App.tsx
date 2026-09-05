@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { LogOut, RefreshCw, WifiOff } from "lucide-react";
 import { useAuth } from "./auth/AuthContext";
+import { flushAiBeforeLeave } from "./features/tongpin-ai/workspaceLeaveGuard";
 import { AppShell, type AppView } from "./components/AppShell";
 import { CustomCursor } from "./components/CustomCursor";
 import { DesktopTitlebar } from "./components/DesktopTitlebar";
@@ -27,6 +28,16 @@ const RelationshipMapPage = lazy(async () => {
   return { default: module.RelationshipMapPage };
 });
 
+const TongpinAIPage = lazy(async () => {
+  const module = await import("./pages/TongpinAIPage");
+  return { default: module.TongpinAIPage };
+});
+
+const AdminAiQuotaPanel = lazy(async () => {
+  const module = await import("./features/tongpin-ai/AdminAiQuotaPanel");
+  return { default: module.AdminAiQuotaPanel };
+});
+
 export function App() {
   const {
     loading,
@@ -38,9 +49,18 @@ export function App() {
   const [view, setView] = useState<AppView>("home");
   const [homeLayout, setHomeLayout] = useState<HomeLayout>("lanes");
   const relationshipExitInFlight = useRef(false);
+  const currentAccountRef = useRef(session?.user.id);
+  currentAccountRef.current = session?.user.id;
 
   const changeView = useCallback((nextView: AppView) => {
     if (nextView === view || relationshipExitInFlight.current) return;
+    if (view === "ai" && session) {
+      relationshipExitInFlight.current = true;
+      const accountId = session.user.id;
+      void flushAiBeforeLeave(accountId).then(saved => { if (saved && currentAccountRef.current === accountId) setView(nextView); })
+        .finally(() => { relationshipExitInFlight.current = false; });
+      return;
+    }
     if (view !== "relations" || !window.tongpin?.relationshipGraph) {
       setView(nextView);
       return;
@@ -56,7 +76,7 @@ export function App() {
       .finally(() => {
         relationshipExitInFlight.current = false;
       });
-  }, [view]);
+  }, [view, session]);
 
   useEffect(() => {
     if (!session) return;
@@ -163,6 +183,14 @@ export function App() {
           <RelationshipMapPage userId={session.user.id} />
         </Suspense>
       </RelationshipMapErrorBoundary>
+    ) : view === "ai" && session.user.role === "member" ? (
+      <Suspense fallback={<div className="tp-ai-page-loading">正在打开同频 AI…</div>}>
+        <TongpinAIPage user={session.user} />
+      </Suspense>
+    ) : view === "admin-ai" && session.user.role === "admin" ? (
+      <Suspense fallback={<div className="tp-ai-quota-loading">正在打开 AI 管理…</div>}>
+        <AdminAiQuotaPanel />
+      </Suspense>
     ) : session.user.role === "admin" ? (
       <AdminConsole />
     ) : view === "boss" && session.user.role === "boss" ? (
@@ -181,6 +209,10 @@ export function App() {
           session && !loading && !startupError
             ? view === "relations"
               ? "客户脉络图"
+              : view === "ai"
+                ? "同频 AI"
+                : view === "admin-ai"
+                  ? "AI 管理"
               : view === "home" && isLaneHomeLayout(homeLayout)
                 ? "今日待办"
                 : undefined

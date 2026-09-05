@@ -1,0 +1,52 @@
+import { Router } from "express";
+import { AiError } from "../ai/security";
+import type { AiService } from "../ai/service";
+import { ApiError } from "../errors";
+import { requireRole } from "../middleware";
+import type { JsonStore } from "../store";
+
+export function createAiRouter(service: AiService, users: JsonStore, requireAuth: ReturnType<typeof import("../middleware").createRequireAuth>, admin = false): Router {
+  const router = Router();
+  router.use(requireAuth);
+  router.use((request, _response, next) => {
+    if (request.get("X-Tongpin-Account") !== undefined && request.get("X-Tongpin-Account") !== request.currentUser!.id) {
+      next(new ApiError(409, "AI_ACCOUNT_CHANGED", "账号已切换，请重新打开工作台")); return;
+    }
+    next();
+  });
+  router.use((_request, response, next) => { response.set("Cache-Control", "no-store"); next(); });
+  if (admin) {
+    router.use(requireRole("admin"));
+    router.get("/provider", (_request, response) => response.json({ provider: service.provider() }));
+    router.put("/provider", async (request, response) => response.json({ provider: await service.saveProvider(request.body) }));
+    router.post("/provider/test", async (request, response) => response.json(await service.testProvider(request.body)));
+    router.get("/members", async (_request, response) => {
+      const members = await users.read(db => db.users.filter(user => user.role === "member").map(({ id, email, name, role, status }) => ({ id, email, name, role, status })));
+      response.json({ members: service.members(members) });
+    });
+    router.put("/members/:id/quota", async (request, response) => {
+      const member = await users.read(db => db.users.find(user => user.id === request.params.id));
+      if (!member) throw new ApiError(404, "USER_NOT_FOUND", "没有找到该成员");
+      if (member.role !== "member") throw new ApiError(403, "AI_MEMBER_REQUIRED", "AI 额度仅可分配给成员账号");
+      const quota = service.setQuota(member.id, request.currentUser!.id, request.body);
+      response.json({ member: { id: member.id, email: member.email, name: member.name, role: member.role, status: member.status, quota } });
+    });
+    router.get("/usage", (request, response) => response.json({ entries: service.store.usage(typeof request.query.userId === "string" ? request.query.userId : undefined) }));
+  } else {
+    router.use(requireRole("member"));
+    router.get("/status", (request, response) => response.json(service.status(request.currentUser!.id)));
+    router.get("/usage", (request, response) => { service.quota(request.currentUser!.id); response.json({ entries: service.store.usage(request.currentUser!.id) }); });
+    router.post("/chat", async (request, response) => response.json(await service.chat(request.currentUser!.id, request.body)));
+    router.post("/images", async (request, response) => response.json(await service.generateImage(request.currentUser!.id, request.body)));
+    router.get("/assets/:id", (request, response) => response.json(service.getAsset(request.currentUser!.id, request.params.id)));
+    router.delete("/assets/:id", (request, response) => { service.deleteAsset(request.currentUser!.id, request.params.id); response.json({ deleted: true }); });
+    router.get("/requests/:id", (request, response) => response.json(service.getRequestResult(request.currentUser!.id, request.params.id)));
+  }
+  // Provider error bodies and caught network errors are deliberately never logged or forwarded.
+  router.use((error: unknown, _request: import("express").Request, response: import("express").Response, next: import("express").NextFunction) => {
+    if (error instanceof ApiError) { next(error); return; }
+    if (error instanceof AiError) { response.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }
+    response.status(500).json({ error: { code: "AI_SERVER_ERROR", message: "AI 服务处理失败，请稍后重试" } });
+  });
+  return router;
+}

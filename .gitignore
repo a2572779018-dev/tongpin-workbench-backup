@@ -4,6 +4,8 @@ release/
 artifacts/
 .playwright-cli/
 .data/
+*.ai-key
+*.ai.sqlite*
 .env
 .env.*
 !.env.example

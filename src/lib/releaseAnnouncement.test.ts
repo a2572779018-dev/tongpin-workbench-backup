@@ -27,16 +27,16 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "在线成员身份验证成功后",
+      "专属助手名字、性格与回答偏好",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "不覆盖已有加密数据",
+      "账号隔离保存",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "平均出块时间",
+      "可编辑 PPTX",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "每次刷新都会推进采集",
+      "额度不足时停止新增生成",
     );
   });
 

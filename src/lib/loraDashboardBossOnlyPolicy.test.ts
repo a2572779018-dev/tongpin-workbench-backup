@@ -11,7 +11,9 @@ describe("LORA dashboard boss-only policy", () => {
     const shell = source("src/components/AppShell.tsx");
 
     expect(access).toContain('return role === "boss";');
-    expect(access).toContain('if (role === "admin") return ["admin"];');
+    expect(access).toContain(
+      'if (role === "admin") return ["admin", "admin-ai"];',
+    );
     expect(access).not.toContain('role === "boss" || role === "admin"');
     expect(shell).not.toContain(
       'user.role === "boss" || user.role === "admin"',

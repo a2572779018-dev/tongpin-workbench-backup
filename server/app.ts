@@ -25,12 +25,22 @@ import { createLoraChainRouter } from "./routes/lora-chain";
 import { createTasksRouter } from "./routes/tasks";
 import { createWorkReportsRouter } from "./routes/work-reports";
 import { JsonStore } from "./store";
+import { createNodeAi } from "./ai/node";
+import type { AiTransport } from "./ai/provider";
+import type { AiStore } from "./ai/storage";
+import { createAiRouter } from "./routes/ai";
+import { AiWorkspaceRepository } from "./ai/workspace";
+import { createAiWorkspaceRouter } from "./ai/workspaceRoutes";
+import { AiPersonaRepository } from "./ai/persona";
+import { createAiPersonaRouter } from "./ai/personaRoutes";
 
 export interface AppRuntime {
   app: express.Express;
   server: HttpServer;
   store: JsonStore;
   loraCollector: LoraChainCollector;
+  aiStore: AiStore;
+  closeAi: () => void;
 }
 
 export async function ensureBootstrapAdmin(
@@ -71,13 +81,20 @@ export async function createRuntime(
     attachSockets?: boolean;
     loraSource?: LoraChainDataSource;
     startLoraCollector?: boolean;
+    aiTransport?: AiTransport;
   } = {},
 ): Promise<AppRuntime> {
   const store = await JsonStore.open(config.dataFile);
   await ensureBootstrapAdmin(store, config);
+  const ai = await createNodeAi(config.dataFile, options.aiTransport);
+  const aiWorkspace = new AiWorkspaceRepository(ai.store.sql);
+  aiWorkspace.initialize();
+  const aiPersona = new AiPersonaRepository(ai.store.sql);
+  aiPersona.initialize();
 
   const app = express();
   const server = createServer(app);
+  server.once("close", ai.close);
   const realtime =
     options.attachSockets === false
       ? silentRealtimeHub
@@ -106,6 +123,10 @@ export async function createRuntime(
       },
     }),
   );
+  // Workspace snapshots have a separate authenticated 2 MiB limit; do not grow every API body limit.
+  app.use("/api/ai/workspace", createAiWorkspaceRouter(aiWorkspace, requireAuth));
+  app.use("/api/ai/persona", createAiPersonaRouter(aiPersona, requireAuth));
+  app.use("/api/ai/chat", express.json({ limit: 1600 * 1024 }));
   app.use(express.json({ limit: "768kb" }));
 
   app.get("/api/health", (_request, response) => {
@@ -130,6 +151,8 @@ export async function createRuntime(
     createAuthRouter(store, config, requireAuth),
   );
   app.use("/api/tasks", createTasksRouter(store, requireAuth, realtime));
+  app.use("/api/admin/ai", createAiRouter(ai.service, store, requireAuth, true));
+  app.use("/api/ai", createAiRouter(ai.service, store, requireAuth));
   app.use("/api/admin", createAdminRouter(store, requireAuth));
   app.use(
     "/api/boss/lora-chain",
@@ -154,5 +177,5 @@ export async function createRuntime(
 
   if (options.startLoraCollector) loraCollector.start();
 
-  return { app, server, store, loraCollector };
+  return { app, server, store, loraCollector, aiStore: ai.store, closeAi: ai.close };
 }

@@ -81,6 +81,7 @@ interface DesktopSessionBridge {
     kind: "address" | "tx";
     value: string;
   }): Promise<boolean>;
+  openAiSource(url: string): Promise<"opened" | "cancelled" | "blocked" | "failed" | "busy">;
   onDesktopNoticeAcknowledge(
     callback: (notificationId: string) => void,
   ): () => void;

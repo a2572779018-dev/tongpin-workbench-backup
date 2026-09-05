@@ -10,7 +10,12 @@ describe("LORA dashboard client access", () => {
     expect(canAccessLoraDashboard("boss")).toBe(true);
     expect(canAccessLoraDashboard("admin")).toBe(false);
     expect(canAccessLoraDashboard("member")).toBe(false);
-    expect(visibleAppViews("member")).toEqual(["home", "relations"]);
+  });
+
+  it("keeps the exact navigation order for every role", () => {
+    expect(visibleAppViews("member")).toEqual(["home", "relations", "ai"]);
+    expect(visibleAppViews("boss")).toEqual(["home", "boss", "lora-chain"]);
+    expect(visibleAppViews("admin")).toEqual(["admin", "admin-ai"]);
   });
 
   it("allows the relationship map for members only", () => {
@@ -23,5 +28,15 @@ describe("LORA dashboard client access", () => {
     expect(roleAllowsAppView("member", "lora-chain")).toBe(false);
     expect(roleAllowsAppView("boss", "lora-chain")).toBe(true);
     expect(roleAllowsAppView("admin", "lora-chain")).toBe(false);
+  });
+
+  it("keeps the AI workbench and quota console behind separate role gates", () => {
+    expect(roleAllowsAppView("member", "ai")).toBe(true);
+    expect(roleAllowsAppView("boss", "ai")).toBe(false);
+    expect(roleAllowsAppView("admin", "ai")).toBe(false);
+
+    expect(roleAllowsAppView("admin", "admin-ai")).toBe(true);
+    expect(roleAllowsAppView("member", "admin-ai")).toBe(false);
+    expect(roleAllowsAppView("boss", "admin-ai")).toBe(false);
   });
 });

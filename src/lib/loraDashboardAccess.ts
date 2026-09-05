@@ -5,9 +5,9 @@ export function canAccessLoraDashboard(role: UserRole): boolean {
 }
 
 export function visibleAppViews(role: UserRole): string[] {
-  if (role === "admin") return ["admin"];
+  if (role === "admin") return ["admin", "admin-ai"];
   if (role === "boss") return ["home", "boss", "lora-chain"];
-  return ["home", "relations"];
+  return ["home", "relations", "ai"];
 }
 
 export function roleAllowsAppView(role: UserRole, view: string): boolean {

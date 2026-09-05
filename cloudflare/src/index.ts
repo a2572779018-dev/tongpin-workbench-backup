@@ -4,7 +4,7 @@ import type { WorkerEnv } from "./platform";
 export { TongpinCore };
 
 const ALLOWED_METHODS = "GET,HEAD,POST,PATCH,PUT,DELETE,OPTIONS";
-const ALLOWED_HEADERS = "Authorization,Content-Type";
+const ALLOWED_HEADERS = "Authorization,Content-Type,X-Tongpin-Account";
 const RELEASE_UPLOAD_PREFIX = "/internal/releases/";
 const MAX_RELEASE_PART_BYTES = 8 * 1024 * 1024;
 const MAX_RELEASE_OBJECT_BYTES = 2 * 1024 * 1024;
@@ -52,10 +52,24 @@ async function bufferedApiRequest(request: Request): Promise<Request> {
   if (request.method === "GET" || request.method === "HEAD" || !request.body) {
     return request;
   }
-  const body = await request.arrayBuffer();
-  if (body.byteLength > 768 * 1024) {
-    throw new RangeError("API request body is too large");
-  }
+  const path = new URL(request.url).pathname;
+  const limit = path === "/api/ai/workspace" ? 2 * 1024 * 1024 + 4096 : path === "/api/ai/chat" ? 1600 * 1024 : 768 * 1024;
+  if (Number(request.headers.get("Content-Length")) > limit) throw new RangeError("API request body is too large");
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel(); throw new RangeError("API request body is too large"); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
   return new Request(request.url, {
     method: request.method,
     headers: request.headers,

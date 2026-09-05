@@ -14,12 +14,14 @@ import {
   CheckCheck,
   ChevronRight,
   ClipboardCheck,
+  Coins,
   LogOut,
   MessageCircle,
   Network,
   RotateCcw,
   ShieldCheck,
   Shirt,
+  Sparkles,
   UsersRound,
   Wifi,
   WifiOff,
@@ -85,15 +87,19 @@ import {
 export type AppView =
   | "home"
   | "relations"
+  | "ai"
   | "boss"
   | "admin"
+  | "admin-ai"
   | "lora-chain";
 
 const PAGE_TITLES: Record<AppView, string> = {
   home: "我的任务",
   relations: "客户脉络图",
+  ai: "同频 AI",
   boss: "全员进度",
   admin: "账号与权限",
+  "admin-ai": "AI 管理",
   "lora-chain": "LORA 链驾驶舱",
 };
 
@@ -1112,6 +1118,11 @@ export function AppShell({
           label: "账号与权限",
           icon: ShieldCheck,
         },
+        {
+          view: "admin-ai" as const,
+          label: "AI 管理",
+          icon: Coins,
+        },
       ];
     }
     return [
@@ -1126,6 +1137,11 @@ export function AppShell({
               view: "relations" as const,
               label: "客户脉络图",
               icon: Network,
+            },
+            {
+              view: "ai" as const,
+              label: "同频 AI",
+              icon: Sparkles,
             },
           ]
         : []),
@@ -1245,6 +1261,7 @@ export function AppShell({
         isLaneHome ? "app-frame--lane-home" : "",
         view === "home" ? `home-layout-${homeLayout}` : "",
         view === "relations" ? "app-frame--relations" : "",
+        view === "ai" ? "app-frame--ai" : "",
         view === "lora-chain" ? "app-frame--lora-chain" : "",
       ]
         .filter(Boolean)
@@ -1312,7 +1329,7 @@ export function AppShell({
       </aside>
 
       <section className="app-content">
-        {view !== "relations" ? (
+        {view !== "relations" && view !== "ai" ? (
           <header
             className={[
               "topbar",

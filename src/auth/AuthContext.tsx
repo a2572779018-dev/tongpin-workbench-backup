@@ -15,6 +15,7 @@ import {
 } from "../lib/api";
 import { normalizeSession, normalizeUser } from "../lib/user";
 import type { Session, User } from "../types";
+import { flushAiBeforeLeave } from "../features/tongpin-ai/workspaceLeaveGuard";
 
 const SESSION_KEY = "tongpin.session.v1";
 
@@ -98,13 +99,14 @@ export function AuthProvider({ children }: PropsWithChildren) {
       body: JSON.stringify({ refreshToken: current.refreshToken }),
     })
       .then(async (next) => {
+        if (sessionRef.current !== current) return null;
         const normalized = normalizeSession(next);
         await setSession(normalized);
         return normalized;
       })
       .catch(async (error) => {
         if (isNetworkUnavailable(error)) throw error;
-        await setSession(null);
+        if (sessionRef.current === current) await setSession(null);
         return null;
       })
       .finally(() => {
@@ -124,6 +126,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
       if (!current) {
         throw new ApiRequestError(401, "AUTH_REQUIRED", "请先登录");
       }
+      const requestAccountId = current.user.id;
+      const boundAccount = new Headers(init.headers).get("X-Tongpin-Account");
+      if (boundAccount !== null && boundAccount !== requestAccountId) {
+        throw new ApiRequestError(409, "AI_ACCOUNT_CHANGED", "账号已切换，请重新打开工作台");
+      }
 
       try {
         return await publicRequest<T>(
@@ -141,8 +148,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         if (!(error instanceof ApiRequestError) || error.status !== 401) {
           throw error;
         }
+        if (sessionRef.current?.user.id !== requestAccountId) throw error;
         current = await refresh();
-        if (!current) throw error;
+        if (!current || current.user.id !== requestAccountId) throw error;
         return publicRequest<T>(
           path,
           {
@@ -219,6 +227,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const logout = useCallback(async () => {
     const current = sessionRef.current;
+    if (current && !(await flushAiBeforeLeave(current.user.id))) return;
+    if (sessionRef.current?.user.id !== current?.user.id) return;
     if (window.tongpin?.relationshipGraph) {
       try {
         const flushed = await window.tongpin.relationshipGraph.flushCurrent();
@@ -227,6 +237,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         return;
       }
     }
+    if (sessionRef.current?.user.id !== current?.user.id) return;
     if (current) {
       try {
         await publicRequest("/api/auth/logout", {
@@ -237,6 +248,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         // 即使服务器不可达，也必须清理本地会话。
       }
     }
+    if (sessionRef.current?.user.id !== current?.user.id) return;
     await setSession(null);
   }, [setSession]);
 

@@ -1,369 +1,97 @@
-# LORA 链驾驶舱 UI 对接与数据刷新 QA（2026-08-30）
+# 同频 AI 工作台设计验收
 
-## 视觉真值与实现证据
+## 最新验收：2026-09-05 恢复黄白视觉
 
-- 用户视觉 token：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-4e456bb7-2662-4137-ae06-35802fecb247.png`。
-- 用户完整 HTML 设计稿：`/Users/sam/.codex/attachments/f2535135-a733-4346-982a-fbc3cafdffdc/pasted-text.txt`。
-- 桌面首屏：`output/lora-dashboard-preview/desktop-final-top-1440x900.png`。
-- 桌面明细与健康状态：`output/lora-dashboard-preview/desktop-final-bottom-1440x900.png`。
-- 1280×720：`output/lora-dashboard-preview/desktop-final-1280x720.png`。
-- 700×900 与 390×844：`output/lora-dashboard-preview/narrow-final-700x900.png`、`output/lora-dashboard-preview/phone-final-390x844.png`。
+用户明确否定暗色方案。本轮恢复原来的暖白背景、柔黄按钮、深色文字和同频描边，
+仅保留缩小后的同频金属 Logo、液态球与低强度浅色输入框光效。
+未修改项目、对话、权限、额度与请求逻辑。
 
-## 视觉与交互结论
-
-- 2.5px 墨黑描边、5px/3px 硬投影、Archivo + Space Mono、薄荷/紫/黄/粉/绿五色 KPI 均与设计 token 一致；未使用渐变、柔和阴影、手绘 SVG 或字符图标。
-- KPI 为 5/3/2 列响应式；趋势为 3/2/1 列；明细表在窄屏改为单列并支持键盘聚焦与横向滚动。
-- 1440×900、1280×720、700×900、390×844 均无文档级横向溢出；桌面主状态、KPI、趋势、明细和健康状态完整可访问。
-- 地址恢复值显示为 `≈` 与“恢复后估算”，不会再出现含糊的“无日基线”；stale、unavailable、config-error 分别显示缓存、不可用和配置错误。
-- 价格状态按正常、缓存、采集中、缺失、不可用和配置错误分别显示，不再出现“暂无可信价格”同时写“1 LRB = USDT”的矛盾。
-- 刷新按钮连续点击的浏览器实测为 `≈18 / 420 → ≈19 / 421 → ≈20 / 422`；POST 返回的新快照直接进入页面，推送也直接复用 payload，较晚返回的旧轮询不会覆盖新数据。
-- Swap 完成扫描但没有超过 100 LRB 的记录时显示“暂无 Swap”，不再永久停在“采集中”。
-- 浏览器运行时 warning/error：0。
-
-## 数据链路结论
-
-- RPC、Explorer 与采集器健康状态来自最新聚合快照；Cron 改由 Durable Object 私有采集路由执行，公网同路径返回 404，定时和手动刷新共享同一个进行中的采集任务。
-- 旧 v1 聚合快照仅在 v2 缺失时迁移一次；真实 13.99 MB 旧快照已做只读迁移演练，压缩至 2.08 MB，并保留 checkpoint、累计燃烧/确认数、877038 地址及地址基线。
-- pending 内部交易只保留上海当日、去重并限制 5000 条；Swap 优先采集并使用真实 Blockscout 字符串块高解析。
-- 普通 API 仍保持短超时，LORA 手动刷新单独覆盖完整采集最坏时长；失败仍显示明确错误。
-- 驾驶舱严格只允许老板角色：管理员和成员均无导航入口，桌面动作与实时更新不会打开该页面，本地 Express API 与 Cloudflare API 均返回 403。
-
-## 比较与验证历史
-
-- 第 1 次视觉对照发现地址状态、刷新状态、旧响应覆盖、价格副文案、窄屏换行和趋势图表达问题，均已修复。
-- 第 2 次同屏对照确认边框、硬投影、五色 KPI、字体与贴纸式交互符合 token；未发现新的 P0/P1/P2 视觉问题。
-- 59 个测试文件、310 项测试通过；主工程与 Cloudflare 类型检查通过；Web/API 构建与 Wrangler dry-run 通过；`git diff --check` 通过。
-- 本节记录发布前代码、构建与本地预览门禁；Worker 部署、双平台安装包和公网更新清单需在发布阶段单独核验。
+视觉源：`design-qa/ai-layout-20260905/05-final-desktop.png`。
+本轮实景：`design-qa/ai-light-20260905/desktop.png`。
+完整比较与检查见 [浅色恢复验收](design-qa/ai-light-20260905/report.md)。
+3 个定向测试文件共 15 项通过，类型检查、生产构建与差异检查通过。
 
 final result: passed
 
----
+## 历史验收：2026-09-05 AI 暗色实验（已撤回）
 
-# LORA 链驾驶舱视觉 QA（历史版本）
+本轮采用 AI 专属深灰、冷银和蓝紫视觉，保留待办与客户图的现有主题。
+详细来源、许可、截图比较、修复项和交互复验见
+[AI 金属视觉验收](design-qa/ai-metal-20260905/report.md)。
 
-## 对照
+最新验证：68 个测试文件、376 项测试通过；类型检查、Web 构建和差异检查通过。
+当前模型与额度服务仍未连接，页面不再使用下方历史演示记录中的虚构回复、点数或成果。
+本次只完成本地视觉集成，没有上线或打包发布。最新视觉验收结论：passed。
 
-- 参考：用户提供的 1440×900 实际界面截图。
-- 实现：`output/lora-dashboard-1440x900.png` 与 `output/lora-dashboard-1280x720.png`。
+以下保留历史交互验收记录；与本节不一致的阶段性演示描述不代表当前能力。
 
-## 检查结果
+## 验收范围
 
-- 配色：页面使用纯黄色 `#FFD84D` 背景与纯白色 `#FFFDF7` 卡片；深墨色仅用于文字与边框，不使用灰色蒙层。
-- 层级：KPI、图表、表格和状态区通过黄色填充、白色卡片、边框与线型区分，无渐变、透明滤镜或灰色卡片。
-- 文案：删除重复的时区、区间和数据源解释，只保留指标名、数值、必要状态及明细字段。
-- 信息密度：六项 KPI、三张图、两张明细表和底部健康状态均保留。
-- 适配：1280×720 与 1440×900 均无横向溢出；主要图表在首屏；表格内部滚动。
-- 数据：完整指标显示最终值；首轮回填中的交易、活跃地址、Gas 与大额统计显示已采集下限值并加 `+`，不再整块隐藏为“同步中”。
-- 运行：35 个测试文件 176 项通过，前后端类型检查、Web/API 构建与 Cloudflare dry-run 通过。
+- 设计基准：同频现有黄白黑视觉、用户提供的侧栏问题截图，以及已确认的三栏 AI 工作台方向。
+- 实现页面：`src/pages/TongpinAIPage.tsx` 与 `src/features/tongpin-ai/`。
+- 本轮状态：项目/普通对话分组、新建命名弹窗、项目菜单、重命名、删除确认、普通对话底部吸附、左下角账号额度入口。
+- 最终交互复验视口：Codex 内置浏览器 `1023 × 933 px`。
 
-## 遗留
+## 对比证据
 
-- 今日新增链上地址在缺少当日零点快照时仍显示“无日基线”，避免伪造数字。
+- 用户问题截图归一化：`design-qa/source-user-sidebar-bug-normalized.jpg`
+- 旧问题与修正后同屏：`design-qa/sidebar-bug-fix-comparison.jpg`
+- 收起后底部吸附同屏：`design-qa/sidebar-docked-comparison.jpg`
+- 新对话命名弹窗：`design-qa/implementation-new-conversation-dialog.png`
+- “是否新建项目”确认弹窗：`design-qa/implementation-project-create-confirmation.png`
+- 项目操作菜单：`design-qa/implementation-project-context-menu.png`
+- 删除确认弹窗：`design-qa/implementation-project-delete-confirmation.png`
+- 项目菜单与删除确认并排：`design-qa/project-management-flow-comparison.jpg`
+- AI 逐字回复中：`design-qa/implementation-ai-typewriter-midstream.png`
+- 头像额度悬浮层：`design-qa/implementation-account-quota-hover.jpg`
+- Token 使用详情：`design-qa/implementation-token-usage-dialog.jpg`
 
-final result: passed
+说明：内置浏览器导出的图像实际为 JPEG 编码；扩展名沿用采集文件名，像素尺寸与编码已用 `file`、`sips` 核验。
 
----
+## 设计与逻辑检查
 
-# 客户脉络顶部空间、通知入口与右上角快捷待办 QA
+### 信息架构
 
-## 对照与规格化
+- 成员主导航保持“我的任务 → 客户脉络图 → 同频 AI”。
+- 成员端不显示管理员额度或开源底座对比；管理员额度继续受管理员角色保护。
+- 项目与普通对话分组独立；项目对话只显示在所属项目下。
+- 普通对话展开时位于项目列表后；收起时吸附在侧栏底部、账号入口上方。
+- 账号头像位于 AI 侧栏左下角；悬浮显示额度摘要，点击进入 Token 使用详情。
 
-- 源视觉真值：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-d5f66b29-687d-4484-846b-992cf0d71415.png`，2880×1840，按 2× 密度归一化为 `artifacts/customer-map-toolbar/reference-1440x920.png`，1440×920。
-- 身份标签源视觉：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-896d134d-497f-43cb-81d4-aefed8ec0db0.png`，2880×1840，按 2× 密度归一化为 `artifacts/customer-map-toolbar/reference-editor-1440x920.png`。
-- 浏览器实现：`artifacts/customer-map-toolbar/customer-map-toolbar-1440x920.png`，CSS 视口 1440×920，截图 1440×920；`artifacts/customer-map-toolbar/customer-map-toolbar-1280x720-final.png`，CSS 视口 1280×720，截图 1280×720。
-- 身份编辑实现：`artifacts/customer-map-toolbar/identity-label-editor-1440x900.png`，CSS 视口与截图均为 1440×900。
-- 快捷入口实现：`artifacts/customer-map-toolbar/quick-corner-top-right-240x160.png`，CSS 视口与截图均为 240×160。
-- 全景同屏对照：`artifacts/customer-map-toolbar/reference-vs-toolbar-2880x920.png`；左侧为归一化源界面，右侧为实现。
-- 重点区域同屏对照：`artifacts/customer-map-toolbar/reference-vs-identity-label-1520x160.png`；左侧为“黄色 · 一级关系”，右侧为移除颜色前缀后的身份定义。
-- 状态：同频主题、成员账号、横向客户脉络、默认折叠分支；身份标签重点图为林澜编辑态。源图与实现使用不同数量的本地客户数据，因此只比较本次要求的顶部结构、控件位置和标签表达，不将节点数量视为视觉差异。
+### 项目与对话
 
-## Findings
+- “新项目”先显示“是否新建项目？”并要求输入名称；普通/项目内新对话也先打开命名弹窗。取消、Esc 或点击遮罩不会写入记录。
+- 项目创建后为空，不自动创建对话；项目内对话只有确认名称后才写入并聚焦输入框。
+- 项目行支持右键，同时提供可见“…”菜单，包含“重命名”和危险色“删除项目”。
+- 重命名预填原名称；保存后侧栏和项目页标题同步更新，不改变项目内对话。
+- 删除项目必须二次确认。遵循安全语义：项目内对话移入普通对话，对话内容及成果不删除。
+- 删除含对话项目后，当前对话继续可用、项目归属清空，普通对话计数同步增加。
 
-- 未发现 P0/P1/P2 问题。关系页外层重复标题与独立铃铛行已移除，图内工具栏直接承接导航下方空间；铃铛与导入、导出、换肤、隐私按钮同组且未造成 1280×720 或 1440×920 的横向重叠。
-- 字体与排版：沿用同频原有字体、字号、粗细和单行工具栏层级；新增铃铛使用现有图标库与 44px 图标按钮规格，无额外文案换行。
-- 间距与布局节奏：删除约 3.25rem 的冗余 topbar 轨道，画布从导航后直接开始；图内 header、搜索框和操作组的间距保持原设计系统。
-- 颜色与视觉 token：铃铛沿用现有米白、黄色、黑色描边和硬阴影；未读角标复用关系图的危险提示 token，没有引入新配色。
-- 图像与资产：本次没有新增或替换位图、Logo 或人物素材；铃铛和快捷待办继续使用项目既有图标库，清晰度与原按钮一致。
-- 文案与内容：身份选择项只显示“一级关系 / 合伙人”等当前固定含义，不再重复“黄色 ·”；色点仍保留颜色识别，“黄色固定含义”编辑字段继续承担全图颜色语义设置。
+### 对话、成果与额度
 
-## 交互与平台检查
+- 导航不会静默取消正在生成的回复；延迟回复仍写回原对话，不会强行打开到另一条对话。
+- AI 新回复从思考状态进入逐字显示状态，并带 BB 机式闪烁光标；完成后才挂载成果卡。
+- 新生成成果带有 `conversationId` 和可选 `projectId`，不再让所有对话共用同一个成果。
+- 快速模式每次 12 点、深度模式每次 24 点；当前余额不足对应模式成本时禁用发送并给出一致提示。
+- PPT 生成与图片生成仅位于输入框“+”菜单，Skill 数量来自实际 Skill 数据。
+- 管理员额度示例接收者仅为成员，不再给老板角色分配成员 AI 额度。
 
-- 点击图内铃铛已实际打开消息中心，关闭后仍回到原关系图状态。
-- 客户详情和编辑弹窗的身份下拉均通过可见 DOM 验证，只出现语义文本；合作状态、性别、手机号、微信号等既有字段保持不变。
-- 右上角快捷入口的触发区、小角窗和 380×500 快捷面板都按可用桌面区域定位；策略测试覆盖 Windows 顶部/底部/右侧任务栏、macOS 菜单栏和负坐标副屏。
-- 快捷角 `open-panel` IPC 仅显示并聚焦快捷待办窗；只有快捷窗底部显式“打开完整同频”路径才调用主窗恢复。该边界已加入回归测试。
-- Windows 自定义最小化路径隐藏主窗口并从任务栏移除，托盘点击或“打开同频”恢复；关闭按钮仍走原关系图保存/退出流程。当前主机为 macOS，Windows 托盘的真实系统外观与任务栏行为仍需在发布前用 Windows 安装包做一次实机确认。
-- 浏览器控制台 warning/error：0。
+### 视觉与可访问性
 
-## 比较历史
+- 延续粗黑描边、轻投影、奶油黄与暖白主色；弹窗、菜单、危险操作均沿用同频视觉语言。
+- 命名弹窗使用 `role="dialog"`，删除确认使用 `role="alertdialog"`；两者具备焦点圈定、Esc 关闭和明确标签。
+- 项目菜单支持键盘方向键、Home、End 与 Esc；点击外部、滚动和窗口变化会关闭。
+- 同屏检查确认：项目、普通对话、账号入口无重叠；弹窗未裁切；按钮、输入框和危险状态层级清楚。
+- 浏览器控制台复验无错误或警告。
 
-- 第 1 次同屏比较即无 P0/P1/P2 视觉问题；未因 QA 比较追加视觉修复。源码实现前的已知目标差异为：删除外层重复标题行、把铃铛并入图内工具栏、移除身份下拉的颜色名前缀、把快捷角移到右上；上述差异均已在实现证据中消除。
+## 验证结果
 
-## 自动化与构建
-
-- TypeScript 类型检查通过。
-- 57 个测试文件、290 项测试全部通过。
-- Renderer 与 API 生产构建通过。
-- `git diff --check` 与 Electron 主进程语法检查通过。
-- 本报告对应 v0.1.28 发布候选；安装包、上传和公网更新清单另按正式发布门禁验证。
-
-final result: passed
-
----
-
-# 客户身份颜色与性别视觉 QA
-
-## 视觉证据
-
-- 源界面：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-37c26fbd-f58e-45bb-be9e-e871fa0c0675.png`，原始 2880×1840。
-- 实现详情态：`artifacts/customer-identity-colors/identity-color-detail-1440x900.png`，1440×900。
-- 实现编辑态：`artifacts/customer-identity-colors/gender-color-editor-1440x900.png`，1440×900。
-- 并排比较：`artifacts/customer-identity-colors/source-vs-implementation.png`，2880×900。
-- 比较状态：同频主题、金字塔布局、二级客户吴衡展开；实现额外打开客户详情，以验证身份色与层级解耦。
-
-## 可见结果
-
-- 黄色不再代表一级关系：二级客户吴衡可设为黄色，并立即显示为“合伙人”，树层级和连线位置不变。
-- 颜色含义为图谱级固定语义；编辑页可设置“黄色固定含义”，同色客户统一更新。
-- 编辑客户新增性别下拉，仅有男、女两个有效值；旧数据无性别时保持空值，不阻塞编辑。
-- 上传照片保持正圆裁切，使用身份色圆环，无黑色偏移阴影。
-- 中心“我”继续保持黑底黄影与“关系中心”，不参与客户身份颜色。
-- 原版风格继续使用黑白节点；同频风格才显示身份色。
-- 隐私模式的界面与导出均不显示身份含义、性别、头像或联系方式。
-
-## 交互与布局验收
-
-- 详情页切换身份色立即生效并持久化；导入、导出和本机恢复均保留全局颜色含义及每位客户的颜色。
-- 修改颜色、性别、备注或合作状态不会触发整图 `fitView`；浏览器实测切换蓝色再切回黄色时 viewport transform 完全一致。
-- 新增/删除关系、横向与金字塔切换、展开与收起仍会正常重排。
-- 1440×900 无横向溢出；详情卡片内部滚动，不挤压主图控制区。
-
-## 自动化验证
-
-- 全量测试：56 个文件，280 项通过。
-- Typecheck：通过。
-- Web 与 API 生产构建：通过。
+- TypeScript：通过。
+- Vitest：65 个测试文件、372 项测试通过。
+- Web 生产构建：通过。
 - `git diff --check`：通过。
+- 当前阶段仍是本地前端交互；LibreChat、模型调用、持久化与服务端原子额度扣减尚未接入，本报告不将其视为已完成。
 
-final result: passed
+## 最终结论
 
----
-
-# 已合作客户脉络图与任务刷新 QA
-
-## 视觉证据
-
-- 原始关系图参考：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-f36846e2-5936-4dbd-84ca-87a5ea3b3052.png`。
-- 连线问题标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-22729394-d74e-41d8-8b9a-5f2f10874ad4.png`。
-- 金字塔第二层重叠标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-102f5de5-de51-4537-97cb-76d4774e9b31.png`。
-- 头像变形标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-1664b22a-7b42-42da-b360-365eca657d38.png`。
-- 头像黑色错位投影标注：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-68199e41-3287-43f5-83df-2115fc436f9e.png`。
-- 横向完整预览：`output/customer-map-horizontal-trunk-1440x900.png`。
-- 展开唐婕预览：`output/customer-map-expanded-trunk-1440x900.png`。
-- 金字塔预览：`output/customer-map-pyramid-1440x900.png`。
-- 金字塔修复预览：`output/customer-map-pyramid-clean-tongpin-1440x900.png`。
-- 1280×720 预览：`output/customer-map-horizontal-1280x720.png`。
-- 原版灰色皮肤：`output/customer-map-original-1440x900.png`。
-- 参考与实现同屏对照：`output/customer-map-reference-comparison.png`、`output/customer-map-trunk-comparison.png`。
-- 金字塔修复前后同屏对照：`output/customer-map-pyramid-before-after.png`。
-- 头像无投影完整预览：`output/customer-avatar-no-shadow-tongpin-1440x900.jpg`；局部前后对照：`output/customer-avatar-shadow-before-after.png`。
-- 客户状态参考：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-c336f902-dcf2-4640-9c9a-96be0ce0f903.png`；完整预览：`output/customer-status-lines-clean-tongpin-1440x900.jpg`；编辑预览：`output/customer-status-edit-form-1440x900.jpg`；图例对照：`output/customer-status-legend-before-after.png`。
-
-## 视觉检查
-
-- 默认横向树以一条中心主干统一分叉，消除了首尾客户的大弧线和交叉绕线；下级客户沿父客户右侧继续使用相同的主干分叉规则。
-- 折叠分支显示未展开人数；展开后人数消失，只保留小型收起箭头。
-- 同频皮肤按层级使用黄色、蓝色、粉色、绿色；原版灰色皮肤未被层级颜色覆盖。
-- 顶部搜索、新增客户、导入、导出、换肤和隐私按钮在 1280×720、1440×900 均不重叠，无横向溢出。
-- 横向和金字塔两种自动排列均完整显示；长层级留在画布内缩放，不增加页面滚动。
-- 金字塔按客户子树独立排位：单个下级垂直对齐，多个下级只在自己的上级下方分叉，不再把不同上级的第二层客户合并到同一条横线上。
-- 上传头像固定为等宽等高的正方形裁切区，再使用圆形遮罩与 `object-fit: cover` 居中裁切，不会被节点布局拉成长扁形。
-- 实际上传头像移除节点的错位黑色投影，默认字母头像、中心头像和展开按钮继续保留原有层次；悬停、选中和搜索命中状态也不会重新加回头像投影。
-- 图例使用“已合作客户 / 待合作客户”；公共主干保持实线，仅客户末端线段按合作状态切换实线或虚线。
-
-## 交互检查
-
-- 点击折叠客户可展开并聚焦其下级客户；唐婕展开后显示罗可、徐妍两个蓝色二级客户且不再显示数字 2。
-- 搜索折叠分支中的宋晴会自动展开祖先路径并显示 1 个结果。
-- 新增客户表单保留手机号、微信号、标签和合作记录，支持选择现有客户作为上级或暂不连接。
-- 拖动未连接客户到现有客户附近可建立连接；调整已有客户主连接前必须确认。
-- 任务板实时同步和新建任务后的刷新改为保留现有卡片的静默更新，仅首次加载显示骨架屏，避免整列卡片闪烁。
-- 客户详情编辑可在“已合作客户 / 待合作客户”之间切换，保存后详情文本和图中线型即时同步；旧数据默认迁移为“已合作客户”，状态继续使用成员隔离的本地加密存储。
-
-## 验证结果
-
-- TypeScript 类型检查通过。
-- 53 个测试文件、252 项测试通过；新增横向/金字塔布局、分支连线、头像圆形裁切、头像无投影、客户合作状态实时线型和任务静默刷新回归测试。
-- Renderer 和服务端生产构建通过。
-- 当前仅提供本地预览，未修改版本号、未制作安装包、未发布更新。
-
-final result: passed
-
----
-
-# 人物关系爆炸双风格集成 QA
-
-## 视觉证据
-
-- 原关系程序当前源码：`output/relationship-current-source-1440x1024.png`。
-- 原源码与同频适配并排对照：`output/relationship-qa-current-source-side-by-side.png`。
-- 同频风格最终预览：`output/relationship-final-tongpin-1440x900.png`。
-- 同频风格小屏预览：`output/relationship-final-tongpin-1280x720.png`。
-- 原版风格最终预览：`output/relationship-final-original-1440x900.png`。
-- 同频主导航内嵌状态：`output/relationship-preview-embedded-1280x590-after-fit.png`。
-
-## 视觉检查
-
-- 默认使用同频黄色、米白和黑色体系；节点层级继续用同频任务板已有等级色，未套灰色滤镜。
-- 右上角衣服按钮可在同频风格与原版冷灰黏土风格之间切换，按钮图标、圆角、描边和阴影均沿用对应主题。
-- 1440×900、1280×720 和主导航内嵌高度均完整显示图谱、筛选、缩放、图例和布局按钮；无横向或页面纵向溢出。
-- 长工具栏在 1280 宽度仍保持单行可用，人物节点、关系曲线和控制区没有裁切。
-
-## 交互与权限检查
-
-- 关系入口仅 member 可见；boss/admin 保持原页面和功能，不加载关系模块。
-- 同频 `AppShell`、铃铛、Socket 实时通知和强提醒始终位于关系模块外层，切换页面不会中断。
-- 两套主题在本机记忆；刷新后保持上次选择。
-- 新增人物、人物详情、新增/编辑/删除关系、搜索、筛选、布局切换、导入、导出、报告和隐私模式均保留。
-- 键盘打开林澜快捷卡后焦点落到“查看完整详情”；关闭详情后回到原按钮；取消新增关系后回到快捷卡新增按钮。
-- Shadow DOM 内的焦点查询、GSAP 节点查询和自定义光标均限定在关系模块范围；关系模块异常由局部错误边界接住，不卸载通知外壳。
-- 关系数据按当前已验证成员账号写入系统加密存储，不在生产 Renderer 的 localStorage 保存正文。
-- 隐私关系数据导出会重编号人物，并移除姓名、原始 ID、联系方式、头像、分组、标签、自由文本备注、精确指标、坐标和全部真实连线；隐私报告不复用用户输入，也不保留小团队精确计数。
-
-## 构建与回归
-
-- TypeScript 类型检查通过。
-- 49 个测试文件、231 项测试全部通过。
-- Renderer 生产构建与服务端生产构建通过。
-- 正式 Renderer 只生成 `index.html`，预览专用 `relationship.html` 不进入生产包。
-- 最终预览浏览器无 warning/error；`git diff --check` 通过。
-
-final result: passed
-
----
-
-# 登录页视觉跟随预览 QA
-
-## 视觉证据
-
-- 现有登录页对照：`artifacts/login-preview/reference-current-login.png`，1269×714。
-- 新版默认状态：`artifacts/login-preview/preview-login-motion.png`，1269×714。
-- 密码隐私状态：`artifacts/login-preview/preview-password-privacy.png`，1269×714。
-- 同屏对照：`artifacts/login-preview/login-visual-comparison.png`。
-- 密码动作对照：`artifacts/login-preview/password-visual-comparison.png`。
-- 响应式检查：`artifacts/login-preview/preview-900x900.png` 与 `artifacts/login-preview/preview-520x900.png`。
-
-## 视觉检查
-
-- 保留原登录页双栏、品牌标题、工作日票据、右侧表单、字号、边框和硬阴影；只在右侧邮箱输入框上方增加极简 Bot。
-- Bot 使用两张透明 PNG 实体素材：默认姿势双手趴住邮箱框上沿，密码姿势双手抬起并完整遮住双眼；沿用黄色、米白、粉色和墨色。
-- 不显示气泡、状态解释、隐私图标或额外小字；具体错误仍由原表单呈现。
-- 1269×714、900×900、520×900 均无页面横向溢出；账号下拉未被遮挡或裁剪。
-
-## 交互检查
-
-- 鼠标从左侧移到右侧时，Bot 以双手为支点轻微转头，眼睛跟随鼠标；不再上下悬浮。触屏和 `prefers-reduced-motion` 路径会关闭跟随动画。
-- 邮箱获得焦点并输入完整地址后，提示切换为“邮箱格式没问题”。
-- 密码框获得焦点后，Bot 双手遮眼；离开密码框后恢复趴在邮箱框上的默认姿势。显示密码按钮保持原功能和焦点语义。
-- 密码姿势在第二轮视觉复核中下移 15.2px，机身下沿已与邮箱框上沿贴合，不再呈现悬空间隔；默认姿势位置不变。
-- 历史账号下拉可打开并显示空状态；注册、返回登录和找回密码页面均可进入。
-- 登录提交、账号安全存储、会话恢复、注册验证和找回密码逻辑未改动。
-- 生产构建预览无浏览器 warning/error。
-
-## 验证结果
-
-- TypeScript 类型检查通过。
-- 43 个测试文件、206 项测试全部通过。
-- Vite 生产构建通过。
-- 视觉预览通过后进入 0.1.23 正式发布流程。
-
-final result: passed
-
----
-
-# 快捷待办等级配色与热角行为 QA
-
-## 视觉证据
-
-- 源视觉真值：`/var/folders/64/2mdd5r1x1zn8rwnnf90vx3mc0000gn/T/codex-clipboard-25656e7a-5989-443e-97c9-4a0984a7499d.png`，3008×2084。
-- 源快捷窗裁剪：`artifacts/quick-task-priority-source-crop.png`，从原图 760×1000 区域归一化为 380×500。
-- 实现截图：`artifacts/quick-task-yellow-row-preview.png`，Electron CSS 视口 380×500，截图密度 1×。
-- 并排对照：`artifacts/quick-task-yellow-row-comparison.png`，776×500。
-- 状态：P2 默认选中；预览数据覆盖 P0 至 P4，P4 为已完成状态。
-
-## 视觉检查
-
-- 任务卡片：P0 红、P1 粉、P2 黄、P3 蓝、P4 灰；已完成任务保持绿色卡片，等级标签继续显示其等级色。
-- 等级按钮：P0 至 P4 恢复统一浅黄色，当前选中项为黑底白字；任务卡片继续按等级分色。
-- 字体、间距、窗口尺寸、圆角、阴影、图标、按钮位置和既有文案均未改变。
-- “按轻重缓急”未重新加入；无新增解释文字、渐变或横向溢出。
-- 380×500 完整视图中创建区、等级按钮、任务列表和底部操作均保持可见，长列表继续在卡片内部滚动。
-
-## 交互检查
-
-- 点击 P0 后新建测试待办，新增卡片正确显示为 P0 红色并进入列表。
-- 刷新预览后 fixture 状态正确恢复；页面无浏览器脚本错误。
-- 黄色热角、快捷窗、Dock 与“打开完整同频”的激活路径由纯策略测试覆盖：热角只开快捷窗，快捷窗内激活不拉起主窗，Dock 仍可恢复主窗。
-- Windows 使用可用桌面区域定位热角，底部、左侧或右侧任务栏都不会遮挡黄色小角。
-- 正式发布前保留一次打包后 macOS 实机热角回归作为发布门槛。
-
-## 比较历史
-
-- 第 1 次：修复全部黄色后，P0 至 P4 的按钮、卡片和标签已与主任务板颜色一致；未发现 P0、P1 或 P2 视觉问题。
-- 第 2 次：修复热角激活边界，避免快捷窗聚焦状态长期阻止 Dock 打开主窗；视觉未受影响。
-- 第 3 次：按确认稿将横排等级按钮恢复为统一黄色和黑色选中态，重新以 380×500 截图并排复核；任务卡片继续保留五档等级色，无 P0、P1 或 P2 视觉问题。
-
-final result: passed
-
----
-
-# 右下角快捷待办视觉 QA
-
-> 历史记录：此右下角入口方案已由“客户脉络顶部空间、通知入口与右上角快捷待办 QA”中的右上角方案替代。
-
-## 视觉证据
-
-- 源视觉真值：`/Users/sam/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_x1df3i4xrg3822_ca3f/msg/video/2026-08/c3763c323ccaa7adf09b0de6149a7ef3.mp4`
-- 源弹窗帧：`/tmp/tongpin-corner-video.HFJNjG/key-5.2.jpg`，720×1280；手机拍摄的 Quick Note 打开态，密度未知。
-- 源热角裁剪：`output/hot-corner-preview/reference-corner-160.png`，160×160。
-- 实现弹窗：`output/hot-corner-preview/quick-task-panel-380x500.png`，380×500；Electron CSS 视口 380×500，截图密度 1×。
-- 实现热角裁剪：`output/hot-corner-preview/quick-corner-240.png`，240×240；来自 3420×2214 桌面截图的右下角裁剪。
-- 状态：源与实现均为右下角入口已出现、点击后浮窗打开；实现内容按需求替换为今日待办。
-- 归一化：源视频存在透视、拍摄缩放和未知像素密度，因此不做像素级缩放对齐；按相同交互状态比较窗口占位、锚点、层级和出现方式。
-
-## 完整视图比较
-
-- 源与实现都无遮罩，浮窗固定在右下角并独立覆盖桌面内容。
-- 源 Quick Note 窗口更大；实现采用用户指定的小尺寸 380×500，不占用过多桌面，属于明确的产品约束而非偏差。
-- 实现保留圆角、浅色表面、清晰阴影和即时聚焦输入，层级与参考一致。
-
-## 聚焦区域比较
-
-- 热角入口单独裁剪对比：参考约 32–40px 浅色圆角角标；实现为 42px 黄底圆角角标，锚点、显隐占位与点击目标一致，颜色沿用同频黄色品牌色。
-- 弹窗内容单独检查：标题、输入、优先级、任务列表、滚动条、关闭和打开完整同频均完整可见；卡片内部滚动，不扩大窗口。
-
-## 必查项
-
-- 字体与层级：沿用 Space Grotesk、DM Mono 和系统中文回退；标题、日期、任务和辅助信息权重清楚，无异常换行。
-- 间距与节奏：380×500 内头部、创建区、列表和底部操作分区稳定；无横向溢出，长列表只在卡片内部滚动。
-- 色彩与令牌：沿用完整任务板的 P0 红、P1 粉、P2 黄、P3 蓝、P4 灰与完成态绿色；无渐变。
-- 图标与资源：入口、待办、完成、关闭、添加均使用 Lucide 图标；无手绘 SVG、字符图标或占位图。
-- 文案与内容：只保留新建待办、优先级、待完成数量和任务标题，没有大段说明小字。
-
-## 交互验收
-
-- P0 新建待办可提交，并立即按优先级进入列表顶部。
-- 完成待办后自动移至列表底部，待完成数量同步减少。
-- 鼠标滚轮可浏览全部今日待办，底部按钮保持固定。
-- 关闭按钮可隐藏小窗；热角命中、150ms 停留、离开收起和多显示器边界由纯策略测试覆盖。
-- Electron 预览控制台和终端未出现渲染错误。
-
-## 比较历史
-
-- 第 1 次：同一交互状态对照未发现可执行的 P0、P1 或 P2 视觉问题；未因 QA 结果修改视觉实现。
-
-## 遗留
-
-- 参考视频为手机透视拍摄，无法做精确的字体与像素密度一比一测量；该限制不影响热角位置、窗口层级和交互节奏判断。
-
-final result: passed
+passed
