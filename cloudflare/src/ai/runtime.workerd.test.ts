@@ -118,8 +118,15 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     expect(tables.map(item => item.name)).toEqual(expect.arrayContaining(["ai_settings", "ai_quotas", "ai_requests", "ai_usage", "ai_workspaces", "ai_assets", "ai_asset_chunks"]));
     await api<ErrorBody>("/api/admin/ai/provider", member, undefined, "GET", 403);
     await api<ErrorBody>("/api/ai/status", admin, undefined, "GET", 403);
-    expect((await api<AiStatus>("/api/ai/status", member)).quota.remainingTokens).toBe(0);
-    await api<ErrorBody>("/api/ai/chat", member, requestBody(), "POST", 503);
+    expect(await api<AiStatus>("/api/ai/status", member)).toMatchObject({ accessGranted: false, quota: { remainingTokens: 0 } });
+    const denied = await api<ErrorBody>("/api/ai/chat", member, requestBody(), "POST", 403);
+    expect(denied.error.code).toBe("AI_ACCESS_NOT_GRANTED");
+    for (const pathname of ["/api/ai/persona", "/api/ai/workspace"]) {
+      expect((await api<ErrorBody>(pathname, member, undefined, "GET", 403)).error.code).toBe("AI_ACCESS_NOT_GRANTED");
+      expect((await api<ErrorBody>(pathname, member, {}, "PUT", 403)).error.code).toBe("AI_ACCESS_NOT_GRANTED");
+    }
+    expect(await storage.exec("SELECT user_id FROM ai_personas")).toEqual([]);
+    expect(await storage.exec("SELECT user_id FROM ai_workspaces")).toEqual([]);
     expect(postCount).toBe(0);
   });
   it("discovers models through safe outbound transport, encrypts provider settings and denies unlisted domains", async () => {
@@ -138,7 +145,10 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   });
   it("enforces zero quota before outbound, then accounts actual provider tokens without cross-user reads", async () => {
     const before = postCount;
-    await api("/api/ai/chat", member, requestBody(), "POST", 402);
+    await api(`/api/admin/ai/members/${member.user.id}/quota`, admin, { limitTokens: 0 }, "PUT");
+    expect((await api<AiStatus>("/api/ai/status", member)).accessGranted).toBe(false);
+    await api("/api/ai/chat", member, requestBody(), "POST", 403);
+    await api("/api/ai/images", member, { requestId: crypto.randomUUID(), prompt: "未开通" }, "POST", 403);
     expect(postCount).toBe(before);
     await api(`/api/admin/ai/members/${member.user.id}/quota`, admin, { limitTokens: 20_000 }, "PUT");
     const request = requestBody();
@@ -178,6 +188,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     expect((await api<AiStatus>("/api/ai/status", member)).quota).toMatchObject({ usedTokens: usedBeforeFailure, reservedTokens: 0 });
   });
   it("persists projects and conversations across a real workerd restart, rejects stale writes and preserves independent workspaces", async () => {
+    await api(`/api/admin/ai/members/${other.user.id}/quota`, admin, { limitTokens: 1000 }, "PUT");
     const state: AiWorkspaceState = { view: "chat", mode: "quick", projects: [{ id: "project-one", title: "真实保存项目", timeLabel: "刚刚" }], conversations: [{ id: "conversation-one", projectId: "project-one", title: "项目内对话", timeLabel: "刚刚", messages: [{ id: "message-one", role: "user", content: "重启后应保留", time: "14:00" }] }], artifacts: [], drafts: {}, activeConversationId: "conversation-one", activeProjectId: "project-one", enabledSkillIds: [] };
     const saved = await api<AiWorkspaceSnapshot>("/api/ai/workspace", member, { expectedRevision: 0, mutationId: crypto.randomUUID(), state }, "PUT");
     expect(saved.revision).toBe(1);
@@ -217,6 +228,25 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     await api("/api/ai/chat", member, requestBody());
     expect(lastChatInstructions).toContain('你的专属称呼是 "小频"');
     expect(lastChatInstructions).toContain("偏好简体中文");
+    expect(lastChatInstructions).toContain("不声称自动记住所有历史聊天");
     await api("/api/ai/persona", admin, undefined, "GET", 403);
+  });
+  it("retains granted access, persona and history when quota is exhausted, but never sends new paid work", async () => {
+    const persona = await api<AiPersonaSnapshot>("/api/ai/persona", member);
+    const workspace = await api<AiWorkspaceSnapshot>("/api/ai/workspace", member);
+    const used = (await api<AiStatus>("/api/ai/status", member)).quota.usedTokens;
+    await api(`/api/admin/ai/members/${member.user.id}/quota`, admin, { limitTokens: used }, "PUT");
+    await api(`/api/admin/ai/members/${other.user.id}/quota`, admin, { limitTokens: 0 }, "PUT");
+    const before = postCount;
+    await mf.dispose(); mf = start(); await mf.ready;
+    for (const session of [member, other]) {
+      expect(await api<AiStatus>("/api/ai/status", session)).toMatchObject({ accessGranted: true, quota: { remainingTokens: 0 } });
+      expect((await api<ErrorBody>("/api/ai/chat", session, requestBody(), "POST", 402)).error.code).toBe("AI_QUOTA_EXHAUSTED");
+      await api("/api/ai/images", session, { requestId: crypto.randomUUID(), prompt: "额度耗尽" }, "POST", 402);
+    }
+    expect(await api<AiPersonaSnapshot>("/api/ai/persona", member)).toEqual(persona);
+    expect(await api<AiWorkspaceSnapshot>("/api/ai/workspace", member)).toEqual(workspace);
+    expect((await api<AiPersonaSnapshot>("/api/ai/persona", other)).profile.name).toBe("");
+    expect(postCount).toBe(before);
   });
 });

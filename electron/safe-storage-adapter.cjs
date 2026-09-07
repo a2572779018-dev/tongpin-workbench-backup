@@ -80,11 +80,15 @@ function isSafeStorageAdapterError(error) {
   );
 }
 
-function createSafeStorageAdapter(safeStorage) {
+function createSafeStorageAdapter(safeStorage, { platform = process.platform } = {}) {
   if (!safeStorage || typeof safeStorage !== "object") {
     throw new TypeError("系统安全存储配置无效");
   }
   const useAsyncApi = hasCompleteAsyncApi(safeStorage);
+  // On macOS even the sync availability probe can block on Keychain access.
+  // Once async APIs exist, an async failure must not re-enter that sync path.
+  // Electron versions without async APIs keep their legacy encrypted codec.
+  const allowSyncFallback = platform !== "darwin";
 
   function isSyncEncryptionAvailable() {
     try {
@@ -103,11 +107,11 @@ function createSafeStorageAdapter(safeStorage) {
       try {
         available = await safeStorage.isAsyncEncryptionAvailable();
       } catch (error) {
-        if (isSyncEncryptionAvailable()) return "sync";
+        if (allowSyncFallback && isSyncEncryptionAvailable()) return "sync";
         throw unavailableError(error, isTemporaryUnavailableCause(error));
       }
       if (!available) {
-        if (isSyncEncryptionAvailable()) return "sync";
+        if (allowSyncFallback && isSyncEncryptionAvailable()) return "sync";
         throw unavailableError();
       }
       return "async";

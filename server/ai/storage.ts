@@ -52,6 +52,17 @@ export class AiStore {
     const q = row ? JSON.parse(row.data) as AiQuota : emptyQuota();
     return { ...q, remainingTokens: Math.max(0, q.limitTokens - q.usedTokens - q.reservedTokens) };
   }
+  /** A zero-limit row or an old persona is not an entitlement. Keep prior grants after exhaustion. */
+  hasAccess(userId: string): boolean {
+    const quota = this.quota(userId);
+    if (quota.limitTokens > 0 || quota.usedTokens > 0 || quota.reservedTokens > 0) return true;
+    // Read the authoritative ledger, not the UI's bounded latest-200 usage list.
+    // This also preserves legacy grants lowered back to zero before any generation.
+    return this.sql.all<{ id: string }>("SELECT id FROM ai_usage WHERE user_id=? AND json_extract(data,'$.kind')='quota' AND json_extract(data,'$.limitTokens')>0 LIMIT 1", userId).length > 0;
+  }
+  assertAccess(userId: string): void {
+    if (!this.hasAccess(userId)) throw new AiError(403, "AI_ACCESS_NOT_GRANTED", "管理员尚未为此账号开通 AI，请联系管理员分配额度");
+  }
   saveQuota(userId: string, quota: AiQuota): void {
     this.sql.exec("INSERT INTO ai_quotas(user_id,data) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data", userId, JSON.stringify(quota));
   }

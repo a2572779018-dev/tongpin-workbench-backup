@@ -207,7 +207,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
   });
   it("preflights image quota and storage capacity without paid upstream calls", async () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
-    await expect(runtime.service.generateImage("zero-member", { requestId: crypto.randomUUID(), prompt: "图片" })).rejects.toMatchObject({ code: "AI_QUOTA_EXHAUSTED" });
+    await expect(runtime.service.generateImage("zero-member", { requestId: crypto.randomUUID(), prompt: "图片" })).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
     runtime.store.sql.exec("INSERT INTO ai_assets(id,user_id,mime_type,byte_length,created_at) VALUES(?,?,?,?,?)", "filled", "member", "image/png", 50 * 1024 * 1024, new Date().toISOString());
     await expect(runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt: "图片" })).rejects.toMatchObject({ code: "AI_ASSET_CAPACITY" });
     expect(transport).not.toHaveBeenCalled();

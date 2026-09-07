@@ -65,6 +65,8 @@ export interface AiUsageEntry extends AiUsage {
   actorId: string | null;
 }
 export interface AiStatus {
+  /** Server-owned entitlement: a positive quota was granted, even if now exhausted. */
+  accessGranted: boolean;
   configured: boolean;
   quickModel: string;
   deepModel: string;

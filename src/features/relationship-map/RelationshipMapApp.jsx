@@ -171,6 +171,14 @@ export function readableRelationshipStorageError(error) {
   return withoutIpcPrefix.slice(firstChineseCharacter);
 }
 
+export function relationshipStorageRecoveryHint(error, platform) {
+  if (platform !== "darwin" ||
+      !readableRelationshipStorageError(error).startsWith("系统安全存储暂时不可用")) {
+    return "";
+  }
+  return "若系统弹出同频的钥匙串访问提示，请确认后允许访问；随后完整退出并重新打开同频。";
+}
+
 function peopleWithExpandedPositions(peopleList) {
   return peopleList.map((person) => ({
     ...person,
@@ -1201,6 +1209,10 @@ export function RelationshipMapApp({
     : "";
 
   if (!storageReady) {
+    const recoveryHint = relationshipStorageRecoveryHint(
+      storageLoadError,
+      typeof window === "undefined" ? undefined : window.tongpin?.platform,
+    );
     return (
       <main
         ref={appRootRef}
@@ -1223,6 +1235,9 @@ export function RelationshipMapApp({
                 <p className="secure-storage-card__reassurance">
                   本机加密数据未被删除，也不会在此状态下被编辑或覆盖。
                 </p>
+                {recoveryHint && (
+                  <p className="secure-storage-card__reassurance">{recoveryHint}</p>
+                )}
                 <button
                   className="primary-button secure-storage-card__retry"
                   type="button"

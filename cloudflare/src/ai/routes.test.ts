@@ -37,6 +37,19 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     expect((await invoke("/api/ai/status", "GET", boss)).status).toBe(403);
     expect(transport).not.toHaveBeenCalled();
   });
+  it("reports ungranted access and rejects forged ownership before generation, independently of provider configuration", async () => {
+    expect(await (await invoke("/api/ai/status", "GET", a)).json()).toMatchObject({ accessGranted: false, configured: false });
+    await invoke("/api/admin/ai/provider", "PUT", admin, provider);
+    await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 5000 });
+    await invoke("/api/admin/ai/members/b/quota", "PUT", admin, { limitTokens: 0 });
+    expect(await (await invoke("/api/ai/status", "GET", b)).json()).toMatchObject({ accessGranted: false, configured: true });
+    const chat = await invoke("/api/ai/chat", "POST", b, { userId: a.id, accessGranted: true, requestId: crypto.randomUUID(), mode: "quick", messages: [{ role: "user", content: "不应发送" }] });
+    expect(chat.status).toBe(403); expect(await chat.json()).toMatchObject({ error: { code: "AI_ACCESS_NOT_GRANTED" } });
+    expect((await invoke("/api/ai/images", "POST", b, { requestId: crypto.randomUUID(), prompt: "不应生成", userId: a.id })).status).toBe(403);
+    expect((await invoke("/api/ai/status", "GET", { ...a, status: "disabled" })).status).toBe(401);
+    expect(transport).not.toHaveBeenCalled();
+    expect(service.quota(a.id).usedTokens).toBe(0);
+  });
   it("supports unsaved discovery and write-only provider configuration", async () => {
     const discovery = await invoke("/api/admin/ai/provider/test", "POST", admin, { baseUrl: provider.baseUrl, apiKey: provider.apiKey });
     expect(await discovery.json()).toMatchObject({ ok: true, models: ["quick"] });

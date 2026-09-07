@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AI_PERSONA_LIMITS, defaultAiPersonaProfile, type AiPersonaProfile } from "../../shared/aiPersona";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
-import type { AiSql } from "./storage";
+import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AiPersonaRepository, validateAiPersonaProfile } from "./persona";
 
 const workerRouteModulePath = "../../cloudflare/src/ai/personaRoutes";
@@ -34,6 +34,8 @@ describe("member-owned AI persona", () => {
     directory = await mkdtemp(path.join(tmpdir(), "tongpin-persona-test-"));
     database = new DatabaseSync(path.join(directory, "persona.sqlite"));
     repository = new AiPersonaRepository(adapter(database)); repository.initialize();
+    const store = new AiStore(repository.sql); store.initialize();
+    for (const id of ["member-a", "member-b"]) store.saveQuota(id, { ...emptyQuota(), limitTokens: 10000 });
   });
   afterEach(async () => { database.close(); await rm(directory, { recursive: true }); });
 
@@ -41,12 +43,34 @@ describe("member-owned AI persona", () => {
     expect(repository.read("member-a")).toEqual({ revision: 0, profile: defaultAiPersonaProfile() });
     expect(database.prepare("SELECT name FROM sqlite_master WHERE name IN ('users','ai_workspaces')").all()).toEqual([]);
   });
+  it("does not allow an ungranted or explicitly zero-limit member to create, read or reset a persona", async () => {
+    const store = new AiStore(repository.sql);
+    for (const id of ["never-granted", "zero-limit"]) {
+      if (id === "zero-limit") store.saveQuota(id, emptyQuota());
+      expect(() => repository.read(id)).toThrow(expect.objectContaining({ status: 403, code: "AI_ACCESS_NOT_GRANTED" }));
+      expect(() => repository.save(id, { expectedRevision: 0, profile: profile() })).toThrow(expect.objectContaining({ code: "AI_ACCESS_NOT_GRANTED" }));
+      const response = await invoke(repository, "PUT", { expectedRevision: 0, profile: profile() }, { ...member, id });
+      expect(response.status).toBe(403); expect(await response.json()).toMatchObject({ error: { code: "AI_ACCESS_NOT_GRANTED" } });
+      expect(database.prepare("SELECT user_id FROM ai_personas WHERE user_id=?").get(id)).toBeUndefined();
+    }
+  });
   it("stores the chosen assistant name, character and confirmed preferences across process restart", () => {
     const saved = repository.save("member-a", { expectedRevision: 0, profile: profile() });
     database.close(); database = new DatabaseSync(path.join(directory, "persona.sqlite"));
     repository = new AiPersonaRepository(adapter(database)); repository.initialize();
     expect(repository.read("member-a")).toEqual(saved);
     expect(repository.read("member-a").profile.name).toBe("小频");
+  });
+  it("does not grant access merely because legacy persona data exists, and never erases that data", () => {
+    const saved = repository.save("member-a", { expectedRevision: 0, profile: profile() });
+    const before = database.prepare("SELECT data,revision FROM ai_personas WHERE user_id=?").get("member-a");
+    const store = new AiStore(repository.sql); store.saveQuota("member-a", emptyQuota());
+    expect(store.hasAccess("member-a")).toBe(false);
+    expect(() => repository.read("member-a")).toThrow(expect.objectContaining({ code: "AI_ACCESS_NOT_GRANTED" }));
+    expect(() => repository.save("member-a", { expectedRevision: 1, reset: true })).toThrow(expect.objectContaining({ code: "AI_ACCESS_NOT_GRANTED" }));
+    expect(database.prepare("SELECT data,revision FROM ai_personas WHERE user_id=?").get("member-a")).toEqual(before);
+    store.saveQuota("member-a", { ...emptyQuota(), limitTokens: 5000 });
+    expect(repository.read("member-a")).toEqual(saved);
   });
   it("keeps profiles private to each member and rejects body-selected ownership", () => {
     repository.save("member-a", { expectedRevision: 0, profile: profile("小频") });
@@ -140,6 +164,11 @@ describe("member-owned AI persona", () => {
       const session = await request(runtime.app).post("/api/auth/login").send({ email: "persona-member@tongpin.test", password }).expect(200);
       const headers = { Authorization: `Bearer ${session.body.accessToken}`, "X-Tongpin-Account": "persona-member" };
       await request(runtime.app).put("/api/ai/persona").set({ ...headers, "X-Tongpin-Account": "wrong-account" }).send({ expectedRevision: 0, profile: profile() }).expect(409);
+      expect((await request(runtime.app).get("/api/ai/status").set(headers).expect(200)).body.accessGranted).toBe(false);
+      const denied = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile() }).expect(403);
+      expect(denied.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
+      await request(runtime.app).put("/api/admin/ai/members/persona-member/quota").set("Authorization", `Bearer ${admin.body.accessToken}`).send({ limitTokens: 5000 }).expect(200);
+      expect((await request(runtime.app).get("/api/ai/status").set(headers).expect(200)).body.accessGranted).toBe(true);
       const saved = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile() }).expect(200);
       expect(saved.body.profile.name).toBe("小频");
       await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile("不能覆盖") }).expect(409);

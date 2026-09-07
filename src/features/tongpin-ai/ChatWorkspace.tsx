@@ -2,10 +2,7 @@ import {
   ArrowDown,
   ArrowUp,
   Brain,
-  Check,
   ChevronDown,
-  Copy,
-  FileText,
   Globe,
   Image as ImageIcon,
   PanelLeft,
@@ -20,7 +17,9 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
@@ -41,7 +40,8 @@ import { useAmbientMotion } from "./visuals/useAmbientMotion";
 import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
 import { ATTACHMENT_ACCEPT } from "./attachments";
 import { AttachmentChips } from "./AttachmentChips";
-import { AiSourceLink } from "./AiSourceLink";
+import { ChatMessageRow } from "./ChatMessageRow";
+import { CHAT_MESSAGE_PAGE_SIZE } from "./chatPerformance";
 
 interface ChatWorkspaceProps {
   artifactById: Map<string, TongpinAIArtifact>;
@@ -146,7 +146,16 @@ export function ChatWorkspace({
   const [composerFocused, setComposerFocused] = useState(false);
   const [readingFiles, setReadingFiles] = useState(false);
   const [fileError, setFileError] = useState("");
+  const [visualEffects, setVisualEffects] = useState(false);
   const fileReadingRef = useRef(false);
+  const [historyWindow, setHistoryWindow] = useState({ conversationId, count: CHAT_MESSAGE_PAGE_SIZE });
+  const historyAnchorRef = useRef<{ height: number; top: number } | null>(null);
+  const callbacksRef = useRef({ onOpenArtifact, onRetry });
+  callbacksRef.current = { onOpenArtifact, onRetry };
+  const openArtifact = useCallback((id: string) => callbacksRef.current.onOpenArtifact(id), []);
+  const retryMessage = useCallback((id: string) => callbacksRef.current.onRetry?.(id), []);
+  const visibleCount = historyWindow.conversationId === conversationId ? historyWindow.count : CHAT_MESSAGE_PAGE_SIZE;
+  const hiddenCount = Math.max(0, messages.length - visibleCount);
   const capabilityUnavailable = composerTool === "image" ? !imageEnabled : webSearch && !webSearchEnabled;
 
   useEffect(() => {
@@ -155,13 +164,33 @@ export function ChatWorkspace({
     setMenu(null);
     setCopiedId(null);
     setCopyError("");
+    historyAnchorRef.current = null;
     const list = messageListRef.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [conversationId]);
+  useLayoutEffect(() => {
+    const anchor = historyAnchorRef.current;
+    const list = messageListRef.current;
+    if (anchor && list) list.scrollTop = anchor.top + list.scrollHeight - anchor.height;
+    historyAnchorRef.current = null;
+  }, [visibleCount]);
   useEffect(() => {
     const list = messageListRef.current;
     if (list && followResponseRef.current) list.scrollTop = list.scrollHeight;
   }, [messages]);
+  useEffect(() => {
+    // Local typewriter updates do not rerender this workspace. Observe only the
+    // active reply's height to retain follow-to-bottom without a polling loop.
+    if (!responding || typeof ResizeObserver === "undefined") return;
+    const list = messageListRef.current;
+    const reply = list?.lastElementChild;
+    if (!list || !reply) return;
+    const observer = new ResizeObserver(() => {
+      if (followResponseRef.current) list.scrollTop = list.scrollHeight;
+    });
+    observer.observe(reply);
+    return () => observer.disconnect();
+  }, [responding, responsePhase, conversationId, messages.length]);
   useEffect(() => {
     if (composerFocusRequest > 0) composerRef.current?.focus();
   }, [composerFocusRequest]);
@@ -247,7 +276,7 @@ export function ChatWorkspace({
     event.preventDefault();
     submitMessage();
   }
-  async function copyMessage(message: TongpinAIMessage) {
+  const copyMessage = useCallback(async (message: TongpinAIMessage) => {
     try {
       await navigator.clipboard.writeText(message.content);
       setCopiedId(message.id);
@@ -257,7 +286,7 @@ export function ChatWorkspace({
     } catch {
       setCopyError("复制失败，请选中文字复制。");
     }
-  }
+  }, []);
 
   return (
     <section
@@ -276,6 +305,7 @@ export function ChatWorkspace({
           </button>
           <TongpinOrb
             active={responding}
+            richMotion={visualEffects}
             size={40}
             className="tp-ai-composer-orb"
           />
@@ -289,6 +319,9 @@ export function ChatWorkspace({
             </span>
           )}
         </div>
+        <button type="button" className="tp-ai-motion-toggle" aria-label="视觉动效" aria-pressed={visualEffects}
+          title={visualEffects ? "关闭视觉动效，降低 GPU 占用" : "开启视觉动效会增加 GPU 负担；性能较低的电脑建议保持关闭"}
+          onClick={() => setVisualEffects(current => !current)}><Sparkles size={16} /><span>动效{visualEffects ? "开" : "关"}</span></button>
         {onEditPersona ? <button type="button" className="tp-ai-persona-settings-trigger" aria-label="专属 AI 设置" title="专属 AI 设置" onClick={onEditPersona}><Settings2 size={18} /></button> : null}
         <TongpinAINotificationButton
           unread={notificationUnread}
@@ -314,113 +347,35 @@ export function ChatWorkspace({
       >
         {isEmpty ? (
           <div className="tp-ai-chat-welcome">
-            <TongpinMetalIdentity />
+            <TongpinMetalIdentity richMotion={visualEffects} />
             <h1>今天，一起完成什么？</h1>
             {projectTitle && <p>{projectTitle}</p>}
+            <div className="tp-ai-starters" aria-label="开始一项任务">
+              {[
+                { title: "整理文档", text: "请帮我整理这份文档，提炼重点、待办和需要确认的问题。" },
+                { title: "起草方案", text: "请帮我起草一份工作方案。先和我确认目标、受众与交付要求。" },
+                { title: "制作演示大纲", text: "请帮我设计一份演示文稿的大纲。先和我确认主题、受众和预计页数。" },
+              ].map(starter => <button key={starter.title} type="button" disabled={responding || quotaInsufficient}
+                onClick={() => { onDraftChange(starter.text); composerRef.current?.focus(); }}>{starter.title}</button>)}
+            </div>
           </div>
         ) : (
-          messages.map((message) => {
-            const artifact = message.artifactId
-              ? artifactById.get(message.artifactId)
-              : undefined;
-            return (
-              <article
-                key={message.id}
-                className={`tp-ai-message is-${message.role}${message.status === "error" ? " is-error" : ""}`}
-                aria-label={
-                  message.role === "assistant" ? `${assistantName} 消息` : "你的消息"
-                }
-              >
-                {message.role === "assistant" && (
-                  <span className="tp-ai-message__avatar" aria-hidden="true">
-                    <img src="./app-icon.svg" alt="" />
-                  </span>
-                )}
-                <div className="tp-ai-message__body">
-                  {message.role === "assistant" && (
-                    <header>
-                      <strong>{assistantName}</strong>
-                    </header>
-                  )}
-                  {message.attachments?.length ? <ul className="tp-ai-message-attachments" aria-label="消息中的附件">
-                    {message.attachments.map(file => <li key={file.id}><Paperclip size={13} aria-hidden="true" />{file.name}</li>)}
-                  </ul> : null}
-                  {message.status === "thinking" ? (
-                    <div className="tp-ai-thinking" role="status">
-                      <span />
-                      <span />
-                      <span />
-                      正在思考
-                    </div>
-                  ) : (
-                    <p
-                      className={
-                        message.status === "typing"
-                          ? "tp-ai-message__typing"
-                          : undefined
-                      }
-                    >
-                      {message.content}
-                      {message.status === "typing" && (
-                        <span
-                          className="tp-ai-message__typing-caret"
-                          aria-hidden="true"
-                        />
-                      )}
-                    </p>
-                  )}
-                  {artifact && (
-                    <button
-                      type="button"
-                      className="tp-ai-artifact-card"
-                      aria-label={`打开成果：${artifact.title}`}
-                      onClick={() => onOpenArtifact(artifact.id)}
-                    >
-                      <span className="tp-ai-artifact-card__icon">
-                        <FileText size={20} />
-                      </span>
-                      <span>
-                        <small>{artifact.kind}</small>
-                        <strong>{artifact.title}</strong>
-                      </span>
-                      <span className="tp-ai-artifact-card__action">打开</span>
-                    </button>
-                  )}
-                  {message.sources?.length ? <ul className="tp-ai-message-sources" aria-label="参考来源">
-                    {message.sources.map((source, index) => <AiSourceLink key={`${source.url}-${index}`} source={source} />)}
-                  </ul> : null}
-                  {message.status === "error" && retryableMessageIds?.has(message.id) && (
-                    <div className="tp-ai-message__controls">
-                      <button type="button" disabled={responding} onClick={() => onRetry?.(message.id)}>
-                        重新获取回复
-                      </button>
-                    </div>
-                  )}
-                  {message.role === "assistant" &&
-                    message.content &&
-                    !["thinking", "typing", "error"].includes(
-                      message.status ?? "ready",
-                    ) && (
-                      <div className="tp-ai-message__controls">
-                        <button
-                          type="button"
-                          aria-label={
-                            copiedId === message.id ? "已复制回复" : "复制回复"
-                          }
-                          onClick={() => void copyMessage(message)}
-                        >
-                          {copiedId === message.id ? (
-                            <Check size={15} />
-                          ) : (
-                            <Copy size={15} />
-                          )}
-                        </button>
-                      </div>
-                    )}
-                </div>
-              </article>
-            );
-          })
+          <>
+            {hiddenCount > 0 && <button type="button" className="tp-ai-load-earlier" onClick={() => {
+              const list = messageListRef.current;
+              if (list) historyAnchorRef.current = { height: list.scrollHeight, top: list.scrollTop };
+              followResponseRef.current = false;
+              setHistoryWindow({ conversationId, count: visibleCount + CHAT_MESSAGE_PAGE_SIZE });
+            }}>加载更早的消息（还有 {hiddenCount} 条）</button>}
+            {messages.slice(hiddenCount).map(message => <ChatMessageRow
+              key={message.id} message={message}
+              artifact={message.artifactId ? artifactById.get(message.artifactId) : undefined}
+              assistantName={assistantName} copied={copiedId === message.id}
+              retryable={Boolean(retryableMessageIds?.has(message.id))}
+              retryDisabled={message.status === "error" && responding}
+              onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
+            />)}
+          </>
         )}
       </div>
 
@@ -471,7 +426,7 @@ export function ChatWorkspace({
           duration={5}
           borderRadius={16}
           staticColors
-          active={ambientMotion && (composerFocused || responding)}
+          active={visualEffects && ambientMotion && (composerFocused || responding)}
           onFocusCapture={() => setComposerFocused(true)}
           onBlurCapture={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget))

@@ -11,7 +11,13 @@ describe("TongpinOrb", () => {
     expect(markup).toContain('data-orb-renderer="fallback"');
     expect(markup).toContain('src="./app-icon.svg"');
     expect(markup).toContain('aria-hidden="true"');
-    expect(markup.match(/<canvas/g)).toHaveLength(1);
+    expect(markup).not.toContain("<canvas");
+  });
+
+  it("does not request a GPU canvas without an explicit visual-effects choice", () => {
+    const markup = renderToStaticMarkup(createElement(TongpinOrb, { active: true }));
+    expect(markup).not.toContain("<canvas");
+    expect(renderToStaticMarkup(createElement(TongpinOrb, { richMotion: true }))).toContain("<canvas");
   });
 
   it("only requests the thinking appearance when its caller marks a request active", () => {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   initialGraphState,
   readableRelationshipStorageError,
+  relationshipStorageRecoveryHint,
 } from "./RelationshipMapApp.jsx";
 
 afterEach(() => {
@@ -42,5 +43,28 @@ describe("relationship map secure loading UI", () => {
     expect(readableRelationshipStorageError(new Error("Unexpected native failure"))).toBe(
       "暂时无法打开本机加密客户脉络图，请稍后重新尝试。",
     );
+  });
+
+  it("offers Mac restart guidance only for a temporary system-storage failure", () => {
+    const error = new Error(
+      "Error invoking remote method 'relationship-graph:open': Error: 系统安全存储暂时不可用，请稍后重新尝试",
+    );
+    expect(relationshipStorageRecoveryHint(error, "darwin")).toBe(
+      "若系统弹出同频的钥匙串访问提示，请确认后允许访问；随后完整退出并重新打开同频。",
+    );
+    expect(relationshipStorageRecoveryHint(error, "win32")).toBe("");
+    expect(relationshipStorageRecoveryHint(error, "linux")).toBe("");
+    expect(relationshipStorageRecoveryHint(error, undefined)).toBe("");
+  });
+
+  it.each([
+    "请先登录后再打开客户脉络图",
+    "无法连接服务器",
+    "系统安全存储无法解密本机客户脉络图，原加密文件已保留",
+    "本机加密客户脉络图内容损坏",
+    "Unexpected native failure",
+    "",
+  ])("does not attribute unrelated errors to Keychain: %s", (error) => {
+    expect(relationshipStorageRecoveryHint(error, "darwin")).toBe("");
   });
 });

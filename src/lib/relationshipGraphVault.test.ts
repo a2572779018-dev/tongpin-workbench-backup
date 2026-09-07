@@ -210,6 +210,74 @@ describe("relationship graph encrypted vault", () => {
     );
   });
 
+  it("preserves the original ciphertext on temporary read and save failures, then safely retries", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tongpin-graph-vault-"));
+    temporaryDirectories.push(directory);
+    const safeStorage = asyncCompatibleSafeStorage();
+    const vault = createRelationshipGraphVault({ userDataPath: directory, safeStorage });
+    await vault.save("member-a", graph("仍需保留的客户图"), 4);
+    const target = join(directory, "relationship-graphs", graphFileName("member-a"));
+    const originalCiphertext = await readFile(target);
+    safeStorage.encryptStringAsync.mockClear();
+    safeStorage.decryptStringAsync.mockRejectedValue(
+      new Error("safeStorage.decryptStringAsync is temporarily unavailable. Please try again."),
+    );
+
+    await expect(vault.load("member-a")).rejects.toMatchObject({
+      code: "SAFE_STORAGE_TEMPORARILY_UNAVAILABLE",
+    });
+    await expect(vault.save("member-a", graph("不可覆盖原图"), 5)).rejects.toMatchObject({
+      code: "SAFE_STORAGE_TEMPORARILY_UNAVAILABLE",
+    });
+    expect(await readFile(target)).toEqual(originalCiphertext);
+    expect(await readdir(join(directory, "relationship-graphs")))
+      .toEqual([graphFileName("member-a")]);
+    expect(safeStorage.encryptStringAsync).not.toHaveBeenCalled();
+    expect(safeStorage.encryptString).not.toHaveBeenCalled();
+    expect(safeStorage.decryptString).not.toHaveBeenCalled();
+
+    // Simulate the provider becoming usable; this does not imply that native
+    // Electron will refresh its cached Keychain provider without an app restart.
+    safeStorage.decryptStringAsync.mockImplementation(async (value: Buffer) => ({
+      result: fakeSafeStorage().decryptString(value),
+      shouldReEncrypt: true,
+    }));
+    await expect(vault.load("member-a")).resolves.toMatchObject({
+      content: graph("仍需保留的客户图"),
+      revision: 4,
+    });
+    expect(await readFile(target)).toEqual(originalCiphertext);
+    expect(safeStorage.encryptStringAsync).not.toHaveBeenCalled();
+    await expect(vault.save("member-a", graph("授权恢复后的编辑"), 5)).resolves.toBe(5);
+    await expect(vault.load("member-a")).resolves.toMatchObject({
+      content: graph("授权恢复后的编辑"), revision: 5,
+    });
+  });
+
+  it("does not replace a readable old graph when encrypting its next revision fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tongpin-graph-vault-"));
+    temporaryDirectories.push(directory);
+    const safeStorage = asyncCompatibleSafeStorage();
+    const vault = createRelationshipGraphVault({ userDataPath: directory, safeStorage });
+    await vault.save("member-a", graph("原加密版本"), 1);
+    const target = join(directory, "relationship-graphs", graphFileName("member-a"));
+    const originalCiphertext = await readFile(target);
+    safeStorage.encryptStringAsync.mockRejectedValueOnce(
+      new Error("safeStorage.encryptStringAsync is temporarily unavailable. Please try again."),
+    );
+
+    await expect(vault.save("member-a", graph("未保存的编辑"), 2)).rejects.toMatchObject({
+      code: "SAFE_STORAGE_TEMPORARILY_UNAVAILABLE",
+    });
+    expect(await readFile(target)).toEqual(originalCiphertext);
+    expect(await readdir(join(directory, "relationship-graphs")))
+      .toEqual([graphFileName("member-a")]);
+    await expect(vault.load("member-a")).resolves.toMatchObject({
+      content: graph("原加密版本"), revision: 1,
+    });
+    expect(safeStorage.encryptString).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid and oversized graph structures before writing", () => {
     expect(() => validateGraphDocument("{}"))
       .toThrow("关系图内容不符合安全存储格式");

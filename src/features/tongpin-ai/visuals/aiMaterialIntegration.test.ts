@@ -37,4 +37,17 @@ describe("AI material integration guardrails", () => {
     expect(orb).toContain("!document.hidden");
     expect(orb).toContain("!motionPreference.matches");
   });
+
+  it("does not initialize expensive material renderers before explicit opt-in", () => {
+    const orb = read("./TongpinOrb.tsx");
+    const identity = read("./TongpinMetalIdentity.tsx");
+    expect(orb).toContain("richMotion = false");
+    expect(orb).toContain("if (!richMotion || !canvas || !host || !navigator.gpu) return;");
+    expect(identity).not.toContain('import { MetalFx } from "metal-fx"');
+    expect(identity).toContain('lazy(() => import("metal-fx")');
+    expect(read("../ChatWorkspace.tsx")).toContain("active={visualEffects && ambientMotion");
+    const renderer = read("./vendor/orb/src/orb-renderer.ts");
+    expect(renderer).not.toContain("device.createRenderPipeline({");
+    expect(renderer.match(/createRenderPipelineAsync\(/g)).toHaveLength(3);
+  });
 });

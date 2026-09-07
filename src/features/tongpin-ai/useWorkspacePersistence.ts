@@ -15,7 +15,6 @@ export function useWorkspacePersistence(
   const [queue] = useState(() => new WorkspaceSaveQueue(initial, write, (next, message = "") => {
     if (active.current) { setStatus(next); setError(message); }
   }));
-  const serializedState = JSON.stringify(state);
   useEffect(() => registerAiLeaveGuard(accountId, () => queue.flushSaved()), [accountId, queue]);
   useEffect(() => {
     active.current = true;
@@ -32,11 +31,13 @@ export function useWorkspacePersistence(
     };
   }, [queue]);
   useEffect(() => {
-    const changed = queue.setState(JSON.parse(serializedState) as AiWorkspaceState, { flush: false });
+    // The page memoizes semantic state. Do not stringify a complete workspace while
+    // rendering, or repeat the queue's immutable snapshot clone on every UI tick.
+    const changed = queue.setState(state, { flush: false });
     if (!changed) return;
     const timer = window.setTimeout(() => void queue.flush(), 300);
     return () => window.clearTimeout(timer);
-  }, [queue, serializedState]);
+  }, [queue, state]);
   return { status, error, retry: () => void queue.flush(), flush: () => queue.flush(),
     flushSaved: () => queue.flushSaved(),
     saveNow: (next: AiWorkspaceState) => queue.saveNow(next),

@@ -203,7 +203,7 @@ export function App() {
   return (
     <>
       <QuickTaskBridge />
-      <CustomCursor />
+      {view !== "ai" && view !== "admin-ai" && <CustomCursor />}
       <DesktopTitlebar
         centerLabel={
           session && !loading && !startupError

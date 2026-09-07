@@ -5,7 +5,10 @@ const require = createRequire(import.meta.url);
 const {
   createSafeStorageAdapter,
 } = require("../../electron/safe-storage-adapter.cjs") as {
-  createSafeStorageAdapter(safeStorage: Record<string, unknown>): {
+  createSafeStorageAdapter(
+    safeStorage: Record<string, unknown>,
+    options?: { platform: string },
+  ): {
     mode: "async" | "sync";
     decryptString(encrypted: Buffer): Promise<{
       result: string;
@@ -96,7 +99,7 @@ describe("safeStorage async compatibility adapter", () => {
       encryptString: vi.fn((value: string) => encryptCompat(value)),
       decryptString: vi.fn((value: Buffer) => decryptCompat(value)),
     };
-    const adapter = createSafeStorageAdapter(safeStorage);
+    const adapter = createSafeStorageAdapter(safeStorage, { platform: "darwin" });
 
     expect(adapter.mode).toBe("sync");
     const encrypted = await adapter.encryptString("sync-fallback");
@@ -106,10 +109,10 @@ describe("safeStorage async compatibility adapter", () => {
     });
   });
 
-  it("safely falls back to sync when async availability is false", async () => {
+  it("preserves Windows sync fallback when async availability is false", async () => {
     const safeStorage = asyncCompatibleSafeStorage();
     safeStorage.isAsyncEncryptionAvailable.mockResolvedValue(false);
-    const adapter = createSafeStorageAdapter(safeStorage);
+    const adapter = createSafeStorageAdapter(safeStorage, { platform: "win32" });
 
     const encrypted = await adapter.encryptString("sync-recovery");
     await expect(adapter.decryptString(encrypted)).resolves.toMatchObject({
@@ -120,18 +123,48 @@ describe("safeStorage async compatibility adapter", () => {
     expect(safeStorage.encryptString).toHaveBeenCalledOnce();
   });
 
-  it("safely falls back to sync when async availability probing throws", async () => {
+  it("preserves Windows sync fallback when async availability probing throws", async () => {
     const safeStorage = asyncCompatibleSafeStorage();
     safeStorage.isAsyncEncryptionAvailable.mockRejectedValue(
       new Error("async provider is temporarily unavailable"),
     );
-    const adapter = createSafeStorageAdapter(safeStorage);
+    const adapter = createSafeStorageAdapter(safeStorage, { platform: "win32" });
 
     await expect(adapter.encryptString("sync-recovery")).resolves.toEqual(
       encryptCompat("sync-recovery"),
     );
     expect(safeStorage.encryptString).toHaveBeenCalledOnce();
   });
+
+  it.each(["unavailable", "temporarily unavailable"])(
+    "never probes or invokes synchronous Keychain APIs on Mac after async %s",
+    async (failure) => {
+      const safeStorage = asyncCompatibleSafeStorage();
+      if (failure === "unavailable") {
+        safeStorage.isAsyncEncryptionAvailable.mockResolvedValue(false);
+      } else {
+        safeStorage.isAsyncEncryptionAvailable.mockRejectedValue(
+          new Error("async provider is temporarily unavailable"),
+        );
+      }
+      const adapter = createSafeStorageAdapter(safeStorage, { platform: "darwin" });
+      const expectedCode = failure === "unavailable"
+        ? "SAFE_STORAGE_UNAVAILABLE"
+        : "SAFE_STORAGE_TEMPORARILY_UNAVAILABLE";
+      const ciphertext = encryptCompat("original-encrypted-data");
+      const original = Buffer.from(ciphertext);
+
+      await expect(adapter.ensureAvailable()).rejects.toMatchObject({ code: expectedCode });
+      await expect(adapter.encryptString("must-not-save")).rejects.toMatchObject({ code: expectedCode });
+      await expect(adapter.decryptString(ciphertext)).rejects.toMatchObject({ code: expectedCode });
+      expect(ciphertext).toEqual(original);
+      expect(safeStorage.isEncryptionAvailable).not.toHaveBeenCalled();
+      expect(safeStorage.encryptString).not.toHaveBeenCalled();
+      expect(safeStorage.decryptString).not.toHaveBeenCalled();
+      expect(safeStorage.encryptStringAsync).not.toHaveBeenCalled();
+      expect(safeStorage.decryptStringAsync).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects without plaintext downgrade when both providers are unavailable", async () => {
     const safeStorage = asyncCompatibleSafeStorage();
@@ -161,5 +194,9 @@ describe("safeStorage async compatibility adapter", () => {
       code: "SAFE_STORAGE_TEMPORARILY_UNAVAILABLE",
       message: "系统安全存储暂时不可用，请稍后重新尝试",
     });
+    expect(safeStorage.isEncryptionAvailable).not.toHaveBeenCalled();
+    expect(safeStorage.decryptString).not.toHaveBeenCalled();
+    expect(safeStorage.encryptStringAsync).not.toHaveBeenCalled();
+    expect(safeStorage.encryptString).not.toHaveBeenCalled();
   });
 });

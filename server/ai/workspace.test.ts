@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AI_WORKSPACE_LIMITS, type AiWorkspaceSaveRequest, type AiWorkspaceState } from "../../shared/aiWorkspace";
 import { createAiWorkspaceRouter } from "./workspaceRoutes";
 import { ApiError, errorHandler } from "../errors";
-import type { AiSql } from "./storage";
+import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AiWorkspaceRepository, validateAiWorkspaceState } from "./workspace";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
@@ -49,8 +49,23 @@ describe("AI durable member workspace", () => {
     directory = await mkdtemp(path.join(tmpdir(), "tongpin-workspace-test-"));
     database = new DatabaseSync(path.join(directory, "workspace.sqlite"));
     repository = new AiWorkspaceRepository(adapter(database)); repository.initialize();
+    const store = new AiStore(repository.sql); store.initialize();
+    for (const id of ["member-a", "member-b"]) store.saveQuota(id, { ...emptyQuota(), limitTokens: 10000 });
   });
   afterEach(async () => { database.close(); await rm(directory, { recursive: true }); });
+
+  it("rejects ungranted members before creating workspace data and preserves pre-existing snapshots", async () => {
+    const ungranted = "never-granted";
+    expect(() => repository.read(ungranted)).toThrow(expect.objectContaining({ status: 403, code: "AI_ACCESS_NOT_GRANTED" }));
+    await expect(repository.save(ungranted, saveRequest())).rejects.toMatchObject({ status: 403, code: "AI_ACCESS_NOT_GRANTED" });
+    expect(database.prepare("SELECT user_id FROM ai_workspaces WHERE user_id=?").get(ungranted)).toBeUndefined();
+    const saved = await repository.save("member-a", saveRequest());
+    database.prepare("UPDATE ai_quotas SET data=? WHERE user_id=?").run(JSON.stringify(emptyQuota()), "member-a");
+    await expect(repository.save("member-a", saveRequest(fixture(), 1))).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
+    expect(database.prepare("SELECT revision FROM ai_workspaces WHERE user_id=?").get("member-a")).toEqual({ revision: saved.revision });
+    new AiStore(repository.sql).saveQuota("member-a", { ...emptyQuota(), limitTokens: 10000 });
+    expect(repository.read("member-a")).toEqual(saved);
+  });
 
   it("starts empty and preserves every project, conversation, draft and artifact across process restart", async () => {
     expect(repository.read("member-a")).toEqual({ revision: 0, schemaVersion: 1, updatedAt: null, state: null });
@@ -189,9 +204,10 @@ describe("AI durable member workspace", () => {
     expect(() => repository.read("member-a")).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_VERSION_UNSUPPORTED" }));
   });
   it("accepts token conversion metadata without letting it modify the quota ledger", async () => {
+    const beforeQuota = new AiStore(repository.sql).quota("member-a");
     const state = fixture(); state.conversations[0].messages[1].usage = { inputTokens: 10, outputTokens: 20, totalTokens: 130, convertedTokens: 100, estimated: true, billingKind: "tokens_with_search" };
     expect((await repository.save("member-a", saveRequest(state))).state!.conversations[0].messages[1].usage!.totalTokens).toBe(130);
-    expect(database.prepare("SELECT name FROM sqlite_master WHERE name='ai_quotas'").get()).toBeUndefined();
+    expect(new AiStore(repository.sql).quota("member-a")).toEqual(beforeQuota);
   });
   it("bounds entity counts and message length before storage", async () => {
     const state = fixture(); state.conversations[0].messages[0].content = "a".repeat(AI_WORKSPACE_LIMITS.messageCharacters + 1);
@@ -296,6 +312,10 @@ describe("AI durable member workspace", () => {
       });
       const session = await request(runtime.app).post("/api/auth/login").send({ email: "workspace-member@tongpin.test", password }).expect(200);
       const headers = { Authorization: `Bearer ${session.body.accessToken}`, "X-Tongpin-Account": session.body.user.id };
+      const denied = await request(runtime.app).put("/api/ai/workspace").set(headers).send(saveRequest()).expect(403);
+      expect(denied.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
+      const adminGrant = await request(runtime.app).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
+      await request(runtime.app).put("/api/admin/ai/members/runtime-member/quota").set("Authorization", `Bearer ${adminGrant.body.accessToken}`).send({ limitTokens: 5000 }).expect(200);
       const state = fixture(); state.artifacts[0].data = { padding: "x".repeat(900000) };
       const saved = await request(runtime.app).put("/api/ai/workspace").set(headers).send(saveRequest(state)).expect(200);
       expect(saved.body.revision).toBe(1);

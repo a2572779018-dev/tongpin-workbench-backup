@@ -46,10 +46,25 @@ describe("AI transactional service", () => {
     await expect(runtime.service.saveProvider({ ...provider, apiKey: "", baseUrl: "https://api.example.com/evil" })).rejects.toMatchObject({ code: "AI_KEY_REQUIRED" });
   });
   it("defaults to no quota and does not call the provider", async () => {
-    expect(runtime.service.status("member-a").quota.remainingTokens).toBe(0);
-    await expect(runtime.service.chat("member-a", chat())).rejects.toMatchObject({ code: "AI_QUOTA_EXHAUSTED" });
+    expect(runtime.service.status("member-a")).toMatchObject({ accessGranted: false, quota: { remainingTokens: 0 } });
+    await expect(runtime.service.chat("member-a", chat())).rejects.toMatchObject({ status: 403, code: "AI_ACCESS_NOT_GRANTED" });
     expect(transport).not.toHaveBeenCalled();
     expect(runtime.store.usage("member-a")).toEqual([]);
+  });
+  it("does not treat zero-only adjustments as access, but retains positive-grant history beyond the latest 200 entries", async () => {
+    runtime.service.setQuota("zero-member", "admin", { limitTokens: 0 });
+    expect(runtime.service.status("zero-member").accessGranted).toBe(false);
+    await expect(runtime.service.generateImage("zero-member", { requestId: crypto.randomUUID(), prompt: "不应发送" })).rejects.toMatchObject({ status: 403, code: "AI_ACCESS_NOT_GRANTED" });
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 5000 });
+    for (let index = 0; index < 201; index++) runtime.service.setQuota("member-a", "admin", { limitTokens: 0 });
+    expect(runtime.store.usage("member-a").every(entry => entry.limitTokens === 0)).toBe(true);
+    expect(runtime.service.status("member-a")).toMatchObject({ accessGranted: true, quota: { remainingTokens: 0 } });
+    await expect(runtime.service.chat("member-a", chat())).rejects.toMatchObject({ status: 402, code: "AI_QUOTA_EXHAUSTED" });
+    expect(runtime.service.status("member-b").accessGranted).toBe(false);
+    expect(transport).not.toHaveBeenCalled();
+    runtime.close(); runtime = await createNodeAi(path.join(directory, "test.json"), transport);
+    expect(runtime.service.status("member-a").accessGranted).toBe(true);
+    expect(runtime.service.status("zero-member").accessGranted).toBe(false);
   });
   it("charges real usage once, isolates members and replays completed response without more generation", async () => {
     runtime.service.setQuota("member-a", "admin", { limitTokens: 5000 });

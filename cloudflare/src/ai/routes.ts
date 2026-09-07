@@ -28,6 +28,7 @@ export async function handleAiRequest(request: Request, service: AiService, user
     const url = new URL(request.url);
     const { pathname: path } = url;
     const method = request.method;
+    if (user.status !== "active") throw new AiError(401, "SESSION_INVALID", "登录状态已失效，请重新登录");
     const boundAccount = request.headers.get("X-Tongpin-Account");
     if (boundAccount !== null && boundAccount !== user.id) throw new AiError(409, "AI_ACCOUNT_CHANGED", "账号已切换，请重新打开工作台");
     if (path.startsWith("/api/admin/ai/") && user.role !== "admin") throw new AiError(403, "FORBIDDEN", "你没有访问此功能的权限");

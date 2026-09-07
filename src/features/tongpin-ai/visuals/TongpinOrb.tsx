@@ -31,6 +31,7 @@ const stateParams = {
 
 export interface TongpinOrbProps {
   active?: boolean;
+  richMotion?: boolean;
   size?: number;
   className?: string;
 }
@@ -38,6 +39,7 @@ export interface TongpinOrbProps {
 /** Decorative AI identity. Only the caller's real request state activates it. */
 export function TongpinOrb({
   active = false,
+  richMotion = false,
   size = 48,
   className,
 }: TongpinOrbProps) {
@@ -51,9 +53,11 @@ export function TongpinOrb({
     : 48;
 
   useEffect(() => {
+    setReady(false);
     const canvas = canvasRef.current;
     const host = hostRef.current;
-    if (!canvas || !host || !navigator.gpu) return;
+    // Capability is not consent: never warm up GPU drivers merely by opening AI.
+    if (!richMotion || !canvas || !host || !navigator.gpu) return;
 
     const motionPreference = window.matchMedia(
       "(prefers-reduced-motion: reduce)",
@@ -162,7 +166,7 @@ export function TongpinOrb({
       motionPreference.removeEventListener("change", syncPlayback);
       stop();
     };
-  }, []);
+  }, [richMotion]);
 
   return (
     <span
@@ -170,7 +174,7 @@ export function TongpinOrb({
       className={["tp-ai-orb", className].filter(Boolean).join(" ")}
       aria-hidden="true"
       data-orb-state={active ? "thinking" : "idle"}
-      data-orb-renderer={ready ? "webgpu" : "fallback"}
+      data-orb-renderer={richMotion && ready ? "webgpu" : "fallback"}
       style={{
         width: resolvedSize,
         height: resolvedSize,
@@ -193,10 +197,10 @@ export function TongpinOrb({
           width: "76%",
           height: "76%",
           objectFit: "contain",
-          opacity: ready ? 0 : 1,
+          opacity: richMotion && ready ? 0 : 1,
         }}
       />
-      <canvas
+      {richMotion && <canvas
         ref={canvasRef}
         style={{
           display: "block",
@@ -204,7 +208,7 @@ export function TongpinOrb({
           height: "100%",
           opacity: ready ? 1 : 0,
         }}
-      />
+      />}
     </span>
   );
 }

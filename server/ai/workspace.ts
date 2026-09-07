@@ -1,6 +1,6 @@
 import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
 import { AiError } from "./security";
-import type { AiSql } from "./storage";
+import { AiStore, type AiSql } from "./storage";
 
 export const AI_WORKSPACE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_workspaces (
@@ -234,6 +234,7 @@ export class AiWorkspaceRepository {
 
   read(userId: string): AiWorkspaceSnapshot {
     id(userId, "账号");
+    new AiStore(this.sql).assertAccess(userId);
     const row = this.sql.all<{ revision: number; schema_version: number; updated_at: string; data: string }>("SELECT revision,schema_version,updated_at,data FROM ai_workspaces WHERE user_id=?", userId)[0];
     if (!row) return { revision: 0, schemaVersion: 1, updatedAt: null, state: null };
     if (row.schema_version !== 1) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "工作台记录版本已更新，请升级客户端");
@@ -248,6 +249,7 @@ export class AiWorkspaceRepository {
 
   async save(userId: string, value: unknown): Promise<AiWorkspaceSnapshot> {
     id(userId, "账号");
+    new AiStore(this.sql).assertAccess(userId);
     const body = record(value, "保存请求", ["expectedRevision", "mutationId", "state"]);
     if (!Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 || Number(body.expectedRevision) >= Number.MAX_SAFE_INTEGER) invalid("工作台版本无效，请重新同步");
     if (typeof body.mutationId !== "string" || !UUID.test(body.mutationId)) invalid("保存请求标识无效");

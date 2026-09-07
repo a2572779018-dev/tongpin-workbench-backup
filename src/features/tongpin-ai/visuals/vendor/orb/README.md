@@ -14,11 +14,14 @@ remote assets or services.
 Tongpin modifications to `src/orb-renderer.ts`:
 
 - Limit device pixel ratio to 1.5.
-- Limit idle rendering to approximately 30 frames per second.
+- Prefer a low-power adapter and compile render pipelines asynchronously.
+- Limit idle rendering to approximately 15 frames per second and active rendering
+  to approximately 30 frames per second.
 - Stop setup before requesting a device when the renderer was already disposed.
 - Stop initialization after asynchronous shader compilation if disposed.
 
-The host `TongpinOrb.tsx` provides lazy loading, component cleanup, document and
+The host `TongpinOrb.tsx` defaults to a static Tongpin icon. The GPU renderer is
+loaded only when the user explicitly enables visual effects. It provides lazy loading, component cleanup, document and
 intersection visibility handling, reduced-motion support, and the existing
 Tongpin icon as the fallback. Thinking activation is controlled by its caller;
 the renderer does not make model requests or imply a successful connection.

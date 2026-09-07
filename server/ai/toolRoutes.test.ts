@@ -135,8 +135,8 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     } finally { release(); expect((await generating).status).toBe(200); }
   });
   it("blocks zero-quota and deactivated members before generation", async () => {
-    const exhausted = await request(runtime.app).post("/api/ai/images").set(headers("b")).send({ requestId: crypto.randomUUID(), prompt: "没有额度" }).expect(402);
-    expect(exhausted.body.error.code).toBe("AI_QUOTA_EXHAUSTED");
+    const exhausted = await request(runtime.app).post("/api/ai/images").set(headers("b")).send({ requestId: crypto.randomUUID(), prompt: "没有额度" }).expect(403);
+    expect(exhausted.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
     await runtime.store.mutate(db => { db.users.find(user => user.id === sessions.b.id)!.status = "disabled"; });
     try {
       await request(runtime.app).post("/api/ai/images").set(headers("b")).send({ requestId: crypto.randomUUID(), prompt: "已停用" }).expect(401);

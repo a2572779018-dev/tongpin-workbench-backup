@@ -8,10 +8,13 @@ import { useWorkspacePersistence } from "../features/tongpin-ai/useWorkspacePers
 import { liveConversation, withoutConversation } from "../features/tongpin-ai/conversationOperations";
 import { registerAiLeaveGuard } from "../features/tongpin-ai/workspaceLeaveGuard";
 import { PersonaSetup } from "../features/tongpin-ai/PersonaSetup";
+import { AiAccessState } from "../features/tongpin-ai/AiAccessState";
+import { loadAiEntry, type AiEntry } from "../features/tongpin-ai/loadAiEntry";
 import type { AiPersonaSnapshot } from "../../shared/aiPersona";
 import { extractAttachment, validateAttachments } from "../features/tongpin-ai/attachments";
 import { selectSkill, skillRequestIds } from "../features/tongpin-ai/skills";
 import { buildChatRequest, canRecoverChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
+import { conversationsForPersistence, typewriterDuration, TYPEWRITER_FRAME_MS } from "../features/tongpin-ai/chatPerformance";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
 import { ArtifactPreview } from "../features/tongpin-ai/ArtifactPreview";
 import { ChatWorkspace } from "../features/tongpin-ai/ChatWorkspace";
@@ -44,6 +47,7 @@ import "../features/tongpin-ai/sidebar-layout.css";
 import "../features/tongpin-ai/chat-layout.css";
 import "../features/tongpin-ai/ai-metal-theme.css";
 import "../features/tongpin-ai/ai-capabilities.css";
+import "../features/tongpin-ai/ai-refinements.css";
 
 type WorkspaceDialogState =
   | { type: "new-project" }
@@ -72,30 +76,31 @@ export function TongpinAIPage({ user }: { user: User }) {
 
 function WorkspaceLoader({ user }: { user: User }) {
   const { api } = useAuth();
-  const [snapshot, setSnapshot] = useState<AiWorkspaceSnapshot | null>(null);
-  const [persona, setPersona] = useState<AiPersonaSnapshot | null>(null);
+  const [entry, setEntry] = useState<AiEntry | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
-    setError("");
-    const options = { headers: { "X-Tongpin-Account": user.id }, signal: controller.signal };
-    void Promise.all([api<AiWorkspaceSnapshot>("/api/ai/workspace", options), api<AiPersonaSnapshot>("/api/ai/persona", options)])
-      .then(([workspace, memory]) => { if (!controller.signal.aborted) { setSnapshot(workspace); setPersona(memory); } })
+    setError(""); setEntry(null);
+    void loadAiEntry(api, user.id, controller.signal)
+      .then(next => { if (!controller.signal.aborted) setEntry(next); })
       .catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "工作台暂时无法加载"); });
     return () => controller.abort();
   }, [api, user.id, attempt]);
-  if (!snapshot || !persona) return <section className="tp-ai-load-state" aria-live="polite">
-    <p>{error || "正在加载你的对话…"}</p>
-    {error && <button type="button" onClick={() => setAttempt(value => value + 1)}>重新加载</button>}
-  </section>;
-  return <TongpinAIWorkspace user={user} initialSnapshot={snapshot} persona={persona} onPersonaSaved={setPersona} />;
+  if (!entry || entry.kind === "locked") return <AiAccessState name={user.name} loading={!entry && !error} error={error} locked={entry?.kind === "locked"} onRetry={() => setAttempt(value => value + 1)} />;
+  // Do not initialize hidden GPU effects, chat hydration or autosaving behind setup.
+  if (entry.kind === "onboarding") return <section className="tp-ai-entry tp-ai-entry--setup"><PersonaSetup
+    key={entry.persona.revision} snapshot={entry.persona} accountId={user.id}
+    onSaved={() => setAttempt(value => value + 1)}
+  /></section>;
+  return <TongpinAIWorkspace user={user} initialSnapshot={entry.workspace} initialStatus={entry.status} persona={entry.persona}
+    onPersonaSaved={persona => setEntry(current => current?.kind === "ready" ? { ...current, persona } : current)} />;
 }
 
 type GenerationRequest = AiChatRequest | AiImageRequest;
 
-function TongpinAIWorkspace({ user, initialSnapshot, persona, onPersonaSaved }: {
-  user: User; initialSnapshot: AiWorkspaceSnapshot; persona: AiPersonaSnapshot; onPersonaSaved: (value: AiPersonaSnapshot) => void;
+function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onPersonaSaved }: {
+  user: User; initialSnapshot: AiWorkspaceSnapshot; initialStatus: AiStatus; persona: AiPersonaSnapshot; onPersonaSaved: (value: AiPersonaSnapshot) => void;
 }) {
   const { api } = useAuth();
   const notificationToolbar = useNotificationToolbar();
@@ -112,14 +117,13 @@ function TongpinAIWorkspace({ user, initialSnapshot, persona, onPersonaSaved }: 
   const [artifacts, setArtifacts] = useState<TongpinAIArtifact[]>(
     initialSession.artifacts,
   );
-  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(initialStatus);
   const [connectionError, setConnectionError] = useState("");
-  const [connectionLoading, setConnectionLoading] = useState(true);
+  const [connectionLoading, setConnectionLoading] = useState(false);
   const [responding, setResponding] = useState(false);
   const [responsePhase, setResponsePhase] = useState<"waiting" | "typing">("waiting");
   const requestRef = useRef<{ controller: AbortController; conversationId: string; messageId: string; request: GenerationRequest } | null>(null);
   const retryRequestsRef = useRef(new Map<string, { conversationId: string; request: GenerationRequest }>());
-  const completedResponsesRef = useRef(new Map<string, ReturnType<typeof completedReply>>());
   const pendingGenerationRef = useRef<string | null>(null);
   const pendingCancelledRef = useRef(false);
   const fileImportRef = useRef(false);
@@ -237,14 +241,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, persona, onPersonaSaved }: 
     [],
   );
 
-  const persistentState = serializeWorkspace({
+  const persistentConversations = useMemo(() => conversationsForPersistence(conversations), [conversations]);
+  const persistentState = useMemo(() => serializeWorkspace({
       view,
       mode,
-      // Render the typewriter locally, but persist the full received reply once.
-      conversations: conversations.map(conversation => ({ ...conversation, messages: conversation.messages.map(message => {
-        const complete = completedResponsesRef.current.get(message.id);
-        return message.status === "typing" && complete ? { ...message, ...complete } : message;
-      }) })),
+      conversations: persistentConversations,
       projects,
       artifacts,
       drafts,
@@ -255,7 +256,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, persona, onPersonaSaved }: 
       activeProjectId,
       enabledSkillIds,
       sidebarCollapsed,
-    });
+    }), [view, mode, persistentConversations, projects, artifacts, drafts, draftAttachments,
+      composerTool, webSearch, activeConversationId, activeProjectId, enabledSkillIds, sidebarCollapsed]);
   const writeWorkspace = useCallback((body: AiWorkspaceSaveRequest) => api<AiWorkspaceSnapshot>("/api/ai/workspace", {
     method: "PUT", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(body),
   }), [api, user.id]);
@@ -555,7 +557,6 @@ function TongpinAIWorkspace({ user, initialSnapshot, persona, onPersonaSaved }: 
         for (const [messageId, retry] of retryRequestsRef.current) {
           if (retry.conversationId === conversationId) retryRequestsRef.current.delete(messageId);
         }
-        for (const message of latest.conversations.find(item => item.id === conversationId)?.messages ?? []) completedResponsesRef.current.delete(message.id);
         if (latest.workspaceDialog?.type === "delete-conversation" && latest.workspaceDialog.conversationId === conversationId) closeWorkspaceDialog();
         const saved = await persistenceRef.current.saveNow(withoutConversation(persistentStateRef.current, conversationId));
         if (mountedRef.current) showAnnouncement(saved ? "对话已删除" : "对话已移除，请重试保存以同步删除");
@@ -617,7 +618,6 @@ function TongpinAIWorkspace({ user, initialSnapshot, persona, onPersonaSaved }: 
 
   function displayReply(conversationId: string, messageId: string, response: AiChatResponse) {
     retryRequestsRef.current.delete(messageId);
-    completedResponsesRef.current.set(messageId, completedReply(response));
     const finish = () => {
       if (typingRef.current) window.clearTimeout(typingRef.current.timer);
       typingRef.current = null;
@@ -627,17 +627,10 @@ function TongpinAIWorkspace({ user, initialSnapshot, persona, onPersonaSaved }: 
     };
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { finish(); return; }
     setResponsePhase("typing");
-    const characters = Array.from(response.content);
-    const step = Math.max(2, Math.ceil(characters.length / 200));
-    let shown = 0;
-    const tick = () => {
-      if (!mountedRef.current) return;
-      shown = Math.min(shown + step, characters.length);
-      if (shown === characters.length) { finish(); return; }
-      updateReply(conversationId, messageId, { content: characters.slice(0, shown).join(""), status: "typing", model: response.model, usage: response.usage });
-      typingRef.current = { timer: window.setTimeout(tick, 24), finish };
-    };
-    tick();
+    // Store the complete response once. Only TypewriterText updates during the
+    // cosmetic reveal; never rerender/serialize the entire workspace per character.
+    updateReply(conversationId, messageId, { ...completedReply(response), status: "typing" });
+    typingRef.current = { timer: window.setTimeout(finish, typewriterDuration(response.content) + TYPEWRITER_FRAME_MS), finish };
   }
 
   function acceptGeneration(conversationId: string, messageId: string, response: AiChatResponse | AiImageResponse) {

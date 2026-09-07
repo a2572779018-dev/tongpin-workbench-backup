@@ -272,11 +272,13 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     for (const member of [memberA, memberB]) {
       const current = await status(member);
       expect(current.configured).toBe(true);
+      expect(current.accessGranted).toBe(false);
       expect(current.quota.limitTokens).toBe(0);
       expect(current.quota.remainingTokens).toBe(0);
       const response = await request(runtime.app).post("/api/ai/chat")
         .set(authenticated(member.token)).send(chatBody(`zero-${member.id}`));
-      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(response.status).toBe(403);
+      expect(response.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
       assertNoProviderKey(response.body);
     }
     expect(fakeTransport.mock.calls.length).toBe(before);
@@ -375,7 +377,8 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     const before = chatCalls;
     const forged = await request(runtime.app).post("/api/ai/chat").set(authenticated(memberB.token))
       .send({ ...chatBody("forged-owner-identity"), userId: memberA.id, quota: { remainingTokens: 999_999 } });
-    expect(forged.status).toBe(402);
+    expect(forged.status).toBe(403);
+    expect(forged.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
     expect(chatCalls).toBe(before);
     expect((await status(memberB)).quota.usedTokens).toBe(0);
     const otherUsage = await request(runtime.app).get(`/api/ai/usage?userId=${memberA.id}`)

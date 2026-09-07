@@ -27,13 +27,13 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "专属助手名字、性格与回答偏好",
+      "恢复系统光标",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "账号隔离保存",
+      "管理员分配额度后才可设置专属 AI",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "可编辑 PPTX",
+      "不覆盖原有加密客户数据",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "额度不足时停止新增生成",

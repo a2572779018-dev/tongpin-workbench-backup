@@ -81,18 +81,18 @@ export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
   return <div className="tp-ai-persona-layer">
     <section ref={dialogRef} className="tp-ai-persona-dialog" role="dialog" aria-modal="true" aria-labelledby="tp-ai-persona-title">
       <header><span className="tp-ai-persona-symbol"><Sparkles size={23} /></span>
-        <div><h2 id="tp-ai-persona-title">{editing ? "我的专属 AI" : "认识你的专属 AI"}</h2><small>{editing ? "名字、性格与长期偏好" : `${step + 1} / 3`}</small></div>
+        <div><h2 id="tp-ai-persona-title">{editing ? "我的专属 AI" : "认识你的专属 AI"}</h2><small>{editing ? "已保存的名字、性格与偏好" : `${step + 1} / 3 · ${["取个名字", "选择性格", "确认偏好"][step]}`}</small></div>
         {editing && <button type="button" aria-label="关闭专属 AI 设置" disabled={saving} onClick={onClose}><X size={19} /></button>}
       </header>
       <div className="tp-ai-persona-dialog__body">
         <div className="tp-ai-persona-message" aria-live="polite"><strong>{step === 0 ? "同频 AI" : name}</strong>
           <p>{editing ? "你可以随时修改我的名字和相处方式。下次对话，我会按照新的设置与你合作。"
             : step === 0 ? "你好，我是同频 AI，你的专属工作伙伴。你希望我叫什么名字？"
-            : step === 1 ? `好，以后你可以叫我${name}。你希望我以什么样的性格和你相处？选一个，也可以告诉我你的想法。`
+            : step === 1 ? `${name}，这个名字不错。你希望我以什么样的性格和你相处？选一个，也可以告诉我你的想法。`
             : "还有哪些习惯希望我记住？比如默认用中文、先给结论、方案最好带执行步骤。确认后，我会在以后的对话中沿用。"}</p>
         </div>
         <form onSubmit={nextStep}>
-          {(step === 0 || editing) && <label className="tp-ai-persona-field">我的名字
+          {(step === 0 || editing) && <label className="tp-ai-persona-field">AI 的名字
             <input ref={inputRef} value={profile.name} maxLength={40} placeholder="例如：小频" disabled={saving}
               onChange={event => setProfile(current => ({ ...current, name: event.target.value }))}
               onKeyDown={event => { if (event.key === "Enter" && event.nativeEvent.isComposing) event.preventDefault(); }} />
@@ -114,6 +114,7 @@ export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
             <textarea value={profile.preferences} maxLength={4000} rows={4} disabled={saving} placeholder="例如：称呼我 Sam；回答用简体中文；先给简短结论。不要填写密码或 API 密钥。"
               onChange={event => setProfile(current => ({ ...current, preferences: event.target.value }))} />
           </label>}
+          {step === 2 && <p className="tp-ai-persona-memory-note">只保存你在这里确认的内容，随账号同步；可随时修改或清除。</p>}
           {step === 2 && !editing && <div className="tp-ai-persona-summary"><span>名字：{name}</span><span>性格：{PERSONALITIES.find(item => item.id === profile.tone)?.name}</span>
             {profile.customStyle && <p>{profile.customStyle}</p>}
           </div>}

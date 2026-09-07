@@ -1,6 +1,6 @@
 import { AI_PERSONA_LIMITS, defaultAiPersonaProfile, type AiPersonaProfile, type AiPersonaSnapshot } from "../../shared/aiPersona";
 import { AiError } from "./security";
-import type { AiSql } from "./storage";
+import { AiStore, type AiSql } from "./storage";
 
 export const AI_PERSONA_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_personas (
@@ -47,6 +47,7 @@ export class AiPersonaRepository {
   initialize(): void { this.sql.exec(AI_PERSONA_SCHEMA); }
   read(userId: string): AiPersonaSnapshot {
     accountId(userId);
+    new AiStore(this.sql).assertAccess(userId);
     const row = this.sql.all<{ revision: number; schema_version: number; data: string }>("SELECT revision,schema_version,data FROM ai_personas WHERE user_id=?", userId)[0];
     if (!row) return { revision: 0, profile: defaultAiPersonaProfile() };
     if (row.schema_version !== 1) throw new AiError(409, "AI_PERSONA_VERSION_UNSUPPORTED", "专属 AI 设置版本已更新，请升级客户端");
@@ -54,6 +55,7 @@ export class AiPersonaRepository {
   }
   save(userId: string, value: unknown): AiPersonaSnapshot {
     accountId(userId);
+    new AiStore(this.sql).assertAccess(userId);
     const body = record(value, ["expectedRevision", "profile", "reset"]);
     if (!Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 || Number(body.expectedRevision) >= Number.MAX_SAFE_INTEGER) invalid("设置版本无效，请重新加载");
     if (body.reset !== undefined && typeof body.reset !== "boolean") invalid("重置选项格式不正确");

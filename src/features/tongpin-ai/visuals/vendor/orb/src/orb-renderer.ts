@@ -44,7 +44,7 @@ export function createOrbRenderer({
       throw new Error("当前浏览器不支持 WebGPU");
     }
 
-    const adapter = await navigator.gpu.requestAdapter();
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: "low-power" });
     if (disposed) return;
     if (!adapter) {
       throw new Error("未找到可用的 WebGPU 适配器");
@@ -82,7 +82,7 @@ export function createOrbRenderer({
       );
     }
 
-    const pipeline = device.createRenderPipeline({
+    const pipeline = await device.createRenderPipelineAsync({
       label: "orb-glass-liquid-pipeline",
       layout: "auto",
       vertex: { module: shader, entryPoint: "vs_main" },
@@ -107,7 +107,8 @@ export function createOrbRenderer({
       },
       primitive: { topology: "triangle-list" },
     });
-    const ribbonPipeline = device.createRenderPipeline({
+    if (disposed) return;
+    const ribbonPipeline = await device.createRenderPipelineAsync({
       label: "particle-ribbon-pipeline",
       layout: "auto",
       vertex: { module: shader, entryPoint: "ribbon_vs_main" },
@@ -128,7 +129,8 @@ export function createOrbRenderer({
       },
       primitive: { topology: "triangle-list" },
     });
-    const ribbonCompositePipeline = device.createRenderPipeline({
+    if (disposed) return;
+    const ribbonCompositePipeline = await device.createRenderPipelineAsync({
       label: "particle-ribbon-glass-composite-pipeline",
       layout: "auto",
       vertex: { module: shader, entryPoint: "vs_main" },
@@ -153,6 +155,7 @@ export function createOrbRenderer({
       },
       primitive: { topology: "triangle-list" },
     });
+    if (disposed) return;
     const values = new Float32Array(orbUniformFloatCount);
     const uniformBuffer = device.createBuffer({
       size: values.byteLength,
@@ -225,7 +228,8 @@ export function createOrbRenderer({
       try {
         const target = getTarget();
         // Tongpin: idle identity animation should not render at display refresh rate.
-        if (target.state === "idle" && lastDrawAt !== null && now - lastDrawAt < 32) {
+        const frameInterval = target.state === "idle" ? 66 : 32;
+        if (lastDrawAt !== null && now - lastDrawAt < frameInterval) {
           animationFrame = requestAnimationFrame(frame);
           return;
         }

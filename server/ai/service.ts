@@ -126,7 +126,8 @@ export class AiService {
   status(userId: string): AiStatus {
     const p = this.provider();
     const configured = Boolean(p?.enabled && p.apiKeyConfigured);
-    return { configured, quickModel: p?.quickModel ?? "", deepModel: p?.deepModel ?? "", maxOutputTokens: p?.maxOutputTokens ?? 0, quota: this.quota(userId),
+    const quota = this.quota(userId);
+    return { accessGranted: this.store.hasAccess(userId), configured, quickModel: p?.quickModel ?? "", deepModel: p?.deepModel ?? "", maxOutputTokens: p?.maxOutputTokens ?? 0, quota,
       imageEnabled: Boolean(configured && p?.imageModel && p.imageQuotaTokens && p.imageApiKeyConfigured), imageQuotaTokens: p?.imageQuotaTokens ?? 0,
       visionEnabled: Boolean(configured && p?.visionEnabled), webSearchEnabled: Boolean(configured && p?.protocol === "responses" && p.webSearchEnabled && p.webSearchQuotaTokens), webSearchQuotaTokens: p?.webSearchQuotaTokens ?? 0 };
   }
@@ -180,6 +181,7 @@ export class AiService {
     return true;
   }
   async chat(userId: string, value: unknown): Promise<AiChatResponse> {
+    this.store.assertAccess(userId);
     const request = parseChat(value);
     const { requestId: _requestId, ...hashable } = request;
     const hash = await requestHash(hashable);
@@ -264,6 +266,7 @@ export class AiService {
     }
   }
   async generateImage(userId: string, value: unknown): Promise<AiImageResponse> {
+    this.store.assertAccess(userId);
     const request = parseImageRequest(value);
     const hash = await requestHash({ kind: "image", prompt: request.prompt });
     this.recover(userId);
