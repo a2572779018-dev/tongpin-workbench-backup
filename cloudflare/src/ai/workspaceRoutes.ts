@@ -34,7 +34,7 @@ export async function handleAiWorkspaceRequest(
 ): Promise<Response> {
   try {
     if (user.status !== "active") throw new AiError(401, "SESSION_INVALID", "登录状态已失效，请重新登录");
-    if (user.role !== "member") throw new AiError(403, "AI_MEMBER_REQUIRED", "请使用成员账号访问 AI 工作台");
+    if (user.role !== "member" && user.role !== "boss") throw new AiError(403, "AI_MEMBER_REQUIRED", "请使用成员或老板账号访问 AI 工作台");
     if (new URL(request.url).pathname !== "/api/ai/workspace") throw new AiError(404, "NOT_FOUND", "请求的接口不存在");
     const expectedAccount = request.headers.get("X-Tongpin-Account");
     if (expectedAccount !== null && expectedAccount !== user.id) throw new AiError(409, "AI_WORKSPACE_ACCOUNT_CHANGED", "当前登录账号已改变，请重新打开工作台");

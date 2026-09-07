@@ -218,7 +218,7 @@ describe("AI durable member workspace", () => {
 
   const actor = (id = "member-a", role: "member" | "admin" | "boss" = "member") => ({ id, role, status: "active" as const });
   const invoke = (repository: AiWorkspaceRepository, method: string, body?: unknown, member = actor(), suffix = "") => handleAiWorkspaceRequest(new Request(`https://tongpin.example/api/ai/workspace${suffix}`, { method, ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) }), repository, member);
-  it("Cloudflare route denies admin/boss/inactive actors and never uses a body/query account id", async () => {
+  it("Cloudflare route denies admin, ungranted boss and inactive actors, and ignores account queries", async () => {
     expect((await invoke(repository, "GET", undefined, actor("admin", "admin"))).status).toBe(403);
     expect((await invoke(repository, "GET", undefined, actor("boss", "boss"))).status).toBe(403);
     const inactive = await handleAiWorkspaceRequest(new Request("https://tongpin.example/api/ai/workspace"), repository, { ...actor(), status: "disabled" });
@@ -227,6 +227,19 @@ describe("AI durable member workspace", () => {
     const other = await invoke(repository, "GET", undefined, actor("member-b"), "?userId=member-a");
     expect(await other.json()).toMatchObject({ revision: 0, state: null });
     expect(other.headers.get("cache-control")).toBe("no-store");
+  });
+  it("granted bosses own an isolated workspace without reading a member snapshot", async () => {
+    const store = new AiStore(repository.sql);
+    store.saveQuota("boss", { ...emptyQuota(), limitTokens: 10000 });
+    await repository.save("member-a", saveRequest());
+    const empty = await invoke(repository, "GET", undefined, actor("boss", "boss"), "?userId=member-a");
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toMatchObject({ revision: 0, state: null });
+    expect((await invoke(repository, "PUT", saveRequest(), actor("boss", "boss"))).status).toBe(200);
+    expect(repository.read("boss").revision).toBe(1);
+    expect(repository.read("member-a").revision).toBe(1);
+    const mismatch = await handleAiWorkspaceRequest(new Request("https://tongpin.example/api/ai/workspace", { headers: { "X-Tongpin-Account": "member-a" } }), repository, actor("boss", "boss"));
+    expect(mismatch.status).toBe(409);
   });
   it("Cloudflare route returns CAS conflicts without echoing confidential snapshots", async () => {
     await invoke(repository, "PUT", saveRequest());

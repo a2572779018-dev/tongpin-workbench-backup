@@ -14,6 +14,15 @@ const USAGE_STATUS: Record<AiUsageEntry["status"], string> = {
   completed: "已完成", failed: "失败", uncertain: "待核对", adjusted: "额度调整",
 };
 
+export function AdminAiMemberIdentity({ member }: { member: Pick<AiMember, "name" | "email" | "role"> }) {
+  return <>
+    <span className="tp-ai-admin-member-name"><strong>{member.name}</strong>
+      {member.role === "boss" ? <span className="tp-ai-admin-member-role">老板</span> : null}
+    </span>
+    <small>{member.email}</small>
+  </>;
+}
+
 function AdminAiDialog({ title, children, busy = false, onClose }: {
   title: string; children: ReactNode; busy?: boolean; onClose: () => void;
 }) {
@@ -200,7 +209,7 @@ export function AdminAiQuotaPanel() {
               <thead><tr><th>成员</th><th>账号状态</th><th>总限额</th><th>已使用</th><th>正在使用</th><th>剩余额度</th><th>操作</th></tr></thead>
               <tbody>{visibleMembers.map((member) => (
                 <tr key={member.id}>
-                  <td><strong>{member.name}</strong><small>{member.email}</small></td>
+                  <td><AdminAiMemberIdentity member={member} /></td>
                   <td><span className={`tp-ai-admin-status ${member.status === "active" ? "is-active" : ""}`}>{MEMBER_STATUS[member.status] ?? "不可用"}</span></td>
                   <td>{formatAiTokens(member.quota.limitTokens)}</td><td>{formatAiTokens(member.quota.usedTokens)}</td>
                   <td>{formatAiTokens(member.quota.reservedTokens)}</td><td><strong>{formatAiTokens(member.quota.remainingTokens)}</strong></td>

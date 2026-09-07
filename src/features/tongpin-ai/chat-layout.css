@@ -170,6 +170,7 @@
   padding: 0.8rem max(1.5rem, calc((100% - 46rem) / 2)) 0.9rem;
 }
 .tp-ai-composer {
+  --tp-ai-composer-inset: 1rem;
   background: #fffcf5;
   border: 1.5px solid #514b3f;
   border-radius: 1rem;
@@ -185,7 +186,7 @@
   resize: none;
   font-size: 0.94rem;
   line-height: 1.7;
-  padding: 1rem 1rem 0.5rem;
+  padding: 1rem var(--tp-ai-composer-inset) 0.5rem;
 }
 .tp-ai-composer__toolbar {
   display: flex;
@@ -232,23 +233,48 @@
   display: flex;
   gap: 0.3rem;
   align-items: center;
+  min-width: 0;
+  min-height: 2.2rem;
   margin-left: auto;
+  padding: 0 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
   position: relative;
   font-size: 0.74rem;
 }
 .tp-ai-mode-select select {
   cursor: pointer;
+  -webkit-appearance: none;
   appearance: none;
+  min-width: 0;
   border: 0;
+  border-radius: 999px;
   background: transparent;
+  color-scheme: light;
   color: inherit;
   font: inherit;
   padding: 0.4rem 0.9rem 0.4rem 0;
-  outline-offset: 1px;
+}
+.tp-ai-page .tp-ai-mode-select select:focus {
+  /* Native select focus can remain after its menu closes. Keep the actual
+     keyboard cue on the complete rounded control instead of its text box. */
+  outline: none;
+  box-shadow: none;
+}
+.tp-ai-page .tp-ai-mode-select:has(select:focus-visible) {
+  outline: 2px solid #8b7028;
+  outline-offset: 2px;
+  background: #f5edce;
+}
+.tp-ai-mode-select:has(select:disabled) {
+  opacity: 0.58;
+}
+.tp-ai-mode-select select:disabled {
+  cursor: not-allowed;
 }
 .tp-ai-mode-select > svg:last-child {
   position: absolute;
-  right: 0;
+  right: 0.4rem;
   pointer-events: none;
 }
 .tp-ai-send-button {
@@ -471,6 +497,9 @@
   }
   .tp-ai-composer-wrap {
     padding: 0.75rem 0.8rem;
+  }
+  .tp-ai-composer {
+    --tp-ai-composer-inset: 0.875rem;
   }
   .tp-ai-message__body > p {
     font-size: 0.9rem;

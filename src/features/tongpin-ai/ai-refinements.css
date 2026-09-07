@@ -34,6 +34,11 @@
 .tp-ai-entry--setup { padding: 0; }
 .tp-ai-entry--setup button { margin-top: 0; }
 .tp-ai-persona-memory-note { font-size: 12px; line-height: 1.65; color: #716d60; margin: 12px 0; }
+.tp-ai-page .tp-ai-budget-notice { gap: 12px; flex-wrap: wrap; padding: 12px 14px; background: #faf2d8; border: 1px solid #d6c58e; border-radius: 12px; color: #5d4d25; box-shadow: none; }
+.tp-ai-budget-notice > span { flex: 1 1 260px; min-width: 0; }
+.tp-ai-budget-notice strong { display: block; font-size: 13px; line-height: 1.6; }
+.tp-ai-budget-notice small { display: block; margin-top: 3px; font-size: 12px; line-height: 1.6; }
+.tp-ai-page .tp-ai-budget-notice button { flex: 0 0 auto; padding: 8px 10px; border: 1px solid #c8b474; border-radius: 9px; background: #fffaf0; color: #5d4d25; font-size: 12px; line-height: 1.5; white-space: nowrap; box-shadow: none; }
 @media (max-width: 760px) {
   .tp-ai-entry { padding: 16px; min-height: 65vh; }
   .tp-ai-entry__card { padding: 30px 20px; }

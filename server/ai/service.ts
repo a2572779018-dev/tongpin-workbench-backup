@@ -1,12 +1,42 @@
-import type { AiChatRequest, AiChatResponse, AiImageAsset, AiImageRequest, AiImageResponse, AiMember, AiProviderConfig, AiProviderInput, AiProviderTestResult, AiQuota, AiRequestResult, AiStatus, AiUsage } from "../../shared/ai";
+import type { AiChatBudget, AiChatPreflight, AiChatPreflightReason, AiChatRequest, AiChatResponse, AiImageAsset, AiImageRequest, AiImageResponse, AiMember, AiProviderConfig, AiProviderInput, AiProviderTestResult, AiQuota, AiRequestResult, AiStatus, AiUsage } from "../../shared/ai";
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import { AiStore, type StoredProvider, type StoredRequest } from "./storage";
 import { AI_TIMEOUT_MS, object, parseProviderResult, providerBody, providerHttpError, readBoundedJson, readProviderResponse, type AiTransport } from "./provider";
 import { chatInputReserve, parseChatCapabilities, parsePresentation, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
+import type { AiPersonaProfile } from "../../shared/aiPersona";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
+// search_context_size=low is a size preference, not a contractual token ceiling.
+// Keep the existing conservative allowance until a provider supplies a verifiable cap.
+const SEARCH_INPUT_RESERVE = 32768;
+const MIN_OUTPUT_TOKENS = 16;
+
+function chatBudget(request: AiChatRequest, provider: AiProviderConfig, quota: AiQuota, persona: AiPersonaProfile, model: string): AiChatBudget {
+  const inputReserve = chatInputReserve(request, persona, model);
+  const searchInputReserve = request.webSearch ? SEARCH_INPUT_RESERVE : 0;
+  const convertedReserve = request.webSearch ? provider.webSearchQuotaTokens! : 0;
+  return {
+    inputReserve, searchInputReserve, convertedReserve, minOutputTokens: MIN_OUTPUT_TOKENS,
+    minimumRequiredTokens: inputReserve + searchInputReserve + convertedReserve + MIN_OUTPUT_TOKENS,
+    availableOutputTokens: Math.max(0, Math.min(provider.maxOutputTokens, quota.remainingTokens - inputReserve - searchInputReserve - convertedReserve)),
+    maxOutputTokens: provider.maxOutputTokens,
+  };
+}
+function budgetReason(budget: AiChatBudget, quota: AiQuota, pending: boolean): AiChatPreflightReason {
+  if (pending) return "request_in_progress";
+  if (quota.remainingTokens === 0) return "quota_exhausted";
+  if (quota.remainingTokens < budget.minimumRequiredTokens) return budget.searchInputReserve ? "search_quota_insufficient" : "quota_insufficient";
+  return null;
+}
+function requireChatBudget(preflight: AiChatPreflight): void {
+  const { reason } = preflight;
+  if (reason === "request_in_progress") throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "该账号已有一条 AI 请求正在处理，请稍候", true, preflight);
+  if (reason === "quota_exhausted") throw new AiError(402, "AI_QUOTA_EXHAUSTED", "可用 Token 已用完，请联系管理员增加额度", true, preflight);
+  if (reason === "search_quota_insufficient") throw new AiError(402, "AI_SEARCH_QUOTA_INSUFFICIENT", "当前余额不足以预留本次联网搜索所需额度；尚未发送，也未扣费", true, preflight);
+  if (reason === "quota_insufficient") throw new AiError(402, "AI_QUOTA_INSUFFICIENT", "当前仍有余额，但不足以预留本次对话所需额度；请缩短对话或联系管理员", true, preflight);
+}
 function text(value: unknown, name: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new AiError(400, "AI_INPUT_INVALID", `${name}格式不正确`);
   return value.trim();
@@ -132,6 +162,33 @@ export class AiService {
       visionEnabled: Boolean(configured && p?.visionEnabled), webSearchEnabled: Boolean(configured && p?.protocol === "responses" && p.webSearchEnabled && p.webSearchQuotaTokens), webSearchQuotaTokens: p?.webSearchQuotaTokens ?? 0 };
   }
   members(users: MemberIdentity[]): AiMember[] { return users.map(user => ({ ...user, quota: this.quota(user.id) })); }
+  private chatProvider(request: AiChatRequest): StoredProvider {
+    const provider = this.store.provider();
+    if (!provider?.enabled) throw new AiError(503, "AI_NOT_CONFIGURED", "管理员尚未启用 AI 服务");
+    if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
+    if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) throw new AiError(403, "AI_VISION_DISABLED", "管理员尚未启用图片理解，请上传可提取文字的文档");
+    return provider;
+  }
+  private chatPreflight(userId: string, request: AiChatRequest, provider: AiProviderConfig, persona: AiPersonaProfile, model: string): AiChatPreflight {
+    const quota = this.store.quota(userId);
+    const pending = this.store.pending(userId).length > 0;
+    const budget = chatBudget(request, provider, quota, persona, model);
+    const reason = budgetReason(budget, quota, pending);
+    if (!request.webSearch) return { canSend: reason === null, reason, quota, budget };
+    const ordinaryBudget = chatBudget({ ...request, webSearch: false }, provider, quota, persona, model);
+    const ordinaryReason = budgetReason(ordinaryBudget, quota, pending);
+    return { canSend: reason === null, reason, quota, budget,
+      withoutWebSearch: { canSend: ordinaryReason === null, reason: ordinaryReason, budget: ordinaryBudget } };
+  }
+  /** Does not decrypt credentials, recover/mutate requests, reserve quota or contact a provider. */
+  preflight(userId: string, value: unknown): AiChatPreflight {
+    this.store.assertAccess(userId);
+    const request = parseChat(value);
+    const provider = this.chatProvider(request);
+    const model = request.mode === "deep" ? provider.deepModel : provider.quickModel;
+    const persona = new AiPersonaRepository(this.store.sql).read(userId).profile;
+    return this.chatPreflight(userId, request, provider, persona, model);
+  }
   getAsset(userId: string, assetId: string): AiImageAsset {
     const asset = this.store.asset(userId, assetId);
     if (!asset) throw new AiError(404, "AI_ASSET_NOT_FOUND", "图片不存在或已删除");
@@ -193,22 +250,20 @@ export class AiService {
       if (prior.error) throw new AiError(prior.error.status, prior.error.code, prior.error.message);
       throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "AI 正在处理这条消息，请稍候");
     }
-    const provider = this.store.provider();
-    if (!provider?.enabled) throw new AiError(503, "AI_NOT_CONFIGURED", "管理员尚未启用 AI 服务");
-    if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
-    if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) throw new AiError(403, "AI_VISION_DISABLED", "管理员尚未启用图片理解，请上传可提取文字的文档");
+    const provider = this.chatProvider(request);
     const key = await (await this.box()).decrypt(provider.encryptedKey);
     const model = request.mode === "deep" ? provider.deepModel : provider.quickModel;
     const persona = new AiPersonaRepository(this.store.sql).read(userId).profile;
     const reserved = this.store.sql.transaction(() => {
       // Recheck after asynchronous hashing / key decryption.
-      if (this.store.request(userId, request.requestId) || this.store.pending(userId).length) throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "该账号已有一条 AI 请求正在处理，请稍候");
-      const q = this.store.quota(userId);
+      if (this.store.request(userId, request.requestId)) throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "AI 正在处理这条消息，请稍候");
+      const preflight = this.chatPreflight(userId, request, provider, persona, model);
+      requireChatBudget(preflight);
+      const q = preflight.quota;
       // UTF-8 bytes plus protocol overhead is deliberately conservative, not a fake provider token count.
-      const inputReserve = chatInputReserve(request, persona, model) + (request.webSearch ? 32768 : 0);
-      const convertedReserve = request.webSearch ? provider.webSearchQuotaTokens! : 0;
-      const outputReserve = Math.min(provider.maxOutputTokens, q.remainingTokens - inputReserve - convertedReserve);
-      if (outputReserve < 16) throw new AiError(402, "AI_QUOTA_EXHAUSTED", "可用 Token 不足，请联系管理员增加额度，或缩短对话后重试");
+      const inputReserve = preflight.budget.inputReserve + preflight.budget.searchInputReserve;
+      const convertedReserve = preflight.budget.convertedReserve;
+      const outputReserve = preflight.budget.availableOutputTokens;
       const pending: StoredRequest = { requestId: request.requestId, userId, hash, status: "pending", createdAt: new Date().toISOString(), expiresAt: Date.now() + AI_TIMEOUT_MS + 30_000, inputReserve, outputReserve, convertedReserve, kind: "chat", model, mode: request.mode };
       q.reservedTokens += totalReserved(pending);
       this.store.saveQuota(userId, q); this.store.saveRequest(pending);

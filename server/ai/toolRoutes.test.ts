@@ -60,17 +60,75 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     if (directory) await rm(directory, { recursive: true });
   });
 
-  it("requires authentication and denies admin/boss access to member tool APIs", async () => {
+  it("requires authentication and denies admin access to personal tool APIs", async () => {
     for (const endpoint of ["/api/ai/assets/unknown", "/api/ai/requests/unknown"]) {
       await request(runtime.app).get(endpoint).expect(401);
-      for (const actor of ["admin", "boss"]) await request(runtime.app).get(endpoint).set(headers(actor)).expect(403);
+      await request(runtime.app).get(endpoint).set(headers("admin")).expect(403);
     }
     await request(runtime.app).post("/api/ai/images").send({ requestId: crypto.randomUUID(), prompt: "未登录" }).expect(401);
-    for (const actor of ["admin", "boss"]) {
+    for (const actor of ["admin"]) {
       await request(runtime.app).post("/api/ai/images").set(headers(actor)).send({ requestId: crypto.randomUUID(), prompt: "无成员权限" }).expect(403);
       await request(runtime.app).delete("/api/ai/assets/unknown").set(headers(actor)).expect(403);
     }
     expect(transport).not.toHaveBeenCalled();
+  });
+  it("lists bosses without a default grant and lets only admin enable their isolated AI account", async () => {
+    const members = await request(runtime.app).get("/api/admin/ai/members").set(headers("admin")).expect(200);
+    expect(members.body.members.find((actor: { id: string }) => actor.id === sessions.boss.id)).toMatchObject({ role: "boss", quota: { limitTokens: 0 } });
+    expect((await request(runtime.app).get("/api/ai/status").set(headers("boss")).expect(200)).body.accessGranted).toBe(false);
+    for (const endpoint of ["/api/ai/persona", "/api/ai/workspace"]) await request(runtime.app).get(endpoint).set(headers("boss")).expect(403);
+    await request(runtime.app).post("/api/ai/images").set(headers("boss")).send({ requestId: crypto.randomUUID(), prompt: "尚未开通" }).expect(403);
+    await request(runtime.app).get("/api/admin/ai/provider").set(headers("boss")).expect(403);
+    await request(runtime.app).put(`/api/admin/ai/members/${sessions.boss.id}/quota`).set(headers("boss")).send({ limitTokens: 10000 }).expect(403);
+    await request(runtime.app).put(`/api/admin/ai/members/${sessions.boss.id}/quota`).set(headers("admin")).send({ limitTokens: 10000 }).expect(200);
+    const requestId = crypto.randomUUID(), beforeA = runtime.aiStore.quota(sessions.a.id);
+    const response = await request(runtime.app).post("/api/ai/chat").set(headers("boss")).send({ requestId, mode: "quick", messages: [{ role: "user", content: "仅老板的消息" }], userId: sessions.a.id }).expect(200);
+    expect(response.body.quota).toMatchObject({ usedTokens: 20, remainingTokens: 9980 });
+    expect(runtime.aiStore.quota(sessions.a.id)).toEqual(beforeA);
+    await request(runtime.app).get(`/api/ai/requests/${requestId}`).set(headers("boss")).expect(200);
+    await request(runtime.app).get(`/api/ai/requests/${requestId}?userId=${sessions.boss.id}`).set(headers("a")).expect(404);
+    await request(runtime.app).get("/api/ai/status").set(headers("boss", sessions.a.id)).expect(409);
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("persists a granted boss's persona and workspace through the real Node routes without exposing member data", async () => {
+    const profile = (name: string) => ({ name, tone: "warm", customStyle: "先给结论", preferences: "中文", onboardingComplete: true });
+    const state = (title: string) => ({ view: "chat", mode: "quick", projects: [], conversations: [{ id: "private-chat", title, timeLabel: "刚刚", messages: [{ id: "private-message", role: "user", content: title, time: "10:00" }] }], artifacts: [], drafts: {}, activeConversationId: "private-chat", activeProjectId: null, enabledSkillIds: [] });
+    const memberPersona = await request(runtime.app).put("/api/ai/persona").set(headers("a")).send({ expectedRevision: 0, profile: profile("成员专属助手") }).expect(200);
+    const memberWorkspace = await request(runtime.app).put("/api/ai/workspace").set(headers("a")).send({ expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("成员私有对话") }).expect(200);
+    expect((await request(runtime.app).get(`/api/ai/persona?userId=${sessions.a.id}`).set(headers("boss")).expect(200)).body.profile.name).toBe("");
+    expect((await request(runtime.app).get(`/api/ai/workspace?userId=${sessions.a.id}`).set(headers("boss")).expect(200)).body.state).toBeNull();
+    const bossPersona = await request(runtime.app).put("/api/ai/persona").set(headers("boss")).send({ expectedRevision: 0, profile: profile("老板专属助手") }).expect(200);
+    const bossWorkspace = await request(runtime.app).put("/api/ai/workspace").set(headers("boss")).send({ expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("老板私有对话") }).expect(200);
+    expect((await request(runtime.app).get("/api/ai/persona").set(headers("boss")).expect(200)).body).toEqual(bossPersona.body);
+    expect((await request(runtime.app).get("/api/ai/workspace").set(headers("boss")).expect(200)).body).toEqual(bossWorkspace.body);
+    expect((await request(runtime.app).get("/api/ai/persona").set(headers("a")).expect(200)).body).toEqual(memberPersona.body);
+    expect((await request(runtime.app).get("/api/ai/workspace").set(headers("a")).expect(200)).body).toEqual(memberWorkspace.body);
+    for (const endpoint of ["/api/ai/persona", "/api/ai/workspace"]) {
+      await request(runtime.app).get(endpoint).set(headers("admin")).expect(403);
+      await request(runtime.app).get(endpoint).set(headers("boss", sessions.a.id)).expect(409);
+      await request(runtime.app).put(endpoint).set(headers("boss", sessions.a.id)).send({ expectedRevision: 1 }).expect(409);
+    }
+    await runtime.store.mutate(db => { db.users.find(user => user.id === sessions.boss.id)!.status = "disabled"; });
+    try {
+      for (const endpoint of ["/api/ai/persona", "/api/ai/workspace"]) await request(runtime.app).get(endpoint).set(headers("boss")).expect(401);
+    } finally { await runtime.store.mutate(db => { db.users.find(user => user.id === sessions.boss.id)!.status = "active"; }); }
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("returns safe preflight and send-time shortfall details without calling a provider", async () => {
+    const saved = await request(runtime.app).get("/api/admin/ai/provider").set(headers("admin")).expect(200);
+    await request(runtime.app).put("/api/admin/ai/provider").set(headers("admin")).send({ ...saved.body.provider, webSearchEnabled: true, webSearchQuotaTokens: 100 }).expect(200);
+    const body = { requestId: crypto.randomUUID(), mode: "quick", messages: [{ role: "user", content: "你好" }], webSearch: true, userId: sessions.a.id };
+    await request(runtime.app).post("/api/ai/preflight").send(body).expect(401);
+    const checked = await request(runtime.app).post("/api/ai/preflight").set(headers("boss")).send(body).expect(200);
+    expect(checked.headers["cache-control"]).toBe("no-store");
+    expect(checked.body).toMatchObject({ canSend: false, reason: "search_quota_insufficient", quota: { remainingTokens: 9980 }, withoutWebSearch: { canSend: true } });
+    const denied = await request(runtime.app).post("/api/ai/chat").set(headers("boss")).send(body).expect(402);
+    expect(denied.body.error).toMatchObject({ code: "AI_SEARCH_QUOTA_INSUFFICIENT", details: checked.body });
+    for (const actor of ["admin", "b"]) await request(runtime.app).post("/api/ai/preflight").set(headers(actor)).send(body).expect(403);
+    await request(runtime.app).post("/api/ai/preflight").set(headers("boss", sessions.a.id)).send(body).expect(409);
+    expect(transport).not.toHaveBeenCalled();
+    expect(JSON.stringify(checked.body)).not.toContain(KEY);
+    await request(runtime.app).get(`/api/ai/requests/${body.requestId}`).set(headers("boss")).expect(404);
   });
   it.each(["wrong-account", ""])("rejects a wrong or empty X-Tongpin-Account %j before tool actions", async boundAccount => {
     const binding = headers("a", boundAccount);

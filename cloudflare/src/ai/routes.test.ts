@@ -34,7 +34,8 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
   it("enforces role boundaries before touching AI service", async () => {
     expect((await invoke("/api/admin/ai/provider", "GET", a)).status).toBe(403);
     expect((await invoke("/api/ai/status", "GET", admin)).status).toBe(403);
-    expect((await invoke("/api/ai/status", "GET", boss)).status).toBe(403);
+    expect((await invoke("/api/admin/ai/provider", "GET", boss)).status).toBe(403);
+    expect(await (await invoke("/api/ai/status", "GET", boss)).json()).toMatchObject({ accessGranted: false, quota: { limitTokens: 0 } });
     expect(transport).not.toHaveBeenCalled();
   });
   it("reports ungranted access and rejects forged ownership before generation, independently of provider configuration", async () => {
@@ -59,11 +60,12 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     expect(text).toContain("apiKeyConfigured"); expect(text).not.toContain(provider.apiKey);
     expect(saved.headers.get("cache-control")).toBe("no-store");
   });
-  it("lists only member identities and never password hashes", async () => {
+  it("lists member and boss identities without granting them quota or exposing password hashes", async () => {
     const response = await invoke("/api/admin/ai/members", "GET");
     const text = await response.text();
     expect(text).not.toContain("never-return-password");
-    expect(JSON.parse(text).members.map((member: { id: string }) => member.id)).toEqual(["a", "b"]);
+    expect(JSON.parse(text).members.map((member: { id: string }) => member.id)).toEqual(["a", "b", "boss"]);
+    expect(service.status(boss.id)).toMatchObject({ accessGranted: false, quota: { remainingTokens: 0 } });
     expect((await invoke("/api/admin/ai/members/admin/quota", "PUT", admin, { limitTokens: 5000 })).status).toBe(403);
   });
   it("uses per-member quotas and ignores caller-selected userId on member usage", async () => {
@@ -118,13 +120,51 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     }
     expect(transport).toHaveBeenCalledTimes(1);
   });
-  it("prohibits administrators and bosses from member generation, asset and request APIs", async () => {
-    for (const actor of [admin, boss]) {
+  it("prohibits administrators from personal generation, asset and request APIs", async () => {
+    for (const actor of [admin]) {
       expect((await invoke("/api/ai/images", "POST", actor, { requestId: crypto.randomUUID(), prompt: "不应发出" })).status).toBe(403);
       expect((await invoke("/api/ai/assets/unknown", "GET", actor)).status).toBe(403);
       expect((await invoke("/api/ai/requests/unknown", "GET", actor)).status).toBe(403);
       expect((await invoke("/api/ai/assets/unknown", "DELETE", actor)).status).toBe(403);
     }
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("requires an explicit boss grant and isolates its conversations, assets and quota from members", async () => {
+    const { assetId: memberAsset, requestId: memberRequest } = await generateOwnedImage();
+    expect((await invoke("/api/ai/chat", "POST", boss, { requestId: crypto.randomUUID(), mode: "quick", messages: [{ role: "user", content: "未开通" }] })).status).toBe(403);
+    expect((await invoke("/api/admin/ai/members/boss/quota", "PUT", boss, { limitTokens: 10000 })).status).toBe(403);
+    expect((await invoke("/api/admin/ai/members/boss/quota", "PUT", admin, { limitTokens: 10000 })).status).toBe(200);
+    const requestId = crypto.randomUUID();
+    const result = await invoke("/api/ai/chat", "POST", boss, { requestId, mode: "quick", messages: [{ role: "user", content: "老板自己的消息" }], userId: a.id });
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ quota: { limitTokens: 10000, usedTokens: 17 } });
+    expect(service.quota(a.id).usedTokens).toBe(1000);
+    expect((await invoke(`/api/ai/requests/${requestId}`, "GET", boss)).status).toBe(200);
+    expect((await invoke(`/api/ai/requests/${requestId}`, "GET", a)).status).toBe(404);
+    expect((await invoke(`/api/ai/requests/${memberRequest}?userId=a`, "GET", boss)).status).toBe(404);
+    expect((await invoke(`/api/ai/assets/${memberAsset}?userId=a`, "GET", boss)).status).toBe(404);
+    expect((await invoke(`/api/ai/assets/${memberAsset}`, "DELETE", boss)).status).toBe(404);
+    expect((await invoke("/api/ai/status", "GET", boss, undefined, { "X-Tongpin-Account": a.id })).status).toBe(409);
+    expect((await invoke("/api/ai/status", "GET", { ...boss, status: "disabled" })).status).toBe(401);
+  });
+  it("preflights search locally and returns the same safe structured budget when an actual send is denied", async () => {
+    await invoke("/api/admin/ai/provider", "PUT", admin, { ...provider, webSearchEnabled: true, webSearchQuotaTokens: 100 });
+    await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 10000 });
+    const body = { requestId: crypto.randomUUID(), mode: "quick", messages: [{ role: "user", content: "你好" }], webSearch: true, userId: b.id };
+    const checked = await invoke("/api/ai/preflight", "POST", a, body, { "X-Tongpin-Account": a.id });
+    expect(checked.status).toBe(200); expect(checked.headers.get("cache-control")).toBe("no-store");
+    const preflight = await checked.json();
+    expect(preflight).toMatchObject({ canSend: false, reason: "search_quota_insufficient", quota: { remainingTokens: 10000 }, withoutWebSearch: { canSend: true } });
+    const sent = await invoke("/api/ai/chat", "POST", a, body);
+    expect(sent.status).toBe(402);
+    expect(await sent.json()).toMatchObject({ error: { code: "AI_SEARCH_QUOTA_INSUFFICIENT", details: preflight } });
+    expect((await invoke("/api/ai/preflight", "POST", a, body, { "X-Tongpin-Account": b.id })).status).toBe(409);
+    expect((await invoke("/api/ai/preflight", "POST", b, body)).status).toBe(403);
+    expect((await invoke("/api/ai/preflight", "POST", admin, body)).status).toBe(403);
+    expect((await invoke("/api/ai/preflight", "POST", a, { ...body, mode: "forged" })).status).toBe(400);
+    expect((await invoke("/api/ai/preflight", "POST", a, { ...body, extra: "x".repeat(1700 * 1024) })).status).toBe(413);
+    expect(JSON.stringify(preflight)).not.toContain(provider.apiKey);
+    expect(service.quota(a.id)).toMatchObject({ usedTokens: 0, reservedTokens: 0, remainingTokens: 10000 });
     expect(transport).not.toHaveBeenCalled();
   });
   it.each(["other-account", ""])("rejects changed or empty account binding %j before accessing tools or spending quota", async boundAccount => {

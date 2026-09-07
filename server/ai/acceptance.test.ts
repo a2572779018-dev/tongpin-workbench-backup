@@ -493,7 +493,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     }
   });
 
-  it("keeps both admin and boss accounts outside the member-only AI runtime and quota registry", async () => {
+  it("keeps admin configuration isolated while requiring an explicit grant for a boss's personal AI", async () => {
     await request(runtime.app).get("/api/ai/status").set(authenticated(adminToken)).expect(403);
     await request(runtime.app).post("/api/ai/chat").set(authenticated(adminToken))
       .send(chatBody("admin-member-runtime-denied")).expect(403);
@@ -502,14 +502,23 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     await request(runtime.app).patch(`/api/admin/users/${memberB.id}/role`)
       .set(authenticated(adminToken)).send({ role: "boss" }).expect(200);
     try {
-      await request(runtime.app).get("/api/ai/status").set(authenticated(memberB.token)).expect(403);
+      expect((await status(memberB)).accessGranted).toBe(false);
       await request(runtime.app).post("/api/ai/chat").set(authenticated(memberB.token))
         .send(chatBody("boss-member-runtime-denied")).expect(403);
+      await request(runtime.app).get("/api/admin/ai/provider").set(authenticated(memberB.token)).expect(403);
       await request(runtime.app).put(`/api/admin/ai/members/${memberB.id}/quota`)
-        .set(authenticated(adminToken)).send({ limitTokens: 500, reason: "non-member" }).expect(403);
+        .set(authenticated(memberB.token)).send({ limitTokens: 10000, reason: "unauthorized" }).expect(403);
       const registry = await request(runtime.app).get("/api/admin/ai/members").set(authenticated(adminToken)).expect(200);
-      expect(registry.body.members.map((member: { id: string }) => member.id)).toEqual([memberA.id]);
+      expect(registry.body.members.map((member: { id: string }) => member.id)).toEqual([memberA.id, memberB.id]);
       assertNoProviderKey(registry.body);
+      await setLimit(memberB, 10000);
+      const quotaA = (await status(memberA)).quota;
+      const own = await request(runtime.app).post("/api/ai/chat").set(authenticated(memberB.token))
+        .send({ ...chatBody("boss-personal-runtime-allowed"), userId: memberA.id }).expect(200);
+      expect(own.body.quota).toMatchObject({ usedTokens: 26, remainingTokens: 9974 });
+      expect((await status(memberA)).quota).toEqual(quotaA);
+      const usage = await request(runtime.app).get(`/api/ai/usage?userId=${memberA.id}`).set(authenticated(memberB.token)).expect(200);
+      expect(usage.body.entries.every((entry: { userId: string }) => entry.userId === memberB.id)).toBe(true);
     } finally {
       await request(runtime.app).patch(`/api/admin/users/${memberB.id}/role`)
         .set(authenticated(adminToken)).send({ role: "member" }).expect(200);

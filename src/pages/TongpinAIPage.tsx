@@ -2,7 +2,8 @@ import { FileText, Info, PanelRightOpen, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../auth/AuthContext";
 import { ApiRequestError } from "../lib/api";
-import type { AiChatRequest, AiChatResponse, AiImageRequest, AiImageResponse, AiStatus } from "../../shared/ai";
+import type { AiChatPreflight, AiChatRequest, AiChatResponse, AiImageRequest, AiImageResponse, AiStatus } from "../../shared/ai";
+import { ChatPreflightGate, preflightNotice, sameSendContext, withPreparedChatSend } from "../features/tongpin-ai/chatPreflight";
 import type { AiWorkspaceDocument, AiWorkspaceSaveRequest, AiWorkspaceSnapshot } from "../../shared/aiWorkspace";
 import { useWorkspacePersistence } from "../features/tongpin-ai/useWorkspacePersistence";
 import { liveConversation, withoutConversation } from "../features/tongpin-ai/conversationOperations";
@@ -121,6 +122,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [connectionError, setConnectionError] = useState("");
   const [connectionLoading, setConnectionLoading] = useState(false);
   const [responding, setResponding] = useState(false);
+  const [checkingQuota, setCheckingQuota] = useState(false);
+  const [preflightGate] = useState(() => new ChatPreflightGate());
+  const [budgetNotice, setBudgetNotice] = useState<{ context: readonly unknown[]; result: AiChatPreflight } | null>(null);
   const [responsePhase, setResponsePhase] = useState<"waiting" | "typing">("waiting");
   const requestRef = useRef<{ controller: AbortController; conversationId: string; messageId: string; request: GenerationRequest } | null>(null);
   const retryRequestsRef = useRef(new Map<string, { conversationId: string; request: GenerationRequest }>());
@@ -206,9 +210,10 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       statusGenerationRef.current += 1;
       window.removeEventListener("focus", onFocus);
       requestRef.current?.controller.abort();
+      preflightGate.cancel();
       if (typingRef.current) window.clearTimeout(typingRef.current.timer);
     };
-  }, [refreshStatus]);
+  }, [refreshStatus, preflightGate]);
 
   const artifactById = useMemo(
     () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
@@ -218,6 +223,16 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     conversations.find((item) => item.id === activeConversationId) ?? null;
   const activeProject =
     projects.find((project) => project.id === activeProjectId) ?? null;
+  const sendContext = [draftKey, draft, draftAttachments[draftKey], mode, composerTool, webSearch,
+    activeConversation, activeProject, enabledSkillIds, persona.revision, view, workspaceDialog];
+  const sendContextRef = useRef(sendContext);
+  sendContextRef.current = sendContext;
+  const visibleBudgetNotice = budgetNotice && sameSendContext(budgetNotice.context, sendContext)
+    ? preflightNotice(budgetNotice.result) : undefined;
+  useEffect(() => {
+    if (preflightGate.cancelIfChanged(sendContextRef.current)) setCheckingQuota(false);
+  }, [preflightGate, draftKey, draft, draftAttachments, mode, composerTool, webSearch,
+    activeConversation, activeProject, enabledSkillIds, persona.revision, view, workspaceDialog]);
   const activeProjectConversations = activeProject
     ? conversations.filter(
         (conversation) => conversation.projectId === activeProject.id,
@@ -268,6 +283,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   persistentStateRef.current = persistentState;
   useEffect(() => {
     const unregister = registerAiLeaveGuard(user.id, async () => {
+      if (preflightGate.cancel()) setCheckingQuota(false);
       const results = await Promise.all([...deletionTasksRef.current.values()]);
       return results.every(result => result === true) && persistenceRef.current.flushSaved();
     });
@@ -276,11 +292,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     };
     window.addEventListener("beforeunload", guard);
     return () => { unregister(); window.removeEventListener("beforeunload", guard); };
-  }, [user.id]);
+  }, [user.id, preflightGate]);
 
   async function addFiles(files: File[]) {
     if (fileImportRef.current) { showAnnouncement("正在读取附件，请稍候"); return; }
     if (files.length + attachments.length > 5) { showAnnouncement("每次最多添加 5 个附件"); return; }
+    if (preflightGate.cancel()) setCheckingQuota(false);
     fileImportRef.current = true;
     const target = draftKey;
     try {
@@ -692,7 +709,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   }
 
   async function sendMessage() {
-    if (!persona.profile.onboardingComplete || !draft.trim() || responding || pendingGenerationRef.current || requestRef.current || quotaInsufficient || !serviceConnected || connectionError) return;
+    if (!persona.profile.onboardingComplete || !draft.trim() || responding || preflightGate.busy || fileImportRef.current || pendingGenerationRef.current || requestRef.current || quotaInsufficient || !serviceConnected || connectionError) return;
     if (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId)) {
       showAnnouncement("此对话正在删除或已被删除，请选择其他对话"); return;
     }
@@ -720,23 +737,59 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         attachments: documentPayload, outputFormat: composerTool === "presentation" ? "presentation" : "text", webSearch,
       };
     } catch (error) { showAnnouncement(error instanceof Error ? error.message : "内容超出限制"); return; }
+    // Check before saving a sent message, clearing the draft or calling a provider.
+    // The server checks again atomically when reserving the actual request budget.
+    if (!("prompt" in request)) {
+      const ticket = preflightGate.start(sendContextRef.current);
+      if (!ticket) return;
+      const { context, controller } = ticket;
+      setCheckingQuota(true);
+      setBudgetNotice(null);
+      try {
+        const result = await api<AiChatPreflight>("/api/ai/preflight", {
+          method: "POST", body: JSON.stringify(request), signal: controller.signal,
+          headers: { "X-Tongpin-Account": user.id },
+        });
+        if (!mountedRef.current || !preflightGate.isCurrent(ticket, sendContextRef.current)) return;
+        statusGenerationRef.current += 1;
+        setAiStatus(current => current ? { ...current, quota: result.quota } : current);
+        if (!result.canSend) { setBudgetNotice({ context, result }); return; }
+      } catch (error) {
+        if (mountedRef.current && preflightGate.isCurrent(ticket, sendContextRef.current))
+          showAnnouncement(error instanceof Error ? error.message : "额度暂时无法核对，请重试。草稿已保留。");
+        return;
+      } finally {
+        if (preflightGate.finish(ticket) && mountedRef.current) setCheckingQuota(false);
+      }
+    }
+    if (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId)) {
+      showAnnouncement("此对话正在删除或已被删除，本次未发送"); return;
+    }
+    if (persistenceRef.current.status === "conflict" || persistenceRef.current.status === "error") {
+      showAnnouncement("请先完成记录同步，再发送消息。草稿已保留。"); return;
+    }
     const conversation: TongpinAIConversation = {
       ...(activeConversation ?? { id: conversationId, projectId: activeProject?.id, title: Array.from(content.split("\n")[0]).slice(0, 28).join("") }),
       timeLabel: "刚刚", messages: [...messages, { id: messageId, requestId, role: "assistant", content: "", status: "thinking", time: currentTimeLabel() }],
     };
-    const nextConversations = [conversation, ...conversations.filter(item => item.id !== conversationId)];
+    const latest = workspaceRef.current;
+    const nextState = withPreparedChatSend({ ...persistentStateRef.current,
+      conversations: latest.conversations, projects: latest.projects, artifacts: latest.artifacts,
+      drafts: latest.drafts, draftAttachments: latest.draftAttachments,
+      activeProjectId: latest.activeProjectId,
+    }, conversation, draftKey);
     pendingGenerationRef.current = conversationId;
     pendingCancelledRef.current = false;
-    setConversations(nextConversations);
+    workspaceRef.current = { ...latest, conversations: nextState.conversations, drafts: nextState.drafts,
+      draftAttachments: nextState.draftAttachments ?? {}, activeConversationId: conversationId, view: "chat" };
+    persistentStateRef.current = nextState;
+    setConversations(nextState.conversations);
     setActiveConversationId(conversationId);
     setView("chat");
-    updateDraft("");
-    setDraftAttachments(current => ({ ...current, [draftKey]: [] }));
+    setDrafts(nextState.drafts);
+    setDraftAttachments(nextState.draftAttachments ?? {});
     setResponding(true);
-    const saved = await persistence.saveNow({ ...persistentState, conversations: nextConversations,
-      activeConversationId: conversationId, view: "chat", drafts: { ...drafts, [draftKey]: "" },
-      draftAttachments: { ...draftAttachments, [draftKey]: [] },
-    });
+    const saved = await persistenceRef.current.saveNow(nextState);
     if (!mountedRef.current) { pendingGenerationRef.current = null; return; }
     if (pendingCancelledRef.current) {
       pendingGenerationRef.current = null; setResponding(false);
@@ -757,7 +810,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   }
 
   async function retryReply(messageId: string) {
-    if (responding || requestRef.current || pendingGenerationRef.current) return;
+    if (responding || preflightGate.busy || requestRef.current || pendingGenerationRef.current) return;
     const retry = retryRequestsRef.current.get(messageId);
     if (retry) {
       if (!liveConversation(workspaceRef.current, deletingConversationRef.current, retry.conversationId, messageId)) return;
@@ -837,7 +890,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           : "") +
         (sidebarCollapsed ? " is-sidebar-collapsed" : "")
       }
-      aria-label="同频 AI 成员工作台"
+      aria-label="同频 AI 工作台"
     >
       {(persistence.status === "error" || persistence.status === "conflict") && <div className="tp-ai-sync-error" role="alert">
         <span>{persistence.error}</span>
@@ -924,6 +977,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           notificationUnread={notificationToolbar?.unread ?? 0}
           projectTitle={activeProject?.title}
           quotaInsufficient={quotaInsufficient}
+          checkingQuota={checkingQuota}
+          budgetNotice={visibleBudgetNotice}
+          onDisableSearch={() => { setWebSearch(false); setBudgetNotice(null); setComposerFocusRequest(value => value + 1); }}
           responding={responding}
           responsePhase={responsePhase}
           connectionLoading={connectionLoading}

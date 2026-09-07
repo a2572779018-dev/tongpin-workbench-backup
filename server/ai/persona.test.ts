@@ -126,13 +126,25 @@ describe("member-owned AI persona", () => {
 
   const member = { id: "member-a", role: "member", status: "active" };
   const invoke = (repo: AiPersonaRepository, method: string, body?: unknown, actor = member, headers: Record<string, string> = {}, suffix = "") => handleAiPersonaRequest(new Request(`https://tongpin.example/api/ai/persona${suffix}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), repo, actor);
-  it("Cloudflare only permits active members, never administrators inspecting member preferences", async () => {
-    for (const role of ["admin", "boss"]) expect((await invoke(repository, "GET", undefined, { ...member, role })).status).toBe(403);
+  it("Cloudflare denies administrators and ungranted bosses, never exposing another account's preferences", async () => {
+    for (const role of ["admin", "boss"]) expect((await invoke(repository, "GET", undefined, { ...member, id: `ungranted-${role}`, role })).status).toBe(403);
     expect((await invoke(repository, "GET", undefined, { ...member, status: "disabled" })).status).toBe(401);
     const saved = await invoke(repository, "PUT", { expectedRevision: 0, profile: profile() }); expect(saved.status).toBe(200);
     const other = await invoke(repository, "GET", undefined, { ...member, id: "member-b" }, {}, "?userId=member-a");
     expect(await other.json()).toEqual({ revision: 0, profile: defaultAiPersonaProfile() });
     expect(other.headers.get("cache-control")).toBe("no-store");
+  });
+  it("granted bosses can personalize only their own AI", async () => {
+    new AiStore(repository.sql).saveQuota("boss", { ...emptyQuota(), limitTokens: 10000 });
+    repository.save("member-a", { expectedRevision: 0, profile: profile("成员助手") });
+    const boss = { ...member, id: "boss", role: "boss" };
+    const empty = await invoke(repository, "GET", undefined, boss, {}, "?userId=member-a");
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toEqual({ revision: 0, profile: defaultAiPersonaProfile() });
+    expect((await invoke(repository, "PUT", { expectedRevision: 0, profile: profile("老板助手") }, boss)).status).toBe(200);
+    expect(repository.read("boss").profile.name).toBe("老板助手");
+    expect(repository.read("member-a").profile.name).toBe("成员助手");
+    expect((await invoke(repository, "GET", undefined, boss, { "X-Tongpin-Account": "member-a" })).status).toBe(409);
   });
   it("Cloudflare binds reads and writes to X-Tongpin-Account and rejects account switches", async () => {
     for (const method of ["GET", "PUT"]) {

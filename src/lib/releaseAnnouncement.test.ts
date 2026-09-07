@@ -27,16 +27,16 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "恢复系统光标",
+      "修正模式切换后的黑色焦点框",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "管理员分配额度后才可设置专属 AI",
+      "管理员可给老板分配额度",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "不覆盖原有加密客户数据",
+      "保留原有任务、客户脉络图和 AI 历史数据",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "额度不足时停止新增生成",
+      "不足时保留草稿",
     );
   });
 

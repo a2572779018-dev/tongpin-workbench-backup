@@ -183,7 +183,7 @@ export function App() {
           <RelationshipMapPage userId={session.user.id} />
         </Suspense>
       </RelationshipMapErrorBoundary>
-    ) : view === "ai" && session.user.role === "member" ? (
+    ) : view === "ai" && (session.user.role === "member" || session.user.role === "boss") ? (
       <Suspense fallback={<div className="tp-ai-page-loading">正在打开同频 AI…</div>}>
         <TongpinAIPage user={session.user} />
       </Suspense>

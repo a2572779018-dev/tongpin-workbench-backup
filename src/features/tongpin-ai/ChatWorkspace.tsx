@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Globe,
   Image as ImageIcon,
+  LoaderCircle,
   PanelLeft,
   Paperclip,
   Plus,
@@ -55,6 +56,9 @@ interface ChatWorkspaceProps {
   notificationUnread: number;
   projectTitle?: string;
   quotaInsufficient: boolean;
+  checkingQuota?: boolean;
+  budgetNotice?: { title: string; message: string; canDisableSearch: boolean };
+  onDisableSearch?: () => void;
   responding: boolean;
   responsePhase?: "waiting" | "typing";
   connectionLoading?: boolean;
@@ -98,6 +102,9 @@ export function ChatWorkspace({
   notificationUnread,
   projectTitle,
   quotaInsufficient,
+  checkingQuota = false,
+  budgetNotice,
+  onDisableSearch,
   responding,
   responsePhase = "waiting",
   connectionLoading = false,
@@ -257,7 +264,7 @@ export function ChatWorkspace({
 
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    if (!draft.trim() || responding || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || capabilityUnavailable) return;
+    if (!draft.trim() || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || capabilityUnavailable) return;
     followResponseRef.current = true;
     setMenu(null);
     onSubmit();
@@ -404,7 +411,13 @@ export function ChatWorkspace({
             <ArrowDown size={17} />
           </button>
         )}
-        {quotaInsufficient && (
+        {budgetNotice && (
+          <div className="tp-ai-quota-block tp-ai-budget-notice" role="alert">
+            <span><strong>{budgetNotice.title}</strong><small>{budgetNotice.message}</small></span>
+            {budgetNotice.canDisableSearch && <button type="button" onClick={onDisableSearch} disabled={checkingQuota}>关闭联网，保留草稿</button>}
+          </div>
+        )}
+        {quotaInsufficient && !budgetNotice && (
           <div className="tp-ai-quota-block" role="alert">
             <span>
               <strong>AI 额度不足</strong>
@@ -632,10 +645,11 @@ export function ChatWorkspace({
                 <button
                   type="submit"
                   className="tp-ai-send-button"
-                  disabled={readingFiles || quotaInsufficient || !draft.trim() || !serviceConnected || Boolean(connectionError) || connectionLoading || capabilityUnavailable}
-                  aria-label="发送消息"
+                  disabled={checkingQuota || readingFiles || quotaInsufficient || !draft.trim() || !serviceConnected || Boolean(connectionError) || connectionLoading || capabilityUnavailable}
+                  aria-label={checkingQuota ? "正在核对额度" : "发送消息"}
+                  aria-busy={checkingQuota}
                 >
-                  <ArrowUp size={20} strokeWidth={2.5} />
+                  {checkingQuota ? <LoaderCircle size={20} /> : <ArrowUp size={20} strokeWidth={2.5} />}
                 </button>
               )}
             </div>

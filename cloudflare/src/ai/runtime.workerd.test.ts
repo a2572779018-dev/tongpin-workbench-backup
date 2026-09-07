@@ -4,7 +4,7 @@ import path from "node:path";
 import { build } from "esbuild";
 import { convertV4MiniflareOptions, Log, LogLevel, Miniflare, Response as MfResponse, type V4FetchHandler } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AiChatResponse, AiImageResponse, AiProviderInput, AiStatus } from "../../../shared/ai";
+import type { AiChatPreflight, AiChatResponse, AiImageResponse, AiProviderInput, AiStatus } from "../../../shared/ai";
 import type { AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
 import type { AiPersonaSnapshot } from "../../../shared/aiPersona";
 
@@ -14,7 +14,7 @@ const TEST_API_KEY = "test-workerd-provider-not-real";
 const WORKER_NAME = "tongpin-ai-workerd-test";
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 type Session = { accessToken: string; user: { id: string; email: string; role: string } };
-type ErrorBody = { error: { code: string; message: string } };
+type ErrorBody = { error: { code: string; message: string; details?: AiChatPreflight } };
 
 /** The real bundled entry point + SQLite DO run under workerd. Every outbound request is
  * intercepted: no production account, database, DNS resolver, API key or paid provider is used. */
@@ -169,6 +169,34 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     privateDns = false;
     expect(denied.error.code).toBe("AI_URL_UNSAFE");
   });
+  it("preflights a 10k search without any outbound or ledger mutation and permits only explicit ordinary chat", async () => {
+    await api("/api/admin/ai/provider", admin, { ...provider, webSearchEnabled: true, webSearchQuotaTokens: 100 }, "PUT");
+    const used = (await api<AiStatus>("/api/ai/status", member)).quota.usedTokens;
+    await api(`/api/admin/ai/members/${member.user.id}/quota`, admin, { limitTokens: used + 10000 }, "PUT");
+    const storage = await mf.unsafeGetDurableObjectStorage(WORKER_NAME, "TongpinCore", { name: "primary" });
+    const snapshot = () => storage.exec<{ kind: string; total: number }>("SELECT 'usage' AS kind,COUNT(*) AS total FROM ai_usage UNION ALL SELECT 'requests' AS kind,COUNT(*) AS total FROM ai_requests");
+    const beforeRows = await snapshot(), beforeNetwork = outboundUrls.length;
+    const body = { ...requestBody(), webSearch: true };
+    const checked = await api<AiChatPreflight>("/api/ai/preflight", member, body);
+    expect(checked).toMatchObject({ canSend: false, reason: "search_quota_insufficient", quota: { remainingTokens: 10000, reservedTokens: 0 }, budget: { searchInputReserve: 32768, convertedReserve: 100 }, withoutWebSearch: { canSend: true } });
+    const denied = await api<ErrorBody>("/api/ai/chat", member, body, "POST", 402);
+    expect(denied.error).toMatchObject({ code: "AI_SEARCH_QUOTA_INSUFFICIENT", details: checked });
+    expect(await snapshot()).toEqual(beforeRows);
+    expect(outboundUrls.length).toBe(beforeNetwork);
+    expect((await api<AiStatus>("/api/ai/status", member)).quota).toEqual(checked.quota);
+    await api("/api/ai/preflight", admin, body, "POST", 403);
+    await api("/api/ai/preflight", other, { ...body, userId: member.user.id }, "POST", 403);
+    expect(JSON.stringify(checked)).not.toContain(TEST_API_KEY);
+    const normal = { ...requestBody(), webSearch: false };
+    expect((await api<AiChatPreflight>("/api/ai/preflight", member, normal)).canSend).toBe(true);
+    const beforePost = postCount;
+    const response = await api<AiChatResponse>("/api/ai/chat", member, normal);
+    expect(response.quota).toMatchObject({ remainingTokens: 9928, reservedTokens: 0 });
+    expect(postCount).toBe(beforePost + 1);
+    // Restore fixture configuration for the independent subsequent integration scenarios.
+    await api("/api/admin/ai/provider", admin, { ...provider, webSearchEnabled: false }, "PUT");
+    await api(`/api/admin/ai/members/${member.user.id}/quota`, admin, { limitTokens: 20_000 }, "PUT");
+  });
   it("serializes concurrent reservations across actual DO fetch interleaving and releases rejected requests", async () => {
     holdNextPost = true;
     const before = postCount;
@@ -177,6 +205,10 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     void first.catch(() => {});
     await vi.waitFor(() => expect(postCount).toBe(before + 1));
     expect((await api<AiStatus>("/api/ai/status", member)).quota.reservedTokens).toBeGreaterThan(0);
+    const checked = await api<AiChatPreflight>("/api/ai/preflight", member, requestBody());
+    expect(checked).toMatchObject({ canSend: false, reason: "request_in_progress" });
+    const denied = await api<ErrorBody>("/api/ai/chat", member, requestBody(), "POST", 409);
+    expect(denied.error).toMatchObject({ code: "AI_REQUEST_IN_PROGRESS", details: { reason: "request_in_progress", quota: checked.quota } });
     await api("/api/ai/images", member, { requestId: crypto.randomUUID(), prompt: "检查并发" }, "POST", 409);
     releasePending?.(); releasePending = undefined;
     await first;

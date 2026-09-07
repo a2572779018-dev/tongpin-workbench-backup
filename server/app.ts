@@ -129,6 +129,7 @@ export async function createRuntime(
   app.use("/api/ai/workspace", createAiWorkspaceRouter(aiWorkspace, requireAuth));
   app.use("/api/ai/persona", createAiPersonaRouter(aiPersona, requireAuth));
   app.use("/api/ai/chat", express.json({ limit: 1600 * 1024 }));
+  app.use("/api/ai/preflight", express.json({ limit: 1600 * 1024 }));
   app.use(express.json({ limit: "768kb" }));
 
   app.get("/api/health", (_request, response) => {

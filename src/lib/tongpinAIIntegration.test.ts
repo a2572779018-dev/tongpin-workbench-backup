@@ -114,14 +114,14 @@ describe("Tongpin AI authenticated integration boundary", () => {
     expect(navItems.slice(aiIndex)).toContain('label: "同频 AI"');
   });
 
-  it("renders member AI and admin quota behind explicit role checks", () => {
+  it("renders member and boss AI while keeping management administrator-only", () => {
     const contentBranch = sliceBetween(
       app,
       "    content =",
       "\n  }\n\n  return (",
     );
     const memberGate = contentBranch.indexOf(
-      'view === "ai" && session.user.role === "member"',
+      'view === "ai" && (session.user.role === "member" || session.user.role === "boss")',
     );
     const adminQuotaGate = contentBranch.indexOf(
       'view === "admin-ai" && session.user.role === "admin"',

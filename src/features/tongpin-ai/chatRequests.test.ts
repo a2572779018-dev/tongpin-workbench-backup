@@ -10,7 +10,7 @@ const history: TongpinAIConversation[] = [{ id: "a", title: "A", timeLabel: "刚
 
 describe("real AI chat request state", () => {
   it("allows result recovery without offering a dead retry for terminal provider errors", () => {
-    for (const code of ["NETWORK_UNAVAILABLE", "AI_REQUEST_IN_PROGRESS", "AI_QUOTA_EXHAUSTED", "AI_NOT_CONFIGURED"]) {
+    for (const code of ["NETWORK_UNAVAILABLE", "AI_REQUEST_IN_PROGRESS", "AI_QUOTA_EXHAUSTED", "AI_NOT_CONFIGURED", "AI_SEARCH_QUOTA_INSUFFICIENT", "AI_QUOTA_INSUFFICIENT"]) {
       expect(canRecoverChatRequest(code, false)).toBe(true);
     }
     for (const code of ["AI_PROVIDER_AUTH", "AI_RESPONSE_INCOMPLETE", "AI_REQUEST_UNCERTAIN", "AI_INPUT_INVALID", "AI_CONNECTION_FAILED"]) {

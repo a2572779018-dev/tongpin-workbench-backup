@@ -11,7 +11,7 @@ export function createAiWorkspaceRouter(
   requireAuth: ReturnType<typeof import("../middleware").createRequireAuth>,
 ): Router {
   const router = Router();
-  router.use(requireAuth, requireRole("member"));
+  router.use(requireAuth, requireRole("member", "boss"));
   router.use((_request, response, next) => { response.set("Cache-Control", "no-store"); next(); });
   router.use((request, _response, next) => {
     const expectedAccount = request.header("X-Tongpin-Account");

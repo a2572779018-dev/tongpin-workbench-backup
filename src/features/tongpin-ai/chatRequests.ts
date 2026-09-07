@@ -6,7 +6,7 @@ import type { TongpinAIConversation, TongpinAIMessage, TongpinAIMode } from "./t
 export function canRecoverChatRequest(code: string | undefined, interrupted: boolean) {
   return interrupted || code === undefined || [
     "NETWORK_UNAVAILABLE", "REQUEST_FAILED", "AI_REQUEST_IN_PROGRESS",
-    "AI_NOT_CONFIGURED", "AI_QUOTA_EXHAUSTED",
+    "AI_NOT_CONFIGURED", "AI_QUOTA_EXHAUSTED", "AI_SEARCH_QUOTA_INSUFFICIENT", "AI_QUOTA_INSUFFICIENT",
   ].includes(code);
 }
 

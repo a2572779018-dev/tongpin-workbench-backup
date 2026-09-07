@@ -95,6 +95,27 @@ export interface AiChatRequest {
   outputFormat?: "text" | "presentation";
   webSearch?: boolean;
 }
+export type AiChatPreflightReason = null | "quota_exhausted" | "search_quota_insufficient" | "quota_insufficient" | "request_in_progress";
+/** Conservative quota reservations, not actual provider usage or currency prices. */
+export interface AiChatBudget {
+  /** Message, attachment, persona and protocol input; excludes searchInputReserve. */
+  inputReserve: number;
+  searchInputReserve: number;
+  convertedReserve: number;
+  minOutputTokens: number;
+  minimumRequiredTokens: number;
+  availableOutputTokens: number;
+  maxOutputTokens: number;
+}
+/** Advisory only. Sending revalidates atomically; a preflight never reserves or sends. */
+export interface AiChatPreflight {
+  canSend: boolean;
+  reason: AiChatPreflightReason;
+  quota: AiQuota;
+  budget: AiChatBudget;
+  /** An explicit user choice is required before sending without search. */
+  withoutWebSearch?: { canSend: boolean; reason: AiChatPreflightReason; budget: AiChatBudget };
+}
 export interface AiChatResponse {
   requestId: string;
   content: string;

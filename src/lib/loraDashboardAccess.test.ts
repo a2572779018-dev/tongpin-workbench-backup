@@ -14,7 +14,7 @@ describe("LORA dashboard client access", () => {
 
   it("keeps the exact navigation order for every role", () => {
     expect(visibleAppViews("member")).toEqual(["home", "relations", "ai"]);
-    expect(visibleAppViews("boss")).toEqual(["home", "boss", "lora-chain"]);
+    expect(visibleAppViews("boss")).toEqual(["home", "boss", "lora-chain", "ai"]);
     expect(visibleAppViews("admin")).toEqual(["admin", "admin-ai"]);
   });
 
@@ -32,7 +32,7 @@ describe("LORA dashboard client access", () => {
 
   it("keeps the AI workbench and quota console behind separate role gates", () => {
     expect(roleAllowsAppView("member", "ai")).toBe(true);
-    expect(roleAllowsAppView("boss", "ai")).toBe(false);
+    expect(roleAllowsAppView("boss", "ai")).toBe(true);
     expect(roleAllowsAppView("admin", "ai")).toBe(false);
 
     expect(roleAllowsAppView("admin", "admin-ai")).toBe(true);

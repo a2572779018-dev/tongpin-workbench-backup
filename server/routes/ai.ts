@@ -21,21 +21,22 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.put("/provider", async (request, response) => response.json({ provider: await service.saveProvider(request.body) }));
     router.post("/provider/test", async (request, response) => response.json(await service.testProvider(request.body)));
     router.get("/members", async (_request, response) => {
-      const members = await users.read(db => db.users.filter(user => user.role === "member").map(({ id, email, name, role, status }) => ({ id, email, name, role, status })));
+      const members = await users.read(db => db.users.filter(user => user.role === "member" || user.role === "boss").map(({ id, email, name, role, status }) => ({ id, email, name, role, status })));
       response.json({ members: service.members(members) });
     });
     router.put("/members/:id/quota", async (request, response) => {
       const member = await users.read(db => db.users.find(user => user.id === request.params.id));
       if (!member) throw new ApiError(404, "USER_NOT_FOUND", "没有找到该成员");
-      if (member.role !== "member") throw new ApiError(403, "AI_MEMBER_REQUIRED", "AI 额度仅可分配给成员账号");
+      if (member.role !== "member" && member.role !== "boss") throw new ApiError(403, "AI_MEMBER_REQUIRED", "AI 额度仅可分配给成员或老板账号");
       const quota = service.setQuota(member.id, request.currentUser!.id, request.body);
       response.json({ member: { id: member.id, email: member.email, name: member.name, role: member.role, status: member.status, quota } });
     });
     router.get("/usage", (request, response) => response.json({ entries: service.store.usage(typeof request.query.userId === "string" ? request.query.userId : undefined) }));
   } else {
-    router.use(requireRole("member"));
+    router.use(requireRole("member", "boss"));
     router.get("/status", (request, response) => response.json(service.status(request.currentUser!.id)));
     router.get("/usage", (request, response) => { service.quota(request.currentUser!.id); response.json({ entries: service.store.usage(request.currentUser!.id) }); });
+    router.post("/preflight", (request, response) => response.json(service.preflight(request.currentUser!.id, request.body)));
     router.post("/chat", async (request, response) => response.json(await service.chat(request.currentUser!.id, request.body)));
     router.post("/images", async (request, response) => response.json(await service.generateImage(request.currentUser!.id, request.body)));
     router.get("/assets/:id", (request, response) => response.json(service.getAsset(request.currentUser!.id, request.params.id)));
@@ -45,7 +46,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
   // Provider error bodies and caught network errors are deliberately never logged or forwarded.
   router.use((error: unknown, _request: import("express").Request, response: import("express").Response, next: import("express").NextFunction) => {
     if (error instanceof ApiError) { next(error); return; }
-    if (error instanceof AiError) { response.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }
+    if (error instanceof AiError) { response.status(error.status).json({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }); return; }
     response.status(500).json({ error: { code: "AI_SERVER_ERROR", message: "AI 服务处理失败，请稍后重试" } });
   });
   return router;

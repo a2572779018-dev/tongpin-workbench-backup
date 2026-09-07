@@ -1157,6 +1157,11 @@ export function AppShell({
               label: "LORA 链驾驶舱",
               icon: Activity,
             },
+            {
+              view: "ai" as const,
+              label: "同频 AI",
+              icon: Sparkles,
+            },
           ]
         : []),
     ];

@@ -20,16 +20,17 @@ describe("admin AI quota role boundary", () => {
     );
   });
 
-  it("models quota recipients as members without a boss role", () => {
+  it("identifies server-returned bosses without inventing roles or seeded recipients", () => {
     expect(aiTypes).not.toContain("AiQuotaRole");
     expect(aiTypes).not.toMatch(/role:\s*["']?(?:member|boss)/);
     expect(adminQuotaPanel).not.toContain('role: "boss"');
     expect(adminQuotaPanel).not.toContain('value="boss"');
     expect(adminQuotaPanel).not.toContain("member-suran");
-    expect(adminQuotaPanel).not.toContain("老板");
+    expect(adminQuotaPanel).toContain('member.role === "boss"');
+    expect(adminQuotaPanel).toContain("老板");
   });
 
-  it("does not retain a role filter for the member-only registry", () => {
+  it("keeps the real recipient registry administrator-only", () => {
     expect(adminQuotaPanel).not.toContain("roleFilter");
     expect(adminQuotaPanel).not.toContain("AiQuotaRole");
     expect(adminQuotaPanel).not.toContain("筛选成员角色");
