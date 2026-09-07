@@ -91,7 +91,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   }
 
   async function status(member: TestMember): Promise<AiStatus> {
-    const result = await request(runtime.app)
+    const result = await request(runtime.server)
       .get("/api/ai/status")
       .set(authenticated(member.token))
       .expect(200);
@@ -100,7 +100,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   }
 
   async function setLimit(member: TestMember, limitTokens: number) {
-    const result = await request(runtime.app)
+    const result = await request(runtime.server)
       .put(`/api/admin/ai/members/${member.id}/quota`)
       .set(authenticated(adminToken))
       .send({ limitTokens, reason: "隔离验收限额调整" })
@@ -109,15 +109,33 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   }
 
   async function startRuntime() {
-    return createRuntime(config, {
+    const created = await createRuntime(config, {
       attachSockets: false,
       startLoraCollector: false,
       aiTransport: fakeTransport,
     });
+    // Supertest's implicit listen(0) binds wildcard but connects to 127.0.0.1.
+    // macOS can route that port to a different loopback listener (supertest #894).
+    // Own one explicitly bound server until close(), including across restarts.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error) => reject(error);
+        created.server.once("error", onError);
+        created.server.listen(0, "127.0.0.1", () => {
+          created.server.off("error", onError);
+          resolve();
+        });
+      });
+      expect(created.server.address()).toMatchObject({ address: "127.0.0.1", family: "IPv4" });
+      return created;
+    } catch (error) {
+      await created.close();
+      throw error;
+    }
   }
 
   async function login(email: string) {
-    const result = await request(runtime.app)
+    const result = await request(runtime.server)
       .post("/api/auth/login")
       .send({ email, password: TEST_PASSWORD })
       .expect(200);
@@ -128,22 +146,22 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   }
 
   async function registerMember(name: string, email: string): Promise<TestMember> {
-    const registered = await request(runtime.app)
+    const registered = await request(runtime.server)
       .post("/api/auth/register")
       .send({ name, email, password: TEST_PASSWORD })
       .expect(201);
     expect(registered.body.delivery).toBe("preview");
     expect(registered.body.debugCode).toMatch(/^\d{6}$/);
-    const verified = await request(runtime.app)
+    const verified = await request(runtime.server)
       .post("/api/auth/verify-email")
       .send({ email, code: registered.body.debugCode })
       .expect(200);
     expect(verified.body.nextStep).toBe("await_approval");
-    await request(runtime.app)
+    await request(runtime.server)
       .post("/api/auth/login")
       .send({ email, password: TEST_PASSWORD })
       .expect(403);
-    await request(runtime.app)
+    await request(runtime.server)
       .patch(`/api/admin/users/${verified.body.user.id}/access`)
       .set(authenticated(adminToken))
       .send({ status: "active" })
@@ -199,23 +217,23 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
 
   it("creates two distinct real members only after email verification and admin approval", async () => {
     expect(memberA.id).not.toBe(memberB.id);
-    const a = await request(runtime.app)
+    const a = await request(runtime.server)
       .get("/api/auth/me")
       .set(authenticated(memberA.token))
       .expect(200);
-    const b = await request(runtime.app)
+    const b = await request(runtime.server)
       .get("/api/auth/me")
       .set(authenticated(memberB.token))
       .expect(200);
     expect(a.body.user.id).toBe(memberA.id);
     expect(b.body.user.id).toBe(memberB.id);
     assertNoProviderKey([a.body, b.body]);
-    await request(runtime.app).get("/api/admin/users").expect(401);
-    await request(runtime.app)
+    await request(runtime.server).get("/api/admin/users").expect(401);
+    await request(runtime.server)
       .get("/api/admin/users")
       .set(authenticated(memberA.token))
       .expect(403);
-    const registry = await request(runtime.app)
+    const registry = await request(runtime.server)
       .get("/api/admin/users")
       .set(authenticated(adminToken))
       .expect(200);
@@ -224,15 +242,15 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   });
 
   it("can discover models from an unsaved address and key before a first model is chosen", async () => {
-    const initial = await request(runtime.app).get("/api/admin/ai/provider")
+    const initial = await request(runtime.server).get("/api/admin/ai/provider")
       .set(authenticated(adminToken)).expect(200);
     expect(initial.body.provider).toBeNull();
-    const result = await request(runtime.app).post("/api/admin/ai/provider/test")
+    const result = await request(runtime.server).post("/api/admin/ai/provider/test")
       .set(authenticated(adminToken)).send({ baseUrl: provider.baseUrl, apiKey: PROVIDER_KEY }).expect(200);
     expect(result.body.ok).toBe(true);
     expect(result.body.models).toContain("acceptance-quick");
     assertNoProviderKey(result.body);
-    const stillUnsaved = await request(runtime.app).get("/api/admin/ai/provider")
+    const stillUnsaved = await request(runtime.server).get("/api/admin/ai/provider")
       .set(authenticated(adminToken)).expect(200);
     expect(stillUnsaved.body.provider).toBeNull();
     expect((await status(memberA)).configured).toBe(false);
@@ -240,18 +258,18 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   });
 
   it("accepts provider configuration only from admin and never returns its secret", async () => {
-    await request(runtime.app).get("/api/admin/ai/provider").expect(401);
+    await request(runtime.server).get("/api/admin/ai/provider").expect(401);
     for (const member of [memberA, memberB]) {
-      await request(runtime.app).get("/api/admin/ai/provider").set(authenticated(member.token)).expect(403);
-      await request(runtime.app).put("/api/admin/ai/provider").set(authenticated(member.token)).send(provider).expect(403);
-      await request(runtime.app).post("/api/admin/ai/provider/test").set(authenticated(member.token)).expect(403);
-      await request(runtime.app).put(`/api/admin/ai/members/${member.id}/quota`)
+      await request(runtime.server).get("/api/admin/ai/provider").set(authenticated(member.token)).expect(403);
+      await request(runtime.server).put("/api/admin/ai/provider").set(authenticated(member.token)).send(provider).expect(403);
+      await request(runtime.server).post("/api/admin/ai/provider/test").set(authenticated(member.token)).expect(403);
+      await request(runtime.server).put(`/api/admin/ai/members/${member.id}/quota`)
         .set(authenticated(member.token)).send({ limitTokens: 999_999, reason: "unauthorized" }).expect(403);
     }
-    const saved = await request(runtime.app).put("/api/admin/ai/provider")
+    const saved = await request(runtime.server).put("/api/admin/ai/provider")
       .set(authenticated(adminToken)).send(provider).expect(200);
     assertNoProviderKey(saved.body);
-    const read = await request(runtime.app).get("/api/admin/ai/provider").set(authenticated(adminToken)).expect(200);
+    const read = await request(runtime.server).get("/api/admin/ai/provider").set(authenticated(adminToken)).expect(200);
     expect(read.body.provider.apiKeyConfigured).toBe(true);
     expect(read.body.provider.baseUrl).toBe("https://models.example.com/v1");
     expect(read.body.provider).not.toHaveProperty("apiKey");
@@ -263,7 +281,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   });
 
   it("tests the saved connection without spending member quota; zero quota never calls upstream", async () => {
-    const connected = await request(runtime.app).post("/api/admin/ai/provider/test")
+    const connected = await request(runtime.server).post("/api/admin/ai/provider/test")
       .set(authenticated(adminToken)).expect(200);
     expect(connected.body.ok).toBe(true);
     expect(connected.body.models).toContain("acceptance-quick");
@@ -275,7 +293,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
       expect(current.accessGranted).toBe(false);
       expect(current.quota.limitTokens).toBe(0);
       expect(current.quota.remainingTokens).toBe(0);
-      const response = await request(runtime.app).post("/api/ai/chat")
+      const response = await request(runtime.server).post("/api/ai/chat")
         .set(authenticated(member.token)).send(chatBody(`zero-${member.id}`));
       expect(response.status).toBe(403);
       expect(response.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
@@ -286,12 +304,12 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
 
   it("preserves an omitted key only for the same destination and rejects unsafe address changes", async () => {
     const { apiKey: _key, ...withoutKey } = provider;
-    const retained = await request(runtime.app).put("/api/admin/ai/provider")
+    const retained = await request(runtime.server).put("/api/admin/ai/provider")
       .set(authenticated(adminToken)).send(withoutKey).expect(200);
     expect(retained.body.provider.apiKeyConfigured).toBe(true);
     assertNoProviderKey(retained.body);
     const before = fakeTransport.mock.calls.length;
-    const changed = await request(runtime.app).put("/api/admin/ai/provider")
+    const changed = await request(runtime.server).put("/api/admin/ai/provider")
       .set(authenticated(adminToken))
       .send({ ...withoutKey, baseUrl: "https://different.example.com" }).expect(400);
     assertNoProviderKey(changed.body);
@@ -305,13 +323,13 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
       "https://user:password@models.example.com",
       "https://models.example.com?target=internal",
     ]) {
-      const denied = await request(runtime.app).put("/api/admin/ai/provider")
+      const denied = await request(runtime.server).put("/api/admin/ai/provider")
         .set(authenticated(adminToken)).send({ ...provider, baseUrl });
       expect(denied.status).toBe(400);
       assertNoProviderKey(denied.body);
     }
     expect(fakeTransport.mock.calls.length).toBe(before);
-    const current = await request(runtime.app).get("/api/admin/ai/provider").set(authenticated(adminToken)).expect(200);
+    const current = await request(runtime.server).get("/api/admin/ai/provider").set(authenticated(adminToken)).expect(200);
     expect(current.body.provider.baseUrl).toBe("https://models.example.com/v1");
   });
 
@@ -320,22 +338,22 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     expect((await status(memberB)).quota.limitTokens).toBe(0);
     const body = chatBody("accepted-first-turn");
     const before = chatCalls;
-    const completed = await request(runtime.app).post("/api/ai/chat")
+    const completed = await request(runtime.server).post("/api/ai/chat")
       .set(authenticated(memberA.token)).send(body).expect(200);
     expect(completed.body.content).toBe("这是隔离测试上游的确定性回复。");
     expect(completed.body.usage).toMatchObject({ inputTokens: 19, outputTokens: 7, totalTokens: 26, estimated: false });
     expect(completed.body.quota).toMatchObject({ usedTokens: 26, reservedTokens: 0, remainingTokens: 7_974 });
     assertNoProviderKey(completed.body);
-    const repeated = await request(runtime.app).post("/api/ai/chat")
+    const repeated = await request(runtime.server).post("/api/ai/chat")
       .set(authenticated(memberA.token)).send(body).expect(200);
     expect(repeated.body.content).toBe(completed.body.content);
     assertNoProviderKey(repeated.body);
     expect(chatCalls).toBe(before + 1);
-    await request(runtime.app).post("/api/ai/chat")
+    await request(runtime.server).post("/api/ai/chat")
       .set(authenticated(memberA.token)).send(chatBody(body.requestId, "different payload")).expect(409);
     expect(chatCalls).toBe(before + 1);
-    const aUsage = await request(runtime.app).get("/api/ai/usage").set(authenticated(memberA.token)).expect(200);
-    const bUsage = await request(runtime.app).get("/api/ai/usage").set(authenticated(memberB.token)).expect(200);
+    const aUsage = await request(runtime.server).get("/api/ai/usage").set(authenticated(memberA.token)).expect(200);
+    const bUsage = await request(runtime.server).get("/api/ai/usage").set(authenticated(memberB.token)).expect(200);
     expect(aUsage.body.entries.filter((entry: { kind: string }) => entry.kind === "chat")).toHaveLength(1);
     expect(bUsage.body.entries).toHaveLength(0);
     for (const entry of aUsage.body.entries) expect(entry.userId).toBe(memberA.id);
@@ -352,7 +370,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     expect(current.quota).toMatchObject({ limitTokens: 8_000, usedTokens: 26, reservedTokens: 0, remainingTokens: 7_974 });
     expect((await status(memberB)).quota).toMatchObject({ limitTokens: 0, usedTokens: 0 });
     const before = chatCalls;
-    await request(runtime.app).post("/api/ai/chat").set(authenticated(memberA.token))
+    await request(runtime.server).post("/api/ai/chat").set(authenticated(memberA.token))
       .send(chatBody("accepted-first-turn")).expect(200);
     expect(chatCalls).toBe(before);
   });
@@ -360,7 +378,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   it("blocks immediately at exhaustion and only an admin increase restores access", async () => {
     await setLimit(memberA, 26);
     const before = chatCalls;
-    const denied = await request(runtime.app).post("/api/ai/chat")
+    const denied = await request(runtime.server).post("/api/ai/chat")
       .set(authenticated(memberA.token)).send(chatBody("empty-after-limit-adjustment"));
     expect(denied.status).toBeGreaterThanOrEqual(400);
     expect(chatCalls).toBe(before);
@@ -371,17 +389,17 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
 
   it("ignores a forged member identity and rejects invalid quota values", async () => {
     for (const limitTokens of [-1, 0.5, 1_000_000_001, "8000"]) {
-      await request(runtime.app).put(`/api/admin/ai/members/${memberA.id}/quota`)
+      await request(runtime.server).put(`/api/admin/ai/members/${memberA.id}/quota`)
         .set(authenticated(adminToken)).send({ limitTokens, reason: "invalid input" }).expect(400);
     }
     const before = chatCalls;
-    const forged = await request(runtime.app).post("/api/ai/chat").set(authenticated(memberB.token))
+    const forged = await request(runtime.server).post("/api/ai/chat").set(authenticated(memberB.token))
       .send({ ...chatBody("forged-owner-identity"), userId: memberA.id, quota: { remainingTokens: 999_999 } });
     expect(forged.status).toBe(403);
     expect(forged.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
     expect(chatCalls).toBe(before);
     expect((await status(memberB)).quota.usedTokens).toBe(0);
-    const otherUsage = await request(runtime.app).get(`/api/ai/usage?userId=${memberA.id}`)
+    const otherUsage = await request(runtime.server).get(`/api/ai/usage?userId=${memberA.id}`)
       .set(authenticated(memberB.token)).expect(200);
     expect(otherUsage.body.entries).toHaveLength(0);
   });
@@ -389,13 +407,13 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   it("does not turn upstream authentication failure into member logout or reveal upstream credentials", async () => {
     transportError = true;
     try {
-      const response = await request(runtime.app).post("/api/ai/chat")
+      const response = await request(runtime.server).post("/api/ai/chat")
         .set(authenticated(memberA.token)).send(chatBody("upstream-auth-error"));
       expect(response.status).toBeGreaterThanOrEqual(400);
       expect(response.status).not.toBe(401);
       assertNoProviderKey(response.body);
       expect(JSON.stringify(response.body)).not.toContain("Provider rejected");
-      await request(runtime.app).get("/api/auth/me").set(authenticated(memberA.token)).expect(200);
+      await request(runtime.server).get("/api/auth/me").set(authenticated(memberA.token)).expect(200);
     } finally {
       transportError = false;
     }
@@ -404,7 +422,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   it("reserves atomically before upstream work so concurrent sends cannot overrun the cap", async () => {
     blockChat = true;
     const before = chatCalls;
-    const first = request(runtime.app).post("/api/ai/chat").set(authenticated(memberA.token))
+    const first = request(runtime.server).post("/api/ai/chat").set(authenticated(memberA.token))
       .send(chatBody("held-concurrent-turn")).then(response => response);
     try {
       await vi.waitFor(() => expect(chatCalls).toBe(before + 1));
@@ -413,7 +431,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
       // Lower the cap exactly to committed + reserved tokens while first is in
       // flight. A second request must observe zero available quota atomically.
       await setLimit(memberA, reserved.quota.usedTokens + reserved.quota.reservedTokens);
-      const second = await request(runtime.app).post("/api/ai/chat").set(authenticated(memberA.token))
+      const second = await request(runtime.server).post("/api/ai/chat").set(authenticated(memberA.token))
         .send(chatBody("second-concurrent-turn"));
       expect(second.status).toBeGreaterThanOrEqual(400);
       expect(chatCalls).toBe(before + 1);
@@ -433,7 +451,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     const before = await status(memberA);
     omitUsage = true;
     try {
-      const result = await request(runtime.app).post("/api/ai/chat")
+      const result = await request(runtime.server).post("/api/ai/chat")
         .set(authenticated(memberA.token)).send(chatBody("missing-usage-provider")).expect(200);
       expect(result.body.usage.estimated).toBe(true);
       expect(result.body.usage.totalTokens).toBeGreaterThan(0);
@@ -450,7 +468,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     blockChat = true;
     const requestId = "late-result-after-recovery";
     const before = chatCalls;
-    const pendingResponse = request(runtime.app).post("/api/ai/chat").set(authenticated(memberA.token))
+    const pendingResponse = request(runtime.server).post("/api/ai/chat").set(authenticated(memberA.token))
       .send(chatBody(requestId)).then(response => response);
     let recoveredUsed = 0;
     try {
@@ -472,7 +490,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     const lateResponse = await pendingResponse;
     assertNoProviderKey(lateResponse.body);
     expect((await status(memberA)).quota.usedTokens).toBe(recoveredUsed);
-    const usage = await request(runtime.app).get("/api/ai/usage").set(authenticated(memberA.token)).expect(200);
+    const usage = await request(runtime.server).get("/api/ai/usage").set(authenticated(memberA.token)).expect(200);
     expect(usage.body.entries.filter((entry: { requestId: string }) => entry.requestId === requestId)).toHaveLength(1);
   });
 
@@ -480,7 +498,7 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
     await setLimit(memberA, 8_000);
     excessiveUsage = true;
     try {
-      const response = await request(runtime.app).post("/api/ai/chat")
+      const response = await request(runtime.server).post("/api/ai/chat")
         .set(authenticated(memberA.token)).send(chatBody("excessive-provider-usage"));
       assertNoProviderKey(response.body);
       const current = await status(memberA);
@@ -494,43 +512,43 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   });
 
   it("keeps admin configuration isolated while requiring an explicit grant for a boss's personal AI", async () => {
-    await request(runtime.app).get("/api/ai/status").set(authenticated(adminToken)).expect(403);
-    await request(runtime.app).post("/api/ai/chat").set(authenticated(adminToken))
+    await request(runtime.server).get("/api/ai/status").set(authenticated(adminToken)).expect(403);
+    await request(runtime.server).post("/api/ai/chat").set(authenticated(adminToken))
       .send(chatBody("admin-member-runtime-denied")).expect(403);
-    await request(runtime.app).put(`/api/admin/ai/members/${adminId}/quota`)
+    await request(runtime.server).put(`/api/admin/ai/members/${adminId}/quota`)
       .set(authenticated(adminToken)).send({ limitTokens: 500, reason: "non-member" }).expect(403);
-    await request(runtime.app).patch(`/api/admin/users/${memberB.id}/role`)
+    await request(runtime.server).patch(`/api/admin/users/${memberB.id}/role`)
       .set(authenticated(adminToken)).send({ role: "boss" }).expect(200);
     try {
       expect((await status(memberB)).accessGranted).toBe(false);
-      await request(runtime.app).post("/api/ai/chat").set(authenticated(memberB.token))
+      await request(runtime.server).post("/api/ai/chat").set(authenticated(memberB.token))
         .send(chatBody("boss-member-runtime-denied")).expect(403);
-      await request(runtime.app).get("/api/admin/ai/provider").set(authenticated(memberB.token)).expect(403);
-      await request(runtime.app).put(`/api/admin/ai/members/${memberB.id}/quota`)
+      await request(runtime.server).get("/api/admin/ai/provider").set(authenticated(memberB.token)).expect(403);
+      await request(runtime.server).put(`/api/admin/ai/members/${memberB.id}/quota`)
         .set(authenticated(memberB.token)).send({ limitTokens: 10000, reason: "unauthorized" }).expect(403);
-      const registry = await request(runtime.app).get("/api/admin/ai/members").set(authenticated(adminToken)).expect(200);
+      const registry = await request(runtime.server).get("/api/admin/ai/members").set(authenticated(adminToken)).expect(200);
       expect(registry.body.members.map((member: { id: string }) => member.id)).toEqual([memberA.id, memberB.id]);
       assertNoProviderKey(registry.body);
       await setLimit(memberB, 10000);
       const quotaA = (await status(memberA)).quota;
-      const own = await request(runtime.app).post("/api/ai/chat").set(authenticated(memberB.token))
+      const own = await request(runtime.server).post("/api/ai/chat").set(authenticated(memberB.token))
         .send({ ...chatBody("boss-personal-runtime-allowed"), userId: memberA.id }).expect(200);
       expect(own.body.quota).toMatchObject({ usedTokens: 26, remainingTokens: 9974 });
       expect((await status(memberA)).quota).toEqual(quotaA);
-      const usage = await request(runtime.app).get(`/api/ai/usage?userId=${memberA.id}`).set(authenticated(memberB.token)).expect(200);
+      const usage = await request(runtime.server).get(`/api/ai/usage?userId=${memberA.id}`).set(authenticated(memberB.token)).expect(200);
       expect(usage.body.entries.every((entry: { userId: string }) => entry.userId === memberB.id)).toBe(true);
     } finally {
-      await request(runtime.app).patch(`/api/admin/users/${memberB.id}/role`)
+      await request(runtime.server).patch(`/api/admin/users/${memberB.id}/role`)
         .set(authenticated(adminToken)).send({ role: "member" }).expect(200);
     }
   });
 
   it("denies a disabled member even when the existing bearer token is still unexpired", async () => {
     const before = fakeTransport.mock.calls.length;
-    await request(runtime.app).patch(`/api/admin/users/${memberA.id}/access`)
+    await request(runtime.server).patch(`/api/admin/users/${memberA.id}/access`)
       .set(authenticated(adminToken)).send({ status: "disabled" }).expect(200);
-    await request(runtime.app).get("/api/ai/status").set(authenticated(memberA.token)).expect(401);
-    await request(runtime.app).post("/api/ai/chat").set(authenticated(memberA.token))
+    await request(runtime.server).get("/api/ai/status").set(authenticated(memberA.token)).expect(401);
+    await request(runtime.server).post("/api/ai/chat").set(authenticated(memberA.token))
       .send(chatBody("disabled-user-turn")).expect(401);
     expect(fakeTransport.mock.calls.length).toBe(before);
   });

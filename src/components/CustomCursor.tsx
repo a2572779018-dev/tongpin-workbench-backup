@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 
 const CURSOR_SIZE = 20;
-const FRAME_INTERVAL = 1000 / 60;
 
 function nearestRotation(current: number, target: number): number {
   const delta = (((target - current) % 360 + 540) % 360) - 180;
@@ -31,7 +30,6 @@ export function CustomCursor() {
     let hasPosition = false;
     let suppressed = false;
     let visible = false;
-    let lastPaint = -Infinity;
 
     const hide = () => {
       if (frame) window.cancelAnimationFrame(frame);
@@ -42,16 +40,12 @@ export function CustomCursor() {
       root.classList.remove("custom-cursor-enabled");
     };
 
-    const paint = (now: number) => {
+    const paint = () => {
       frame = 0;
       if (!finePointer.matches || document.hidden || suppressed) return;
-      // At most one pending frame, and no idle loop. High-refresh displays do
-      // not multiply the work while the AI is streaming or animating.
-      if (now - lastPaint < FRAME_INTERVAL) {
-        frame = window.requestAnimationFrame(paint);
-        return;
-      }
-      lastPaint = now;
+      // Pointer position follows the display refresh rate, never the character's
+      // animation budget. A fractional 60Hz time gate would skip valid frames.
+      // Only pointer input schedules this one frame; there is no idle loop.
 
       if (!hasPosition) {
         previousX = pointerX;

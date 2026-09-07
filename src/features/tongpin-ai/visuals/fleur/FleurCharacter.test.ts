@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { applyFlush, FleurCharacter, fleurViewBox, heldImpression, FLEUR_MOODS, FLEUR_SAYS, isFleurMood, isFleurSays } from "./FleurCharacter";
 import { bodyPaint, computeFrame, computeStaticFrame, contentExtent, createAvatar, EYE_STYLE_BY_ID, impressionFrame, impressionReach, MOTION_BY_ID, play, svgFrame, svgImpression, topperById } from "./character-runtime.js";
-import type { CharacterConfig, CharacterSpec, ImpressionPlan, SvgFrame } from "./character-runtime.js";
+import type { CharacterConfig, CharacterSpec, Frame, ImpressionPlan, SvgFrame } from "./character-runtime.js";
 
 const source = readFileSync(new URL("./FleurCharacter.tsx", import.meta.url), "utf8");
 const specSource = source.match(/const SPEC = ([\s\S]*?);/)![1];
@@ -14,12 +14,18 @@ const config: CharacterConfig = JSON.parse(source.match(/const CONFIG: Character
 const impressionSource = source.match(/const IMPRESSIONS:[^\n]*? = (.*);/)![1];
 const impressions: Record<string, { plan: ImpressionPlan }> = JSON.parse(impressionSource);
 const frameInput = { config, style: EYE_STYLE_BY_ID[config.eyeStyleId], topper: topperById("none", 3) };
-const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+const hash = (s: string) => createHash("sha256").update(s.replace(/\r\n?/g, "\n")).digest("hex");
 
 describe("purchased Fleur SVG component boundary", () => {
   it("preserves the exported character and impression geometry byte-for-byte", () => {
     expect(hash(specSource)).toBe("af9186512c189e10cb6e949a2098bf5fb7a8a82f899e6bb5be393b1d23c20b26");
     expect(hash(impressionSource)).toBe("c9e8df1815974f7f67c49e5eaaf2428b674d6ae127cb07ae3e58b50228d79468");
+  });
+  it("treats Windows CRLF and macOS LF as identical source geometry", () => {
+    const lf = specSource.replace(/\r\n?/g, "\n");
+    const crlf = lf.replace(/\n/g, "\r\n");
+    expect(hash(crlf)).toBe(hash(lf));
+    expect(JSON.parse(crlf)).toEqual(JSON.parse(lf));
   });
   it("accepts only fixed mood/says values, never raw markup or prototype property names", () => {
     expect(FLEUR_MOODS.every(isFleurMood)).toBe(true);
@@ -111,6 +117,62 @@ describe("purchased Fleur SVG component boundary", () => {
 });
 
 describe("Fleur frame fixes", () => {
+  it("visibly moves actual eye geometry towards all four directions across every app mood", () => {
+    const taskMoods = ["idle", "thinking", "listening", "happy", "confused", "curious", "sleepy", "alert", "surprised", "shakeNo", "bored", "angry", "excited", "dizzy"] as const;
+    const eyeCenter = (frame: Frame, axis: number) => {
+      const pts = [...frame.eyeL!.sclera.pts, ...frame.eyeR!.sclera.pts];
+      return pts.filter((_, index) => index % 2 === axis).reduce((sum, value) => sum + value, 0) / (pts.length / 2);
+    };
+    for (const mood of taskMoods) {
+      const motion = MOTION_BY_ID[mood];
+      const draw = (yaw: number, pitch: number) => {
+        const avatar = createAvatar(spec, motion, true, 4.3, 3);
+        let result!: Frame;
+        for (let now = 0; now <= 3000; now += 100) {
+          result = computeFrame(avatar, now, { ...frameInput, config: { ...config, motionId: mood, blink: false }, headTracking: { yaw, pitch, weight: 1 } });
+          expect(Math.abs(result.transform.rot), `${mood} roll`).toBeLessThanOrEqual(6);
+          expect(result.eyeL?.op, `${mood} left eye faces forward`).toBe(1);
+          expect(result.eyeR?.op, `${mood} right eye faces forward`).toBe(1);
+          expect(JSON.stringify(result)).not.toMatch(/NaN|Infinity/);
+        }
+        expect(avatar.motion).toBe(motion);
+        expect(avatar.clock).toBeGreaterThan(0);
+        return result;
+      };
+      const left = draw(-14, 0), right = draw(14, 0), up = draw(0, 10), down = draw(0, -10);
+      // Numeric displacement of the rendered eyes, not merely changed SVG hashes.
+      expect(eyeCenter(right, 0) - eyeCenter(left, 0), `${mood} horizontal travel`).toBeGreaterThan(25);
+      expect(eyeCenter(down, 1) - eyeCenter(up, 1), `${mood} vertical travel`).toBeGreaterThan(18);
+    }
+  });
+  it("contains flower geometry and impression symbols at the increased tracking limits", () => {
+    const taskMoods = ["idle", "happy", "confused", "listening", "shakeNo", "dizzy"] as const;
+    for (const mood of taskMoods) {
+      const motion = MOTION_BY_ID[mood];
+      const extent = contentExtent(spec, config, null, motion);
+      for (const [yaw, pitch] of [[-14, -10], [-14, 10], [14, -10], [14, 10]]) {
+        const avatar = createAvatar(spec, motion, true, 4.3, 3);
+        for (let now = 0; now <= 3000; now += 200) {
+          const frame = computeFrame(avatar, now, { ...frameInput, headTracking: { yaw, pitch, weight: 1 } });
+          const t = frame.transform, angle = t.rot * Math.PI / 180;
+          for (const { plan } of Object.values(impressions)) {
+            const glyph = impressionFrame(plan, { rim: 106, size: 1, height: 1, drops: 1, t: plan.setT + 400 }).glyph!;
+            const box = fleurViewBox(extent, plan, "compact");
+            let overflow = 0;
+            for (const points of [frame.body.pts, glyph.pts]) {
+              for (let i = 0; i < points.length; i += 2) {
+                const x = points[i] * t.sx, y = points[i + 1] * t.sy;
+                const px = x * Math.cos(angle) - y * Math.sin(angle) + t.tx;
+                const py = x * Math.sin(angle) + y * Math.cos(angle) + t.ty;
+                overflow = Math.max(overflow, box[0] - px, px - box[0] - box[2], box[1] - py, py - box[1] - box[3]);
+              }
+            }
+            expect(overflow, `${mood} ${yaw}/${pitch} at ${now}`).toBe(0);
+          }
+        }
+      }
+    }
+  });
   it.each(FLEUR_MOODS)("draws finite original geometry for %s both static and moving", mood => {
     const motion = MOTION_BY_ID[mood];
     const input = { ...frameInput, config: { ...config, motionId: mood } };

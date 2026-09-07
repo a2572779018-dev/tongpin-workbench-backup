@@ -1,5 +1,14 @@
 # Tongpin AI 0.1.37 — release candidate verification
 
+**Superseded / not delivered.** Subsequent user testing exposed dropped cursor
+frames and unnatural tracking after clicks. The maximum-fps assertions below
+did not establish smoothness. Windows CI also exposed a CRLF-sensitive geometry
+text hash test. CI 34104772067 failed and publication was skipped; only draft
+release 383961971 with five Mac assets exists. No 0.1.37 update manifest was
+activated and no 0.1.37 app was installed. Continue with the corrected 0.1.38
+candidate rather than rewriting this tag or claiming this candidate passed
+the subsequently reported user requirements.
+
 Verified on 2026-09-07. Publication and installation are separate operations;
 this document records the tested source, not a claim of deployed delivery.
 

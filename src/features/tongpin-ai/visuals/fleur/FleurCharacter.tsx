@@ -2,7 +2,7 @@ import { memo, useEffect, useId, useMemo, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { Avatar, BodyPaint, CharacterConfig, FrameInput, ImpressionPlan, SvgEye, SvgFrame, SvgImpression } from "./character-runtime.js";
 import { createVisibleFrameLoop, type VisibleFrameLoop } from "./visibleFrameLoop";
-import { createPointerFollowState, notePointerPosition, resetPointerFollow, stepPointerFollow } from "./pointerFollow";
+import { createPointerFollowState, createPointerSnapshotCache, followAnchorFromViewBox, notePointerPosition, releasePointerFollow, resetPointerFollow, seedPointerFollow, stepPointerFollow } from "./pointerFollow";
 import {
   bodyPaint,
   computeFrame,
@@ -20,6 +20,8 @@ import {
   impressionReach,
   svgImpression,
 } from "./character-runtime.js";
+
+const recentFollowPointer = createPointerSnapshotCache();
 
 const SPEC = {
   "id": "fleur",
@@ -322,7 +324,8 @@ export const FleurCharacter = memo(function FleurCharacter({ mood, says, paused 
   const impTop = Math.max(extent, impReserve);
   // Impressions rotate with the character. A square reserve keeps them inside
   // small clipped containers even during spin/tumble; "none" stays tightly fit.
-  const BOX = useMemo(() => fleurViewBox(extent, impPlan, framing === "compact" && impMotion !== "spin" && impMotion !== "tumble" ? "compact" : "safe").join(" "), [extent, impPlan, framing, impMotion]);
+  const box = useMemo(() => fleurViewBox(extent, impPlan, framing === "compact" && impMotion !== "spin" && impMotion !== "tumble" ? "compact" : "safe"), [extent, impPlan, framing, impMotion]);
+  const BOX = box.join(" ");
 
   const el = useRef<Record<string, SVGElement | null>>({});
   const svgRef = useRef<SVGSVGElement>(null);
@@ -343,16 +346,16 @@ export const FleurCharacter = memo(function FleurCharacter({ mood, says, paused 
     avatarRef.current = createAvatar(SPEC, motion, true, 4.3, DETAIL);
   }
 
-  const visualRef = useRef({ paint, impPlan, blushId, paused, followPointer, impressionPlayback });
+  const visualRef = useRef({ paint, impPlan, blushId, paused, followPointer, impressionPlayback, box });
   const syncMotionRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     inputRef.current = { config, style, topper, drag: dragRef.current };
-    visualRef.current = { paint, impPlan, blushId, paused, followPointer, impressionPlayback };
+    visualRef.current = { paint, impPlan, blushId, paused, followPointer, impressionPlayback, box };
     const avatar = avatarRef.current;
     if (avatar && avatar.motion !== motion) play(avatar, motion);
     syncMotionRef.current?.();
     loopRef.current?.redraw();
-  }, [config, style, topper, motion, paint, impPlan, blushId, paused, followPointer, impressionPlayback]);
+  }, [config, style, topper, motion, paint, impPlan, blushId, paused, followPointer, impressionPlayback, box, className]);
   useEffect(() => {
     impStart.current = loopRef.current?.visibleMs ?? 0;
     loopRef.current?.redraw();
@@ -365,9 +368,7 @@ export const FleurCharacter = memo(function FleurCharacter({ mood, says, paused 
     const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
     let inView = typeof IntersectionObserver === "undefined";
     let following = false;
-    let rect: DOMRect | null = null;
-    let rectDirty = true;
-    let rectReadAt = -Infinity;
+    let seedFromRecentPointer = false;
     const loop = createVisibleFrameLoop((now, dt) => {
       const A = avatarRef.current;
       if (A) {
@@ -375,11 +376,13 @@ export const FleurCharacter = memo(function FleurCharacter({ mood, says, paused 
         const latest = visualRef.current;
         const still = latest.paused || reducedMotion.matches;
         let input = inputRef.current;
-        if (following && !dragRef.current.active && (followRef.current.hasPoint || followRef.current.yaw !== 0 || followRef.current.pitch !== 0)) {
-          // Layout is read at most once in a painted frame, never in pointermove.
-          if (rectDirty || now - rectReadAt >= 250) { rect = svg.getBoundingClientRect(); rectDirty = false; rectReadAt = now; }
-          if (rect) stepPointerFollow(followRef.current, rect, dt, now);
-          input = { ...input, config: { ...input.config, turn: input.config.turn + followRef.current.yaw, tilt: input.config.tilt + followRef.current.pitch } };
+        if (following && !dragRef.current.active && (followRef.current.hasPoint || followRef.current.weight !== 0)) {
+          // Read once before SVG writes, at the <=30fps paint cadence. A cached
+          // outer-box center was wrong after layout changes and top impressions.
+          const anchor = followAnchorFromViewBox(svg.getBoundingClientRect(), latest.box);
+          if (seedFromRecentPointer) { seedPointerFollow(followRef.current, anchor); seedFromRecentPointer = false; }
+          else stepPointerFollow(followRef.current, anchor, dt);
+          input = { ...input, headTracking: { yaw: followRef.current.yaw, pitch: followRef.current.pitch, weight: followRef.current.weight } };
         }
         const frame = svgFrame(still ? computeStaticFrame(SPEC, A.motion, input, true, 4.3, DETAIL) : computeFrame(A, now, input));
         const e = el.current;
@@ -395,33 +398,40 @@ export const FleurCharacter = memo(function FleurCharacter({ mood, says, paused 
     }, { request: callback => window.requestAnimationFrame(callback), cancel: id => window.cancelAnimationFrame(id) });
     loopRef.current = loop;
     const onFollowPointer = (event: PointerEvent) => {
-      if (following && event.pointerType === "mouse") notePointerPosition(followRef.current, event.clientX, event.clientY, loop.visibleMs);
+      if (following && event.pointerType === "mouse") {
+        notePointerPosition(followRef.current, event.clientX, event.clientY);
+        recentFollowPointer.remember(event.clientX, event.clientY, performance.now());
+      }
     };
-    const resetFollow = () => { resetPointerFollow(followRef.current); if (following) loop.redraw(); };
+    const resetFollow = () => { recentFollowPointer.clear(); releasePointerFollow(followRef.current); if (following) loop.redraw(); };
     const onWindowLeave = (event: MouseEvent) => { if (event.relatedTarget === null) resetFollow(); };
-    const invalidateRect = () => { rectDirty = true; };
     const setFollowing = (enabled: boolean) => {
       if (following === enabled) return;
       following = enabled;
-      rectDirty = true;
       resetPointerFollow(followRef.current);
+      seedFromRecentPointer = false;
       if (enabled) {
+        const previousPoint = recentFollowPointer.read(performance.now());
+        if (previousPoint) {
+          notePointerPosition(followRef.current, previousPoint.clientX, previousPoint.clientY);
+          seedFromRecentPointer = true;
+        }
         window.addEventListener("pointermove", onFollowPointer, { passive: true });
+        window.addEventListener("pointerdown", onFollowPointer, { passive: true });
         window.addEventListener("mouseout", onWindowLeave, { passive: true });
         window.addEventListener("blur", resetFollow);
-        window.addEventListener("resize", invalidateRect, { passive: true });
-        window.addEventListener("scroll", invalidateRect, { passive: true, capture: true });
       } else {
         window.removeEventListener("pointermove", onFollowPointer);
+        window.removeEventListener("pointerdown", onFollowPointer);
         window.removeEventListener("mouseout", onWindowLeave);
         window.removeEventListener("blur", resetFollow);
-        window.removeEventListener("resize", invalidateRect);
-        window.removeEventListener("scroll", invalidateRect, true);
       }
     };
     const syncMotion = () => {
+      if (document.hidden) recentFollowPointer.clear();
       const active = !visualRef.current.paused && !document.hidden && !reducedMotion.matches && inView;
-      setFollowing(active && visualRef.current.followPointer && finePointer.matches);
+      const flipping = inputRef.current.config.motionId === "spin" || inputRef.current.config.motionId === "tumble";
+      setFollowing(active && visualRef.current.followPointer && finePointer.matches && !flipping);
       loop.setActive(active);
       if (!active) { dragRef.current.active = false; dragRef.current.vx = 0; dragRef.current.vy = 0; }
     };

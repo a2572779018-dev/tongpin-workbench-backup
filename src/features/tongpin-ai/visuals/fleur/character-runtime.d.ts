@@ -17,7 +17,7 @@ export interface EyeStyle { id: string; label: string; }
 export interface Topper { loops: readonly { pts: readonly (readonly [number, number, number])[] }[]; thickness?: number; }
 export interface Avatar { motion: Motion; clock: number; lastNow: number; }
 export interface Drag { x: number; y: number; active: boolean; vx: number; vy: number; }
-export interface FrameInput { config: CharacterConfig; style: EyeStyle; topper: Topper | null; drag?: Drag; }
+export interface FrameInput { config: CharacterConfig; style: EyeStyle; topper: Topper | null; drag?: Drag; headTracking?: { yaw: number; pitch: number; weight: number }; }
 export interface Outline { pts: readonly number[]; ends: readonly number[]; }
 export interface Transform { tx: number; ty: number; rot: number; sx: number; sy: number; }
 export interface ColorRamp { light: string; mid: string; dark: string; }

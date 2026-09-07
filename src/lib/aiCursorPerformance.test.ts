@@ -18,8 +18,11 @@ describe("AI directional cursor boundary", () => {
     expect(app.match(/<CustomCursor\s*\/>/g)).toHaveLength(1);
     expect(app).not.toContain('view !== "ai" && view !== "admin-ai" && <CustomCursor');
     const cursor = read("../components/CustomCursor.tsx");
-    expect(cursor).toContain("const FRAME_INTERVAL = 1000 / 60;");
+    expect(cursor).not.toContain("FRAME_INTERVAL");
+    expect(cursor).not.toContain("lastPaint");
     expect(cursor).toContain("if (!frame) frame = window.requestAnimationFrame(paint);");
+    const paint = cursor.slice(cursor.indexOf("const paint ="), cursor.indexOf("const handlePointerMove ="));
+    expect(paint).not.toContain("requestAnimationFrame");
     expect(cursor).toContain("if (!finePointer.matches || document.hidden || suppressed) return;");
     expect(cursor).toContain("if (suppressed) { hide(); return; }");
     expect(cursor).not.toContain("getBoundingClientRect");

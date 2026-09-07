@@ -36,7 +36,10 @@ describe("release announcement", () => {
       "保留原有任务、客户脉络图和 AI 历史数据",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "角色眼神和头部轻微跟随鼠标",
+      "角色转头跟随更明显",
+    );
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
+      "修复限帧导致的掉帧",
     );
   });
 

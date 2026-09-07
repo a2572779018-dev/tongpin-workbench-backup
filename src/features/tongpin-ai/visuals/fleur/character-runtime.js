@@ -2330,9 +2330,21 @@ function computeFrame(A, now, input) {
   const s = drag.active ? 0 : e;
   let hx = base.headX + A.amb.hx * s * ms + cfg.tilt;
   let hy = base.headY + A.amb.hy * s * ms + cfg.turn;
-  const hz = base.headZ + A.amb.hz * s * ms + cfg.lean;
+  let hz = base.headZ + A.amb.hz * s * ms + cfg.lean;
   hx += drag.x;
   hy += drag.y;
+  // Optional app pointer tracking: retain eye shape, mood timing and a small
+  // head gesture, but do not add the full +/-24deg mood pose to the pointer.
+  const tracking = input.headTracking;
+  if (tracking && Number.isFinite(tracking.weight) && Number.isFinite(tracking.yaw) && Number.isFinite(tracking.pitch)) {
+    const weight = Math.max(0, Math.min(1, tracking.weight));
+    const bounded = (value, limit) => Math.max(-limit, Math.min(limit, value));
+    const trackedX = bounded(hx, 12) * 0.25 + bounded(tracking.pitch, 10);
+    const trackedY = bounded(hy, 20) * 0.2 + bounded(tracking.yaw, 14);
+    hx += (trackedX - hx) * weight;
+    hy += (trackedY - hy) * weight;
+    hz += (bounded(hz, 12) * 0.5 - hz) * weight;
+  }
   const q = quatFromEuler(hx, hy, 0);
   const persp = Math.max(pose.perspective, 1e-4);
   const styleSpread = Math.max(1, (_c = input.style.spacing) != null ? _c : 1);
