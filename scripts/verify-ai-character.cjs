@@ -5,11 +5,12 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 
 const UI = "http://127.0.0.1:5174";
-const OUT = "/Users/sam/Documents/ChatGPT/个人/tongpin-release-downloads/qa-0.1.37";
+const NEXT_CURSOR_ONLY = process.argv.includes("--cursor-next");
+const OUT = `/Users/sam/Documents/ChatGPT/个人/tongpin-release-downloads/qa-${NEXT_CURSOR_ONLY ? "0.1.38" : "0.1.37"}`;
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const DEFAULT_PW = "/Users/sam/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright";
 const EXPRESSIONS = ["auto", "none", "hmm", "question", "zzz", "aha", "smitten", "oh", "yes", "nope", "meh", "grr", "wow", "woozy"];
-const report = { version: "0.1.37", startedAt: new Date().toISOString(), origin: UI, isolatedHeadlessContext: true, productionRequestsAllowed: false, checks: [], screenshots: [], errors: [], blockedExternalRequests: [] };
+const report = { version: NEXT_CURSOR_ONLY ? "0.1.38" : "0.1.37", startedAt: new Date().toISOString(), origin: UI, isolatedHeadlessContext: true, productionRequestsAllowed: false, checks: [], screenshots: [], errors: [], blockedExternalRequests: [] };
 let browser;
 let activePage;
 
@@ -265,7 +266,7 @@ async function verifyDirectionalCursor(page) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.some(arg => !["--inspect", "--layout", "--cursor"].includes(arg))) throw new Error("Only --inspect/--layout/--cursor are supported; URLs/accounts are pinned to the isolated fixture");
+  if (args.some(arg => !["--inspect", "--layout", "--cursor", "--cursor-next"].includes(arg))) throw new Error("Only --inspect/--layout/--cursor/--cursor-next are supported; URLs/accounts are pinned to the isolated fixture");
   await fs.mkdir(OUT, { recursive: true });
   const modulePath = process.env.PW_MODULE || DEFAULT_PW;
   if (path.basename(await fs.realpath(modulePath)) !== "playwright") throw new Error("PW_MODULE must resolve to the Playwright package");
@@ -277,7 +278,7 @@ async function main() {
     const ready = await newContext("ready");
     await login(ready.page, "ready");
     const page = ready.page;
-    if (args.includes("--cursor")) {
+    if (args.includes("--cursor") || NEXT_CURSOR_ONLY) {
       await verifyDirectionalCursor(page);
       await ready.context.close();
       return;
@@ -472,7 +473,7 @@ main().catch(error => {
   report.completedAt = new Date().toISOString();
   report.passed = !report.fatal && report.checks.every(c => c.passed);
   await fs.mkdir(OUT, { recursive: true });
-  const output = path.join(OUT, process.argv.includes("--inspect") ? "inspection.json" : process.argv.includes("--layout") ? "welcome-layout-verification.json" : process.argv.includes("--cursor") ? "directional-cursor-verification.json" : "browser-character-verification.json");
+  const output = path.join(OUT, process.argv.includes("--inspect") ? "inspection.json" : process.argv.includes("--layout") ? "welcome-layout-verification.json" : process.argv.includes("--cursor") || NEXT_CURSOR_ONLY ? "directional-cursor-verification.json" : "browser-character-verification.json");
   await fs.writeFile(output, JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
   if (process.argv.includes("--cursor") && report.passed) {
     const character = JSON.parse(await fs.readFile(path.join(OUT, "browser-character-verification.json"), "utf8"));

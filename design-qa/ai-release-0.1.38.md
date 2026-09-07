@@ -57,6 +57,9 @@ and after each run and matched the final checked-out source.
   Left/right/up/down, stationary hold, blank/tools clicks, settings layout
   movement without a subsequent pointer move, question/heart impressions and
   all corners in welcome/settings/chat-header contexts passed.
+- Existing directional-cursor regressions were rerun separately with
+  `verify-ai-character.cjs --cursor-next`: **8/8 passed**. This keeps the old
+  0.1.37 evidence intact and does not run the persona-write scenarios.
 - Earlier 14-expression save/reload and member isolation evidence is retained
   in the 0.1.37 candidate report, not misrepresented as repeated persistence
   writes in these read-only geometry tests.
