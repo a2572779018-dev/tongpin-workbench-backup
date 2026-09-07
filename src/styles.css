@@ -182,6 +182,18 @@ html.custom-cursor-enabled * {
   cursor: none !important;
 }
 
+html.custom-cursor-enabled textarea,
+html.custom-cursor-enabled input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+html.custom-cursor-enabled [contenteditable]:not([contenteditable="false"]),
+html.custom-cursor-enabled [contenteditable]:not([contenteditable="false"]) * {
+  cursor: text !important;
+}
+html.custom-cursor-enabled select { cursor: auto !important; }
+html.custom-cursor-enabled button:disabled,
+html.custom-cursor-enabled button:disabled *,
+html.custom-cursor-enabled [aria-disabled="true"],
+html.custom-cursor-enabled [aria-disabled="true"] * { cursor: not-allowed !important; }
+
 html.custom-cursor-reduced-motion .custom-cursor__arrow {
   transition: none;
 }
@@ -193,6 +205,29 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
 }
 
 /* Integrated Electron window chrome */
+
+/* Native fallback until the event-driven, rotating Tongpin pointer is painted. */
+@media (pointer: fine) {
+  html[data-app-view="ai"]:where(:not(.custom-cursor-enabled)),
+  html[data-app-view="ai"]:where(:not(.custom-cursor-enabled)) * {
+    cursor: url("./assets/tongpin-cursor.svg") 10 2, auto !important;
+  }
+  html[data-app-view="ai"] textarea,
+  html[data-app-view="ai"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  html[data-app-view="ai"] [contenteditable]:not([contenteditable="false"]),
+  html[data-app-view="ai"] [contenteditable]:not([contenteditable="false"]) * {
+    cursor: text !important;
+  }
+  html[data-app-view="ai"] select { cursor: auto !important; }
+  html[data-app-view="ai"] [data-native-cursor],
+  html[data-app-view="ai"] [data-native-cursor] * { cursor: auto !important; }
+  html[data-app-view="ai"] button:disabled,
+  html[data-app-view="ai"] button:disabled *,
+  html[data-app-view="ai"] [aria-disabled="true"],
+  html[data-app-view="ai"] [aria-disabled="true"] * {
+    cursor: not-allowed !important;
+  }
+}
 
 .desktop-titlebar {
   position: sticky;

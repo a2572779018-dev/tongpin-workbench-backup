@@ -203,8 +203,9 @@ export function App() {
   return (
     <>
       <QuickTaskBridge />
-      {view !== "ai" && view !== "admin-ai" && <CustomCursor />}
+      <CustomCursor />
       <DesktopTitlebar
+        hideBrandMark={view === "ai"}
         centerLabel={
           session && !loading && !startupError
             ? view === "relations"

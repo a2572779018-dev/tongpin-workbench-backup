@@ -1,4 +1,4 @@
-import type { AiChatRequest, AiSource, AiUsage } from "../../shared/ai";
+import type { AiChatRequest, AiProviderDiagnostic, AiSource, AiUsage } from "../../shared/ai";
 import type { StoredProvider } from "./storage";
 import { AiError } from "./security";
 import { chatInstructions, chatMessages, safeSource } from "./capabilities";
@@ -13,7 +13,7 @@ export interface AiTransportInit {
 }
 export type AiTransport = (url: string, init: AiTransportInit) => Promise<Response>;
 export const AI_TIMEOUT_MS = 120_000;
-async function readBoundedText(response: Response, maxBytes = 2_000_000): Promise<string> {
+export async function readBoundedText(response: Response, maxBytes = 2_000_000): Promise<string> {
   if (!response.body) throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务没有返回有效内容");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -57,11 +57,41 @@ export async function readProviderResponse(response: Response): Promise<unknown>
   if (!completed) throw new AiError(502, "AI_STREAM_INTERRUPTED", "AI 数据流中断，用量暂按预留上限记录，请管理员核对");
   return completed;
 }
-export function providerHttpError(status: number): AiError {
-  if (status === 401 || status === 403) return new AiError(502, "AI_PROVIDER_AUTH", "API 密钥无效或无权使用该模型，请管理员检查配置");
-  if (status === 429) return new AiError(502, "AI_PROVIDER_LIMIT", "AI 服务余额不足或请求过于频繁，请管理员检查服务商账号");
-  if (status >= 300 && status < 400) return new AiError(502, "AI_PROVIDER_REDIRECT", "API 地址发生重定向，已为保护密钥停止连接，请填写最终 API 地址");
-  return new AiError(502, "AI_PROVIDER_REJECTED", "AI 服务拒绝请求，请管理员检查 API 地址、接口协议及模型名称");
+/** Only explicit pre-generation HTTP refusals release a reservation. A timeout/conflict may follow paid work. */
+export function isProviderRejection(status: number): boolean {
+  return (status >= 300 && status < 400) || [400, 401, 403, 404, 405, 406, 410, 411, 413, 414, 415, 422, 429].includes(status);
+}
+// Provider error fields can echo credentials or prompts. Even syntactically safe arbitrary strings are not safe to expose.
+const SAFE_ERROR_CODES = new Set(["invalid_api_key", "invalid_request_error", "invalid_value", "invalid_parameter", "unsupported_parameter", "unknown_parameter", "model_not_found", "model_not_supported", "permission_denied", "insufficient_quota", "rate_limit_exceeded", "content_policy_violation", "moderation_blocked", "server_error", "internal_error", "service_unavailable", "upstream_error", "timeout", "request_timeout"]);
+const SAFE_ERROR_PARAMS = new Set(["model", "size", "quality", "n", "prompt", "stream", "response_format", "output_format", "background", "moderation", "partial_images", "max_output_tokens", "max_completion_tokens", "reasoning_effort", "reasoning.effort", "tools"]);
+export function providerHttpError(status: number, operation: AiProviderDiagnostic["operation"] = "chat", metadata: { code?: string; param?: string } = {}): AiError {
+  const category: AiProviderDiagnostic["category"] = status === 401 || status === 403 ? "authentication" : status === 429 ? "rate_limit" : status >= 300 && status < 400 ? "redirect" : status === 408 || status === 504 ? "timeout" : status === 409 ? "conflict" : status >= 500 ? "upstream_unavailable" : [400, 404, 405, 406, 413, 415, 422].includes(status) ? "invalid_request" : "rejected";
+  const diagnostic: AiProviderDiagnostic = { operation, httpStatus: status, category, billing: isProviderRejection(status) ? "rejected" : "unknown",
+    ...(metadata.code && SAFE_ERROR_CODES.has(metadata.code) ? { code: metadata.code } : {}),
+    ...(metadata.param && SAFE_ERROR_PARAMS.has(metadata.param) ? { param: metadata.param } : {}),
+  };
+  const prefix = operation === "image" ? "图片服务" : "AI 服务";
+  const http = `（HTTP ${status}）`;
+  const failure = (code: string, message: string) => new AiError(502, code, message, false, undefined, diagnostic);
+  if (category === "authentication") return failure("AI_PROVIDER_AUTH", `${prefix}密钥无效或无权使用该模型${http}，请管理员检查对应密钥及分组权限`);
+  if (category === "rate_limit") return failure("AI_PROVIDER_LIMIT", `${prefix}余额不足或请求过于频繁${http}，请管理员检查服务商账号`);
+  if (category === "redirect") return failure("AI_PROVIDER_REDIRECT", `API 地址发生重定向${http}，已为保护密钥停止连接，请填写最终 API 地址`);
+  if (category === "timeout" || category === "conflict" || category === "upstream_unavailable" || diagnostic.billing === "unknown") {
+    if (operation === "models") return failure("AI_PROVIDER_UNAVAILABLE", `读取模型列表时服务异常${http}，请稍后重新测试连接；本次测试未发起生成`);
+    return failure("AI_PROVIDER_UNAVAILABLE", `${prefix}${category === "timeout" ? "处理超时" : category === "conflict" ? "报告请求冲突" : "暂时故障"}${http}，结果与用量待核对；请管理员先核对服务商记录，不要直接重复生成`);
+  }
+  const hint = diagnostic.code === "content_policy_violation" || diagnostic.code === "moderation_blocked" ? "内容未通过服务商审核" : diagnostic.code === "model_not_found" || diagnostic.code === "model_not_supported" ? "模型不存在或当前分组不支持" : diagnostic.param ? `参数 ${diagnostic.param} 不被当前接口接受` : "请管理员检查对应 API 地址、接口参数、模型名称及密钥分组";
+  return failure("AI_PROVIDER_REJECTED", `${prefix}拒绝请求${http}，${hint}`);
+}
+/** Read a small error envelope, but retain only fixed allowlisted metadata. Never log/return arbitrary upstream text. */
+export async function readProviderHttpError(response: Response, operation: AiProviderDiagnostic["operation"]): Promise<AiError> {
+  let metadata: { code?: string; param?: string } = {};
+  try {
+    const root = object(await readBoundedJson(response, 16 * 1024));
+    const error = object(root.error);
+    metadata = { ...(typeof error.code === "string" ? { code: error.code } : {}), ...(typeof error.param === "string" ? { param: error.param } : {}) };
+  } catch { /* Oversized, non-JSON and interrupted error bodies do not erase the received HTTP status. */ }
+  return providerHttpError(response.status, operation, metadata);
 }
 export function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 export function parseProviderResult(value: unknown, protocol: StoredProvider["protocol"]): { content: string; usage: AiUsage | null; status?: string; sources: AiSource[]; searchCalls: number; completedSearchCalls: number } {

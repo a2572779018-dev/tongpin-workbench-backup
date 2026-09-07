@@ -4,7 +4,7 @@ import path from "node:path";
 import { build } from "esbuild";
 import { convertV4MiniflareOptions, Log, LogLevel, Miniflare, Response as MfResponse, type V4FetchHandler } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AiChatPreflight, AiChatResponse, AiImageResponse, AiProviderInput, AiStatus } from "../../../shared/ai";
+import type { AiChatPreflight, AiChatResponse, AiImageResponse, AiProviderDiagnostic, AiProviderInput, AiRequestResult, AiStatus } from "../../../shared/ai";
 import type { AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
 import type { AiPersonaSnapshot } from "../../../shared/aiPersona";
 
@@ -14,7 +14,7 @@ const TEST_API_KEY = "test-workerd-provider-not-real";
 const WORKER_NAME = "tongpin-ai-workerd-test";
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 type Session = { accessToken: string; user: { id: string; email: string; role: string } };
-type ErrorBody = { error: { code: string; message: string; details?: AiChatPreflight } };
+type ErrorBody = { error: { code: string; message: string; details?: AiChatPreflight; diagnostic?: AiProviderDiagnostic } };
 
 /** The real bundled entry point + SQLite DO run under workerd. Every outbound request is
  * intercepted: no production account, database, DNS resolver, API key or paid provider is used. */
@@ -29,6 +29,8 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   let releasePending: (() => void) | undefined;
   let holdNextPost = false;
   let rejectNextPost = false;
+  let imageFailureStatus = 0;
+  let imageSse = false;
   let redirectNextModels = false;
   let privateDns = false;
   let sourceResponse = "workerd 中的真实路由回复（上游为隔离 fixture）";
@@ -56,7 +58,14 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
       await new Promise<void>(resolve => { releasePending = resolve; });
     }
     if (rejectNextPost) { rejectNextPost = false; return MfResponse.json({ error: { message: TEST_API_KEY } }, { status: 401 }); }
-    if (url.pathname === "/v1/images/generations") return MfResponse.json({ data: [{ b64_json: PNG }] });
+    if (url.pathname === "/v1/images/generations") {
+      if (imageFailureStatus) { const status = imageFailureStatus; imageFailureStatus = 0; return MfResponse.json({ error: { code: "upstream_error", message: `${TEST_API_KEY} private-prompt` } }, { status }); }
+      if (imageSse) {
+        expect(await request.json()).toMatchObject({ stream: true, partial_images: 0, n: 1 });
+        return new MfResponse(`: heartbeat\n\ndata: ${JSON.stringify({ type: "image_generation.completed", b64_json: PNG })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+      }
+      return MfResponse.json({ data: [{ b64_json: PNG }] });
+    }
     expect(url.pathname).toBe("/v1/responses");
     lastChatInstructions = String((await request.json() as { instructions?: string }).instructions ?? "");
     return MfResponse.json({ status: "completed", output_text: sourceResponse, usage: { input_tokens: 24, output_tokens: 48, total_tokens: 72 } });
@@ -251,17 +260,58 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     await api(`/api/ai/assets/${assetId}`, member, undefined, "GET", 404);
   });
   it("keeps an explicitly confirmed assistant identity after workerd restart without sharing another member's preferences", async () => {
-    const profile = { name: "小频", tone: "concise", customStyle: "先给结论", preferences: "偏好简体中文", onboardingComplete: true };
+    const profile = { name: "小频", tone: "concise", customStyle: "先给结论", preferences: "偏好简体中文", onboardingComplete: true, expression: "woozy" };
     const saved = await api<AiPersonaSnapshot>("/api/ai/persona", member, { expectedRevision: 0, profile }, "PUT");
     expect(saved.profile.name).toBe("小频");
     await mf.dispose(); mf = start(); await mf.ready;
     expect((await api<AiPersonaSnapshot>("/api/ai/persona", member)).profile).toEqual(profile);
     expect((await api<AiPersonaSnapshot>("/api/ai/persona", other)).profile.name).toBe("");
+    expect((await api<AiPersonaSnapshot>("/api/ai/persona", other)).profile.expression).toBe("auto");
+    const invalid = await api<ErrorBody>("/api/ai/persona", member, { expectedRevision: saved.revision, profile: { ...profile, expression: "dizzy" } }, "PUT", 400);
+    expect(invalid.error.code).toBe("AI_PERSONA_INVALID");
+    const { expression: _expression, ...legacyProfile } = profile;
+    const legacySaved = await api<AiPersonaSnapshot>("/api/ai/persona", member, { expectedRevision: saved.revision, profile: legacyProfile }, "PUT");
+    expect(legacySaved.profile).toEqual(profile);
+    await api("/api/ai/persona", member, { expectedRevision: saved.revision, profile: { ...profile, expression: "yes" } }, "PUT", 409);
+    expect(await api<AiPersonaSnapshot>("/api/ai/persona", member)).toEqual(legacySaved);
     await api("/api/ai/chat", member, requestBody());
     expect(lastChatInstructions).toContain('你的专属称呼是 "小频"');
     expect(lastChatInstructions).toContain("偏好简体中文");
     expect(lastChatInstructions).toContain("不声称自动记住所有历史聊天");
+    expect(lastChatInstructions).not.toContain("woozy");
+    expect(lastChatInstructions).not.toContain("expression");
     await api("/api/ai/persona", admin, undefined, "GET", 403);
+  });
+  it("keeps image gateway failures uncertain and HTTP diagnostics private across a workerd restart without another POST", async () => {
+    const before = postCount, used = (await api<AiStatus>("/api/ai/status", member)).quota.usedTokens;
+    imageFailureStatus = 502;
+    const request = { requestId: crypto.randomUUID(), prompt: "诊断测试图片", mode: "deep" };
+    const error = await api<ErrorBody>("/api/ai/images", member, request, "POST", 502);
+    expect(error.error).toMatchObject({ code: "AI_PROVIDER_UNAVAILABLE", diagnostic: { operation: "image", httpStatus: 502, billing: "unknown", code: "upstream_error" } });
+    expect(JSON.stringify(error)).not.toMatch(/test-workerd-provider-not-real|private-prompt/);
+    expect((await api<AiStatus>("/api/ai/status", member)).quota).toMatchObject({ usedTokens: used + 1000, reservedTokens: 0 });
+    await mf.dispose(); mf = start(); await mf.ready;
+    expect((await api<AiRequestResult>(`/api/ai/requests/${request.requestId}`, member))).toMatchObject({ status: "uncertain", error: { diagnostic: error.error.diagnostic } });
+    expect((await api<ErrorBody>("/api/ai/images", member, request, "POST", 502)).error).toEqual(error.error);
+    await api(`/api/ai/requests/${request.requestId}`, other, undefined, "GET", 404);
+    expect(postCount).toBe(before + 1);
+  });
+  it("saves an explicit Images SSE switch and handles one final image through real Worker transport without a fallback POST", async () => {
+    await api("/api/admin/ai/provider", admin, { ...provider, imageStream: true }, "PUT");
+    imageSse = true;
+    const before = postCount;
+    try {
+      const request = { requestId: crypto.randomUUID(), prompt: "标准流式图片" };
+      const result = await api<AiImageResponse>("/api/ai/images", member, request);
+      expect(result.usage).toMatchObject({ totalTokens: 1000, convertedTokens: 1000, estimated: true });
+      expect((await api<{ base64: string }>(`/api/ai/assets/${result.images[0].assetId}`, member)).base64).toBe(PNG);
+      await api("/api/ai/images", member, request);
+      expect(postCount).toBe(before + 1);
+      await api(`/api/ai/assets/${result.images[0].assetId}`, other, undefined, "GET", 404);
+    } finally {
+      imageSse = false;
+      await api("/api/admin/ai/provider", admin, { ...provider, imageStream: false }, "PUT");
+    }
   });
   it("retains granted access, persona and history when quota is exhausted, but never sends new paid work", async () => {
     const persona = await api<AiPersonaSnapshot>("/api/ai/persona", member);

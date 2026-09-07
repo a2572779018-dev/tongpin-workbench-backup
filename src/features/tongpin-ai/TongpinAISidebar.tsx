@@ -328,9 +328,6 @@ export function TongpinAISidebar({
         aria-label="AI 工作台导航"
       >
         <header className="tp-ai-sidebar__brand">
-          <span className="tp-ai-sidebar__mark" aria-hidden="true">
-            <img src="./app-icon.svg" alt="" />
-          </span>
           <strong className="tp-ai-sidebar__brand-name">同频 AI</strong>
           <button
             ref={toggleRef}

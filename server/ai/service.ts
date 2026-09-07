@@ -1,10 +1,11 @@
 import type { AiChatBudget, AiChatPreflight, AiChatPreflightReason, AiChatRequest, AiChatResponse, AiImageAsset, AiImageRequest, AiImageResponse, AiMember, AiProviderConfig, AiProviderInput, AiProviderTestResult, AiQuota, AiRequestResult, AiStatus, AiUsage } from "../../shared/ai";
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import { AiStore, type StoredProvider, type StoredRequest } from "./storage";
-import { AI_TIMEOUT_MS, object, parseProviderResult, providerBody, providerHttpError, readBoundedJson, readProviderResponse, type AiTransport } from "./provider";
+import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, providerBody, readProviderHttpError, readBoundedJson, readProviderResponse, type AiTransport } from "./provider";
 import { chatInputReserve, parseChatCapabilities, parsePresentation, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
+import { imageProviderBody, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse } from "./imageProvider";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -33,7 +34,7 @@ function budgetReason(budget: AiChatBudget, quota: AiQuota, pending: boolean): A
 function requireChatBudget(preflight: AiChatPreflight): void {
   const { reason } = preflight;
   if (reason === "request_in_progress") throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "该账号已有一条 AI 请求正在处理，请稍候", true, preflight);
-  if (reason === "quota_exhausted") throw new AiError(402, "AI_QUOTA_EXHAUSTED", "可用 Token 已用完，请联系管理员增加额度", true, preflight);
+  if (reason === "quota_exhausted") throw new AiError(402, "AI_QUOTA_EXHAUSTED", "可用同频点已用完，请联系管理员增加额度", true, preflight);
   if (reason === "search_quota_insufficient") throw new AiError(402, "AI_SEARCH_QUOTA_INSUFFICIENT", "当前余额不足以预留本次联网搜索所需额度；尚未发送，也未扣费", true, preflight);
   if (reason === "quota_insufficient") throw new AiError(402, "AI_QUOTA_INSUFFICIENT", "当前仍有余额，但不足以预留本次对话所需额度；请缩短对话或联系管理员", true, preflight);
 }
@@ -60,7 +61,8 @@ function parseProvider(value: unknown, existing: StoredProvider | null): AiProvi
   if (![imageQuotaTokens, webSearchQuotaTokens].every(n => Number.isSafeInteger(n) && Number(n) >= 0 && Number(n) <= 10_000_000)) throw new AiError(400, "AI_INPUT_INVALID", "工具折算额度需为 0 到 1000 万之间的整数");
   const webSearchEnabled = p.webSearchEnabled ?? existing?.webSearchEnabled ?? false;
   const visionEnabled = p.visionEnabled ?? existing?.visionEnabled ?? false;
-  if (typeof webSearchEnabled !== "boolean" || typeof visionEnabled !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "AI 能力开关格式不正确");
+  const imageStream = p.imageStream ?? existing?.imageStream ?? false;
+  if (typeof webSearchEnabled !== "boolean" || typeof visionEnabled !== "boolean" || typeof imageStream !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "AI 能力开关格式不正确");
   if (imageModel && !imageQuotaTokens) throw new AiError(400, "AI_IMAGE_QUOTA_REQUIRED", "启用图片模型前，请设置每张图片的折算额度");
   if (webSearchEnabled && (protocol !== "responses" || !webSearchQuotaTokens)) throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "联网搜索需使用 Responses 协议，并设置每次搜索的折算额度");
   if (!imageBaseUrl && typeof p.imageApiKey === "string" && p.imageApiKey.trim()) throw new AiError(400, "AI_INPUT_INVALID", "填写独立图片密钥时，还需填写图片 API 地址");
@@ -68,7 +70,7 @@ function parseProvider(value: unknown, existing: StoredProvider | null): AiProvi
     name: text(p.name ?? "AI 服务", "服务名称", 80), baseUrl: safeBaseUrl(p.baseUrl), protocol,
     quickModel: text(p.quickModel, "快速模型", 160), deepModel: text(p.deepModel, "深度模型", 160),
     maxOutputTokens: Number(p.maxOutputTokens), reasoningEffort: (p.reasoningEffort ?? "") as AiProviderInput["reasoningEffort"], enabled: p.enabled,
-    imageModel, imageBaseUrl, imageQuotaTokens: Number(imageQuotaTokens), visionEnabled, webSearchEnabled, webSearchQuotaTokens: Number(webSearchQuotaTokens),
+    imageModel, imageBaseUrl, imageQuotaTokens: Number(imageQuotaTokens), imageStream, visionEnabled, webSearchEnabled, webSearchQuotaTokens: Number(webSearchQuotaTokens),
     ...(typeof p.apiKey === "string" && p.apiKey.trim() ? { apiKey: text(p.apiKey, "API 密钥", 4096) } : {}),
     ...(typeof p.imageApiKey === "string" && p.imageApiKey.trim() ? { imageApiKey: text(p.imageApiKey, "图片 API 密钥", 4096) } : {}),
   };
@@ -146,7 +148,7 @@ export class AiService {
     let response: Response;
     try { response = await this.transport(`${baseUrl}/models`, { method: "GET", headers: { Authorization: `Bearer ${key}`, Accept: "application/json" }, signal: AbortSignal.timeout(15_000) }); }
     catch (error) { if (error instanceof AiError) throw error; throw new AiError(502, "AI_CONNECTION_FAILED", "无法连接 AI 服务，请检查公网 API 地址和网络"); }
-    if (!response.ok) { await response.body?.cancel(); throw providerHttpError(response.status); }
+    if (!response.ok) throw await readProviderHttpError(response, "models");
     const root = object(await readBoundedJson(response, 512000));
     if (!Array.isArray(root.data)) throw new AiError(502, "AI_MODELS_UNAVAILABLE", "服务商未返回模型列表，可核对文档后手动填写模型名称");
     const models = root.data.map(row => object(row).id).filter((id): id is string => typeof id === "string" && id.length < 160).slice(0, 500);
@@ -204,7 +206,7 @@ export class AiService {
   }
   setQuota(userId: string, actorId: string, body: unknown): AiQuota {
     const p = object(body);
-    if (!Number.isSafeInteger(p.limitTokens) || Number(p.limitTokens) < 0 || Number(p.limitTokens) > MAX_TOKEN_LIMIT) throw new AiError(400, "AI_QUOTA_INVALID", "额度必须为 0 到 10 亿之间的整数 Token");
+    if (!Number.isSafeInteger(p.limitTokens) || Number(p.limitTokens) < 0 || Number(p.limitTokens) > MAX_TOKEN_LIMIT) throw new AiError(400, "AI_QUOTA_INVALID", "同频点总限额必须为 0 到 10 亿之间的整数");
     const reason = typeof p.reason === "string" ? p.reason.trim().slice(0, 240) : "管理员调整额度";
     this.recover(userId);
     return this.store.sql.transaction(() => {
@@ -231,10 +233,10 @@ export class AiService {
     request.status = status;
     if (content !== undefined) request.result = { requestId: request.requestId, model: request.model, content, usage, ...extras };
     if (images !== undefined) request.imageResult = { requestId: request.requestId, model: request.model, images, usage };
-    if (error) request.error = { status: error.status, code: error.code, message: error.message };
+    if (error) request.error = { status: error.status, code: error.code, message: error.message, ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}) };
     this.store.saveQuota(request.userId, q);
     this.store.saveRequest(request);
-    this.store.addUsage({ id: crypto.randomUUID(), userId: request.userId, actorId: null, requestId: request.requestId, kind: request.kind ?? "chat", status, model: request.model, mode: request.mode, createdAt: new Date().toISOString(), reason, limitTokens: null, ...usage });
+    this.store.addUsage({ id: crypto.randomUUID(), userId: request.userId, actorId: null, requestId: request.requestId, kind: request.kind ?? "chat", status, model: request.model, mode: request.mode, createdAt: new Date().toISOString(), reason, limitTokens: null, ...usage, ...(error?.diagnostic ? { diagnostic: error.diagnostic } : {}) });
     return true;
   }
   async chat(userId: string, value: unknown): Promise<AiChatResponse> {
@@ -247,7 +249,7 @@ export class AiService {
     if (prior) {
       if (prior.hash !== hash) throw new AiError(409, "AI_REQUEST_CONFLICT", "相同请求标识不能用于不同消息");
       if (prior.result) return { ...prior.result, quota: this.quota(userId) };
-      if (prior.error) throw new AiError(prior.error.status, prior.error.code, prior.error.message);
+      if (prior.error) throw new AiError(prior.error.status, prior.error.code, prior.error.message, false, undefined, prior.error.diagnostic);
       throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "AI 正在处理这条消息，请稍候");
     }
     const provider = this.chatProvider(request);
@@ -275,7 +277,7 @@ export class AiService {
         method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": `${userId}:${request.requestId}` },
         body: JSON.stringify(providerBody(provider, request, model, reserved.outputReserve, persona)), signal: AbortSignal.timeout(AI_TIMEOUT_MS),
       });
-      if (!response.ok) { knownRejection = response.status >= 300 && response.status < 500; await response.body?.cancel(); throw providerHttpError(response.status); }
+      if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "chat"); }
       const result = parseProviderResult(await readProviderResponse(response), provider.protocol);
       const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= 1);
       const convertedTokens = request.webSearch && result.searchCalls > 0 ? reserved.convertedReserve! : 0;
@@ -329,7 +331,7 @@ export class AiService {
     if (prior) {
       if (prior.hash !== hash) throw new AiError(409, "AI_REQUEST_CONFLICT", "相同请求标识不能用于不同任务");
       if (prior.imageResult) return { ...prior.imageResult, quota: this.quota(userId) };
-      if (prior.error) throw new AiError(prior.error.status, prior.error.code, prior.error.message);
+      if (prior.error) throw new AiError(prior.error.status, prior.error.code, prior.error.message, false, undefined, prior.error.diagnostic);
       throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "图片正在生成，请稍候");
     }
     const provider = this.store.provider();
@@ -354,12 +356,12 @@ export class AiService {
     let knownRejection = false;
     try {
       const response = await this.transport(`${baseUrl}/images/generations`, {
-        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": `${userId}:${request.requestId}` },
-        body: JSON.stringify({ model, prompt: request.prompt, n: 1, size: "1024x1024", ...(/^gpt-image/i.test(model) ? { output_format: "jpeg" } : { response_format: "b64_json" }) }),
-        signal: AbortSignal.timeout(AI_TIMEOUT_MS), maxResponseBytes: 6_000_000,
+        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: provider.imageStream ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": `${userId}:${request.requestId}` },
+        body: JSON.stringify(imageProviderBody(provider, request.prompt)),
+        signal: AbortSignal.timeout(AI_TIMEOUT_MS), maxResponseBytes: MAX_IMAGE_RESPONSE_BYTES,
       });
-      if (!response.ok) { knownRejection = response.status >= 300 && response.status < 500; await response.body?.cancel(); throw providerHttpError(response.status); }
-      const body = object(await readBoundedJson(response, 6_000_000));
+      if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "image"); }
+      const body = object(await readImageProviderResponse(response));
       if (!Array.isArray(body.data) || body.data.length !== 1) throw new AiError(502, "AI_IMAGE_INVALID", "服务商没有返回一张有效图片");
       const item = object(body.data[0]);
       // Never fetch provider-supplied URLs. An incompatible provider must support base64 explicitly.

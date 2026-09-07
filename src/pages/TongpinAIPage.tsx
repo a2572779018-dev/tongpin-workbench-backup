@@ -954,6 +954,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       ) : (
         <ChatWorkspace
           assistantName={persona.profile.name || "同频 AI"}
+          characterExpression={persona.profile.expression}
+          characterPaused={personaSettingsOpen}
           onEditPersona={() => setPersonaSettingsOpen(true)}
           artifactById={artifactById}
           composerFocusRequest={composerFocusRequest}

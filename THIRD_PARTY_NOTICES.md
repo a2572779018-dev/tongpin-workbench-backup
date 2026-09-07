@@ -252,7 +252,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 ## Liquid Orb
 
-The AI status identity vendors a subset of [LerSent001/orb](https://github.com/LerSent001/orb),
+Earlier AI status identities vendored a subset of [LerSent001/orb](https://github.com/LerSent001/orb),
 commit `047c58cc93587c21dac12183fc0fb1e4101c8e1a`. Local renderer changes limit
 pixel ratio and idle frame rate, and guard asynchronous cleanup. The host adds
 visibility, reduced-motion, device-loss and static-logo fallback handling.
@@ -281,14 +281,16 @@ SOFTWARE.
 
 ## MetalFx and Border Beam
 
-The AI welcome identity uses `metal-fx` 1.0.4 from
+The earlier AI welcome identity used `metal-fx` 1.0.4 from
 [Jakubantalik/metal-fx](https://github.com/Jakubantalik/metal-fx), source commit
 `be1bf89c63056521a4e8224f368768314c9006f7`.
-The composer vendors the unchanged `packages/border-beam/src` files from
+The retained source tree includes the unchanged `packages/border-beam/src` files from
 [Jakubantalik/Libraries.dev](https://github.com/Jakubantalik/Libraries.dev),
 commit `999866f33df216dab0f8956f91c8d2e918d46328`.
-Both packages carry the following license. The central logo is Tongpin's existing
-artwork. No MetalForge paid export or Avatar Lab AGPL runtime is included.
+Both packages carry the following license. These earlier identities and beam
+are not loaded by the current AI workspace. The separate paid Fleur export is
+described below; it is not covered by this MIT notice. No Avatar Lab AGPL runtime
+is included.
 
 MIT License
 
@@ -311,3 +313,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Metalforge Fleur character
+
+The current AI character uses the user's purchased Fleur React + Web export
+from https://metalforge.xyz/character, provided on 2026-09-07 for integration in
+Tongpin. The selected pink body, yellow eyes and impression geometry come from
+that export. The app adds strict types, rendering fixes, bounded pointer-follow
+motion, visibility/reduced-motion pausing and account-scoped expression settings.
+
+The export did not include an open-source license. It is not relicensed under
+any MIT notice in this document; use remains subject to the user's purchase
+terms. The original archive and standalone demo are not distributed as public
+download assets. Only the internal application component is bundled here.

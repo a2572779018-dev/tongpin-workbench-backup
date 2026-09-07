@@ -3,8 +3,10 @@ import { useEffect, useState } from "react";
 
 export function DesktopTitlebar({
   centerLabel,
+  hideBrandMark = false,
 }: {
   centerLabel?: string;
+  hideBrandMark?: boolean;
 }) {
   const desktop = window.tongpin;
   const isMac = desktop?.platform === "darwin";
@@ -49,10 +51,10 @@ export function DesktopTitlebar({
       }
     >
       <div className="desktop-titlebar__brand">
-        <span className="desktop-titlebar__mark" aria-hidden="true">
+        {!hideBrandMark && <span className="desktop-titlebar__mark" aria-hidden="true">
           <i />
           <i />
-        </span>
+        </span>}
         <span className="desktop-titlebar__wordmark">
           <span className="desktop-titlebar__brand-line">
             <b>同频</b>

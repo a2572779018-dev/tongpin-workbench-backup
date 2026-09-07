@@ -33,6 +33,22 @@ describe("chat rendering performance boundaries", () => {
     expect(markup).not.toContain("合成测试消息 0。");
     expect(syntheticHistory).toHaveLength(1_000);
     expect(markup).not.toContain("<canvas");
-    expect(markup).toContain('aria-label="视觉动效" aria-pressed="false"');
+    expect(markup).not.toContain('aria-label="视觉动效"');
+    expect(markup).not.toContain("app-icon.svg");
+    expect(markup.match(/class="tp-ai-character /g)).toHaveLength(1);
+  });
+
+  it("does not pretend a text reasoning mode controls image generation", () => {
+    const props = { artifactById: new Map(), composerFocusRequest: 0, draft: "一只猫", enabledSkills: [],
+      messages: [], mode: "deep" as const, notificationUnread: 0, composerTool: "image" as const, imageEnabled: true,
+      quotaInsufficient: false, responding: false, onDraftChange: noop, onModeChange: noop,
+      onOpenArtifact: noop, onSubmit: noop };
+    const markup = renderToStaticMarkup(createElement(ChatWorkspace, props));
+    expect(markup).toContain("图片生成");
+    expect(markup).not.toContain('aria-label="思考模式"');
+    expect(markup.match(/class="tp-ai-character /g)).toHaveLength(1);
+    const textMarkup = renderToStaticMarkup(createElement(ChatWorkspace, { ...props, composerTool: "text" }));
+    expect(textMarkup).toContain('aria-label="思考模式"');
+    expect(textMarkup).toMatch(/value="deep" selected=""/);
   });
 });

@@ -46,7 +46,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
   // Provider error bodies and caught network errors are deliberately never logged or forwarded.
   router.use((error: unknown, _request: import("express").Request, response: import("express").Response, next: import("express").NextFunction) => {
     if (error instanceof ApiError) { next(error); return; }
-    if (error instanceof AiError) { response.status(error.status).json({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }); return; }
+    if (error instanceof AiError) { response.status(error.status).json({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}), ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}) } }); return; }
     response.status(500).json({ error: { code: "AI_SERVER_ERROR", message: "AI 服务处理失败，请稍后重试" } });
   });
   return router;

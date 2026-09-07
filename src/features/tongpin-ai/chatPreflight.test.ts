@@ -15,10 +15,29 @@ describe("chat quota preflight feedback", () => {
   it("explains search reservation without claiming the 10,000 balance is empty", () => {
     const notice = preflightNotice(result);
     expect(notice.title).toContain("余额尚有");
-    expect(notice.message).toContain("10,000");
-    expect(notice.message).toContain("34,684");
+    expect(notice.message).toContain("剩余 100%");
+    expect(notice.message).not.toContain("10,000");
+    expect(notice.message).not.toContain("34,684");
+    expect(notice.message).toContain("预留");
+    expect(notice.message).toContain("同频点");
     expect(notice.message).toContain("不是实际扣费");
     expect(notice.canDisableSearch).toBe(true);
+  });
+  it("keeps raw amounts out of pending, exhausted, and small-positive-balance notices", () => {
+    const before = structuredClone(result);
+    const pending = preflightNotice({ ...result, reason: "request_in_progress", quota: { ...result.quota, remainingTokens: 7164, reservedTokens: 2836 } });
+    expect(pending.message).toContain("剩余 71.6%");
+    expect(pending.message).not.toMatch(/7,164|7164|2,836|2836/);
+    const exhausted = preflightNotice({ ...result, reason: "quota_exhausted", quota: { ...result.quota, remainingTokens: 0, usedTokens: 10000 } });
+    expect(exhausted.message).toContain("剩余 0%");
+    expect(exhausted.message).toContain("管理员追加同频点");
+    const reserved = preflightNotice({ ...result, reason: "quota_exhausted", quota: { ...result.quota, remainingTokens: 0, reservedTokens: 10000 } });
+    expect(reserved.message).toContain("等待结算");
+    expect(reserved.message).not.toContain("管理员追加");
+    const tiny = preflightNotice({ ...result, quota: { ...result.quota, remainingTokens: 1 } });
+    expect(tiny.message).toContain("剩余 <0.1%");
+    expect(tiny.canDisableSearch).toBe(true);
+    expect(result).toEqual(before);
   });
   it("does not offer ordinary chat when its budget is also insufficient", () => {
     expect(preflightNotice({ ...result, withoutWebSearch: { ...result.withoutWebSearch!, canSend: false } }).canDisableSearch).toBe(false);

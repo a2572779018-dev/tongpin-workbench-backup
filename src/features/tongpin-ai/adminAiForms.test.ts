@@ -60,7 +60,7 @@ describe("AI administrator provider forms", () => {
     expect(testHandler).not.toContain("result.message");
   });
   it("requires explicit image conversion and never reuses the text key for a new image host", () => {
-    expect(validateAiProviderInput({ ...provider, imageModel: "image" }, saved)).toContain("折算额度");
+    expect(validateAiProviderInput({ ...provider, imageModel: "image" }, saved)).toContain("折算的同频点");
     expect(validateAiProviderInput({ ...provider, imageModel: "image", imageQuotaTokens: 100 }, saved)).toBe("");
     expect(validateAiProviderInput({ ...provider, imageBaseUrl: "https://images.example/v1", imageQuotaTokens: 100 }, saved)).toContain("图片密钥");
     expect(validateAiProviderInput({ ...provider, imageBaseUrl: "https://images.example/v1", imageApiKey: "image-test-only", imageQuotaTokens: 100 }, saved)).toBe("");
@@ -81,7 +81,7 @@ describe("AI administrator quota forms", () => {
     expect(calculateAiQuotaLimit("500", "set", quota)).toEqual({ limitTokens: 500, error: "" });
   });
   it("does not reset usage and cannot take away an in-flight reservation", () => {
-    expect(calculateAiQuotaLimit("399", "set", quota).error).toContain("正在使用");
+    expect(calculateAiQuotaLimit("399", "set", quota).error).toContain("处理中预留");
     expect(calculateAiQuotaLimit("400", "set", quota)).toEqual({ limitTokens: 400, error: "" });
     expect(quota.usedTokens).toBe(300);
   });

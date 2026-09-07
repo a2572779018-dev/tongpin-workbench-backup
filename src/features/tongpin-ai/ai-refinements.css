@@ -19,8 +19,30 @@
 .tp-ai-starters { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; max-width: 38rem; }
 .tp-ai-starters button { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #ded8c9; background: #faf7ef; color: #655e4f; border-radius: 12px; padding: 10px 13px; font-size: .8rem; cursor: pointer; }
 .tp-ai-starters button:hover { background: #f3ead0; color: #343025; }
-.tp-ai-motion-toggle { display: inline-flex; align-items: center; width: auto; height: 32px; gap: 5px; padding: 6px 9px; border: 0; border-radius: 8px; background: transparent; color: #756d5e; cursor: pointer; font-size: 12px; }
-.tp-ai-motion-toggle[aria-pressed="true"] { background: #f1e5b8; color: #645121; }
+.tp-ai-page .tp-ai-message.is-assistant { display: block; }
+.tp-ai-character { flex: none; width: 64px; height: 72px; display: grid; place-items: center; pointer-events: none; }
+.tp-ai-character__figure { width: 100%; height: 100%; display: block; }
+.tp-ai-character-placeholder { color: #f2a9c4; font-size: 48px; line-height: 1; }
+.tp-ai-character--header { width: 64px; height: 64px; margin: -8px 0; }
+/* Tall impression SVGs must fit the fixed grid instead of growing its auto track. */
+.tp-ai-character--welcome { width: 154px; height: 170px; margin: 0 auto 16px; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.tp-ai-character--welcome .tp-ai-character__figure { min-width: 0; min-height: 0; }
+.tp-ai-character--settings { width: 112px; height: 122px; margin: -12px auto 16px; }
+.tp-ai-page .tp-ai-composer__toolbar .tp-ai-image-mode-label { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; color: #756d5e; font-size: 12px; white-space: nowrap; }
+.tp-ai-expression-picker { padding: 0; margin: 24px 0 16px; border: 0; min-width: 0; }
+.tp-ai-expression-picker legend { padding: 0; font-size: 14px; font-weight: 650; }
+.tp-ai-expression-picker > p { color: #777062; font-size: 12px; margin: 7px 0 12px; }
+.tp-ai-expression-content { display: grid; grid-template-columns: 100px minmax(0, 1fr); align-items: center; gap: 14px; }
+.tp-ai-expression-content .tp-ai-character--settings { width: 100px; height: 134px; margin: 0; }
+.tp-ai-expression-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+.tp-ai-expression-grid button { display: grid; place-items: center; gap: 6px; min-width: 0; margin: 0; padding: 12px 4px 10px; border: 1px solid #e0d9cd; border-radius: 12px; background: #faf7f0; cursor: pointer; color: #685f52; box-shadow: none; }
+.tp-ai-expression-grid button > span { display: grid; place-items: center; width: 38px; height: 35px; border-radius: 12px; background: #f7dce7; color: #714b39; font-size: 19px; line-height: 1; font-weight: 650; }
+.tp-ai-expression-grid button > span.is-word { font-size: 13px; }
+.tp-ai-expression-grid button small { font-size: 11px; white-space: nowrap; }
+.tp-ai-expression-grid button:hover { border-color: #c6a3ac; background: #fff7f9; }
+.tp-ai-expression-grid button.is-selected { background: #fff5d9; border-color: #bda150; box-shadow: inset 0 0 0 1px #bda150; color: #55431e; }
+.tp-ai-expression-grid button:focus-visible { outline: 2px solid #967822; outline-offset: 2px; }
+.tp-ai-expression-grid button:disabled { cursor: default; opacity: .6; }
 .tp-ai-load-earlier { align-self: center; border: 1px solid #ded8c9; border-radius: 10px; padding: 9px 14px; color: #71684f; background: #faf7ef; font-size: 12px; cursor: pointer; }
 .tp-ai-entry { position: relative; display: grid; place-items: center; min-height: 65vh; height: 100%; padding: 32px; background: #f4f0e7; border: 1px solid #d6d0c1; border-radius: 18px; color: #292a25; }
 .tp-ai-entry__card { width: min(480px, 100%); padding: 40px 32px; text-align: center; border: 1px solid #ddd6c7; border-radius: 22px; background: #faf7ef; box-shadow: 0 10px 35px #35312608; }
@@ -44,5 +66,9 @@
   .tp-ai-entry__card { padding: 30px 20px; }
   .tp-ai-entry--setup { padding: 0; }
   .tp-ai-page .tp-ai-chat__header { padding: .65rem .8rem; gap: .3rem; }
-  .tp-ai-motion-toggle span { display: none; }
+  .tp-ai-expression-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .tp-ai-expression-content { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .tp-ai-expression-content .tp-ai-character--settings { margin: 0 auto; }
+  .tp-ai-character--header { width: 52px; height: 56px; }
+  .tp-ai-character--welcome { width: 128px; height: 142px; }
 }

@@ -26,8 +26,9 @@ describe("AI material integration guardrails", () => {
   });
 
   it("does not activate thinking based on focus or selected mode", () => {
-    expect(read("../ChatWorkspace.tsx")).toContain("active={responding}");
-    expect(read("./TongpinOrb.tsx")).toContain("active = false");
+    const chat = read("../ChatWorkspace.tsx");
+    expect(chat).toContain("const characterActivity: CharacterActivity = currentReplyPending");
+    expect(chat).not.toContain("setVisualEffects");
   });
 
   it("does not render hidden zero-sized GPU targets", () => {
@@ -38,6 +39,14 @@ describe("AI material integration guardrails", () => {
     expect(orb).toContain("!motionPreference.matches");
   });
 
+  it("isolates decorative character failures from chat and persona forms", () => {
+    const character = read("./TongpinAICharacter.tsx");
+    expect(character).toContain("class CharacterBoundary extends Component");
+    expect(character).toContain("static getDerivedStateFromError()");
+    expect(character).toContain("<CharacterBoundary><Suspense");
+    expect(character).toContain('this.state.failed ? <span className="tp-ai-character-placeholder"');
+  });
+
   it("does not initialize expensive material renderers before explicit opt-in", () => {
     const orb = read("./TongpinOrb.tsx");
     const identity = read("./TongpinMetalIdentity.tsx");
@@ -45,7 +54,11 @@ describe("AI material integration guardrails", () => {
     expect(orb).toContain("if (!richMotion || !canvas || !host || !navigator.gpu) return;");
     expect(identity).not.toContain('import { MetalFx } from "metal-fx"');
     expect(identity).toContain('lazy(() => import("metal-fx")');
-    expect(read("../ChatWorkspace.tsx")).toContain("active={visualEffects && ambientMotion");
+    const chat = read("../ChatWorkspace.tsx");
+    expect(chat).not.toContain("TongpinOrb");
+    expect(chat).not.toContain("TongpinMetalIdentity");
+    expect(chat).not.toContain("BorderBeam");
+    expect(read("./TongpinAICharacter.tsx")).toContain('lazy(() => import("./fleur/FleurCharacter")');
     const renderer = read("./vendor/orb/src/orb-renderer.ts");
     expect(renderer).not.toContain("device.createRenderPipeline({");
     expect(renderer.match(/createRenderPipelineAsync\(/g)).toHaveLength(3);

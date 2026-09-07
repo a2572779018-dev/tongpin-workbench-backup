@@ -1,4 +1,4 @@
-import type { AiChatResponse, AiImageAsset, AiImageMimeType, AiImageResponse, AiMode, AiProviderConfig, AiQuota, AiUsageEntry } from "../../shared/ai";
+import type { AiChatResponse, AiImageAsset, AiImageMimeType, AiImageResponse, AiMode, AiProviderConfig, AiQuota, AiRequestResult, AiUsageEntry } from "../../shared/ai";
 import { AiError } from "./security";
 
 export interface AiSql {
@@ -32,7 +32,7 @@ export interface StoredRequest {
   mode: AiMode;
   result?: Omit<AiChatResponse, "quota">;
   imageResult?: Omit<AiImageResponse, "quota">;
-  error?: { status: number; code: string; message: string };
+  error?: AiRequestResult["error"];
 }
 export function emptyQuota(): AiQuota {
   return { limitTokens: 0, usedTokens: 0, reservedTokens: 0, remainingTokens: 0, inputTokens: 0, outputTokens: 0 };

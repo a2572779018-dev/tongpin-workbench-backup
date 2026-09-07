@@ -34,10 +34,9 @@ import type {
   TongpinAISkill,
 } from "./types";
 import { TongpinAINotificationButton } from "./TongpinAINotificationButton";
-import { TongpinOrb } from "./visuals/TongpinOrb";
-import { TongpinMetalIdentity } from "./visuals/TongpinMetalIdentity";
-import { BorderBeam } from "./visuals/vendor/border-beam/src";
-import { useAmbientMotion } from "./visuals/useAmbientMotion";
+import { TongpinAICharacter } from "./visuals/TongpinAICharacter";
+import type { AiPersonaExpression } from "../../../shared/aiPersona";
+import { didCharacterReplyComplete, type CharacterActivity, type CharacterReplySnapshot } from "./visuals/characterExpression";
 import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
 import { ATTACHMENT_ACCEPT } from "./attachments";
 import { AttachmentChips } from "./AttachmentChips";
@@ -80,6 +79,8 @@ interface ChatWorkspaceProps {
   webSearch?: boolean;
   onWebSearchChange?: (enabled: boolean) => void;
   assistantName?: string;
+  characterExpression?: AiPersonaExpression;
+  characterPaused?: boolean;
   onEditPersona?: () => void;
   onModeChange: (mode: TongpinAIMode) => void;
   onOpenNotifications?: () => void;
@@ -125,6 +126,8 @@ export function ChatWorkspace({
   webSearch = false,
   onWebSearchChange,
   assistantName = "同频 AI",
+  characterExpression = "auto",
+  characterPaused = false,
   onEditPersona,
   onModeChange,
   onOpenNotifications,
@@ -149,11 +152,10 @@ export function ChatWorkspace({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const skillInputRef = useRef<HTMLInputElement>(null);
   const isEmpty = messages.length === 0;
-  const ambientMotion = useAmbientMotion();
-  const [composerFocused, setComposerFocused] = useState(false);
   const [readingFiles, setReadingFiles] = useState(false);
   const [fileError, setFileError] = useState("");
-  const [visualEffects, setVisualEffects] = useState(false);
+  const [celebrating, setCelebrating] = useState(false);
+  const previousReply = useRef<CharacterReplySnapshot>({});
   const fileReadingRef = useRef(false);
   const [historyWindow, setHistoryWindow] = useState({ conversationId, count: CHAT_MESSAGE_PAGE_SIZE });
   const historyAnchorRef = useRef<{ height: number; top: number } | null>(null);
@@ -164,6 +166,23 @@ export function ChatWorkspace({
   const visibleCount = historyWindow.conversationId === conversationId ? historyWindow.count : CHAT_MESSAGE_PAGE_SIZE;
   const hiddenCount = Math.max(0, messages.length - visibleCount);
   const capabilityUnavailable = composerTool === "image" ? !imageEnabled : webSearch && !webSearchEnabled;
+  const lastMessage = messages.at(-1);
+  const responseFailed = lastMessage?.role === "assistant" && lastMessage.status === "error";
+  const currentReplyPending = lastMessage?.role === "assistant" && (lastMessage.status === "thinking" || lastMessage.status === "typing");
+  const characterActivity: CharacterActivity = currentReplyPending
+    ? lastMessage.status === "typing" ? "typing" : "waiting"
+    : responseFailed ? "error" : celebrating ? "completed" : "idle";
+
+  useEffect(() => {
+    const current: CharacterReplySnapshot = { conversationId, messageId: lastMessage?.id, role: lastMessage?.role, status: lastMessage?.status };
+    const completed = didCharacterReplyComplete(previousReply.current, current);
+    previousReply.current = current;
+    setCelebrating(false);
+    if (!completed) return;
+    setCelebrating(true);
+    const timer = window.setTimeout(() => setCelebrating(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [conversationId, lastMessage?.id, lastMessage?.role, lastMessage?.status]);
 
   useEffect(() => {
     followResponseRef.current = true;
@@ -310,12 +329,8 @@ export function ChatWorkspace({
           >
             <PanelLeft size={19} />
           </button>
-          <TongpinOrb
-            active={responding}
-            richMotion={visualEffects}
-            size={40}
-            className="tp-ai-composer-orb"
-          />
+          {!isEmpty && <TongpinAICharacter expression={characterExpression} activity={characterActivity}
+            paused={characterPaused} className="tp-ai-character--header" />}
           <div className="tp-ai-chat__title">
             <strong>{conversationTitle ?? assistantName}</strong>
             {projectTitle && <small>{projectTitle}</small>}
@@ -326,9 +341,6 @@ export function ChatWorkspace({
             </span>
           )}
         </div>
-        <button type="button" className="tp-ai-motion-toggle" aria-label="视觉动效" aria-pressed={visualEffects}
-          title={visualEffects ? "关闭视觉动效，降低 GPU 占用" : "开启视觉动效会增加 GPU 负担；性能较低的电脑建议保持关闭"}
-          onClick={() => setVisualEffects(current => !current)}><Sparkles size={16} /><span>动效{visualEffects ? "开" : "关"}</span></button>
         {onEditPersona ? <button type="button" className="tp-ai-persona-settings-trigger" aria-label="专属 AI 设置" title="专属 AI 设置" onClick={onEditPersona}><Settings2 size={18} /></button> : null}
         <TongpinAINotificationButton
           unread={notificationUnread}
@@ -354,7 +366,7 @@ export function ChatWorkspace({
       >
         {isEmpty ? (
           <div className="tp-ai-chat-welcome">
-            <TongpinMetalIdentity richMotion={visualEffects} />
+            <TongpinAICharacter expression={characterExpression} paused={characterPaused} className="tp-ai-character--welcome" />
             <h1>今天，一起完成什么？</h1>
             {projectTitle && <p>{projectTitle}</p>}
             <div className="tp-ai-starters" aria-label="开始一项任务">
@@ -430,22 +442,7 @@ export function ChatWorkspace({
             {copyError}
           </p>
         )}
-        <BorderBeam
-          className="tp-ai-beam-wrap"
-          theme="light"
-          colorVariant="mono"
-          strength={0.28}
-          glowSize={0.3}
-          duration={5}
-          borderRadius={16}
-          staticColors
-          active={visualEffects && ambientMotion && (composerFocused || responding)}
-          onFocusCapture={() => setComposerFocused(true)}
-          onBlurCapture={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget))
-              setComposerFocused(false);
-          }}
-        >
+        <div className="tp-ai-beam-wrap">
           <form className="tp-ai-composer" onSubmit={submitMessage}>
             <input ref={fileInputRef} type="file" accept={ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
@@ -616,7 +613,7 @@ export function ChatWorkspace({
                   </div>
                 )}
               </div>
-              <label className="tp-ai-mode-select">
+              {composerTool === "image" ? <span className="tp-ai-image-mode-label"><ImageIcon size={15} />图片生成</span> : <label className="tp-ai-mode-select">
                 {mode === "quick" ? <Zap size={15} /> : <Brain size={15} />}
                 <select
                   aria-label="思考模式"
@@ -630,7 +627,7 @@ export function ChatWorkspace({
                   <option value="deep">深度思考</option>
                 </select>
                 <ChevronDown size={12} />
-              </label>
+              </label>}
               {responding ? (
                 <button
                   type="button"
@@ -654,7 +651,7 @@ export function ChatWorkspace({
               )}
             </div>
           </form>
-        </BorderBeam>
+        </div>
         <p className="tp-ai-composer-hint">Enter 发送 · Shift + Enter 换行</p>
       </footer>
     </section>

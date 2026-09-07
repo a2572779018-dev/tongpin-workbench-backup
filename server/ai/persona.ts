@@ -1,4 +1,4 @@
-import { AI_PERSONA_LIMITS, defaultAiPersonaProfile, type AiPersonaProfile, type AiPersonaSnapshot } from "../../shared/aiPersona";
+import { AI_PERSONA_LIMITS, defaultAiPersonaProfile, isAiPersonaExpression, type AiPersonaProfile, type AiPersonaSnapshot } from "../../shared/aiPersona";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 
@@ -24,7 +24,7 @@ function record(value: unknown, allowed: string[]): Record<string, unknown> {
 }
 
 export function validateAiPersonaProfile(value: unknown): AiPersonaProfile {
-  const profile = record(value, ["name", "tone", "customStyle", "preferences", "onboardingComplete"]);
+  const profile = record(value, ["name", "tone", "customStyle", "preferences", "onboardingComplete", "expression"]);
   if (typeof profile.name !== "string" || /[\u0000-\u001f\u007f]/.test(profile.name)) invalid("AI 名称不能包含换行或控制字符");
   const name = profile.name.trim();
   if (Array.from(name).length > AI_PERSONA_LIMITS.nameCharacters) invalid("AI 名称最多 40 个字");
@@ -35,9 +35,11 @@ export function validateAiPersonaProfile(value: unknown): AiPersonaProfile {
   if ((profile.customStyle as string).length > AI_PERSONA_LIMITS.customStyleCharacters) invalid("自定义性格最多 2000 个字符");
   if ((profile.preferences as string).length > AI_PERSONA_LIMITS.preferencesCharacters) invalid("已确认偏好最多 4000 个字符");
   if (typeof profile.onboardingComplete !== "boolean") invalid("引导状态格式不正确");
+  const expression = profile.expression === undefined ? "auto" : profile.expression;
+  if (!isAiPersonaExpression(expression)) invalid("请选择有效的表情");
   return {
     name, tone: profile.tone as AiPersonaProfile["tone"], customStyle: (profile.customStyle as string).trim(),
-    preferences: (profile.preferences as string).trim(), onboardingComplete: profile.onboardingComplete,
+    preferences: (profile.preferences as string).trim(), onboardingComplete: profile.onboardingComplete, expression,
   };
 }
 
@@ -64,6 +66,12 @@ export class AiPersonaRepository {
     return this.sql.transaction(() => {
       const current = this.read(userId);
       if (current.revision !== body.expectedRevision) throw new AiError(409, "AI_PERSONA_CONFLICT", "专属 AI 设置已在其他窗口修改，本次未覆盖，请重新加载后再确认");
+      // Older clients omit this visual-only field when saving textual preferences.
+      // Preserve an existing choice inside the same CAS transaction; only reset or
+      // an explicit expression (including "auto") replaces it.
+      if (body.reset !== true && (body.profile as Record<string, unknown>).expression === undefined) {
+        profile.expression = current.profile.expression ?? "auto";
+      }
       const revision = current.revision + 1;
       this.sql.exec("INSERT INTO ai_personas(user_id,revision,schema_version,updated_at,data) VALUES(?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,schema_version=excluded.schema_version,updated_at=excluded.updated_at,data=excluded.data", userId, revision, new Date().toISOString(), JSON.stringify(profile));
       return { revision, profile };

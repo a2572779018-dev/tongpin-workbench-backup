@@ -29,6 +29,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
 
   it("keeps old provider configurations valid and opt-in capabilities disabled", () => {
     expect(runtime.service.status("member")).toMatchObject({ configured: true, imageEnabled: false, visionEnabled: false, webSearchEnabled: false });
+    expect(runtime.service.provider()?.imageStream).toBe(false);
   });
   it("uses the authenticated member's persistent assistant name and preferences across new chats and Skills", async () => {
     const persona = new AiPersonaRepository(runtime.store.sql);
@@ -204,6 +205,65 @@ describe("Reviewed AI capabilities through transactional service", () => {
     expect(chunks.every(chunk => chunk.data.length <= 256 * 1024)).toBe(true);
     runtime.close(); runtime = await createNodeAi(path.join(directory, "test.json"), transport);
     expect(runtime.service.getAsset("member", asset.assetId).base64).toBe(base64);
+  });
+  it("uses the independent image key even on the same host and never applies deep chat settings", async () => {
+    await runtime.service.saveProvider({ ...provider, reasoningEffort: "high", imageModel: "gpt-image-2", imageBaseUrl: "https://text.example.com/api/v1/images/generations", imageApiKey: "test-image-group-key", imageQuotaTokens: 1000 });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    await runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt: "同频图标", mode: "deep", model: "malicious-model", apiKey: "malicious-key" });
+    const [url, init] = transport.mock.calls[0];
+    expect(url).toBe("https://text.example.com/api/v1/images/generations");
+    expect(init.headers.Authorization).toBe("Bearer test-image-group-key");
+    expect(JSON.parse(init.body!)).toEqual({ model: "gpt-image-2", prompt: "同频图标", n: 1, size: "1024x1024", output_format: "jpeg" });
+    expect(init.body).not.toMatch(/reasoning|malicious|text-deep/);
+  });
+  it("requires an explicit saved image streaming switch, retains it on unrelated saves, and delivers only a final owned asset", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000, imageStream: true });
+    await runtime.service.saveProvider({ ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000 });
+    expect(runtime.service.provider()?.imageStream).toBe(true);
+    const stream = `: heartbeat\n\nevent: image_generation.completed\ndata: ${JSON.stringify({ type: "image_generation.completed", b64_json: PNG, usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } })}\n\n`;
+    transport.mockResolvedValueOnce(new Response(stream, { headers: { "content-type": "text/event-stream" } }));
+    const request = { requestId: crypto.randomUUID(), prompt: "流式图片", mode: "deep" };
+    const result = await runtime.service.generateImage("member", request);
+    expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ model: "gpt-image-2", stream: true, partial_images: 0, n: 1 });
+    expect(transport.mock.calls[0][1].headers.Accept).toContain("text/event-stream");
+    expect(transport.mock.calls[0][1].body).not.toMatch(/reasoning|text-deep/);
+    expect(runtime.service.getAsset("member", result.images[0].assetId).base64).toBe(PNG);
+    expect(result.usage).toMatchObject({ totalTokens: 1000, convertedTokens: 1000, inputTokens: 0, outputTokens: 0, estimated: true });
+    await runtime.service.generateImage("member", request);
+    expect(transport).toHaveBeenCalledTimes(1);
+    await runtime.service.saveProvider({ ...provider, imageStream: false });
+    expect(runtime.service.provider()?.imageStream).toBe(false);
+    await expect(runtime.service.saveProvider({ ...provider, imageStream: "true" })).rejects.toMatchObject({ code: "AI_INPUT_INVALID" });
+  });
+  it("does not retry, refund or create an asset after an interrupted image stream", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000, imageStream: true });
+    transport.mockResolvedValueOnce(new Response(`data: ${JSON.stringify({ type: "image_generation.partial_image", b64_json: PNG })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } }));
+    const request = { requestId: crypto.randomUUID(), prompt: "未完成的图片" };
+    await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ code: "AI_IMAGE_STREAM_INTERRUPTED" });
+    await runtime.service.saveProvider({ ...provider, imageStream: false });
+    await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ code: "AI_IMAGE_STREAM_INTERRUPTED" });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.service.quota("member")).toMatchObject({ usedTokens: 1000, reservedTokens: 0 });
+    expect(runtime.service.getRequestResult("member", request.requestId)).toMatchObject({ status: "uncertain" });
+    expect(runtime.store.sql.all("SELECT id FROM ai_assets")).toEqual([]);
+  });
+  it.each([400, 403, 404, 422, 429, 408, 409, 500, 502, 504])("settles image HTTP %i exactly once and preserves safe diagnostics across restart", async status => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000 });
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "model_not_found", param: "model", message: `${provider.apiKey} PRIVATE_PROMPT` } }, { status }));
+    const request = { requestId: crypto.randomUUID(), prompt: "图片" };
+    const rejected = [400, 403, 404, 422, 429].includes(status);
+    const diagnostic = { operation: "image", httpStatus: status, billing: rejected ? "rejected" : "unknown", code: "model_not_found", param: "model" };
+    await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ diagnostic });
+    expect(runtime.service.quota("member")).toMatchObject({ usedTokens: rejected ? 0 : 1000, reservedTokens: 0, inputTokens: 0, outputTokens: 0 });
+    const entries = runtime.store.usage("member").filter(entry => entry.requestId === request.requestId);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ diagnostic, status: rejected ? "failed" : "uncertain", totalTokens: rejected ? 0 : 1000 });
+    expect(JSON.stringify(entries)).not.toMatch(/test-text-key|PRIVATE_PROMPT/);
+    runtime.close(); runtime = await createNodeAi(path.join(directory, "test.json"), transport);
+    expect(runtime.service.getRequestResult("member", request.requestId)).toMatchObject({ error: { diagnostic } });
+    await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ diagnostic });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(() => runtime.service.getRequestResult("other", request.requestId)).toThrow();
   });
   it("preflights image quota and storage capacity without paid upstream calls", async () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });

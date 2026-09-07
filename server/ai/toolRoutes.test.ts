@@ -90,6 +90,21 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     await request(runtime.app).get("/api/ai/status").set(headers("boss", sessions.a.id)).expect(409);
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it("returns safe upstream image diagnostics without repeating a paid failure", async () => {
+    const usedBefore = runtime.aiStore.quota(sessions.a.id).usedTokens;
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "server_error", param: "output_format", message: `${KEY} PRIVATE_IMAGE_PROMPT` } }, { status: 503 }));
+    const body = { requestId: crypto.randomUUID(), prompt: "图片测试" };
+    const failed = await request(runtime.app).post("/api/ai/images").set(headers("a")).send(body).expect(502);
+    expect(failed.headers["cache-control"]).toBe("no-store");
+    expect(failed.body.error).toMatchObject({ code: "AI_PROVIDER_UNAVAILABLE", diagnostic: { operation: "image", httpStatus: 503, billing: "unknown", code: "server_error", param: "output_format" } });
+    expect(JSON.stringify(failed.body)).not.toMatch(/tool-routes-fixture-key|PRIVATE_IMAGE_PROMPT/);
+    const replay = await request(runtime.app).post("/api/ai/images").set(headers("a")).send(body).expect(502);
+    expect(replay.body).toEqual(failed.body);
+    expect((await request(runtime.app).get(`/api/ai/requests/${body.requestId}`).set(headers("a")).expect(200)).body).toMatchObject({ status: "uncertain", error: { diagnostic: failed.body.error.diagnostic } });
+    await request(runtime.app).get(`/api/ai/requests/${body.requestId}`).set(headers("b")).expect(404);
+    expect(runtime.aiStore.quota(sessions.a.id)).toMatchObject({ usedTokens: usedBefore + 1000, reservedTokens: 0 });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("persists a granted boss's persona and workspace through the real Node routes without exposing member data", async () => {
     const profile = (name: string) => ({ name, tone: "warm", customStyle: "先给结论", preferences: "中文", onboardingComplete: true });
     const state = (title: string) => ({ view: "chat", mode: "quick", projects: [], conversations: [{ id: "private-chat", title, timeLabel: "刚刚", messages: [{ id: "private-message", role: "user", content: title, time: "10:00" }] }], artifacts: [], drafts: {}, activeConversationId: "private-chat", activeProjectId: null, enabledSkillIds: [] });

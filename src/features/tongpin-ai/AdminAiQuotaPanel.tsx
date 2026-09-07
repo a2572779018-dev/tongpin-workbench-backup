@@ -3,8 +3,9 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import type { AiMember, AiUsageEntry } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
 import { AdminAiProviderSettings } from "./AdminAiProviderSettings";
-import { adminAiErrorMessage, calculateAiQuotaLimit, formatAiTokens } from "./adminAiForms";
+import { adminAiErrorMessage, calculateAiQuotaLimit } from "./adminAiForms";
 import { aiUsageDescription, aiUsageTotal } from "./usageFormatting";
+import { AI_QUOTA_BILLING_NOTE, formatAiPoints } from "./quotaFormatting";
 import "./AdminAiQuotaPanel.css";
 
 const MEMBER_STATUS: Record<string, string> = {
@@ -81,9 +82,9 @@ function MemberQuotaDialog({ member, onClose, onSaved }: {
     <AdminAiDialog title={`设置额度 · ${member.name}`} onClose={onClose} busy={busy}>
       <p className="tp-ai-admin-hint">{member.email}</p>
       <div className="tp-ai-admin-quota-preview">
-        <span>当前总限额<strong>{formatAiTokens(member.quota.limitTokens)}</strong></span>
-        <span>已使用<strong>{formatAiTokens(member.quota.usedTokens)}</strong></span>
-        <span>正在使用<strong>{formatAiTokens(member.quota.reservedTokens)}</strong></span>
+        <span>当前总限额<strong>{formatAiPoints(member.quota.limitTokens)}</strong></span>
+        <span>已使用<strong>{formatAiPoints(member.quota.usedTokens)}</strong></span>
+        <span>处理中预留<strong>{formatAiPoints(member.quota.reservedTokens)}</strong></span>
       </div>
       <form onSubmit={submit}>
         <fieldset className="tp-ai-admin-fields" disabled={busy}>
@@ -96,7 +97,7 @@ function MemberQuotaDialog({ member, onClose, onSaved }: {
             </select>
           </label>
           <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-amount`}>
-            {mode === "set" ? "总限额" : "追加数量"} · 额度
+            {mode === "set" ? "总限额" : "追加数量"} · 同频点
             <input id={`${id}-amount`} type="text" inputMode="numeric" autoFocus required value={amount}
               maxLength={10} placeholder="填写整数" onChange={(event) => { setAmount(event.target.value); setError(""); }}
               aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} />
@@ -105,7 +106,7 @@ function MemberQuotaDialog({ member, onClose, onSaved }: {
             <input id={`${id}-reason`} value={reason} maxLength={200} placeholder="例如：本次客户提案" onChange={(event) => setReason(event.target.value)} />
           </label>
         </fieldset>
-        {amount && !next.error ? <p className="tp-ai-admin-hint">保存后总限额为 {formatAiTokens(next.limitTokens)}，剩余 {formatAiTokens(next.limitTokens - member.quota.usedTokens - member.quota.reservedTokens)} 额度。</p> : null}
+        {amount && !next.error ? <p className="tp-ai-admin-hint">保存后总限额为 {formatAiPoints(next.limitTokens)}，剩余 {formatAiPoints(next.limitTokens - member.quota.usedTokens - member.quota.reservedTokens)}。</p> : null}
         {error ? <p id={`${id}-error`} className="tp-ai-admin-error" role="alert">{error}</p> : null}
         <footer className="tp-ai-admin-actions is-end">
           <button className="tp-ai-admin-button" type="button" disabled={busy} onClick={onClose}>取消</button>
@@ -134,8 +135,9 @@ function MemberUsageDialog({ member, onClose }: { member: AiMember; onClose: () 
     return () => controller.abort();
   }, [api, member.id, version]);
   return (
-    <AdminAiDialog title={`Token 明细 · ${member.name}`} onClose={onClose}>
+    <AdminAiDialog title={`使用明细 · ${member.name}`} onClose={onClose}>
       <p className="tp-ai-admin-hint">{member.email}</p>
+      <p className="tp-ai-admin-hint">{AI_QUOTA_BILLING_NOTE}原始输入、输出 Token 独立保留。</p>
       {error ? <p className="tp-ai-admin-error" role="alert">{error}</p> : null}
       {loading ? <p role="status">正在读取使用记录…</p> : !error && entries.length === 0 ? <p className="tp-ai-admin-empty">暂无使用记录</p> : !error ? (
         <div className="tp-ai-admin-usage-list">
@@ -143,7 +145,7 @@ function MemberUsageDialog({ member, onClose }: { member: AiMember; onClose: () 
             <article className="tp-ai-admin-usage-entry" key={entry.id}>
               <header><strong>{entry.kind === "quota" ? "额度调整" : entry.model || "AI 对话"}</strong>
                 <span className={`tp-ai-admin-status ${entry.status === "completed" ? "is-active" : ""}`}>{USAGE_STATUS[entry.status]}</span></header>
-              {entry.kind === "quota" ? <p>总限额 {formatAiTokens(entry.limitTokens ?? 0)} 额度{entry.reason ? ` · ${entry.reason}` : ""}</p>
+              {entry.kind === "quota" ? <p>总限额 {formatAiPoints(entry.limitTokens ?? 0)}{entry.reason ? ` · ${entry.reason}` : ""}</p>
                 : <p>{aiUsageDescription(entry)} · 合计 {aiUsageTotal(entry)}</p>}
               <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString("zh-CN")}</time>
             </article>
@@ -191,7 +193,7 @@ export function AdminAiQuotaPanel() {
       <section className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>
         <header className="tp-ai-admin-heading">
           <div><h2 id="tp-ai-admin-members-title"><UsersRound size={21} aria-hidden="true" />成员额度</h2>
-            <p>文本每个 Token 扣 1 额度，图片与搜索按设置折算；默认 0，用尽后仅管理员可追加。</p></div>
+            <p>{AI_QUOTA_BILLING_NOTE}默认分配 0 同频点，用尽后仅管理员可追加。</p></div>
           <button className="tp-ai-admin-button" type="button" disabled={loading} onClick={() => { setNotice(""); setVersion((value) => value + 1); }}>
             <RefreshCw size={17} aria-hidden="true" />刷新
           </button>
@@ -206,16 +208,16 @@ export function AdminAiQuotaPanel() {
         ) : (
           <div className="tp-ai-admin-table-scroll" tabIndex={0} aria-label="成员额度表格，可横向滚动">
             <table className="tp-ai-admin-table">
-              <thead><tr><th>成员</th><th>账号状态</th><th>总限额</th><th>已使用</th><th>正在使用</th><th>剩余额度</th><th>操作</th></tr></thead>
+              <thead><tr><th>成员</th><th>账号状态</th><th>总限额</th><th>已使用</th><th>处理中预留</th><th>剩余额度</th><th>操作</th></tr></thead>
               <tbody>{visibleMembers.map((member) => (
                 <tr key={member.id}>
                   <td><AdminAiMemberIdentity member={member} /></td>
                   <td><span className={`tp-ai-admin-status ${member.status === "active" ? "is-active" : ""}`}>{MEMBER_STATUS[member.status] ?? "不可用"}</span></td>
-                  <td>{formatAiTokens(member.quota.limitTokens)}</td><td>{formatAiTokens(member.quota.usedTokens)}</td>
-                  <td>{formatAiTokens(member.quota.reservedTokens)}</td><td><strong>{formatAiTokens(member.quota.remainingTokens)}</strong></td>
+                  <td>{formatAiPoints(member.quota.limitTokens)}</td><td>{formatAiPoints(member.quota.usedTokens)}</td>
+                  <td>{formatAiPoints(member.quota.reservedTokens)}</td><td><strong>{formatAiPoints(member.quota.remainingTokens)}</strong></td>
                   <td><div className="tp-ai-admin-row-actions">
                     <button className="tp-ai-admin-button is-primary" type="button" aria-label={`设置 ${member.name} 的额度`} onClick={() => setQuotaMember(member)}><Coins size={16} aria-hidden="true" />设额度</button>
-                    <button className="tp-ai-admin-button" type="button" aria-label={`查看 ${member.name} 的 Token 明细`} onClick={() => setUsageMember(member)}><History size={16} aria-hidden="true" />明细</button>
+                    <button className="tp-ai-admin-button" type="button" aria-label={`查看 ${member.name} 的同频点与 Token 明细`} onClick={() => setUsageMember(member)}><History size={16} aria-hidden="true" />明细</button>
                   </div></td>
                 </tr>
               ))}</tbody>
@@ -225,7 +227,7 @@ export function AdminAiQuotaPanel() {
       </section>
       {quotaMember ? <MemberQuotaDialog member={quotaMember} onClose={() => setQuotaMember(null)} onSaved={(member) => {
         setMembers((current) => current.map((item) => item.id === member.id ? member : item));
-        setQuotaMember(null); setNotice(`${member.name} 的总限额已保存为 ${formatAiTokens(member.quota.limitTokens)} 额度。`);
+        setQuotaMember(null); setNotice(`${member.name} 的总限额已保存为 ${formatAiPoints(member.quota.limitTokens)}。`);
       }} /> : null}
       {usageMember ? <MemberUsageDialog member={usageMember} onClose={() => setUsageMember(null)} /> : null}
     </section>

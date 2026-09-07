@@ -24,7 +24,6 @@ export const ChatMessageRow = memo(function ChatMessageRow({
     className={`tp-ai-message is-${message.role}${message.status === "error" ? " is-error" : ""}`}
     aria-label={message.role === "assistant" ? `${assistantName} 消息` : "你的消息"}
   >
-    {message.role === "assistant" && <span className="tp-ai-message__avatar" aria-hidden="true"><img src="./app-icon.svg" alt="" /></span>}
     <div className="tp-ai-message__body">
       {message.role === "assistant" && <header><strong>{assistantName}</strong></header>}
       {message.attachments?.length ? <ul className="tp-ai-message-attachments" aria-label="消息中的附件">

@@ -1281,7 +1281,7 @@ export function AppShell({
               className={view === itemView ? "is-active" : ""}
               onClick={() => onViewChange(itemView)}
             >
-              <Icon size={18} />
+              {itemView !== "ai" && <Icon size={18} />}
               <span>{label}</span>
               <ChevronRight size={14} className="nav-chevron" />
             </button>

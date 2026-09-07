@@ -27,16 +27,16 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "修正模式切换后的黑色焦点框",
+      "同频 AI 换上 Fleur 新形象",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "管理员可给老板分配额度",
+      "成员概览只显示剩余百分比",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留原有任务、客户脉络图和 AI 历史数据",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "不足时保留草稿",
+      "角色眼神和头部轻微跟随鼠标",
     );
   });
 

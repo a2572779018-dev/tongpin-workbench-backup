@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
 
 const CURSOR_SIZE = 20;
+const FRAME_INTERVAL = 1000 / 60;
 
 function nearestRotation(current: number, target: number): number {
-  const delta = ((target - current + 540) % 360) - 180;
+  const delta = (((target - current) % 360 + 540) % 360) - 180;
   return current + delta;
 }
 
@@ -28,14 +29,29 @@ export function CustomCursor() {
     let previousY = 0;
     let rotation = 0;
     let hasPosition = false;
+    let suppressed = false;
+    let visible = false;
+    let lastPaint = -Infinity;
 
     const hide = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = 0;
+      hasPosition = false;
+      visible = false;
       cursor.classList.remove("custom-cursor--visible");
+      root.classList.remove("custom-cursor-enabled");
     };
 
-    const paint = () => {
+    const paint = (now: number) => {
       frame = 0;
-      if (!finePointer.matches) return;
+      if (!finePointer.matches || document.hidden || suppressed) return;
+      // At most one pending frame, and no idle loop. High-refresh displays do
+      // not multiply the work while the AI is streaming or animating.
+      if (now - lastPaint < FRAME_INTERVAL) {
+        frame = window.requestAnimationFrame(paint);
+        return;
+      }
+      lastPaint = now;
 
       if (!hasPosition) {
         previousX = pointerX;
@@ -57,13 +73,23 @@ export function CustomCursor() {
       cursor.style.transform = `translate3d(${
         pointerX - CURSOR_SIZE / 2
       }px, ${pointerY}px, 0)`;
-      cursor.classList.add("custom-cursor--visible");
+      if (!visible) {
+        cursor.classList.add("custom-cursor--visible");
+        root.classList.add("custom-cursor-enabled");
+        visible = true;
+      }
       previousX = pointerX;
       previousY = pointerY;
     };
 
     const handlePointerMove = (event: PointerEvent) => {
-      if (event.pointerType === "touch") return;
+      if (event.pointerType === "touch" || !finePointer.matches || document.hidden) return;
+      // Preserve native I-beams, selection handles and disabled controls. No
+      // layout reads, React state updates or event interception are needed.
+      suppressed = event.target instanceof Element && Boolean(event.target.closest(
+        'textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, [contenteditable]:not([contenteditable="false"]), button:disabled, [aria-disabled="true"], [data-native-cursor]',
+      ));
+      if (suppressed) { hide(); return; }
       pointerX = event.clientX;
       pointerY = event.clientY;
       if (!frame) frame = window.requestAnimationFrame(paint);
@@ -75,14 +101,13 @@ export function CustomCursor() {
 
     const syncCapabilities = () => {
       const enabled = finePointer.matches;
-      root.classList.toggle("custom-cursor-enabled", enabled);
+      hide();
       root.classList.toggle(
         "custom-cursor-reduced-motion",
         enabled && reducedMotion.matches,
       );
       cursor.hidden = !enabled;
-      hasPosition = false;
-      if (!enabled) hide();
+      if (reducedMotion.matches) arrow.style.transform = "rotate(0deg)";
     };
 
     const handleVisibility = () => {
@@ -139,4 +164,3 @@ export function CustomCursor() {
     </div>
   );
 }
-

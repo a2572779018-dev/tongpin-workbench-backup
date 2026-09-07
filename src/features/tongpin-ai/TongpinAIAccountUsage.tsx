@@ -1,4 +1,4 @@
-import { ArrowDownToLine, ArrowUpFromLine, ChevronRight, Gauge, Info, RefreshCw, Sigma, X } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, ChevronRight, Info, RefreshCw, Sigma, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AiUsageEntry } from "../../../shared/ai";
@@ -6,7 +6,9 @@ import { useAuth } from "../../auth/AuthContext";
 import type { User } from "../../types";
 import { UserAvatar } from "../../components/UserAvatar";
 import type { TongpinAIUsage } from "./types";
-import { aiUsageDescription, aiUsageTotal } from "./usageFormatting";
+import { aiDiagnosticDescription, aiUsageDescription, aiUsageTotal } from "./usageFormatting";
+import { AI_QUOTA_BILLING_NOTE, formatAiPoints, quotaPercent } from "./quotaFormatting";
+import { TongpinAIQuotaSummary } from "./TongpinAIQuotaSummary";
 
 const number = (value: number) => value.toLocaleString("zh-CN");
 const statusLabel: Record<AiUsageEntry["status"], string> = {
@@ -28,8 +30,7 @@ export function TongpinAIAccountUsage({ usage, user, quotaSynced = false, onRefr
   const closeRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const generationRef = useRef(0);
-  const usedPercent = usage.limitTokens > 0 ? Math.min(100, Math.round(usage.usedTokens / usage.limitTokens * 100)) : 0;
-  const remainingPercent = usage.limitTokens > 0 ? Math.max(0, usage.remainingTokens / usage.limitTokens * 100) : 0;
+  const usedPercent = quotaPercent(usage.usedTokens, usage.limitTokens) ?? 0;
   const refresh = useCallback(async () => {
     const generation = ++generationRef.current;
     setLoading(true);
@@ -75,17 +76,9 @@ export function TongpinAIAccountUsage({ usage, user, quotaSynced = false, onRefr
 
   return <>
     <div className="tp-ai-account">
-      <div className="tp-ai-account__quota-summary" id="tp-ai-quota-summary" role="tooltip">
-        <header><span><Gauge size={15} /> AI 剩余额度</span><strong>{quotaSynced ? number(usage.remainingTokens) : "尚未同步"}</strong></header>
-        {quotaSynced ? <>
-          <div className="tp-ai-account__quota-track" aria-hidden="true"><span style={{ width: remainingPercent + "%" }} /></div>
-          <p>已用 {number(usage.usedTokens)} / {number(usage.limitTokens)} 额度</p>
-          {usage.reservedTokens > 0 && <p>处理中预留 {number(usage.reservedTokens)} 额度</p>}
-        </> : <p>额度尚未同步</p>}
-        <small>点击查看 Token 使用详情</small>
-      </div>
+      <TongpinAIQuotaSummary usage={usage} quotaSynced={quotaSynced} />
       <button ref={triggerRef} type="button" className="tp-ai-account__trigger"
-        aria-label={user.name + "，个人账户，查看 Token 使用详情"} aria-haspopup="dialog"
+        aria-label={user.name + "，个人账户，查看使用详情"} aria-haspopup="dialog"
         aria-expanded={detailsOpen} aria-controls="tp-ai-token-details" aria-describedby="tp-ai-quota-summary"
         onClick={() => setDetailsOpen(true)}>
         <UserAvatar user={user} className="tp-ai-account__avatar" />
@@ -97,38 +90,40 @@ export function TongpinAIAccountUsage({ usage, user, quotaSynced = false, onRefr
       <div className="tp-ai-usage-layer__backdrop" aria-hidden="true" onClick={closeDetails} />
       <section ref={dialogRef} className="tp-ai-usage-dialog" id="tp-ai-token-details" role="dialog" aria-modal="true" aria-labelledby="tp-ai-token-details-title">
         <header className="tp-ai-usage-dialog__header">
-          <span><h2 id="tp-ai-token-details-title">Token 使用详情</h2><small>{user.email} · 累计使用</small></span>
-          <button ref={closeRef} type="button" aria-label="关闭 Token 使用详情" onClick={closeDetails}><X size={18} /></button>
+          <span><h2 id="tp-ai-token-details-title">使用详情</h2><small>{user.email} · 同频点与 Token 明细</small></span>
+          <button ref={closeRef} type="button" aria-label="关闭使用详情" onClick={closeDetails}><X size={18} /></button>
         </header>
         <div className="tp-ai-usage-dialog__overview">
-          <article><small>总限额</small><strong>{quotaSynced ? number(usage.limitTokens) : "—"}</strong><span>额度</span></article>
-          <article><small>已经使用</small><strong>{quotaSynced ? number(usage.usedTokens) : "—"}</strong><span>{quotaSynced ? usedPercent + "%" : "尚未同步"}</span></article>
+          <article><small>总限额</small><strong>{quotaSynced ? number(usage.limitTokens) : "—"}</strong><span>同频点</span></article>
+          <article><small>已经使用</small><strong>{quotaSynced ? number(usage.usedTokens) : "—"}</strong><span>{quotaSynced ? "同频点" : "尚未同步"}</span></article>
           <article className={quotaSynced ? usage.remainingTokens === 0 ? "is-empty" : "is-available" : undefined}>
             <small>当前可用</small><strong>{quotaSynced ? number(usage.remainingTokens) : "—"}</strong>
-            <span>{!quotaSynced ? "尚未同步" : usage.remainingTokens === 0 ? "请联系管理员加额" : "额度"}</span>
+            <span>{!quotaSynced ? "尚未同步" : usage.remainingTokens === 0 ? usage.reservedTokens > 0 ? "同频点 · 有任务待结算" : "同频点 · 请联系管理员加额" : "同频点"}</span>
           </article>
         </div>
         {quotaSynced && <div className="tp-ai-usage-dialog__progress"><span style={{ width: usedPercent + "%" }} /></div>}
         <div className="tp-ai-usage-dialog__breakdown">
-          <header><strong>文本模型用量</strong><small>1 Token 计入 1 额度</small></header>
+          <header><strong>文本 Token 与处理中预留</strong><small>文本 1 Token = 1 同频点</small></header>
           {[
             {icon: ArrowDownToLine, label: "输入 Token", value: usage.inputTokens},
             {icon: ArrowUpFromLine, label: "输出 Token", value: usage.outputTokens},
-            {icon: Sigma, label: "处理中预留", value: usage.reservedTokens},
+            {icon: Sigma, label: "处理中预留 · 同频点", value: usage.reservedTokens},
           ].map(({icon: Icon, label, value}) => <div key={label}><span><Icon size={15} aria-hidden="true" />{label}</span><strong>{quotaSynced ? number(value) : "—"}</strong></div>)}
         </div>
         <section className="tp-ai-usage-history" aria-label="最近用量记录">
           <header><strong>最近记录</strong><button type="button" disabled={loading} onClick={() => void refresh()} aria-label="刷新用量记录"><RefreshCw size={16} /></button></header>
           {loading ? <p role="status">正在读取…</p> : error ? <p role="alert">{error}</p> : entries.length === 0 ? <p>暂无使用记录</p> : <ul>
             {entries.map(entry => <li key={entry.id}>
-              <span><strong>{entry.kind === "quota" ? "额度调整" : entry.model || "AI 对话"}</strong><small>{new Date(entry.createdAt).toLocaleString("zh-CN", { hour12: false })} · {statusLabel[entry.status]}</small></span>
-              <span>{entry.kind === "quota" ? "总限额 " + number(entry.limitTokens ?? 0) : aiUsageTotal(entry)}
+              <span><strong>{entry.kind === "quota" ? "额度调整" : entry.model || "AI 对话"}</strong><small>{new Date(entry.createdAt).toLocaleString("zh-CN", { hour12: false })} · {statusLabel[entry.status]}</small>
+                {entry.diagnostic && <small>{aiDiagnosticDescription(entry.diagnostic)}</small>}
+              </span>
+              <span>{entry.kind === "quota" ? "总限额 " + formatAiPoints(entry.limitTokens ?? 0) : aiUsageTotal(entry)}
                 <small>{entry.kind !== "quota" ? aiUsageDescription(entry) : entry.reason}</small>
               </span>
             </li>)}
           </ul>}
         </section>
-        <p className="tp-ai-usage-dialog__notice"><Info size={15} aria-hidden="true" />文本按 Token 扣额，图片与搜索按管理员设置折算。额度不会自动恢复。</p>
+        <p className="tp-ai-usage-dialog__notice"><Info size={15} aria-hidden="true" />{AI_QUOTA_BILLING_NOTE}处理中预留不是实际扣费。同频点不会自动补充。</p>
       </section>
     </div>, triggerRef.current?.closest(".tp-ai-page") ?? document.body) : null}
   </>;

@@ -17,6 +17,8 @@ export interface AiProviderInput {
   imageBaseUrl?: string;
   imageApiKey?: string;
   imageQuotaTokens?: number;
+  /** Opt-in standard Images API SSE; independent of text protocol and quick/deep mode. */
+  imageStream?: boolean;
   visionEnabled?: boolean;
   webSearchEnabled?: boolean;
   webSearchQuotaTokens?: number;
@@ -51,6 +53,16 @@ export interface AiUsage {
   convertedTokens?: number;
   billingKind?: "tokens" | "image_conversion" | "tokens_with_search";
 }
+/** Sanitized metadata only: never the provider's message, request body, URL or credentials. */
+export interface AiProviderDiagnostic {
+  operation: "chat" | "image" | "models";
+  httpStatus: number;
+  category: "authentication" | "rate_limit" | "redirect" | "invalid_request" | "timeout" | "conflict" | "upstream_unavailable" | "rejected";
+  /** Local settlement assessment, not a claim about the provider's final invoice. */
+  billing: "rejected" | "unknown";
+  code?: string;
+  param?: string;
+}
 export interface AiUsageEntry extends AiUsage {
   id: string;
   userId: string;
@@ -63,6 +75,7 @@ export interface AiUsageEntry extends AiUsage {
   reason: string;
   limitTokens: number | null;
   actorId: string | null;
+  diagnostic?: AiProviderDiagnostic;
 }
 export interface AiStatus {
   /** Server-owned entitlement: a positive quota was granted, even if now exhausted. */
@@ -140,7 +153,7 @@ export interface AiRequestResult {
   status: "pending" | "completed" | "failed" | "uncertain";
   result?: AiChatResponse;
   imageResult?: AiImageResponse;
-  error?: { status: number; code: string; message: string };
+  error?: { status: number; code: string; message: string; diagnostic?: AiProviderDiagnostic };
 }
 export interface AiProviderTestResult {
   ok: boolean;

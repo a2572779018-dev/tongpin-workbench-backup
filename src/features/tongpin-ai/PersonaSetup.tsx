@@ -1,8 +1,10 @@
-import { ArrowLeft, ArrowUp, Check, Heart, Lightbulb, SlidersHorizontal, Sparkles, X, Zap } from "lucide-react";
+import { ArrowLeft, ArrowUp, Check, Heart, Lightbulb, SlidersHorizontal, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AiPersonaProfile, AiPersonaSnapshot } from "../../../shared/aiPersona";
 import { useAuth } from "../../auth/AuthContext";
 import { ApiRequestError } from "../../lib/api";
+import { TongpinAICharacter } from "./visuals/TongpinAICharacter";
+import { CHARACTER_EXPRESSIONS } from "./visuals/characterExpression";
 
 const PERSONALITIES = [
   { id: "warm", name: "温暖搭档", description: "亲切耐心，一起把事情想清楚", Icon: Heart },
@@ -80,11 +82,12 @@ export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
 
   return <div className="tp-ai-persona-layer">
     <section ref={dialogRef} className="tp-ai-persona-dialog" role="dialog" aria-modal="true" aria-labelledby="tp-ai-persona-title">
-      <header><span className="tp-ai-persona-symbol"><Sparkles size={23} /></span>
+      <header>
         <div><h2 id="tp-ai-persona-title">{editing ? "我的专属 AI" : "认识你的专属 AI"}</h2><small>{editing ? "已保存的名字、性格与偏好" : `${step + 1} / 3 · ${["取个名字", "选择性格", "确认偏好"][step]}`}</small></div>
         {editing && <button type="button" aria-label="关闭专属 AI 设置" disabled={saving} onClick={onClose}><X size={19} /></button>}
       </header>
       <div className="tp-ai-persona-dialog__body">
+        {step !== 2 && <TongpinAICharacter expression={profile.expression ?? "auto"} className="tp-ai-character--settings" />}
         <div className="tp-ai-persona-message" aria-live="polite"><strong>{step === 0 ? "同频 AI" : name}</strong>
           <p>{editing ? "你可以随时修改我的名字和相处方式。下次对话，我会按照新的设置与你合作。"
             : step === 0 ? "你好，我是同频 AI，你的专属工作伙伴。你希望我叫什么名字？"
@@ -114,6 +117,21 @@ export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
             <textarea value={profile.preferences} maxLength={4000} rows={4} disabled={saving} placeholder="例如：称呼我 Sam；回答用简体中文；先给简短结论。不要填写密码或 API 密钥。"
               onChange={event => setProfile(current => ({ ...current, preferences: event.target.value }))} />
           </label>}
+          {step === 2 && <fieldset className="tp-ai-expression-picker" disabled={saving}>
+            <legend>表情</legend>
+            <p>自动随任务变化；选择其他表情，作为平时的样子。</p>
+            <div className="tp-ai-expression-content">
+            <TongpinAICharacter expression={profile.expression ?? "auto"} className="tp-ai-character--settings" />
+            <div className="tp-ai-expression-grid">
+              {CHARACTER_EXPRESSIONS.map(option => <button key={option.id} type="button"
+                aria-pressed={(profile.expression ?? "auto") === option.id}
+                className={(profile.expression ?? "auto") === option.id ? "is-selected" : ""}
+                onClick={() => setProfile(current => ({ ...current, expression: option.id }))}>
+                <span aria-hidden="true" className={option.glyph.length > 2 ? "is-word" : undefined}>{option.glyph}</span><small>{option.label}</small>
+              </button>)}
+            </div>
+            </div>
+          </fieldset>}
           {step === 2 && <p className="tp-ai-persona-memory-note">只保存你在这里确认的内容，随账号同步；可随时修改或清除。</p>}
           {step === 2 && !editing && <div className="tp-ai-persona-summary"><span>名字：{name}</span><span>性格：{PERSONALITIES.find(item => item.id === profile.tone)?.name}</span>
             {profile.customStyle && <p>{profile.customStyle}</p>}

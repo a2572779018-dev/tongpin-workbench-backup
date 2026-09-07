@@ -75,7 +75,7 @@ export async function handleAiRequest(request: Request, service: AiService, user
     throw new AiError(404, "NOT_FOUND", "请求的接口不存在");
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    if (error instanceof AiError) return json({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }, error.status);
+    if (error instanceof AiError) return json({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}), ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}) } }, error.status);
     return json({ error: { code: "AI_SERVER_ERROR", message: "AI 服务处理失败，请稍后重试" } }, 500);
   }
 }

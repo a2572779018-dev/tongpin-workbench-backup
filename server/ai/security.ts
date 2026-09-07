@@ -1,7 +1,7 @@
-import type { AiChatPreflight } from "../../shared/ai";
+import type { AiChatPreflight, AiProviderDiagnostic } from "../../shared/ai";
 
 export class AiError extends Error {
-  constructor(public readonly status: number, public readonly code: string, message: string, public readonly definitelyNotSent = false, public readonly details?: AiChatPreflight) { super(message); }
+  constructor(public readonly status: number, public readonly code: string, message: string, public readonly definitelyNotSent = false, public readonly details?: AiChatPreflight, public readonly diagnostic?: AiProviderDiagnostic) { super(message); }
 }
 export function safeBaseUrl(value: unknown): string {
   if (typeof value !== "string" || value.length > 512) throw new AiError(400, "AI_URL_INVALID", "请输入有效的 HTTPS API 地址");

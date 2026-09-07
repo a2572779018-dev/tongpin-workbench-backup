@@ -1,5 +1,6 @@
 import type { AiChatPreflight } from "../../../shared/ai";
 import type { AiWorkspaceConversation, AiWorkspaceState } from "../../../shared/aiWorkspace";
+import { quotaRemainingSummary } from "./quotaFormatting";
 
 // Reference/primitive comparison keeps draft checks cheap, even with large files.
 export function sameSendContext(left: readonly unknown[], right: readonly unknown[]) {
@@ -51,21 +52,20 @@ export function withPreparedChatSend(latest: AiWorkspaceState, conversation: AiW
 }
 
 export function preflightNotice(result: AiChatPreflight) {
-  const remaining = result.quota.remainingTokens.toLocaleString("zh-CN");
-  const required = result.budget.minimumRequiredTokens.toLocaleString("zh-CN");
+  const remaining = quotaRemainingSummary(result.quota).label;
   if (result.reason === "request_in_progress") return {
     title: "还有一条请求正在处理",
-    message: `当前可用 ${remaining} 额度，请等待上次请求完成后重试。本次未发送、未扣费。`,
+    message: `${remaining}，已扣除处理中预留。请等待上次请求完成后重试。本次未发送、未扣费。`,
     canDisableSearch: false,
   };
   if (result.reason === "quota_exhausted") return {
     title: "可用额度已用完",
-    message: "请联系管理员追加额度。本次未发送，草稿已保留。",
+    message: `${remaining}。${result.quota.reservedTokens > 0 ? "有任务正在预留同频点，请等待结算后重试。" : "请联系管理员追加同频点。"}本次未发送，草稿已保留。`,
     canDisableSearch: false,
   };
   return {
     title: result.reason === "search_quota_insufficient" ? "余额尚有，但不足以启动本次联网搜索" : "本次对话所需额度超过余额",
-    message: `可用 ${remaining}，本次至少需预留 ${required} 额度。预留包含输入、回复${result.budget.searchInputReserve > 0 ? "和搜索内容" : ""}，不是实际扣费。本次未发送，草稿已保留。`,
+    message: `${remaining}，不足以预留本次请求所需的同频点。预留包含输入、回复${result.budget.searchInputReserve > 0 ? "和搜索内容" : ""}，不是实际扣费。本次未发送，草稿已保留。`,
     canDisableSearch: result.reason === "search_quota_insufficient" && result.withoutWebSearch?.canSend === true,
   };
 }

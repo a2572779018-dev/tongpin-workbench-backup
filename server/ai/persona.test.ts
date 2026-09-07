@@ -4,11 +4,12 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AI_PERSONA_LIMITS, defaultAiPersonaProfile, type AiPersonaProfile } from "../../shared/aiPersona";
+import { AI_PERSONA_EXPRESSIONS, AI_PERSONA_LIMITS, defaultAiPersonaProfile, type AiPersonaProfile } from "../../shared/aiPersona";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
 import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AiPersonaRepository, validateAiPersonaProfile } from "./persona";
+import { chatInstructions } from "./capabilities";
 
 const workerRouteModulePath = "../../cloudflare/src/ai/personaRoutes";
 const { handleAiPersonaRequest } = await import(workerRouteModulePath) as {
@@ -55,11 +56,42 @@ describe("member-owned AI persona", () => {
     }
   });
   it("stores the chosen assistant name, character and confirmed preferences across process restart", () => {
-    const saved = repository.save("member-a", { expectedRevision: 0, profile: profile() });
+    const saved = repository.save("member-a", { expectedRevision: 0, profile: { ...profile(), expression: "wow" } });
     database.close(); database = new DatabaseSync(path.join(directory, "persona.sqlite"));
     repository = new AiPersonaRepository(adapter(database)); repository.initialize();
     expect(repository.read("member-a")).toEqual(saved);
     expect(repository.read("member-a").profile.name).toBe("小频");
+    expect(repository.read("member-a").profile.expression).toBe("wow");
+  });
+  it.each(AI_PERSONA_EXPRESSIONS)("persists the exact exported visual expression %s", expression => {
+    const saved = repository.save("member-a", { expectedRevision: 0, profile: { ...profile(), expression } });
+    expect(saved.profile.expression).toBe(expression);
+    expect(repository.read("member-a")).toEqual(saved);
+    expect(repository.read("member-b").profile.expression).toBe("auto");
+  });
+  it("reads legacy records as auto without rewriting their saved data or revision", () => {
+    const legacy = JSON.stringify(profile());
+    database.prepare("INSERT INTO ai_personas(user_id,revision,schema_version,updated_at,data) VALUES(?,7,1,?,?)").run("member-a", "2026-09-06T00:00:00.000Z", legacy);
+    expect(repository.read("member-a")).toEqual({ revision: 7, profile: { ...profile(), expression: "auto" } });
+    expect(database.prepare("SELECT data,revision FROM ai_personas WHERE user_id=?").get("member-a")).toEqual({ data: legacy, revision: 7 });
+  });
+  it("preserves a chosen expression when an older client omits it, but allows explicit auto and reset", () => {
+    repository.save("member-a", { expectedRevision: 0, profile: { ...profile(), expression: "smitten" } });
+    const legacySaved = repository.save("member-a", { expectedRevision: 1, profile: profile("改名") });
+    expect(legacySaved).toMatchObject({ revision: 2, profile: { name: "改名", expression: "smitten" } });
+    expect(() => repository.save("member-a", { expectedRevision: 1, profile: { ...profile(), expression: "nope" } })).toThrow(expect.objectContaining({ code: "AI_PERSONA_CONFLICT" }));
+    expect(repository.read("member-a")).toEqual(legacySaved);
+    expect(repository.save("member-a", { expectedRevision: 2, profile: { ...profile(), expression: "auto" } }).profile.expression).toBe("auto");
+    repository.save("member-a", { expectedRevision: 3, profile: { ...profile(), expression: "hmm" } });
+    expect(repository.save("member-a", { expectedRevision: 4, reset: true })).toEqual({ revision: 5, profile: defaultAiPersonaProfile() });
+  });
+  it("does not inject any visual expression into model instructions or change the prompt", () => {
+    const chat = { requestId: "persona-expression-fixture", mode: "quick" as const, messages: [{ role: "user" as const, content: "你好" }] };
+    const baseline = chatInstructions(chat, profile(), "fixture-model");
+    for (const expression of AI_PERSONA_EXPRESSIONS) {
+      const saved = validateAiPersonaProfile({ ...profile(), expression });
+      expect(chatInstructions(chat, saved, "fixture-model")).toBe(baseline);
+    }
   });
   it("does not grant access merely because legacy persona data exists, and never erases that data", () => {
     const saved = repository.save("member-a", { expectedRevision: 0, profile: profile() });
@@ -88,11 +120,12 @@ describe("member-owned AI persona", () => {
     expect(repository.read("member-a")).toEqual(next);
   });
   it("requires an explicit, revision-checked reset and leaves other members intact", () => {
-    repository.save("member-a", { expectedRevision: 0, profile: profile() });
-    repository.save("member-b", { expectedRevision: 0, profile: profile("小光") });
+    repository.save("member-a", { expectedRevision: 0, profile: { ...profile(), expression: "woozy" } });
+    repository.save("member-b", { expectedRevision: 0, profile: { ...profile("小光"), expression: "yes" } });
     expect(() => repository.save("member-a", { expectedRevision: 1, reset: true, profile: profile() })).toThrow();
     expect(repository.save("member-a", { expectedRevision: 1, reset: true })).toEqual({ revision: 2, profile: defaultAiPersonaProfile() });
     expect(repository.read("member-b").profile.name).toBe("小光");
+    expect(repository.read("member-b").profile.expression).toBe("yes");
   });
   it.each(["warm", "professional", "concise", "creative"] as const)("accepts the %s character style", tone => {
     expect(validateAiPersonaProfile({ ...profile(), tone }).tone).toBe(tone);
@@ -101,6 +134,8 @@ describe("member-owned AI persona", () => {
     { name: "x".repeat(41) }, { name: "不能\n换行" }, { name: 123 },
     { tone: "admin" }, { preferences: "x".repeat(4001) }, { customStyle: "x".repeat(2001) },
     { onboardingComplete: "true" }, { preferences: "private\u0000content" }, { autoExtractSecrets: true },
+    { expression: null }, { expression: 1 }, { expression: false }, { expression: "" },
+    { expression: "love" }, { expression: "no" }, { expression: "dizzy" }, { expression: "<script>alert(1)</script>" },
   ])("rejects malformed or excessive profile fields without writing: %j", patch => {
     expect(() => repository.save("member-a", { expectedRevision: 0, profile: { ...profile(), ...patch } })).toThrow(expect.objectContaining({ code: "AI_PERSONA_INVALID" }));
     expect(repository.read("member-a").revision).toBe(0);
@@ -153,6 +188,18 @@ describe("member-owned AI persona", () => {
     }
     expect(repository.read("member-a").revision).toBe(0);
   });
+  it("Cloudflare persists expressions, rejects unknown ids, and resets only the authenticated account", async () => {
+    const saved = await invoke(repository, "PUT", { expectedRevision: 0, profile: { ...profile(), expression: "nope" } });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ revision: 1, profile: { expression: "nope" } });
+    const invalid = await invoke(repository, "PUT", { expectedRevision: 1, profile: { ...profile(), expression: "no" } });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ error: { code: "AI_PERSONA_INVALID" } });
+    expect((await invoke(repository, "PUT", { expectedRevision: 1, profile: { ...profile(), expression: "wow" } }, member, { "X-Tongpin-Account": "member-b" })).status).toBe(409);
+    expect(await (await invoke(repository, "GET")).json()).toMatchObject({ revision: 1, profile: { expression: "nope" } });
+    expect(repository.read("member-b")).toEqual({ revision: 0, profile: defaultAiPersonaProfile() });
+    expect(await (await invoke(repository, "PUT", { expectedRevision: 1, reset: true })).json()).toEqual({ revision: 2, profile: defaultAiPersonaProfile() });
+  });
   it("Cloudflare bounds streams, rejects malformed UTF-8, and exposes reset only through PUT", async () => {
     expect((await invoke(repository, "PUT", { preferences: "x".repeat(AI_PERSONA_LIMITS.requestBytes) })).status).toBe(413);
     const malformed = await handleAiPersonaRequest(new Request("https://tongpin.example/api/ai/persona", { method: "PUT", body: new Uint8Array([0xff]) }), repository, member);
@@ -181,8 +228,11 @@ describe("member-owned AI persona", () => {
       expect(denied.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
       await request(runtime.app).put("/api/admin/ai/members/persona-member/quota").set("Authorization", `Bearer ${admin.body.accessToken}`).send({ limitTokens: 5000 }).expect(200);
       expect((await request(runtime.app).get("/api/ai/status").set(headers).expect(200)).body.accessGranted).toBe(true);
-      const saved = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile() }).expect(200);
+      const saved = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: { ...profile(), expression: "smitten" } }).expect(200);
       expect(saved.body.profile.name).toBe("小频");
+      expect(saved.body.profile.expression).toBe("smitten");
+      const invalid = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 1, profile: { ...profile(), expression: "love" } }).expect(400);
+      expect(invalid.body.error.code).toBe("AI_PERSONA_INVALID");
       await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile("不能覆盖") }).expect(409);
       await request(runtime.app).put("/api/ai/persona").set(headers).send({ oversized: "x".repeat(AI_PERSONA_LIMITS.requestBytes) }).expect(413);
       await runtime.close(); runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });

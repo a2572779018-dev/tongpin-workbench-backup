@@ -94,6 +94,24 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     expect(service.quota("existing-user").limitTokens).toBe(5000);
   });
   const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  it("exposes safe image failure metadata and preserves uncertain quota without replaying or leaking to another account", async () => {
+    await invoke("/api/admin/ai/provider", "PUT", admin, { ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000 });
+    await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 10000 });
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "server_error", message: "private-test-key private-prompt" } }, { status: 502 }));
+    const request = { requestId: crypto.randomUUID(), prompt: "私有图片" };
+    const failure = await invoke("/api/ai/images", "POST", a, request);
+    expect(failure.status).toBe(502); expect(failure.headers.get("cache-control")).toBe("no-store");
+    const body = await failure.text();
+    expect(JSON.parse(body)).toMatchObject({ error: { code: "AI_PROVIDER_UNAVAILABLE", diagnostic: { operation: "image", httpStatus: 502, billing: "unknown", code: "server_error" } } });
+    expect(body).not.toMatch(/private-test-key|private-prompt/);
+    expect(await (await invoke(`/api/ai/requests/${request.requestId}`, "GET", a)).json()).toMatchObject({ status: "uncertain", error: { diagnostic: { httpStatus: 502 } } });
+    expect((await invoke(`/api/ai/requests/${request.requestId}`, "GET", b)).status).toBe(404);
+    expect((await invoke(`/api/ai/requests/${request.requestId}`, "GET", a, undefined, { "X-Tongpin-Account": b.id })).status).toBe(409);
+    await invoke("/api/ai/images", "POST", a, request);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(service.quota(a.id)).toMatchObject({ usedTokens: 1000, reservedTokens: 0 });
+    expect(await (await invoke("/api/admin/ai/usage?userId=a", "GET", admin)).json()).toMatchObject({ entries: [expect.objectContaining({ diagnostic: { operation: "image", httpStatus: 502, category: "upstream_unavailable", billing: "unknown", code: "server_error" } }), expect.anything()] });
+  });
   async function generateOwnedImage() {
     await invoke("/api/admin/ai/provider", "PUT", admin, { ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
     await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 10000 });

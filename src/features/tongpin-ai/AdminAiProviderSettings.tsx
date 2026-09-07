@@ -16,6 +16,7 @@ const EMPTY_PROVIDER: AiProviderInput = {
   imageModel: "",
   imageBaseUrl: "",
   imageQuotaTokens: 0,
+  imageStream: false,
   visionEnabled: false,
   webSearchEnabled: false,
   webSearchQuotaTokens: 0,
@@ -89,6 +90,7 @@ export function AdminAiProviderSettings() {
       imageModel: input.imageModel?.trim() || "",
       imageBaseUrl: input.imageBaseUrl?.trim() ? normalizeAiBaseUrl(input.imageBaseUrl) : "",
       imageQuotaTokens: input.imageQuotaTokens ?? 0,
+      imageStream: input.imageStream ?? false,
       visionEnabled: input.visionEnabled ?? false,
       webSearchEnabled: input.webSearchEnabled ?? false,
       webSearchQuotaTokens: input.webSearchQuotaTokens ?? 0,
@@ -216,7 +218,7 @@ export function AdminAiProviderSettings() {
                 placeholder="可与快速模式使用相同模型" spellCheck={false} onChange={(event) => update("deepModel", event.target.value)} />
             </label>
             <datalist id={`${id}-models`}>{models.map((model) => <option key={model} value={model} />)}</datalist>
-            <label className="tp-ai-admin-field" htmlFor={`${id}-max`}>单次最大输出 · Tokens
+            <label className="tp-ai-admin-field" htmlFor={`${id}-max`}>单次最大文本输出 · Token
               <input id={`${id}-max`} type="number" min="16" max="32768" step="1" required value={Number.isNaN(draft.maxOutputTokens) ? "" : draft.maxOutputTokens}
                 onChange={(event) => update("maxOutputTokens", event.target.valueAsNumber)} />
             </label>
@@ -235,10 +237,10 @@ export function AdminAiProviderSettings() {
                 <label className="tp-ai-admin-field" htmlFor={`${id}-image-model`}>图片模型 ID
                   <input id={`${id}-image-model`} value={draft.imageModel ?? ""} maxLength={160} list={`${id}-image-models`} placeholder="留空关闭图片生成" spellCheck={false} onChange={event => update("imageModel", event.target.value)} />
                 </label>
-                <label className="tp-ai-admin-field" htmlFor={`${id}-image-quota`}>每张图片折算额度
+                <label className="tp-ai-admin-field" htmlFor={`${id}-image-quota`}>每张图片折算 · 同频点
                   <input id={`${id}-image-quota`} type="number" min={0} max={10_000_000} step={1} value={Number.isNaN(draft.imageQuotaTokens) ? "" : draft.imageQuotaTokens ?? 0} onChange={event => update("imageQuotaTokens", event.target.valueAsNumber)} />
                 </label>
-                <p className="tp-ai-admin-hint is-wide">图片按你设置的额度扣减，属于折算值，不是服务商实际文本 Token。请先核对服务商图片价格和模型能力。</p>
+                <p className="tp-ai-admin-hint is-wide">图片按你设置的同频点扣减，属于折算值，不是服务商实际文本 Token。请先核对服务商图片价格和模型能力。</p>
                 <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-image-url`}>独立图片 API 地址
                   <input id={`${id}-image-url`} type="url" value={draft.imageBaseUrl ?? ""} maxLength={512} placeholder="留空复用上面的 API 地址和密钥" spellCheck={false} onChange={event => update("imageBaseUrl", event.target.value)} />
                 </label>
@@ -246,6 +248,8 @@ export function AdminAiProviderSettings() {
                   <input id={`${id}-image-key`} type="password" autoComplete="new-password" maxLength={4096} value={imageApiKey} placeholder={saved?.imageBaseUrl && saved.imageApiKeyConfigured ? "已保存；留空保留，填写则替换" : "使用独立图片地址时填写"} onChange={event => { setImageApiKey(event.target.value); setDirty(true); setImageModels([]); setError(""); setNotice(""); }} />
                 </label>
                 <datalist id={`${id}-image-models`}>{imageModels.map(model => <option key={model} value={model} />)}</datalist>
+                <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.imageStream ?? false} onChange={event => update("imageStream", event.target.checked)} />图片流式响应（SSE）</label>
+                <p className="tp-ai-admin-hint is-wide">服务商要求流式生图时开启。使用标准 Images 接口，仅接收最终图片；与文本的快速 / 深度思考无关。</p>
                 <button className="tp-ai-admin-button" type="button" disabled={busy !== null} onClick={() => void testImageConnection()}><RefreshCw size={16} />{busy === "image-test" ? "测试中…" : "测试图片接口 / 获取模型"}</button>
               </div>
             </details>
@@ -253,10 +257,10 @@ export function AdminAiProviderSettings() {
               <summary><Globe size={17} />联网搜索</summary>
               <div className="tp-ai-admin-fields">
                 <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.webSearchEnabled ?? false} onChange={event => update("webSearchEnabled", event.target.checked)} />启用服务商联网搜索工具</label>
-                <label className="tp-ai-admin-field" htmlFor={`${id}-search-quota`}>每次联网搜索折算额度
+                <label className="tp-ai-admin-field" htmlFor={`${id}-search-quota`}>每次联网搜索折算 · 同频点
                   <input id={`${id}-search-quota`} type="number" min={0} max={10_000_000} step={1} value={Number.isNaN(draft.webSearchQuotaTokens) ? "" : draft.webSearchQuotaTokens ?? 0} onChange={event => update("webSearchQuotaTokens", event.target.valueAsNumber)} />
                 </label>
-                <p className="tp-ai-admin-hint is-wide">仅支持 Responses 协议且模型必须支持搜索工具。文本 Token 与搜索折算额度分别计入总用量。</p>
+                <p className="tp-ai-admin-hint is-wide">仅支持 Responses 协议且模型必须支持搜索工具。文本每 1 Token 计 1 同频点，搜索另按本设置折算为同频点；实际 Token 和折算用量在明细中分开显示。</p>
               </div>
             </details>
           </fieldset>

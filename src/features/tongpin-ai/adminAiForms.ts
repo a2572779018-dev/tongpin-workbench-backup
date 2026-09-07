@@ -1,8 +1,6 @@
 import type { AiProviderConfig, AiProviderInput, AiQuota } from "../../../shared/ai";
 import { ApiRequestError } from "../../lib/api";
 
-export const formatAiTokens = (value: number) => new Intl.NumberFormat("zh-CN").format(value);
-
 export function normalizeAiBaseUrl(value: string): string {
   const url = new URL(value.trim());
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
@@ -36,16 +34,16 @@ export function validateAiProviderInput(
     return "单次最大输出请填写 16–32,768 之间的整数。";
   }
   for (const amount of [input.imageQuotaTokens ?? 0, input.webSearchQuotaTokens ?? 0]) {
-    if (!Number.isSafeInteger(amount) || amount < 0 || amount > 10_000_000) return "工具折算额度需填写 0 到 10,000,000 之间的整数。";
+    if (!Number.isSafeInteger(amount) || amount < 0 || amount > 10_000_000) return "工具折算同频点需填写 0 到 10,000,000 之间的整数。";
   }
-  if (input.imageModel?.trim() && !(input.imageQuotaTokens && input.imageQuotaTokens > 0)) return "启用图片模型前，请设置每张图片的折算额度。";
+  if (input.imageModel?.trim() && !(input.imageQuotaTokens && input.imageQuotaTokens > 0)) return "启用图片模型前，请设置每张图片折算的同频点。";
   if (input.imageBaseUrl?.trim()) {
     let base: string;
     try { base = normalizeAiBaseUrl(input.imageBaseUrl); } catch { return "请填写有效的图片 HTTPS API 地址。"; }
     const previous = saved?.imageBaseUrl ? normalizeAiBaseUrl(saved.imageBaseUrl) : "";
     if ((!saved?.imageApiKeyConfigured || previous !== base) && !input.imageApiKey?.trim()) return "首次接入或更换图片 API 地址后，请重新填写图片密钥。";
   } else if (input.imageApiKey?.trim()) return "填写独立图片密钥时，还需填写图片 API 地址。";
-  if (input.webSearchEnabled && (input.protocol !== "responses" || !(input.webSearchQuotaTokens && input.webSearchQuotaTokens > 0))) return "联网搜索需要 Responses 协议，并设置每次搜索的折算额度。";
+  if (input.webSearchEnabled && (input.protocol !== "responses" || !(input.webSearchQuotaTokens && input.webSearchQuotaTokens > 0))) return "联网搜索需要 Responses 协议，并设置每次搜索折算的同频点。";
   return "";
 }
 
@@ -56,18 +54,18 @@ export function calculateAiQuotaLimit(
 ): { limitTokens: number; error: string } {
   const trimmed = amount.trim();
   if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(Number(trimmed))) {
-    return { limitTokens: 0, error: "请填写有效的整数额度数量。" };
+    return { limitTokens: 0, error: "请填写有效的整数同频点数量。" };
   }
   const value = Number(trimmed);
   const limitTokens = mode === "add" ? quota.limitTokens + value : value;
   if (!Number.isSafeInteger(limitTokens) || limitTokens > 1_000_000_000) {
-    return { limitTokens, error: "总限额不能超过 1,000,000,000 额度。" };
+    return { limitTokens, error: "总限额不能超过 1,000,000,000 同频点。" };
   }
   if (mode === "add" && value === 0) {
-    return { limitTokens, error: "追加额度必须大于 0。" };
+    return { limitTokens, error: "追加同频点必须大于 0。" };
   }
   if (limitTokens < quota.usedTokens + quota.reservedTokens) {
-    return { limitTokens, error: "总限额不能低于已使用和正在使用的额度之和。" };
+    return { limitTokens, error: "总限额不能低于已使用和处理中预留的同频点之和。" };
   }
   return { limitTokens, error: "" };
 }
@@ -80,8 +78,8 @@ export function adminAiErrorMessage(error: unknown, fallback: string): string {
     AI_URL_UNSAFE: "请使用公网 HTTPS API 域名，不要包含端口、账号或查询参数。",
     AI_KEY_REQUIRED: "首次接入或更换 API 地址后，请重新填写密钥。",
     AI_IMAGE_KEY_REQUIRED: "首次接入或更换图片 API 地址后，请重新填写图片密钥。",
-    AI_IMAGE_QUOTA_REQUIRED: "请设置每张图片的折算额度后再启用图片生成。",
-    AI_SEARCH_CONFIG_INVALID: "联网搜索需要 Responses 协议和大于 0 的折算额度，请核对模型是否支持。",
+    AI_IMAGE_QUOTA_REQUIRED: "请设置每张图片折算的同频点后再启用图片生成。",
+    AI_SEARCH_CONFIG_INVALID: "联网搜索需要 Responses 协议和大于 0 的折算同频点，请核对模型是否支持。",
     AI_ASSET_STORAGE_FULL: "图片存储空间已满，请让成员下载并删除不再需要的图片。",
     AI_PROVIDER_AUTH: "API 密钥无效或无权访问，请核对服务商的密钥配置。",
     AI_PROVIDER_LIMIT: "服务商余额不足或请求频繁，请检查服务商账号后重试。",
@@ -91,7 +89,7 @@ export function adminAiErrorMessage(error: unknown, fallback: string): string {
     AI_ENCRYPTION_UNAVAILABLE: "服务器安全存储尚未配置，暂时不能保存密钥。",
     AI_KEY_UNREADABLE: "已保存的密钥无法读取，请重新填写并保存密钥。",
     AI_CONFIG_CHANGED: "接入配置刚被修改，请重新填写密钥后保存。",
-    AI_QUOTA_BELOW_USED: "额度状态已变化；请刷新后重新设置，总限额不能低于已用和正在使用的额度。",
+    AI_QUOTA_BELOW_USED: "额度状态已变化；请刷新后重新设置，总限额不能低于已用和处理中预留的同频点。",
   };
   if (knownErrors[error.code]) return knownErrors[error.code];
   if (error.code === "NETWORK_UNAVAILABLE") return "连接不上服务器，请稍后重试。";
