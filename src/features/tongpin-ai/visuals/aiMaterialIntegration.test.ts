@@ -31,6 +31,19 @@ describe("AI material integration guardrails", () => {
     expect(chat).not.toContain("setVisualEffects");
   });
 
+  it("contains every character SVG in its layout slot, including the header", () => {
+    const refinements = read("../ai-refinements.css");
+    expect(refinements).toMatch(/\.tp-ai-character\s*\{[^}]*grid-template: minmax\(0, 1fr\) \/ minmax\(0, 1fr\);/);
+    expect(refinements).toMatch(/\.tp-ai-character__figure\s*\{[^}]*min-width: 0; min-height: 0;/);
+    expect(refinements).toMatch(/\.tp-ai-character--header\s*\{[^}]*margin: 0;/);
+  });
+
+  it("starts empty conversations at the top instead of scrolling their welcome character away", () => {
+    const chat = read("../ChatWorkspace.tsx");
+    expect(chat.match(/list\.scrollTop = isEmpty \? 0 : list\.scrollHeight;/g)).toHaveLength(2);
+    expect(read("../ai-refinements.css")).toMatch(/@media \(max-height: 850px\)[\s\S]*\.tp-ai-page \.tp-ai-chat\.is-empty \.tp-ai-composer-wrap\s*\{ flex: 0 0 auto;/);
+  });
+
   it("does not render hidden zero-sized GPU targets", () => {
     const orb = read("./TongpinOrb.tsx");
     expect(orb).toContain("entry.boundingClientRect.width > 0");

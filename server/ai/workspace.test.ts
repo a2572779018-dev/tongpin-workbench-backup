@@ -12,6 +12,7 @@ import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AiWorkspaceRepository, validateAiWorkspaceState } from "./workspace";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
+import { completedReply } from "../../src/features/tongpin-ai/chatRequests";
 
 // Keep Worker global types out of the browser/Node tsconfig. The Worker source is
 // separately typechecked by cloudflare/tsconfig.json and executed here unchanged.
@@ -76,6 +77,51 @@ describe("AI durable member workspace", () => {
     expect(repository.read("member-a")).toEqual(first);
     expect(first.state).toEqual(request.state);
     expect(first.updatedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+  });
+  it("durably saves visual draft/message frames only inside the authenticated member workspace", async () => {
+    const state = fixture();
+    const media = { kind: "video" as const, durationSeconds: 4, frames: [{ dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", timeSeconds: 0 }, { dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", timeSeconds: 3.95 }] };
+    state.draftAttachments!["new-conversation"][0].media = media;
+    state.conversations[0].messages[0].attachments = [{ id: "visual-message", name: "测试视频.mp4", mimeType: "video/mp4", content: "仅采样画面，不含音频", media }];
+    const saved = await repository.save("member-a", saveRequest(state));
+    database.close(); database = new DatabaseSync(path.join(directory, "workspace.sqlite"));
+    repository = new AiWorkspaceRepository(adapter(database)); repository.initialize();
+    expect(repository.read("member-a")).toEqual(saved);
+    expect(repository.read("member-b").state).toBeNull();
+    expect(repository.read("member-a").state!.conversations[0].messages[0].attachments![0].media).toEqual(media);
+  });
+  it("rejects unsafe visual payloads and leaves the saved snapshot intact", async () => {
+    const saved = await repository.save("member-a", saveRequest());
+    const validUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const variants = [
+      { kind: "image", frames: [{ dataUrl: "https://private.example.com/file" }] },
+      { kind: "image", frames: [{ dataUrl: "data:image/svg+xml;base64,AAAA" }] },
+      { kind: "image", frames: [] },
+      { kind: "image", frames: [{ dataUrl: validUrl, timeSeconds: 1 }] },
+      { kind: "video", durationSeconds: 121, frames: [{ dataUrl: validUrl, timeSeconds: 0 }] },
+      { kind: "video", durationSeconds: 5, frames: [{ dataUrl: validUrl, timeSeconds: 5 }] },
+      { kind: "video", durationSeconds: 5, frames: [{ dataUrl: validUrl, timeSeconds: 2 }, { dataUrl: validUrl, timeSeconds: 1 }] },
+      { kind: "video", durationSeconds: 5, frames: Array.from({ length: 5 }, (_, timeSeconds) => ({ dataUrl: validUrl, timeSeconds })) },
+    ];
+    for (const media of variants) {
+      const state = fixture(); Object.assign(state.draftAttachments!["new-conversation"][0], { media });
+      await expect(repository.save("member-a", saveRequest(state, 1))).rejects.toMatchObject({ status: expect.toBeOneOf([400, 413]) });
+      expect(repository.read("member-a")).toEqual(saved);
+    }
+  });
+  it("persists a completed web-search reply and rejects malformed search usage metadata", async () => {
+    const state = fixture();
+    const reply = completedReply({ requestId: crypto.randomUUID(), content: "搜索完成，以下是查到的信息", model: "fixture", quota: emptyQuota(), usage: {
+      inputTokens: 100, outputTokens: 20, convertedTokens: 1000, totalTokens: 1120, estimated: false, searchCalls: 1, tokenUsageEstimated: false, billingKind: "tokens_with_search",
+    } });
+    Object.assign(state.conversations[0].messages[1], reply);
+    const saved = await repository.save("member-a", saveRequest(state));
+    expect(repository.read("member-a").state!.conversations[0].messages[1].usage).toEqual(reply.usage);
+    for (const bad of [{ searchCalls: -1 }, { searchCalls: 4 }, { searchCalls: 1.5 }, { tokenUsageEstimated: "false" }]) {
+      const invalidState = structuredClone(state); Object.assign(invalidState.conversations[0].messages[1].usage!, bad);
+      await expect(repository.save("member-a", saveRequest(invalidState, 1))).rejects.toHaveProperty("code", "AI_WORKSPACE_INVALID");
+      expect(repository.read("member-a")).toEqual(saved);
+    }
   });
   it("isolates reads, writes and identical mutation ids by authenticated user", async () => {
     const request = saveRequest();

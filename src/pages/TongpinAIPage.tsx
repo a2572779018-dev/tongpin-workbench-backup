@@ -12,7 +12,7 @@ import { PersonaSetup } from "../features/tongpin-ai/PersonaSetup";
 import { AiAccessState } from "../features/tongpin-ai/AiAccessState";
 import { loadAiEntry, type AiEntry } from "../features/tongpin-ai/loadAiEntry";
 import type { AiPersonaSnapshot } from "../../shared/aiPersona";
-import { extractAttachment, validateAttachments } from "../features/tongpin-ai/attachments";
+import { documentAttachments, ensureAttachmentWorkspaceCapacity, extractAttachment, workspaceAttachment, validateAttachments, WorkspaceCapacityError } from "../features/tongpin-ai/attachments";
 import { selectSkill, skillRequestIds } from "../features/tongpin-ai/skills";
 import { buildChatRequest, canRecoverChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence, typewriterDuration, TYPEWRITER_FRAME_MS } from "../features/tongpin-ai/chatPerformance";
@@ -192,6 +192,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     initialSession.enabledSkillIds,
   );
   const [announcement, setAnnouncement] = useState("");
+  const [capacityNotice, setCapacityNotice] = useState<string | null>(null);
   const [workspaceDialog, setWorkspaceDialog] =
     useState<WorkspaceDialogState>(null);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
@@ -294,25 +295,39 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     return () => { unregister(); window.removeEventListener("beforeunload", guard); };
   }, [user.id, preflightGate]);
 
-  async function addFiles(files: File[]) {
+  async function addFiles(files: File[], signal?: AbortSignal) {
     if (fileImportRef.current) { showAnnouncement("正在读取附件，请稍候"); return; }
     if (files.length + attachments.length > 5) { showAnnouncement("每次最多添加 5 个附件"); return; }
     if (preflightGate.cancel()) setCheckingQuota(false);
     fileImportRef.current = true;
     const target = draftKey;
     try {
-      const extracted = await Promise.all(files.map(extractAttachment));
-      const documents = extracted.map(item => ({ id: createLocalId("document"), name: item.name, mimeType: item.mediaType, content: item.text }));
+      // Decode one source at a time; parallel video/image surfaces can stall low-memory devices.
+      const extracted: Awaited<ReturnType<typeof extractAttachment>>[] = [];
+      for (const file of files) {
+        signal?.throwIfAborted();
+        extracted.push(await extractAttachment(file, { signal }));
+      }
+      signal?.throwIfAborted();
+      if (extracted.some(item => item.media) && !aiStatus?.visionEnabled) throw new Error("管理员尚未启用图片理解，请先启用支持视觉输入的模型；附件尚未添加");
+      const documents = extracted.map(item => ({ id: createLocalId("document"), name: item.name, mimeType: item.mediaType, content: item.text, ...(item.media ? { media: item.media } : {}) }));
       if (!mountedRef.current) return;
       const latest = workspaceRef.current;
       const targetExists = target === "new-conversation" || latest.conversations.some(item => item.id === target) || latest.projects.some(item => `new-project-conversation:${item.id}` === target);
       if (!targetExists) return;
       const merged = [...(latest.draftAttachments[target] ?? []), ...documents];
-      validateAttachments(merged.map(item => ({ name: item.name, text: item.content, mediaType: item.mimeType })));
+      validateAttachments(merged.map(workspaceAttachment));
+      documentAttachments(merged);
+      ensureAttachmentWorkspaceCapacity({ ...persistentStateRef.current, draftAttachments: { ...latest.draftAttachments, [target]: merged } });
+      setCapacityNotice(null);
       setDraftAttachments(current => ({ ...current, [target]: merged }));
       const warnings = extracted.flatMap(item => item.warnings);
       if (warnings.length) showAnnouncement(warnings.join("；"));
-    } catch (error) { if (mountedRef.current) showAnnouncement(error instanceof Error ? error.message : "文件读取失败"); }
+    } catch (error) {
+      if (!mountedRef.current) return;
+      if (error instanceof WorkspaceCapacityError) { setCapacityNotice(error.message); return; }
+      throw error;
+    }
     finally { fileImportRef.current = false; }
   }
 
@@ -709,7 +724,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   }
 
   async function sendMessage() {
-    if (!persona.profile.onboardingComplete || !draft.trim() || responding || preflightGate.busy || fileImportRef.current || pendingGenerationRef.current || requestRef.current || quotaInsufficient || !serviceConnected || connectionError) return;
+    if (!persona.profile.onboardingComplete || (!draft.trim() && !attachments.length) || responding || preflightGate.busy || fileImportRef.current || pendingGenerationRef.current || requestRef.current || quotaInsufficient || !serviceConnected || connectionError) return;
     if (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId)) {
       showAnnouncement("此对话正在删除或已被删除，请选择其他对话"); return;
     }
@@ -718,7 +733,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       showAnnouncement(!aiStatus?.imageEnabled ? "请管理员先配置图片模型" : "图片生成暂不支持附件和联网，请先移除或切回对话"); return;
     }
     if (webSearch && !aiStatus?.webSearchEnabled) { showAnnouncement("请关闭联网搜索，或联系管理员启用"); return; }
-    const content = draft.trim();
+    const content = draft.trim() || "请分析附件中的内容。视频仅需分析提供的采样画面，不推测未提供的声音和画面。";
     const conversationId = activeConversation?.id ?? createLocalId("conversation");
     const messageId = createLocalId("assistant");
     const requestId = crypto.randomUUID();
@@ -726,11 +741,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     const documents = [...(activeProject?.contextDocuments ?? []), ...attachments];
     let request: GenerationRequest;
     try {
-      // Prior attachments stay as untrusted source text for follow-up questions.
+      // Prior attachments stay as untrusted source material for follow-up questions.
       const currentDocuments = new Map(documents.map(item => [item.id, item]));
       for (const message of messages) for (const item of message.attachments ?? []) currentDocuments.set(item.id, item);
-      const documentPayload = [...currentDocuments.values()].map(item => ({ name: item.name, text: item.content, mediaType: item.mimeType }));
-      if (composerTool !== "image") validateAttachments(documentPayload);
+      const documentPayload = composerTool === "image" ? [] : documentAttachments([...currentDocuments.values()]);
+      if (documentPayload.some(item => item.dataUrl) && !aiStatus?.visionEnabled) throw new Error("管理员尚未启用图片理解，请联系管理员启用支持视觉输入的模型");
       request = composerTool === "image" ? { requestId, prompt: content } : {
         ...buildChatRequest(requestId, mode, messages), skillIds: skillRequestIds(enabledSkillIds),
         projectContext: activeProject?.instructions || undefined,
@@ -778,6 +793,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       drafts: latest.drafts, draftAttachments: latest.draftAttachments,
       activeProjectId: latest.activeProjectId,
     }, conversation, draftKey);
+    try { ensureAttachmentWorkspaceCapacity(nextState, "reply"); setCapacityNotice(null); }
+    catch (error) {
+      if (error instanceof WorkspaceCapacityError) setCapacityNotice(error.message);
+      else showAnnouncement(error instanceof Error ? error.message : "保存空间不足，草稿已保留");
+      return;
+    }
     pendingGenerationRef.current = conversationId;
     pendingCancelledRef.current = false;
     workspaceRef.current = { ...latest, conversations: nextState.conversations, drafts: nextState.drafts,
@@ -892,6 +913,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       }
       aria-label="同频 AI 工作台"
     >
+      {(capacityNotice || persistence.status === "error" || persistence.status === "conflict") && <div className="tp-ai-workspace-notices">
       {(persistence.status === "error" || persistence.status === "conflict") && <div className="tp-ai-sync-error" role="alert">
         <span>{persistence.error}</span>
         {persistence.status === "error" && <button type="button" onClick={persistence.retry}>重试保存</button>}
@@ -899,6 +921,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         {persistence.status === "conflict" && <button type="button" onClick={() => {
           if (window.confirm("请先导出当前内容。重新加载后将显示云端记录，是否继续？")) window.location.reload();
         }}>重新加载云端</button>}
+      </div>}
+      {capacityNotice && <div className="tp-ai-capacity-notice" role="alert">
+        <span>{capacityNotice}</span>
+        <button type="button" onClick={exportWorkspace}>导出当前内容</button>
+        <button type="button" onClick={() => setCapacityNotice(null)} aria-label="关闭存储空间提示">关闭</button>
+      </div>}
       </div>}
       <TongpinAISidebar
         activeConversationId={activeConversationId}
@@ -968,6 +996,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           composerTool={composerTool}
           onComposerToolChange={setComposerTool}
           imageEnabled={aiStatus?.imageEnabled === true}
+          visionEnabled={aiStatus?.visionEnabled === true}
           webSearchEnabled={aiStatus?.webSearchEnabled === true}
           webSearch={webSearch}
           onWebSearchChange={setWebSearch}

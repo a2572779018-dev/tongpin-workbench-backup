@@ -3,6 +3,8 @@ import type { StoredProvider } from "./storage";
 import { AiError } from "./security";
 import { chatInstructions, chatMessages, safeSource } from "./capabilities";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
+import { createSearchStreamGuard } from "./searchStreamGuard";
+import { AI_WORKSPACE_LIMITS } from "../../shared/aiWorkspace";
 
 export interface AiTransportInit {
   method: "GET" | "POST";
@@ -13,7 +15,7 @@ export interface AiTransportInit {
 }
 export type AiTransport = (url: string, init: AiTransportInit) => Promise<Response>;
 export const AI_TIMEOUT_MS = 120_000;
-export async function readBoundedText(response: Response, maxBytes = 2_000_000): Promise<string> {
+export async function readBoundedText(response: Response, maxBytes = 2_000_000, inspect?: (chunk: string, final: boolean) => void): Promise<string> {
   if (!response.body) throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务没有返回有效内容");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -24,10 +26,16 @@ export async function readBoundedText(response: Response, maxBytes = 2_000_000):
       if (done) break;
       size += value.byteLength;
       if (size > maxBytes) { await reader.cancel(); throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 返回内容过大"); }
-      text += decoder.decode(value, { stream: true });
+      const chunk = decoder.decode(value, { stream: true });
+      text += chunk;
+      inspect?.(chunk, false);
     }
-    return text + decoder.decode();
+    const final = decoder.decode();
+    inspect?.(final, true);
+    return text + final;
   } catch (error) {
+    // Cancel the body immediately when a budget/parser guard fails; do not keep draining paid work.
+    try { await reader.cancel(); } catch { /* Keep the original bounded diagnostic. */ }
     if (error instanceof AiError) throw error;
     throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称");
   } finally { reader.releaseLock(); }
@@ -38,11 +46,12 @@ export async function readBoundedJson(response: Response, maxBytes = 2_000_000):
   catch { throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称"); }
 }
 /** Codex-compatible relays may require Responses SSE. Aggregate only a terminal response, never invent a successful stream. */
-export async function readProviderResponse(response: Response): Promise<unknown> {
-  const text = await readBoundedText(response);
+export async function readProviderResponse(response: Response, options: { maxSearchCalls?: number } = {}): Promise<unknown> {
+  const guard = options.maxSearchCalls === undefined ? undefined : createSearchStreamGuard(options.maxSearchCalls);
+  const text = await readBoundedText(response, 2_000_000, guard?.feed);
   if (!response.headers.get("content-type")?.includes("text/event-stream") && !text.trimStart().startsWith("event:") && !text.trimStart().startsWith("data:")) {
-    try { return JSON.parse(text) as unknown; }
-    catch { throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称"); }
+    try { const value = JSON.parse(text) as unknown; guard?.inspectResponse(value); return value; }
+    catch (error) { if (error instanceof AiError) throw error; throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称"); }
   }
   let completed: unknown;
   for (const block of text.replace(/\r\n/g, "\n").split("\n\n")) {
@@ -55,6 +64,8 @@ export async function readProviderResponse(response: Response): Promise<unknown>
     if (event.type === "response.completed" || event.type === "response.incomplete") completed = { ...object(event.response), status: event.type === "response.incomplete" ? "incomplete" : "completed" };
   }
   if (!completed) throw new AiError(502, "AI_STREAM_INTERRUPTED", "AI 数据流中断，用量暂按预留上限记录，请管理员核对");
+  // Also reconcile events arriving after the terminal envelope before accepting its usage.
+  guard?.inspectResponse(completed);
   return completed;
 }
 /** Only explicit pre-generation HTTP refusals release a reservation. A timeout/conflict may follow paid work. */
@@ -62,13 +73,22 @@ export function isProviderRejection(status: number): boolean {
   return (status >= 300 && status < 400) || [400, 401, 403, 404, 405, 406, 410, 411, 413, 414, 415, 422, 429].includes(status);
 }
 // Provider error fields can echo credentials or prompts. Even syntactically safe arbitrary strings are not safe to expose.
-const SAFE_ERROR_CODES = new Set(["invalid_api_key", "invalid_request_error", "invalid_value", "invalid_parameter", "unsupported_parameter", "unknown_parameter", "model_not_found", "model_not_supported", "permission_denied", "insufficient_quota", "rate_limit_exceeded", "content_policy_violation", "moderation_blocked", "server_error", "internal_error", "service_unavailable", "upstream_error", "timeout", "request_timeout"]);
-const SAFE_ERROR_PARAMS = new Set(["model", "size", "quality", "n", "prompt", "stream", "response_format", "output_format", "background", "moderation", "partial_images", "max_output_tokens", "max_completion_tokens", "reasoning_effort", "reasoning.effort", "tools"]);
+const SAFE_ERROR_CODES = new Set(["invalid_api_key", "invalid_request_error", "invalid_value", "invalid_parameter", "unsupported_parameter", "unknown_parameter", "model_not_found", "model_not_supported", "permission_denied", "insufficient_quota", "rate_limit_exceeded", "content_policy_violation", "moderation_blocked", "server_error", "internal_error", "service_unavailable", "upstream_error", "timeout", "request_timeout", "no_available_compatible_accounts"]);
+const SAFE_ERROR_PARAMS = new Set(["model", "size", "quality", "n", "prompt", "stream", "response_format", "output_format", "background", "moderation", "partial_images", "max_output_tokens", "max_completion_tokens", "reasoning_effort", "reasoning.effort", "tools", "tool_choice", "max_tool_calls", "include", "store", "search_context_size"]);
+function safeErrorParam(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  if (SAFE_ERROR_PARAMS.has(value)) return value;
+  // Some compatible gateways identify a rejected nested parameter instead of the top-level field.
+  // Emit only fixed field names; arbitrary indices/paths can contain prompt or credential material.
+  if (/^tools(?:\[\d{1,3}\]|\.\d{1,3})\.(?:type|search_context_size|external_web_access)$/.test(value)) return `tools[].${value.slice(value.lastIndexOf(".") + 1)}`;
+  return undefined;
+}
 export function providerHttpError(status: number, operation: AiProviderDiagnostic["operation"] = "chat", metadata: { code?: string; param?: string } = {}): AiError {
   const category: AiProviderDiagnostic["category"] = status === 401 || status === 403 ? "authentication" : status === 429 ? "rate_limit" : status >= 300 && status < 400 ? "redirect" : status === 408 || status === 504 ? "timeout" : status === 409 ? "conflict" : status >= 500 ? "upstream_unavailable" : [400, 404, 405, 406, 413, 415, 422].includes(status) ? "invalid_request" : "rejected";
+  const param = safeErrorParam(metadata.param);
   const diagnostic: AiProviderDiagnostic = { operation, httpStatus: status, category, billing: isProviderRejection(status) ? "rejected" : "unknown",
     ...(metadata.code && SAFE_ERROR_CODES.has(metadata.code) ? { code: metadata.code } : {}),
-    ...(metadata.param && SAFE_ERROR_PARAMS.has(metadata.param) ? { param: metadata.param } : {}),
+    ...(param ? { param } : {}),
   };
   const prefix = operation === "image" ? "图片服务" : "AI 服务";
   const http = `（HTTP ${status}）`;
@@ -78,6 +98,7 @@ export function providerHttpError(status: number, operation: AiProviderDiagnosti
   if (category === "redirect") return failure("AI_PROVIDER_REDIRECT", `API 地址发生重定向${http}，已为保护密钥停止连接，请填写最终 API 地址`);
   if (category === "timeout" || category === "conflict" || category === "upstream_unavailable" || diagnostic.billing === "unknown") {
     if (operation === "models") return failure("AI_PROVIDER_UNAVAILABLE", `读取模型列表时服务异常${http}，请稍后重新测试连接；本次测试未发起生成`);
+    if (diagnostic.code === "no_available_compatible_accounts") return failure("AI_PROVIDER_UNAVAILABLE", `${prefix}暂无可用兼容通道${http}，需要服务商恢复对应模型通道；结果与用量待核对，请勿直接重复生成`);
     return failure("AI_PROVIDER_UNAVAILABLE", `${prefix}${category === "timeout" ? "处理超时" : category === "conflict" ? "报告请求冲突" : "暂时故障"}${http}，结果与用量待核对；请管理员先核对服务商记录，不要直接重复生成`);
   }
   const hint = diagnostic.code === "content_policy_violation" || diagnostic.code === "moderation_blocked" ? "内容未通过服务商审核" : diagnostic.code === "model_not_found" || diagnostic.code === "model_not_supported" ? "模型不存在或当前分组不支持" : diagnostic.param ? `参数 ${diagnostic.param} 不被当前接口接受` : "请管理员检查对应 API 地址、接口参数、模型名称及密钥分组";
@@ -89,7 +110,16 @@ export async function readProviderHttpError(response: Response, operation: AiPro
   try {
     const root = object(await readBoundedJson(response, 16 * 1024));
     const error = object(root.error);
-    metadata = { ...(typeof error.code === "string" ? { code: error.code } : {}), ...(typeof error.param === "string" ? { param: error.param } : {}) };
+    // OpenAI-compatible errors sometimes put invalid_request_error in type while code is null.
+    const code = [error.code, error.type].find(value => typeof value === "string" && SAFE_ERROR_CODES.has(value));
+    metadata = { ...(typeof code === "string" ? { code } : {}), ...(typeof error.param === "string" ? { param: error.param } : {}) };
+    // Observed Codex-compatible gateway refusal: no code/param, only this exact message.
+    // An anchored, known-field match is diagnostic evidence, never permission to echo arbitrary text.
+    const unsupported = typeof error.message === "string" ? /^Unsupported parameter: ([a-z_]+)$/.exec(error.message) : null;
+    if (unsupported && SAFE_ERROR_PARAMS.has(unsupported[1]) && !metadata.param) {
+      metadata = { code: typeof code === "string" ? code : "unsupported_parameter", param: unsupported[1] };
+    }
+    if (error.message === "No available compatible accounts") metadata.code = "no_available_compatible_accounts";
   } catch { /* Oversized, non-JSON and interrupted error bodies do not erase the received HTTP status. */ }
   return providerHttpError(response.status, operation, metadata);
 }
@@ -128,6 +158,8 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
     const message = object(choice.message);
     if (typeof message.content === "string") content = message.content;
   }
+  if (content.length > AI_WORKSPACE_LIMITS.messageCharacters) throw new AiError(502, "AI_RESPONSE_TOO_LONG", "AI 回复超出可保存长度，未将截断内容作为完整回复；用量待管理员核对，请勿直接重复发送");
+  if (content.includes("\u0000")) throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 回复包含无法保存的字符，用量待管理员核对；请勿直接重复发送");
   const u = object(root.usage);
   const input = protocol === "responses" ? u.input_tokens : u.prompt_tokens;
   const output = protocol === "responses" ? u.output_tokens : u.completion_tokens;
@@ -150,7 +182,7 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
       ? { role: message.role, content: [{ type: "input_text", text: message.content }, ...images.map(item => ({ type: "input_image", image_url: item.dataUrl, detail: "low" }))] }
       : message),
     max_output_tokens: maxOutputTokens, stream: true, store: false,
-    ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], max_tool_calls: 1, tool_choice: "required", include: ["web_search_call.action.sources"] } : {}),
+    ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], ...(provider.webSearchProtocol === "compatible" ? {} : { max_tool_calls: 1 }), tool_choice: "required", include: ["web_search_call.action.sources"] } : {}),
     ...(request.mode === "deep" && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort } } : {}),
   };
   return {

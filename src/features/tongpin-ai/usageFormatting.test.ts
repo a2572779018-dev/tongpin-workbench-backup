@@ -17,6 +17,8 @@ describe("honest text and tool billing labels", () => {
     expect(aiUsageTotal(image)).toBe("2,000 同频点");
     const search = { ...image, inputTokens: 12, outputTokens: 8, totalTokens: 2_020, estimated: false, billingKind: "tokens_with_search" as const };
     expect(aiUsageDescription(search)).toBe("输入 12 / 输出 8 Token · 搜索折算 2,000 同频点");
+    expect(aiUsageDescription({ ...search, estimated: true, tokenUsageEstimated: false, searchCalls: 2 })).toBe("输入 12 / 输出 8 Token · 搜索 2 次折算 2,000 同频点");
+    expect(aiUsageDescription({ ...search, estimated: true, tokenUsageEstimated: true, searchCalls: 2 })).toContain("文本用量待核对");
     expect(aiUsageTotal(search)).toBe("2,020 同频点");
   });
   it("keeps historic and estimated text records intact rather than recomputing totals", () => {

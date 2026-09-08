@@ -1,15 +1,22 @@
+import type { AiAttachment } from "../../../shared/ai";
+import type { AiWorkspaceDocument, AiWorkspaceMedia } from "../../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS } from "../../../shared/aiWorkspace";
+import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT, AI_MEDIA_LIMITS, mediaFrameByteLength } from "../../../shared/aiMedia";
+
 /** Files are source material, not privileged instructions or executable skills. */
 export interface AiTextAttachment {
   name: string;
   text: string;
   mediaType: string;
+  media?: AiWorkspaceMedia;
 }
 
 export interface ExtractedAttachment extends AiTextAttachment {
   warnings: string[];
 }
 
-export const ATTACHMENT_ACCEPT = ".txt,.md,.markdown,.csv,.json,.pdf,.docx";
+export const TEXT_ATTACHMENT_ACCEPT = ".txt,.md,.markdown,.csv,.json,.pdf,.docx";
+export const ATTACHMENT_ACCEPT = `${TEXT_ATTACHMENT_ACCEPT},${AI_IMAGE_ACCEPT},${AI_VIDEO_ACCEPT}`;
 export const MAX_ATTACHMENTS = 5;
 export const MAX_ATTACHMENT_CHARACTERS = 24_000;
 export const MAX_ATTACHMENT_TOTAL_BYTES = 48_000;
@@ -21,18 +28,43 @@ export class AttachmentError extends Error {
   constructor(message: string) { super(message); this.name = "AttachmentError"; }
 }
 
+export class WorkspaceCapacityError extends AttachmentError {
+  constructor(readonly phase: "attachment" | "reply") {
+    super(phase === "attachment"
+      ? "工作台附件保存空间不足，请先导出备份并整理不再需要的历史对话；本次附件未添加，原记录保持不变"
+      : "当前云端对话资料空间不足，无法保存下一条回复。请先导出备份并整理历史对话；草稿已保留，本次未发送、未扣费");
+    this.name = "WorkspaceCapacityError";
+  }
+}
+
 const utf8Length = (text: string) => new TextEncoder().encode(text).length;
 
 export function validateAttachments(attachments: readonly AiTextAttachment[]): void {
   if (attachments.length > MAX_ATTACHMENTS) throw new AttachmentError("每次最多添加 5 个附件");
   let total = 0;
+  let frames = 0;
+  let visualBytes = 0;
   for (const attachment of attachments) {
-    if (!attachment.name.trim() || attachment.name.length > 160) throw new AttachmentError("文件名过长，请缩短后再添加");
-    if (!attachment.text.trim()) throw new AttachmentError(`${attachment.name} 没有可读取的文字`);
+    if (!attachment.name.trim() || attachment.name.length > 160 || /[\u0000-\u001f\u007f]/.test(attachment.name)) throw new AttachmentError("文件名过长或含无效字符，请重命名后再添加");
+    if (!attachment.text.trim() && !attachment.media) throw new AttachmentError(`${attachment.name} 没有可读取的文字`);
     if (attachment.text.length > MAX_ATTACHMENT_CHARACTERS) throw new AttachmentError(`${attachment.name} 文字过长，每个附件最多 24,000 字符，请拆分文件`);
     total += utf8Length(attachment.text);
+    if (attachment.media) {
+      const media = attachment.media;
+      if (!["image", "video"].includes(media.kind) || !media.frames.length || media.frames.length > (media.kind === "image" ? 1 : AI_MEDIA_LIMITS.videoFrames)) throw new AttachmentError("图片或视频采样内容无效，请重新添加");
+      if (media.kind === "video" && (!Number.isFinite(media.durationSeconds) || !media.durationSeconds || media.durationSeconds > AI_MEDIA_LIMITS.videoSeconds)) throw new AttachmentError("视频时长无效，请重新添加");
+      for (const frame of media.frames) {
+        const bytes = mediaFrameByteLength(frame.dataUrl);
+        if (bytes > AI_MEDIA_LIMITS.frameBytes) throw new AttachmentError("图片压缩结果过大或无效，请重新添加");
+        if (media.kind === "video" && (!Number.isFinite(frame.timeSeconds) || frame.timeSeconds! < 0 || frame.timeSeconds! >= media.durationSeconds!)) throw new AttachmentError("视频采样时间无效，请重新添加");
+        visualBytes += bytes;
+        frames += 1;
+      }
+    }
   }
   if (total > MAX_ATTACHMENT_TOTAL_BYTES) throw new AttachmentError("附件文字合计过长，请减少附件或精简内容后再发送");
+  if (frames > AI_MEDIA_LIMITS.requestFrames) throw new AttachmentError("每次最多分析 5 张图片或视频采样帧，请减少附件；历史图片过多时请新建对话");
+  if (visualBytes > AI_MEDIA_LIMITS.requestBytes) throw new AttachmentError("图片内容合计过大，请减少附件");
 }
 
 function cleanText(text: string): string {
@@ -84,22 +116,30 @@ export function validateDocxArchive(bytes: Uint8Array): void {
   if (offset !== directoryEnd || !hasDocument) throw new AttachmentError("文件不是有效的 DOCX 文档");
 }
 
-async function extractPdf(bytes: Uint8Array): Promise<{ text: string; warnings: string[] }> {
+async function extractPdf(bytes: Uint8Array, signal?: AbortSignal): Promise<{ text: string; warnings: string[] }> {
+  signal?.throwIfAborted();
   const [pdfjs, worker] = await Promise.all([
     import("pdfjs-dist"), import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
   ]);
   pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
   const task = pdfjs.getDocument({ data: bytes, useSystemFonts: false, disableFontFace: true, enableXfa: false, useWasm: false });
+  let destruction: Promise<void> | undefined;
+  const destroy = () => destruction ??= task.destroy();
+  const abort = () => { void destroy().catch(() => undefined); };
+  signal?.addEventListener("abort", abort, { once: true });
   try {
+    signal?.throwIfAborted();
     const document = await task.promise;
     if (document.numPages > MAX_PDF_PAGES) throw new AttachmentError("PDF 最多支持 60 页，请拆分后上传");
     const pages: string[] = [];
     let characters = 0;
     let emptyPages = 0;
     for (let number = 1; number <= document.numPages; number += 1) {
+      signal?.throwIfAborted();
       const page = await document.getPage(number);
       try {
         const content = await page.getTextContent();
+        signal?.throwIfAborted();
         const text = content.items.map(item => "str" in item ? item.str + (item.hasEOL ? "\n" : " ") : "").join("").trim();
         characters += text.length + 2;
         if (characters > MAX_ATTACHMENT_CHARACTERS) throw new AttachmentError("PDF 文字过长，请拆分后上传");
@@ -111,17 +151,24 @@ async function extractPdf(bytes: Uint8Array): Promise<{ text: string; warnings: 
     if (!text) throw new AttachmentError("这个 PDF 没有可提取的文字，可能是扫描件。OCR 尚未接入，请提供文字版 PDF 或粘贴文字");
     return { text, warnings: emptyPages ? [`${emptyPages} 页没有可提取文字，图片和扫描内容未识别`] : [] };
   } catch (error) {
+    signal?.throwIfAborted();
     if (error instanceof AttachmentError) throw error;
     if (error instanceof Error && error.name === "PasswordException") throw new AttachmentError("PDF 已加密，请先解除密码后上传");
     throw new AttachmentError("PDF 读取失败，请检查文件是否损坏或另存为文字版 PDF");
-  } finally { await task.destroy(); }
+  } finally { signal?.removeEventListener("abort", abort); await destroy(); }
 }
 
-export async function extractAttachment(file: File): Promise<ExtractedAttachment> {
+export async function extractAttachment(file: File, options: { signal?: AbortSignal; allowMedia?: boolean } = {}): Promise<ExtractedAttachment> {
+  options.signal?.throwIfAborted();
   if (!file.size) throw new AttachmentError("不能添加空文件");
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (["png", "jpg", "jpeg", "webp", "mp4", "webm", "mov", "m4v"].includes(extension ?? "")) {
+    if (options.allowMedia === false) throw new AttachmentError("请在对话中添加图片或视频，项目资料目前支持文字文档");
+    const { extractMediaAttachment } = await import("./mediaAttachments");
+    return extractMediaAttachment(file, options.signal);
+  }
   if (file.size > MAX_ATTACHMENT_FILE_BYTES) throw new AttachmentError("单个附件最大 5 MB，请压缩或拆分后上传");
   if (file.name.length > 160) throw new AttachmentError("文件名过长，请缩短后再添加");
-  const extension = file.name.split(".").pop()?.toLowerCase();
   if (!["txt", "md", "markdown", "csv", "json", "pdf", "docx"].includes(extension ?? "")) throw new AttachmentError("支持 TXT、Markdown、CSV、JSON、PDF 和 DOCX 文件");
   const bytes = new Uint8Array(await file.arrayBuffer());
   let text: string;
@@ -129,7 +176,7 @@ export async function extractAttachment(file: File): Promise<ExtractedAttachment
   let warnings: string[] = [];
   if (extension === "pdf") {
     if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") throw new AttachmentError("文件内容不是 PDF");
-    ({ text, warnings } = await extractPdf(bytes));
+    ({ text, warnings } = await extractPdf(bytes, options.signal));
     mediaType = "application/pdf";
   } else if (extension === "docx") {
     validateDocxArchive(bytes);
@@ -154,11 +201,40 @@ export async function extractAttachment(file: File): Promise<ExtractedAttachment
     mediaType = extension === "json" ? "application/json" : extension === "csv" ? "text/csv" : extension === "txt" ? "text/plain" : "text/markdown";
   }
   const attachment = { name: file.name, text, mediaType, warnings };
+  options.signal?.throwIfAborted();
   validateAttachments([attachment]);
   return attachment;
 }
 
 /** Use this boundary when sending: local extraction warnings are not part of the API contract. */
 export function attachmentPayload(attachment: AiTextAttachment): AiTextAttachment {
-  return { name: attachment.name, text: attachment.text, mediaType: attachment.mediaType };
+  return { name: attachment.name, text: attachment.text, mediaType: attachment.mediaType, ...(attachment.media ? { media: attachment.media } : {}) };
+}
+
+export function workspaceAttachment(document: AiWorkspaceDocument): AiTextAttachment {
+  return { name: document.name, text: document.content, mediaType: document.mimeType, ...(document.media ? { media: document.media } : {}) };
+}
+
+/** Expand sampled video frames into the existing, validated image API contract. */
+export function documentAttachments(documents: readonly AiWorkspaceDocument[]): AiAttachment[] {
+  const attachments = documents.map(workspaceAttachment);
+  validateAttachments(attachments);
+  const result: AiAttachment[] = [];
+  for (const item of attachments) {
+    if (!item.media) { result.push({ name: item.name, text: item.text, mediaType: item.mediaType }); continue; }
+    for (const [index, frame] of item.media.frames.entries()) {
+      const time = item.media.kind === "video" ? `，采样时间 ${frame.timeSeconds!.toFixed(2)} 秒` : "";
+      result.push({ name: `${item.name.slice(0, 120)}${time}`, mediaType: "image/jpeg", dataUrl: frame.dataUrl,
+        text: item.media.kind === "video" ? `视频 ${item.name}：第 ${index + 1}/${item.media.frames.length} 个采样画面，时间 ${frame.timeSeconds!.toFixed(2)} 秒，总时长 ${item.media.durationSeconds!.toFixed(2)} 秒。仅分析这些静态画面，不包含音频；未采样部分未知。` : `图片附件：${item.name}` });
+    }
+  }
+  if (result.length > MAX_ATTACHMENTS) throw new AttachmentError("文档、图片和视频采样帧合计最多 5 份，请减少附件或新建对话");
+  return result;
+}
+
+/** Leave room for a maximum-length text reply and bounded source metadata, not just a short answer. */
+export function ensureAttachmentWorkspaceCapacity(state: unknown, phase: "attachment" | "reply" = "attachment"): void {
+  if (utf8Length(JSON.stringify(state)) > AI_WORKSPACE_LIMITS.stateBytes - 1024 * 1024) {
+    throw new WorkspaceCapacityError(phase);
+  }
 }

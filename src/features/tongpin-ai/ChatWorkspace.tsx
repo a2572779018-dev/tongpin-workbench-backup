@@ -16,6 +16,7 @@ import {
   Square,
   X,
   Zap,
+  Video,
 } from "lucide-react";
 import {
   useCallback,
@@ -38,7 +39,8 @@ import { TongpinAICharacter } from "./visuals/TongpinAICharacter";
 import type { AiPersonaExpression } from "../../../shared/aiPersona";
 import { didCharacterReplyComplete, type CharacterActivity, type CharacterReplySnapshot } from "./visuals/characterExpression";
 import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
-import { ATTACHMENT_ACCEPT } from "./attachments";
+import { ATTACHMENT_ACCEPT, TEXT_ATTACHMENT_ACCEPT, workspaceAttachment } from "./attachments";
+import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT } from "../../../shared/aiMedia";
 import { AttachmentChips } from "./AttachmentChips";
 import { ChatMessageRow } from "./ChatMessageRow";
 import { CHAT_MESSAGE_PAGE_SIZE } from "./chatPerformance";
@@ -70,11 +72,12 @@ interface ChatWorkspaceProps {
   onDraftChange: (draft: string) => void;
   onDemoAction?: (action: TongpinAIDemoAction) => void;
   attachments?: AiWorkspaceDocument[];
-  onAddFiles?: (files: File[]) => void | Promise<void>;
+  onAddFiles?: (files: File[], signal?: AbortSignal) => void | Promise<void>;
   onRemoveAttachment?: (index: number) => void;
   composerTool?: "text" | "presentation" | "image";
   onComposerToolChange?: (tool: "text" | "presentation" | "image") => void;
   imageEnabled?: boolean;
+  visionEnabled?: boolean;
   webSearchEnabled?: boolean;
   webSearch?: boolean;
   onWebSearchChange?: (enabled: boolean) => void;
@@ -122,6 +125,7 @@ export function ChatWorkspace({
   composerTool = "text",
   onComposerToolChange,
   imageEnabled = false,
+  visionEnabled = false,
   webSearchEnabled = false,
   webSearch = false,
   onWebSearchChange,
@@ -150,6 +154,9 @@ export function ChatWorkspace({
   const [copyError, setCopyError] = useState("");
   const copyTimer = useRef<number | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
+  const attachmentController = useRef<AbortController | null>(null);
   const skillInputRef = useRef<HTMLInputElement>(null);
   const isEmpty = messages.length === 0;
   const [readingFiles, setReadingFiles] = useState(false);
@@ -157,6 +164,7 @@ export function ChatWorkspace({
   const [celebrating, setCelebrating] = useState(false);
   const previousReply = useRef<CharacterReplySnapshot>({});
   const fileReadingRef = useRef(false);
+  useEffect(() => () => attachmentController.current?.abort(), [conversationId]);
   const [historyWindow, setHistoryWindow] = useState({ conversationId, count: CHAT_MESSAGE_PAGE_SIZE });
   const historyAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const callbacksRef = useRef({ onOpenArtifact, onRetry });
@@ -192,8 +200,8 @@ export function ChatWorkspace({
     setCopyError("");
     historyAnchorRef.current = null;
     const list = messageListRef.current;
-    if (list) list.scrollTop = list.scrollHeight;
-  }, [conversationId]);
+    if (list) list.scrollTop = isEmpty ? 0 : list.scrollHeight;
+  }, [conversationId, isEmpty]);
   useLayoutEffect(() => {
     const anchor = historyAnchorRef.current;
     const list = messageListRef.current;
@@ -202,8 +210,8 @@ export function ChatWorkspace({
   }, [visibleCount]);
   useEffect(() => {
     const list = messageListRef.current;
-    if (list && followResponseRef.current) list.scrollTop = list.scrollHeight;
-  }, [messages]);
+    if (list && followResponseRef.current) list.scrollTop = isEmpty ? 0 : list.scrollHeight;
+  }, [messages, isEmpty]);
   useEffect(() => {
     // Local typewriter updates do not rerender this workspace. Observe only the
     // active reply's height to retain follow-to-bottom without a polling loop.
@@ -283,17 +291,18 @@ export function ChatWorkspace({
 
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    if (!draft.trim() || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || capabilityUnavailable) return;
+    if ((!draft.trim() && !attachments.length) || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || capabilityUnavailable) return;
     followResponseRef.current = true;
     setMenu(null);
     onSubmit();
   }
   async function addFiles(files: File[]) {
     if (!files.length || !onAddFiles || fileReadingRef.current) return;
+    const controller = new AbortController(); attachmentController.current = controller;
     fileReadingRef.current = true; setReadingFiles(true); setFileError("");
-    try { await onAddFiles(files); }
-    catch (caught) { setFileError(caught instanceof Error ? caught.message : "附件读取失败，请重试"); }
-    finally { fileReadingRef.current = false; setReadingFiles(false); }
+    try { await onAddFiles(files, controller.signal); }
+    catch (caught) { if (!controller.signal.aborted) setFileError(caught instanceof Error ? caught.message : "附件读取失败，请重试"); }
+    finally { if (attachmentController.current === controller) attachmentController.current = null; fileReadingRef.current = false; setReadingFiles(false); }
   }
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
@@ -399,7 +408,6 @@ export function ChatWorkspace({
       </div>
 
       <footer className="tp-ai-composer-wrap">
-        {readingFiles ? <p className="tp-ai-copy-error" role="status">正在读取附件，请稍候…</p> : null}
         {fileError ? <p className="tp-ai-copy-error" role="alert">{fileError}</p> : null}
         {capabilityUnavailable && serviceConnected ? <div className="tp-ai-quota-block" role="status"><span>{composerTool === "image" ? "图片生成尚未启用，请取消图片模式或联系管理员配置。" : "联网搜索当前不可用，请关闭搜索或联系管理员配置。"}</span></div> : null}
         {(connectionError || (!connectionLoading && !serviceConnected)) && (
@@ -444,7 +452,15 @@ export function ChatWorkspace({
         )}
         <div className="tp-ai-beam-wrap">
           <form className="tp-ai-composer" onSubmit={submitMessage}>
-            <input ref={fileInputRef} type="file" accept={ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
+            <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
+              const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
+              if (files.length) void addFiles(files);
+            }} />
+            <input ref={imageInputRef} type="file" aria-label="选择图片" accept={AI_IMAGE_ACCEPT} multiple hidden onChange={event => {
+              const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
+              if (files.length) void addFiles(files);
+            }} />
+            <input ref={videoInputRef} type="file" aria-label="选择视频" accept={AI_VIDEO_ACCEPT} hidden onChange={event => {
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);
             }} />
@@ -452,7 +468,8 @@ export function ChatWorkspace({
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);
             }} />
-            {attachments.length ? <AttachmentChips attachments={attachments.map(file => ({ name: file.name, text: file.content, mediaType: file.mimeType }))} onRemove={index => onRemoveAttachment?.(index)} disabled={responding || readingFiles} /> : null}
+            {attachments.length ? <AttachmentChips attachments={attachments.map(workspaceAttachment)} onRemove={index => onRemoveAttachment?.(index)} disabled={responding || readingFiles} /> : null}
+            {readingFiles ? <div className="tp-ai-attachment-progress" role="status"><LoaderCircle size={16} />正在处理附件…<button type="button" onClick={() => attachmentController.current?.abort()}>取消</button></div> : null}
             {composerTool !== "text" || webSearch ? <div className="tp-ai-composer-capabilities" aria-label="当前生成设置">
               {composerTool !== "text" ? <button type="button" disabled={responding} onClick={() => onComposerToolChange?.("text")} aria-label={`取消${composerTool === "presentation" ? "生成 PPT" : "生成图片"}`}>
                 {composerTool === "presentation" ? <Presentation size={14} /> : <ImageIcon size={14} />}{composerTool === "presentation" ? "生成 PPT" : "生成图片"}<X size={13} />
@@ -470,6 +487,14 @@ export function ChatWorkspace({
               placeholder={composerTool === "image" ? "描述你想生成的图片…" : composerTool === "presentation" ? "告诉我 PPT 的主题、用途和页数…" : `把任务交给${assistantName}…`}
               onChange={(event) => onDraftChange(event.target.value)}
               onKeyDown={handleComposerKeyDown}
+              onPaste={event => {
+                const images = Array.from(event.clipboardData.files).filter(file => file.type.startsWith("image/"));
+                if (!images.length) return;
+                event.preventDefault();
+                if (composerTool === "image") { setFileError("图片生成模式暂不支持参考图，请切换到对话后添加图片"); return; }
+                if (!visionEnabled) { setFileError("请管理员先启用图片理解"); return; }
+                if (!responding) void addFiles(images);
+              }}
             />
             <div className="tp-ai-composer__toolbar" ref={toolbarRef}>
               <div className="tp-ai-composer__actions">
@@ -538,6 +563,16 @@ export function ChatWorkspace({
                           <Paperclip size={18} />
                           <span>上传文件</span>
                           <small>文档资料</small>
+                        </button>
+                        <button type="button" role="menuitem" disabled={responding || readingFiles || composerTool === "image" || !visionEnabled || !onAddFiles}
+                          title={!visionEnabled ? "请管理员启用支持视觉输入的模型" : "PNG、JPEG、WebP，单张最大 12 MB"}
+                          onClick={() => { setMenu(null); imageInputRef.current?.click(); }}>
+                          <ImageIcon size={18} /><span>上传图片</span><small>{visionEnabled ? "图片理解" : "需管理员启用"}</small>
+                        </button>
+                        <button type="button" role="menuitem" disabled={responding || readingFiles || composerTool === "image" || !visionEnabled || !onAddFiles}
+                          title={!visionEnabled ? "请管理员启用支持视觉输入的模型" : "最多 2 分钟 / 50 MB；分析最多 4 个采样画面，不含音频"}
+                          onClick={() => { setMenu(null); videoInputRef.current?.click(); }}>
+                          <Video size={18} /><span>上传视频</span><small>采样画面 · 无音频</small>
                         </button>
                         <button
                           type="button"
@@ -642,7 +677,7 @@ export function ChatWorkspace({
                 <button
                   type="submit"
                   className="tp-ai-send-button"
-                  disabled={checkingQuota || readingFiles || quotaInsufficient || !draft.trim() || !serviceConnected || Boolean(connectionError) || connectionLoading || capabilityUnavailable}
+                  disabled={checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || capabilityUnavailable}
                   aria-label={checkingQuota ? "正在核对额度" : "发送消息"}
                   aria-busy={checkingQuota}
                 >

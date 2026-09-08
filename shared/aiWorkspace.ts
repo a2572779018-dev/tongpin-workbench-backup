@@ -3,12 +3,20 @@ import type { AiMode, AiSource, AiUsage } from "./ai";
 /** JSON-only workspace payload. Provider credentials and executable code never belong here. */
 export type AiWorkspaceJson = null | boolean | number | string | AiWorkspaceJson[] | { [key: string]: AiWorkspaceJson };
 
+/** Only bounded, locally compressed visual frames; never original video, audio or file paths. */
+export interface AiWorkspaceMedia {
+  kind: "image" | "video";
+  frames: Array<{ dataUrl: string; timeSeconds?: number }>;
+  durationSeconds?: number;
+}
+
 export interface AiWorkspaceDocument {
   id: string;
   name: string;
   mimeType: string;
   content: string;
   createdAt?: string;
+  media?: AiWorkspaceMedia;
 }
 
 export interface AiWorkspaceMessage {

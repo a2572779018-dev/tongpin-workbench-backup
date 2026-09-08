@@ -21,6 +21,41 @@ describe("Safe upstream HTTP diagnostics", () => {
     expect(JSON.stringify(error)).not.toMatch(/customer|sk_test|secret/);
     expect(providerHttpError(400, "image", { code: "key_should_not_leak", param: "prompt_should_not_leak" }).diagnostic).not.toHaveProperty("code");
   });
+  it.each(["max_tool_calls", "tool_choice", "include", "search_context_size", "store"])("retains the fixed Responses compatibility parameter %s", async param => {
+    const error = await readProviderHttpError(Response.json({ error: { code: null, type: "invalid_request_error", param, message: "private request text" } }, { status: 400 }), "chat");
+    expect(error.diagnostic).toMatchObject({ code: "invalid_request_error", param, billing: "rejected" });
+    expect(error.message).toContain(`参数 ${param}`);
+    expect(JSON.stringify(error)).not.toContain("private request text");
+  });
+  it("recognizes the observed gateway's exact unsupported-parameter message without echoing message text", async () => {
+    const error = await readProviderHttpError(Response.json({ error: { message: "Unsupported parameter: max_tool_calls" } }, { status: 400 }), "chat");
+    expect(error.diagnostic).toMatchObject({ code: "unsupported_parameter", param: "max_tool_calls", billing: "rejected" });
+    expect(error.message).toContain("参数 max_tool_calls");
+    expect(error.message).not.toContain("Unsupported parameter:");
+  });
+  it("distinguishes the observed unavailable image channel while keeping billing uncertain", async () => {
+    const error = await readProviderHttpError(Response.json({ error: { message: "No available compatible accounts" } }, { status: 503 }), "image");
+    expect(error.diagnostic).toMatchObject({ httpStatus: 503, code: "no_available_compatible_accounts", billing: "unknown" });
+    expect(error.message).toContain("暂无可用兼容通道");
+    expect(error.message).not.toContain("请管理员检查对应 API 地址");
+    const arbitrary = await readProviderHttpError(Response.json({ error: { message: "No available compatible accounts for private-key" } }, { status: 503 }), "image");
+    expect(arbitrary.diagnostic).not.toHaveProperty("code");
+  });
+  it.each(["Unsupported parameter: private_api_key", "Unsupported parameter: max_tool_calls\nprivate prompt", "Unsupported parameter: max_tool_calls private-key", "Private prompt: Unsupported parameter: max_tool_calls"])("does not extract arbitrary or trailing message content: %s", async message => {
+    const error = await readProviderHttpError(Response.json({ error: { message } }, { status: 400 }), "chat");
+    expect(error.diagnostic).not.toHaveProperty("param");
+    expect(error.diagnostic).not.toHaveProperty("code");
+    expect(error.message).not.toContain("private");
+  });
+  it.each(["tools[0].type", "tools.1.type", "tools[0].search_context_size", "tools[0].external_web_access"])("normalizes a known nested search field without retaining the original path: %s", async param => {
+    const error = await readProviderHttpError(Response.json({ error: { code: "unsupported_parameter", param } }, { status: 400 }), "chat");
+    expect(error.diagnostic?.param).toBe(`tools[].${param.slice(param.lastIndexOf(".") + 1)}`);
+  });
+  it.each(["tools[private-api-key].type", "tools[0].private-prompt", "tools[1234].type", "tool_choice.private-key"])("does not expose unrecognized nested error path %s", async param => {
+    const error = await readProviderHttpError(Response.json({ error: { type: "private-secret-type", param } }, { status: 400 }), "chat");
+    expect(error.diagnostic).not.toHaveProperty("param");
+    expect(error.diagnostic).not.toHaveProperty("code");
+  });
   it("does not describe a model-list GET failure as a paid generation", () => {
     const error = providerHttpError(503, "models");
     expect(error.message).toContain("本次测试未发起生成");

@@ -40,6 +40,18 @@ describe("AI administrator provider forms", () => {
   it.each([0, 15, 32_769, 1.5, NaN])("rejects invalid output cap %s", (maxOutputTokens) => {
     expect(validateAiProviderInput({ ...provider, maxOutputTokens }, saved)).toContain("16–32,768");
   });
+  it.each([0, 255, 131073, 1.5, NaN])("rejects invalid image input reserve %s", visionInputReserveTokens => {
+    expect(validateAiProviderInput({ ...provider, visionInputReserveTokens }, saved)).toContain("256 到 131072");
+  });
+  it("accepts explicit search compatibility and bounded image reservation without enabling vision by itself", () => {
+    expect(validateAiProviderInput({ ...provider, webSearchProtocol: "compatible", visionInputReserveTokens: 4096 }, saved)).toBe("");
+    const source = readFileSync(new URL("./AdminAiProviderSettings.tsx", import.meta.url), "utf8");
+    expect(source).toContain('webSearchProtocol: input.webSearchProtocol ?? "standard"');
+    expect(source).toContain('visionInputReserveTokens: input.visionInputReserveTokens ?? 4096');
+    expect(source).toContain('visionEnabled: input.visionEnabled ?? false');
+    expect(source).toContain("不包含音轨");
+    expect(source).toContain("不能保证服务商同时停止计费");
+  });
   it("does not expose arbitrary error responses that may echo credentials", () => {
     expect(adminAiErrorMessage(new ApiRequestError(502, "PROVIDER_ERROR", "secret-token"), "连接失败")).toBe("连接失败");
     expect(adminAiErrorMessage(new Error("secret-token"), "连接失败")).toBe("连接失败");

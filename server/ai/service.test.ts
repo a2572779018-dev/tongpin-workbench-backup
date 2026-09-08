@@ -74,6 +74,7 @@ describe("AI transactional service", () => {
     expect(runtime.service.quota("member-b").limitTokens).toBe(0);
     await runtime.service.chat("member-a", body);
     expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0][1].headers.Accept).toBe("application/json");
     await expect(runtime.service.chat("member-a", { ...body, messages: [{ role: "user", content: "另一个问题" }] })).rejects.toMatchObject({ code: "AI_REQUEST_CONFLICT" });
     expect(runtime.store.usage("member-a").filter(e => e.kind === "chat")).toHaveLength(1);
   });
@@ -98,6 +99,7 @@ describe("AI transactional service", () => {
     const result = await runtime.service.chat("member-a", { ...chat(), mode: "deep" });
     const [url, init] = transport.mock.calls[0];
     expect(url).toBe("https://api.example.com/v1/responses");
+    expect(init.headers.Accept).toBe("text/event-stream, application/json");
     expect(JSON.parse(init.body!)).toMatchObject({ model: "deep-model", store: false, stream: true, max_output_tokens: 1024, reasoning: { effort: "high" } });
     expect(result).toMatchObject({ content: "真正回复", usage: { totalTokens: 20, estimated: false } });
   });
@@ -111,6 +113,25 @@ describe("AI transactional service", () => {
     transport.mockResolvedValueOnce(new Response('data: {"type":"response.output_text.delta","delta":"半句"}\n\n', { headers: { "content-type": "text/event-stream" } }));
     await expect(runtime.service.chat("member-a", chat())).rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
     expect(runtime.store.usage("member-a")[0]).toMatchObject({ status: "uncertain", estimated: true });
+  });
+  it.each(["responses", "chat_completions"] as const)("rejects an unpersistable %s reply without truncating, losing request state or generating twice", async protocol => {
+    await runtime.service.saveProvider({ ...provider, protocol });
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 5000 });
+    const content = "长".repeat(128001);
+    const value = protocol === "responses"
+      ? { status: "completed", output_text: content, usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 } }
+      : { choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } };
+    transport.mockResolvedValueOnce(Response.json(value));
+    const request = chat();
+    await expect(runtime.service.chat("member-a", request)).rejects.toMatchObject({ code: "AI_RESPONSE_TOO_LONG" });
+    const record = runtime.service.getRequestResult("member-a", request.requestId);
+    expect(record).toMatchObject({ status: "uncertain", error: { code: "AI_RESPONSE_TOO_LONG" } });
+    expect(record.result).toBeUndefined();
+    expect(JSON.stringify(record)).not.toContain(content);
+    expect(runtime.store.usage("member-a")[0]).toMatchObject({ status: "uncertain", estimated: true });
+    expect(runtime.service.quota("member-a").reservedTokens).toBe(0);
+    await expect(runtime.service.chat("member-a", request)).rejects.toMatchObject({ code: "AI_RESPONSE_TOO_LONG" });
+    expect(transport).toHaveBeenCalledTimes(1);
   });
   it("decodes Chinese UTF-8 across SSE chunk boundaries and counts final output tokens once including reasoning", async () => {
     await runtime.service.saveProvider({ ...provider, protocol: "responses" });

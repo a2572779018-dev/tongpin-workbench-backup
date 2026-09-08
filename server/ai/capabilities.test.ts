@@ -110,6 +110,32 @@ describe("Reviewed AI capabilities through transactional service", () => {
     await expect(runtime.service.chat("member", chat({ attachments: [{ name: "photo.png", dataUrl }] }))).rejects.toMatchObject({ code: "AI_VISION_DISABLED" });
     expect(transport).not.toHaveBeenCalled();
   });
+  it.each(["image/jpeg", "video/mp4", "image/png", "VIDEO/WEBM"])("blocks legacy %s placeholder requests before reserving, charging or creating a generation record", async mediaType => {
+    await runtime.service.saveProvider({ ...provider, visionEnabled: true });
+    const request = chat({ attachments: [{ name: "old-client-media", mediaType, text: "视频：sample.mp4，仅分析采样画面" }] });
+    const quota = runtime.service.quota("member");
+    const usage = runtime.store.usage("member");
+    expect(() => runtime.service.preflight("member", request)).toThrow(expect.objectContaining({ code: "AI_ATTACHMENT_UPGRADE_REQUIRED", definitelyNotSent: true }));
+    await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_ATTACHMENT_UPGRADE_REQUIRED", definitelyNotSent: true });
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.service.quota("member")).toEqual(quota);
+    expect(runtime.store.usage("member")).toEqual(usage);
+    expect(runtime.store.request("member", request.requestId)).toBeUndefined();
+  });
+  it("still accepts text documents and actual image/video-frame payloads", async () => {
+    await runtime.service.saveProvider({ ...provider, visionEnabled: true });
+    const attachments = [
+      { name: "document.pdf", mediaType: "application/pdf", text: "提取出的普通文档内容" },
+      { name: "photo.png", mediaType: "image/png", dataUrl, text: "图片附件" },
+      { name: "sample.mp4，采样时间 1.00 秒", mediaType: "image/png", dataUrl, text: "视频第 1 个采样画面，仅分析静态画面" },
+    ];
+    const result = await runtime.service.chat("member", chat({ attachments }));
+    expect(result.content).toBe("已整理资料");
+    const body = JSON.parse(transport.mock.calls[0][1].body!);
+    expect(body.input.at(-1).content.filter((part: { type: string }) => part.type === "input_image")).toHaveLength(2);
+    expect(body.input.at(-1).content[0].text).toContain("提取出的普通文档内容");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("performs a bounded native search and separates its configured quota conversion from real provider tokens", async () => {
     await runtime.service.saveProvider({ ...provider, webSearchEnabled: true, webSearchQuotaTokens: 1000 });
     transport.mockResolvedValueOnce(reply("查到资料", { output: [{ type: "web_search_call", status: "completed", action: { sources: [{ title: "来源", url: "https://example.com/research" }, { title: "坏链接", url: "javascript:alert(1)" }] } }] }));
@@ -143,7 +169,9 @@ describe("Reviewed AI capabilities through transactional service", () => {
     await runtime.service.saveProvider({ ...provider, visionEnabled: true });
     const request = chat({ attachments: [{ name: "photo.png", dataUrl }] });
     const baseline = chatInputReserve(chat());
-    expect(chatInputReserve(request) - baseline).toBe(131072);
+    expect(chatInputReserve(request) - baseline).toBe(4096);
+    expect(chatInputReserve(request, undefined, undefined, 1024) - baseline).toBe(1024);
+    expect(chatInputReserve(request, undefined, undefined, 0) - baseline).toBe(4096);
     await runtime.service.chat("member", request);
     const body = JSON.parse(transport.mock.calls[0][1].body!);
     expect(body.input.at(-1).content).toEqual([{ type: "input_text", text: "整理资料" }, { type: "input_image", image_url: dataUrl, detail: "low" }]);
@@ -157,6 +185,14 @@ describe("Reviewed AI capabilities through transactional service", () => {
     const body = JSON.parse(transport.mock.calls[0][1].body!);
     expect(body.messages[0].role).toBe("system");
     expect(body.messages.at(-1).content[1]).toEqual({ type: "image_url", image_url: { url: dataUrl, detail: "low" } });
+  });
+  it("allows a short image question within 10000 points and charges reported usage, not the visual reservation", async () => {
+    await runtime.service.saveProvider({ ...provider, visionEnabled: true, visionInputReserveTokens: 4096 });
+    runtime.service.setQuota("member", "admin", { limitTokens: 10000 });
+    const request = chat({ attachments: [{ name: "test.png", dataUrl }] });
+    expect(runtime.service.preflight("member", request).canSend).toBe(true);
+    await runtime.service.chat("member", request);
+    expect(runtime.service.quota("member")).toMatchObject({ usedTokens: 50, remainingTokens: 9950, reservedTokens: 0 });
   });
   it("keeps separate image service key encrypted and does not reuse it on a new origin", async () => {
     const config = { ...provider, imageModel: "image-model", imageBaseUrl: "https://image.example.com", imageApiKey: "test-image-key-not-real", imageQuotaTokens: 1000 };

@@ -6,6 +6,7 @@ import { chatInputReserve, parseChatCapabilities, parsePresentation, validateIma
 import { AiPersonaRepository } from "./persona";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { imageProviderBody, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse } from "./imageProvider";
+import { searchCallLimit } from "./searchPolicy";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -15,9 +16,9 @@ const SEARCH_INPUT_RESERVE = 32768;
 const MIN_OUTPUT_TOKENS = 16;
 
 function chatBudget(request: AiChatRequest, provider: AiProviderConfig, quota: AiQuota, persona: AiPersonaProfile, model: string): AiChatBudget {
-  const inputReserve = chatInputReserve(request, persona, model);
+  const inputReserve = chatInputReserve(request, persona, model, provider.visionInputReserveTokens);
   const searchInputReserve = request.webSearch ? SEARCH_INPUT_RESERVE : 0;
-  const convertedReserve = request.webSearch ? provider.webSearchQuotaTokens! : 0;
+  const convertedReserve = request.webSearch ? provider.webSearchQuotaTokens! * searchCallLimit(provider) : 0;
   return {
     inputReserve, searchInputReserve, convertedReserve, minOutputTokens: MIN_OUTPUT_TOKENS,
     minimumRequiredTokens: inputReserve + searchInputReserve + convertedReserve + MIN_OUTPUT_TOKENS,
@@ -60,7 +61,11 @@ function parseProvider(value: unknown, existing: StoredProvider | null): AiProvi
   const webSearchQuotaTokens = p.webSearchQuotaTokens ?? existing?.webSearchQuotaTokens ?? 0;
   if (![imageQuotaTokens, webSearchQuotaTokens].every(n => Number.isSafeInteger(n) && Number(n) >= 0 && Number(n) <= 10_000_000)) throw new AiError(400, "AI_INPUT_INVALID", "工具折算额度需为 0 到 1000 万之间的整数");
   const webSearchEnabled = p.webSearchEnabled ?? existing?.webSearchEnabled ?? false;
+  const webSearchProtocol = p.webSearchProtocol ?? existing?.webSearchProtocol ?? "standard";
+  if (webSearchProtocol !== "standard" && webSearchProtocol !== "compatible") throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "请选择标准或兼容搜索协议");
   const visionEnabled = p.visionEnabled ?? existing?.visionEnabled ?? false;
+  const visionInputReserveTokens = p.visionInputReserveTokens ?? existing?.visionInputReserveTokens ?? 4096;
+  if (!Number.isSafeInteger(visionInputReserveTokens) || Number(visionInputReserveTokens) < 256 || Number(visionInputReserveTokens) > 131072) throw new AiError(400, "AI_VISION_CONFIG_INVALID", "每张图片的输入预留需为 256 到 131072 的整数估算值");
   const imageStream = p.imageStream ?? existing?.imageStream ?? false;
   if (typeof webSearchEnabled !== "boolean" || typeof visionEnabled !== "boolean" || typeof imageStream !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "AI 能力开关格式不正确");
   if (imageModel && !imageQuotaTokens) throw new AiError(400, "AI_IMAGE_QUOTA_REQUIRED", "启用图片模型前，请设置每张图片的折算额度");
@@ -70,7 +75,7 @@ function parseProvider(value: unknown, existing: StoredProvider | null): AiProvi
     name: text(p.name ?? "AI 服务", "服务名称", 80), baseUrl: safeBaseUrl(p.baseUrl), protocol,
     quickModel: text(p.quickModel, "快速模型", 160), deepModel: text(p.deepModel, "深度模型", 160),
     maxOutputTokens: Number(p.maxOutputTokens), reasoningEffort: (p.reasoningEffort ?? "") as AiProviderInput["reasoningEffort"], enabled: p.enabled,
-    imageModel, imageBaseUrl, imageQuotaTokens: Number(imageQuotaTokens), imageStream, visionEnabled, webSearchEnabled, webSearchQuotaTokens: Number(webSearchQuotaTokens),
+    imageModel, imageBaseUrl, imageQuotaTokens: Number(imageQuotaTokens), imageStream, visionEnabled, visionInputReserveTokens: Number(visionInputReserveTokens), webSearchEnabled, webSearchQuotaTokens: Number(webSearchQuotaTokens), webSearchProtocol,
     ...(typeof p.apiKey === "string" && p.apiKey.trim() ? { apiKey: text(p.apiKey, "API 密钥", 4096) } : {}),
     ...(typeof p.imageApiKey === "string" && p.imageApiKey.trim() ? { imageApiKey: text(p.imageApiKey, "图片 API 密钥", 4096) } : {}),
   };
@@ -274,14 +279,15 @@ export class AiService {
     let knownRejection = false;
     try {
       const response = await this.transport(`${provider.baseUrl}/${provider.protocol === "responses" ? "responses" : "chat/completions"}`, {
-        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": `${userId}:${request.requestId}` },
+        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: provider.protocol === "responses" ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": `${userId}:${request.requestId}` },
         body: JSON.stringify(providerBody(provider, request, model, reserved.outputReserve, persona)), signal: AbortSignal.timeout(AI_TIMEOUT_MS),
       });
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "chat"); }
-      const result = parseProviderResult(await readProviderResponse(response), provider.protocol);
-      const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= 1);
-      const convertedTokens = request.webSearch && result.searchCalls > 0 ? reserved.convertedReserve! : 0;
-      const usage: AiUsage = validUsage ? { ...result.usage!, ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind: "tokens_with_search" } : {}) } : conservativeUsage(reserved);
+      const maxSearchCalls = request.webSearch ? searchCallLimit(provider) : 0;
+      const result = parseProviderResult(await readProviderResponse(response, { maxSearchCalls }), provider.protocol);
+      const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= maxSearchCalls);
+      const convertedTokens = request.webSearch ? provider.webSearchQuotaTokens! * result.searchCalls : 0;
+      const usage: AiUsage = validUsage ? { ...result.usage!, ...(request.webSearch ? { searchCalls: result.searchCalls, tokenUsageEstimated: false } : {}), ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind: "tokens_with_search" } : {}) } : conservativeUsage(reserved);
       if (!result.content.trim() || (result.status !== undefined && result.status !== "completed")) {
         const error = result.status === "incomplete"
           ? new AiError(502, "AI_RESPONSE_INCOMPLETE", "AI 未能完成回复，可能达到输出上限，请管理员调整模型或单次输出上限")
@@ -289,8 +295,8 @@ export class AiService {
         this.store.sql.transaction(() => this.settle(reserved, usage, "uncertain", usage.estimated ? "生成未完成，用量不确定，按预留上限计入" : "生成未完成，按服务商实际 Token 用量计入", undefined, error));
         throw error;
       }
-      if (request.webSearch && (result.searchCalls !== 1 || result.completedSearchCalls !== 1)) {
-        const error = new AiError(502, "AI_SEARCH_NOT_COMPLETED", "服务商未按要求完成一次联网搜索，请管理员检查模型支持；已记录生成用量");
+      if (request.webSearch && (result.searchCalls < 1 || result.searchCalls > maxSearchCalls || result.completedSearchCalls !== result.searchCalls)) {
+        const error = new AiError(502, "AI_SEARCH_NOT_COMPLETED", "服务商未按要求完成联网搜索，请管理员检查模型支持；已记录生成用量");
         this.store.sql.transaction(() => this.settle(reserved, usage, "uncertain", "联网搜索执行不符合请求限制，已记录用量，请管理员核对", undefined, error));
         throw error;
       }
@@ -305,7 +311,7 @@ export class AiService {
       }
       const content = presentation ? `已生成《${presentation.title}》，共 ${presentation.slides.length} 页。` : result.content;
       const extras: Pick<AiChatResponse, "presentation" | "sources"> = { ...(presentation ? { presentation } : {}), ...(result.sources.length ? { sources: result.sources } : {}) };
-      const settled = this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "completed" : "uncertain", validUsage ? convertedTokens ? "服务商实际生成 Token + 管理员设定的单次搜索折算额度" : "服务商实际 Token 用量" : "服务商未返回有效 Token 用量或报告超过请求上限，按预留上限保守计入，请管理员核对", content, undefined, extras));
+      const settled = this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "completed" : "uncertain", validUsage ? convertedTokens ? `服务商实际生成 Token + ${result.searchCalls} 次搜索的管理员设定折算额度` : "服务商实际 Token 用量" : "服务商未返回有效 Token 用量或报告超过请求上限，按预留上限保守计入，请管理员核对", content, undefined, extras));
       if (!settled) {
         const final = this.store.request(userId, request.requestId);
         if (final?.result) return { ...final.result, quota: this.store.quota(userId) };

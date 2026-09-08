@@ -27,19 +27,19 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "同频 AI 换上 Fleur 新形象",
+      "同频 AI 支持上传和粘贴图片",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "成员概览只显示剩余百分比",
+      "视频采样不包含音频",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "保留原有任务、客户脉络图和 AI 历史数据",
+      "保留任务、客户脉络图、AI 历史及原有额度",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "角色转头跟随更明显",
+      "修复 Fleur 形象超出标题栏边界",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "修复限帧导致的掉帧",
+      "联网搜索新增兼容协议配置",
     );
   });
 

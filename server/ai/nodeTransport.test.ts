@@ -1,11 +1,13 @@
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
-import type { ClientRequest } from "node:http";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import https from "node:https";
+import { PassThrough } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createNodeAi, nodeAiTransport } from "./node";
+import { readBoundedText } from "./provider";
 
 function resetConnection(reusedSocket: boolean, completedHandshake: boolean) {
   const request = Object.assign(new EventEmitter(), {
@@ -35,6 +37,42 @@ describe("Node AI transport paid-request uncertainty", () => {
     await expect(nodeAiTransport("https://api.example.com/v1/responses", {
       method: "POST", headers: { Authorization: "Bearer fixture-not-a-real-key" }, body: "{}", signal: new AbortController().signal,
     })).rejects.toMatchObject({ code: "AI_CONNECTION_FAILED", definitelyNotSent: unsent });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  function responseStream(firstChunk: string) {
+    const incoming = Object.assign(new PassThrough(), { statusCode: 200, headers: { "content-type": "text/event-stream" } });
+    const transport = vi.spyOn(https, "request").mockImplementation(((_url: unknown, _options: unknown, receive: (response: IncomingMessage) => void) => {
+      const req = Object.assign(new EventEmitter(), {
+        reusedSocket: false, write: vi.fn(), end() {
+          queueMicrotask(() => {
+            const socket = new EventEmitter(); req.emit("socket", socket); socket.emit("secureConnect");
+            receive(incoming as unknown as IncomingMessage);
+            incoming.write(firstChunk);
+          });
+        },
+      });
+      return req as unknown as ClientRequest;
+    }) as typeof https.request);
+    return { incoming, transport };
+  }
+
+  it("exposes streaming bytes before the upstream finishes and propagates cancellation without repeating the request", async () => {
+    const { incoming, transport } = responseStream("data: first\n\n");
+    const response = await nodeAiTransport("https://api.example.com/v1/responses", { method: "POST", headers: {}, body: "{}", signal: new AbortController().signal });
+    expect(incoming.readableEnded).toBe(false);
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: first\n\n");
+    await reader.cancel(); reader.releaseLock();
+    await vi.waitFor(() => expect(incoming.destroyed).toBe(true));
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the transport byte ceiling while allowing a consumer to inspect chunks", async () => {
+    const { incoming, transport } = responseStream("12345");
+    const response = await nodeAiTransport("https://api.example.com/v1/responses", { method: "POST", headers: {}, signal: new AbortController().signal, maxResponseBytes: 4 });
+    await expect(readBoundedText(response)).rejects.toMatchObject({ code: "AI_PROVIDER_RESPONSE" });
+    await vi.waitFor(() => expect(incoming.destroyed).toBe(true));
     expect(transport).toHaveBeenCalledTimes(1);
   });
 

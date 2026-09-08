@@ -20,8 +20,12 @@ export interface AiProviderInput {
   /** Opt-in standard Images API SSE; independent of text protocol and quick/deep mode. */
   imageStream?: boolean;
   visionEnabled?: boolean;
+  /** Per-image reservation estimate, not actual usage nor an upstream token ceiling. */
+  visionInputReserveTokens?: number;
   webSearchEnabled?: boolean;
   webSearchQuotaTokens?: number;
+  /** Explicit relay compatibility. Standard sends max_tool_calls; compatible uses a local bounded search budget. */
+  webSearchProtocol?: "standard" | "compatible";
 }
 export interface AiProviderConfig extends Omit<AiProviderInput, "apiKey" | "imageApiKey"> {
   apiKeyConfigured: boolean;
@@ -52,6 +56,10 @@ export interface AiUsage {
   /** Quota units explicitly configured by an administrator, not provider token counts. */
   convertedTokens?: number;
   billingKind?: "tokens" | "image_conversion" | "tokens_with_search";
+  /** Observed provider search invocations, never inferred from generated text or citations. */
+  searchCalls?: number;
+  /** Separates actual text-token reporting from administrator-defined tool conversion estimates. */
+  tokenUsageEstimated?: boolean;
 }
 /** Sanitized metadata only: never the provider's message, request body, URL or credentials. */
 export interface AiProviderDiagnostic {

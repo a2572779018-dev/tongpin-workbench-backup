@@ -5,7 +5,8 @@ const number = (value: number) => value.toLocaleString("zh-CN");
 export function aiUsageDescription(usage: AiUsage): string {
   if (usage.billingKind === "image_conversion") return `图片生成折算 ${formatAiPoints(usage.convertedTokens ?? usage.totalTokens)}`;
   const text = `输入 ${number(usage.inputTokens)} / 输出 ${number(usage.outputTokens)} Token`;
-  return text + ((usage.convertedTokens ?? 0) > 0 ? ` · 搜索折算 ${formatAiPoints(usage.convertedTokens!)}` : "") + (usage.estimated ? " · 文本用量待核对" : "");
+  const calls = Number.isSafeInteger(usage.searchCalls) && Number(usage.searchCalls) > 0 ? ` ${number(usage.searchCalls!)} 次` : "";
+  return text + ((usage.convertedTokens ?? 0) > 0 ? ` · 搜索${calls}折算 ${formatAiPoints(usage.convertedTokens!)}` : "") + ((usage.tokenUsageEstimated ?? usage.estimated) ? " · 文本用量待核对" : "");
 }
 
 export function aiUsageTotal(usage: AiUsage): string {

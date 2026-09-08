@@ -27,7 +27,13 @@ export const ChatMessageRow = memo(function ChatMessageRow({
     <div className="tp-ai-message__body">
       {message.role === "assistant" && <header><strong>{assistantName}</strong></header>}
       {message.attachments?.length ? <ul className="tp-ai-message-attachments" aria-label="消息中的附件">
-        {message.attachments.map(file => <li key={file.id}><Paperclip size={13} aria-hidden="true" />{file.name}</li>)}
+        {message.attachments.map(file => <li key={file.id} className={file.media ? "tp-ai-message-attachment-media" : undefined}>
+          <span><Paperclip size={13} aria-hidden="true" />{file.name}</span>
+          {file.media ? <><div className="tp-ai-message-frames">{file.media.frames.map((frame, index) => <figure key={index}>
+            <img src={frame.dataUrl} alt={`${file.name}${frame.timeSeconds === undefined ? "" : ` ${frame.timeSeconds.toFixed(2)} 秒画面`}`} loading="lazy" />
+            {frame.timeSeconds !== undefined ? <figcaption>{frame.timeSeconds.toFixed(2)} 秒</figcaption> : null}
+          </figure>)}</div>{file.media.kind === "video" ? <small>仅分析采样画面，不含音频</small> : null}</> : null}
+        </li>)}
       </ul> : null}
       {message.status === "thinking" ? <div className="tp-ai-thinking" role="status"><span /><span /><span />正在思考</div> :
         <p className={message.status === "typing" ? "tp-ai-message__typing" : undefined}>

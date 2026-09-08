@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { extractAttachment } from "./attachments";
 
-const pdf = vi.hoisted(() => ({ pages: [] as string[], destroy: vi.fn(), cleanup: vi.fn(), reject: false, options: {} as Record<string, unknown> }));
+const pdf = vi.hoisted(() => ({ pages: [] as string[], destroy: vi.fn(), cleanup: vi.fn(), reject: false, options: {} as Record<string, unknown>, onRead: undefined as (() => void) | undefined }));
 vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({ default: "/assets/local-pdf.worker.mjs" }));
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: {},
@@ -12,7 +12,7 @@ vi.mock("pdfjs-dist", () => ({
       promise: pdf.reject ? Promise.reject(Object.assign(new Error("locked"), { name: "PasswordException" })) : Promise.resolve({
         numPages: pdf.pages.length,
         getPage: async (page: number) => ({
-          getTextContent: async () => ({ items: [{ str: pdf.pages[page - 1], hasEOL: true }] }),
+          getTextContent: async () => { pdf.onRead?.(); return { items: [{ str: pdf.pages[page - 1], hasEOL: true }] }; },
           cleanup: pdf.cleanup,
         }),
       }),
@@ -23,7 +23,7 @@ vi.mock("pdfjs-dist", () => ({
 const file = () => new File(["%PDF-1.7\nfixture"], "资料.pdf");
 
 describe("PDF text extraction boundaries", () => {
-  beforeEach(() => { pdf.pages = []; pdf.destroy.mockReset(); pdf.cleanup.mockReset(); pdf.reject = false; });
+  beforeEach(() => { pdf.pages = []; pdf.destroy.mockReset().mockResolvedValue(undefined); pdf.cleanup.mockReset(); pdf.reject = false; pdf.onRead = undefined; });
   it("extracts only text from local bytes and releases the worker and page resources", async () => {
     pdf.pages = ["第一段", "第二段"];
     const result = await extractAttachment(file());
@@ -53,6 +53,14 @@ describe("PDF text extraction boundaries", () => {
   it("gives an actionable message for a password-protected PDF", async () => {
     pdf.reject = true;
     await expect(extractAttachment(file())).rejects.toThrow("解除密码");
+    expect(pdf.destroy).toHaveBeenCalledOnce();
+  });
+  it("cancels page extraction immediately and destroys the worker exactly once", async () => {
+    pdf.pages = ["第一页", "不应继续读取的第二页"];
+    const controller = new AbortController();
+    pdf.onRead = () => controller.abort();
+    await expect(extractAttachment(file(), { signal: controller.signal })).rejects.toHaveProperty("name", "AbortError");
+    expect(pdf.cleanup).toHaveBeenCalledOnce();
     expect(pdf.destroy).toHaveBeenCalledOnce();
   });
 });

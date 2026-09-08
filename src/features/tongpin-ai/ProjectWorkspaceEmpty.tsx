@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import type { TongpinAIConversation, TongpinAIProject } from "./types";
 import { TongpinAINotificationButton } from "./TongpinAINotificationButton";
 import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
-import { ATTACHMENT_ACCEPT, extractAttachment, validateAttachments } from "./attachments";
+import { TEXT_ATTACHMENT_ACCEPT, extractAttachment, validateAttachments } from "./attachments";
 import { AttachmentChips } from "./AttachmentChips";
 
 interface ProjectWorkspaceEmptyProps {
@@ -164,7 +164,7 @@ function ProjectContextEditor({ project, onUpdateContext }: {
     busyRef.current = true; setBusy(true); setError(""); setNotice("");
     try {
       const extracted: Awaited<ReturnType<typeof extractAttachment>>[] = [];
-      for (const file of files) extracted.push(await extractAttachment(file));
+      for (const file of files) extracted.push(await extractAttachment(file, { allowMedia: false }));
       validateAttachments([...documents.map(file => ({ name: file.name, text: file.content, mediaType: file.mimeType })), ...extracted]);
       setDocuments(current => [...current, ...extracted.map(file => ({ id: crypto.randomUUID(), name: file.name, mimeType: file.mediaType, content: file.text, createdAt: new Date().toISOString() }))]);
       setDirty(true);
@@ -187,7 +187,7 @@ function ProjectContextEditor({ project, onUpdateContext }: {
     <form onSubmit={event => { event.preventDefault(); void save(); }}>
       <label>项目说明<textarea value={instructions} rows={4} maxLength={12000} disabled={busy} placeholder="填写项目背景、目标或统一要求，供项目内的对话参考。" onChange={event => { setInstructions(event.target.value); setDirty(true); setNotice(""); }} /></label>
       <AttachmentChips attachments={documents.map(file => ({ name: file.name, text: file.content, mediaType: file.mimeType }))} disabled={busy} onRemove={index => { setDocuments(current => current.filter((_, item) => item !== index)); setDirty(true); setNotice(""); }} />
-      <input ref={fileInput} hidden type="file" multiple accept={ATTACHMENT_ACCEPT} onChange={event => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void addDocuments(files); }} />
+      <input ref={fileInput} hidden type="file" multiple accept={TEXT_ATTACHMENT_ACCEPT} onChange={event => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void addDocuments(files); }} />
       {error ? <p role="alert" className="tp-ai-generated-error">{error}</p> : null}
       {notice ? <p role="status">{notice}</p> : null}
       <footer><button type="button" disabled={busy || documents.length >= 5} onClick={() => fileInput.current?.click()}><Paperclip size={16} />添加资料</button>

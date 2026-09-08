@@ -1,6 +1,8 @@
 import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
+import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
+import { validateImageBase64 } from "./capabilities";
 
 export const AI_WORKSPACE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_workspaces (
@@ -75,21 +77,45 @@ function documents(value: unknown, label: string): void {
   if (value === undefined) return;
   const ids = new Set<string>();
   for (const raw of array(value, label, LIMITS.documentsPerContainer)) {
-    const doc = record(raw, label, ["id", "name", "mimeType", "content", "createdAt"]);
+    const doc = record(raw, label, ["id", "name", "mimeType", "content", "createdAt", "media"]);
     id(doc.id, label); unique(doc.id, ids, label);
     string(doc.name, "文件名称", 240, true);
     string(doc.mimeType, "文件类型", 160, true);
     string(doc.content, "文件内容", LIMITS.documentCharacters);
     if (doc.createdAt !== undefined) string(doc.createdAt, "文件时间", 80);
+    if (doc.media !== undefined) {
+      const media = record(doc.media, "视觉附件", ["kind", "frames", "durationSeconds"]);
+      if (media.kind !== "image" && media.kind !== "video") invalid("视觉附件类型无效");
+      if (media.kind === "video") {
+        if (typeof media.durationSeconds !== "number" || !Number.isFinite(media.durationSeconds) || media.durationSeconds <= 0 || media.durationSeconds > AI_MEDIA_LIMITS.videoSeconds) invalid("视频时长无效");
+      } else if (media.durationSeconds !== undefined) invalid("图片不能包含视频时长");
+      const frames = array(media.frames, "采样画面", media.kind === "image" ? 1 : AI_MEDIA_LIMITS.videoFrames);
+      if (!frames.length) invalid("视觉附件缺少画面");
+      let previousTime = -1;
+      for (const rawFrame of frames) {
+        const frame = record(rawFrame, "采样画面", ["dataUrl", "timeSeconds"]);
+        string(frame.dataUrl, "图片数据", Math.ceil(AI_MEDIA_LIMITS.frameBytes / 3) * 4 + 40, true);
+        const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(frame.dataUrl);
+        if (!match) invalid("视觉附件只能保存压缩后的 PNG、JPEG 或 WebP 画面");
+        const image = validateImageBase64(match[2], AI_MEDIA_LIMITS.frameBytes, 400);
+        if (image.mimeType !== match[1] || image.width > AI_MEDIA_LIMITS.frameDimension || image.height > AI_MEDIA_LIMITS.frameDimension) invalid("视觉附件格式或尺寸无效");
+        if (media.kind === "video") {
+          if (typeof frame.timeSeconds !== "number" || !Number.isFinite(frame.timeSeconds) || frame.timeSeconds < 0 || frame.timeSeconds <= previousTime || frame.timeSeconds >= Number(media.durationSeconds)) invalid("视频采样时间无效");
+          previousTime = frame.timeSeconds;
+        } else if (frame.timeSeconds !== undefined) invalid("图片不能包含视频采样时间");
+      }
+    }
   }
 }
 function usage(value: unknown): void {
   if (value === undefined) return;
-  const item = record(value, "消息用量", ["inputTokens", "outputTokens", "totalTokens", "estimated", "convertedTokens", "billingKind"]);
+  const item = record(value, "消息用量", ["inputTokens", "outputTokens", "totalTokens", "estimated", "convertedTokens", "billingKind", "searchCalls", "tokenUsageEstimated"]);
   for (const key of ["inputTokens", "outputTokens", "totalTokens"] as const) {
     if (!Number.isSafeInteger(item[key]) || Number(item[key]) < 0) invalid("消息用量格式不正确");
   }
   if (item.convertedTokens !== undefined && (!Number.isSafeInteger(item.convertedTokens) || Number(item.convertedTokens) < 0)) invalid("消息折算用量格式不正确");
+  if (item.searchCalls !== undefined && (!Number.isSafeInteger(item.searchCalls) || Number(item.searchCalls) < 0 || Number(item.searchCalls) > 3)) invalid("消息搜索次数格式不正确");
+  if (item.tokenUsageEstimated !== undefined && typeof item.tokenUsageEstimated !== "boolean") invalid("消息文本用量核对状态格式不正确");
   if (item.billingKind !== undefined && !["tokens", "image_conversion", "tokens_with_search"].includes(String(item.billingKind))) invalid("消息计量类型格式不正确");
   if (Number(item.inputTokens) + Number(item.outputTokens) + Number(item.convertedTokens ?? 0) !== item.totalTokens || typeof item.estimated !== "boolean") invalid("消息用量格式不正确");
   // Display metadata only: quota accounting must exclusively use the server AI ledger.

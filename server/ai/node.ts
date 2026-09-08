@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { lookup } from "node:dns";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import https from "node:https";
+import { Readable } from "node:stream";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "./security";
@@ -29,20 +30,22 @@ export const nodeAiTransport: AiTransport = async (target, init) => {
         });
       },
     }, response => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      response.on("data", (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > Math.min(init.maxResponseBytes ?? 2_000_000, 6_000_000)) { request.destroy(new Error("AI response too large")); return; }
-        chunks.push(chunk);
-      });
-      response.on("end", () => {
-        try {
-          const status = response.statusCode ?? 502;
-          resolve(new Response([204, 205, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers: { "Content-Type": String(response.headers["content-type"] ?? "application/json") } }));
-        } catch { reject(new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回了无效响应")); }
-      });
-      response.on("error", () => reject(new AiError(502, "AI_CONNECTION_FAILED", "AI 服务连接中断，请管理员核对用量")));
+      try {
+        const status = response.statusCode ?? 502;
+        // Expose bytes as they arrive so bounded readers and search-budget guards can cancel promptly.
+        // Readable.toWeb propagates cancellation to IncomingMessage; it never retries the request.
+        let size = 0;
+        const limit = Math.min(init.maxResponseBytes ?? 2_000_000, 6_000_000);
+        const body = [204, 205, 304].includes(status) ? null : (Readable.toWeb(response) as ReadableStream<Uint8Array>).pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            size += chunk.byteLength;
+            if (size > limit) throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 返回内容过大");
+            controller.enqueue(chunk);
+          },
+        }));
+        if (!body) response.resume();
+        resolve(new Response(body, { status, headers: { "Content-Type": String(response.headers["content-type"] ?? "application/json") } }));
+      } catch { response.destroy(); reject(new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回了无效响应")); }
     });
     request.on("socket", socket => { socket.once("secureConnect", () => { connected = true; }); });
     // Keep-alive sockets do not emit secureConnect again. A reset on a reused

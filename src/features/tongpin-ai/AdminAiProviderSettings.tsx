@@ -18,8 +18,10 @@ const EMPTY_PROVIDER: AiProviderInput = {
   imageQuotaTokens: 0,
   imageStream: false,
   visionEnabled: false,
+  visionInputReserveTokens: 4096,
   webSearchEnabled: false,
   webSearchQuotaTokens: 0,
+  webSearchProtocol: "standard",
 };
 
 export function AdminAiProviderSettings() {
@@ -92,8 +94,10 @@ export function AdminAiProviderSettings() {
       imageQuotaTokens: input.imageQuotaTokens ?? 0,
       imageStream: input.imageStream ?? false,
       visionEnabled: input.visionEnabled ?? false,
+      visionInputReserveTokens: input.visionInputReserveTokens ?? 4096,
       webSearchEnabled: input.webSearchEnabled ?? false,
       webSearchQuotaTokens: input.webSearchQuotaTokens ?? 0,
+      webSearchProtocol: input.webSearchProtocol ?? "standard",
       ...(input.apiKey ? { apiKey: input.apiKey } : {}),
       ...(input.imageApiKey ? { imageApiKey: input.imageApiKey } : {}),
     };
@@ -254,13 +258,29 @@ export function AdminAiProviderSettings() {
               </div>
             </details>
             <details className="tp-ai-provider-capabilities is-wide">
+              <summary><Image size={17} />图片与视频画面理解</summary>
+              <div className="tp-ai-admin-fields">
+                <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.visionEnabled ?? false} onChange={event => update("visionEnabled", event.target.checked)} />启用图片理解</label>
+                <label className="tp-ai-admin-field" htmlFor={`${id}-vision-reserve`}>每张图片的输入预留 · 同频点
+                  <input id={`${id}-vision-reserve`} type="number" min={256} max={131072} step={1} value={Number.isNaN(draft.visionInputReserveTokens) ? "" : draft.visionInputReserveTokens ?? 4096} onChange={event => update("visionInputReserveTokens", event.target.valueAsNumber)} />
+                </label>
+                <p className="tp-ai-admin-hint is-wide">请先确认文本模型支持图片输入。视频按抽取的画面理解，不包含音轨；每帧按一张图片预留。这里是发送前的预算估算，不是实际消费，完成后按服务商返回的 Token 结算。</p>
+              </div>
+            </details>
+            <details className="tp-ai-provider-capabilities is-wide">
               <summary><Globe size={17} />联网搜索</summary>
               <div className="tp-ai-admin-fields">
                 <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.webSearchEnabled ?? false} onChange={event => update("webSearchEnabled", event.target.checked)} />启用服务商联网搜索工具</label>
                 <label className="tp-ai-admin-field" htmlFor={`${id}-search-quota`}>每次联网搜索折算 · 同频点
                   <input id={`${id}-search-quota`} type="number" min={0} max={10_000_000} step={1} value={Number.isNaN(draft.webSearchQuotaTokens) ? "" : draft.webSearchQuotaTokens ?? 0} onChange={event => update("webSearchQuotaTokens", event.target.valueAsNumber)} />
                 </label>
+                <label className="tp-ai-admin-field" htmlFor={`${id}-search-protocol`}>搜索接口兼容方式
+                  <select id={`${id}-search-protocol`} value={draft.webSearchProtocol ?? "standard"} onChange={event => update("webSearchProtocol", event.target.value as AiProviderInput["webSearchProtocol"])}>
+                    <option value="standard">标准 Responses</option><option value="compatible">兼容接口（不支持 max_tool_calls）</option>
+                  </select>
+                </label>
                 <p className="tp-ai-admin-hint is-wide">仅支持 Responses 协议且模型必须支持搜索工具。文本每 1 Token 计 1 同频点，搜索另按本设置折算为同频点；实际 Token 和折算用量在明细中分开显示。</p>
+                <p className="tp-ai-admin-hint is-wide">{draft.webSearchProtocol === "compatible" ? "兼容方式预留最多 3 次搜索的折算额度，按实际次数结算。超过预算会停止接收并记录待核对，不能保证服务商同时停止计费。" : "标准方式向服务商请求最多 1 次搜索。仅在服务商明确不支持 max_tool_calls 时选择兼容方式。"}</p>
               </div>
             </details>
           </fieldset>
