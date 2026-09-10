@@ -88,6 +88,7 @@ export function adminAiErrorMessage(error: unknown, fallback: string): string {
     AI_PROVIDER_AUTH: "API 密钥无效或无权访问，请核对服务商的密钥配置。",
     AI_PROVIDER_LIMIT: "服务商余额不足或请求频繁，请检查服务商账号后重试。",
     AI_PROVIDER_REDIRECT: "该地址发生跳转；为保护密钥，请填写服务商提供的最终 API 地址。",
+    AI_HOST_NOT_ALLOWED: "该服务商域名尚未接入同频服务器，与你填写的密钥无关。",
     AI_MODELS_UNAVAILABLE: "服务商未提供可读取的模型列表，可手动填写模型 ID。",
     AI_CONNECTION_FAILED: "无法连接 AI 服务，请核对 API 地址或稍后重试。",
     AI_ENCRYPTION_UNAVAILABLE: "服务器安全存储尚未配置，暂时不能保存密钥。",

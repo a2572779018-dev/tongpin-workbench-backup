@@ -59,6 +59,7 @@ describe("AI administrator provider forms", () => {
   it("distinguishes provider key failures from member session failures", () => {
     expect(adminAiErrorMessage(new ApiRequestError(502, "AI_PROVIDER_AUTH", "secret-token"), "连接失败")).toContain("API 密钥无效");
     expect(adminAiErrorMessage(new ApiRequestError(409, "AI_CONFIG_CHANGED", "secret-token"), "连接失败")).toContain("接入配置");
+    expect(adminAiErrorMessage(new ApiRequestError(400, "AI_HOST_NOT_ALLOWED", "secret-token"), "连接失败")).toContain("服务商域名尚未接入");
   });
   it("keeps secrets in a write-only password field and permits model discovery before saving", () => {
     const source = readFileSync(new URL("./AdminAiProviderSettings.tsx", import.meta.url), "utf8");

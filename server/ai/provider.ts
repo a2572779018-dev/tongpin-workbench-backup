@@ -221,10 +221,11 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
     ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], ...(provider.webSearchProtocol === "compatible" ? {} : { max_tool_calls: 1 }), tool_choice: "required", include: ["web_search_call.action.sources"] } : {}),
     ...(request.mode === "deep" && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort } } : {}),
   };
+  const isBaiChat = new URL(provider.baseUrl).hostname === "api.b.ai";
   return {
     model, messages: [{ role: "system", content: instructions }, ...messages.map((message, index) => images.length && index === messages.length - 1
       ? { role: message.role, content: [{ type: "text", text: message.content }, ...images.map(item => ({ type: "image_url", image_url: { url: item.dataUrl, detail: "low" } }))] }
-      : message)], max_completion_tokens: maxOutputTokens, stream: false,
-    ...(request.mode === "deep" && provider.reasoningEffort ? { reasoning_effort: provider.reasoningEffort } : {}),
+      : message)], ...(isBaiChat ? { max_tokens: maxOutputTokens } : { max_completion_tokens: maxOutputTokens }), stream: false,
+    ...(!isBaiChat && request.mode === "deep" && provider.reasoningEffort ? { reasoning_effort: provider.reasoningEffort } : {}),
   };
 }
