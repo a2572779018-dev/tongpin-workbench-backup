@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AiChatPreflight, AiChatResponse, AiImageResponse, AiProviderDiagnostic, AiProviderInput, AiRequestResult, AiStatus } from "../../../shared/ai";
 import type { AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
 import type { AiPersonaSnapshot } from "../../../shared/aiPersona";
+import type { AiVideoJob, AiVideoList } from "../../../shared/aiVideo";
 
 const TEST_ADMIN = "admin@workerd.example.com";
 const TEST_PASSWORD = "WorkerdOnly20260905!";
@@ -29,22 +30,31 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   let releasePending: (() => void) | undefined;
   let holdNextPost = false;
   let rejectNextPost = false;
+  let challengeNextPost = false;
   let imageFailureStatus = 0;
   let imageSse = false;
   let redirectNextModels = false;
   let privateDns = false;
   let sourceResponse = "workerd 中的真实路由回复（上游为隔离 fixture）";
   let lastChatInstructions = "";
+  let videoCompleted = false;
   const outboundUrls: string[] = [];
   const provider: AiProviderInput = { name: "Workerd fixture", baseUrl: "https://ai-fixture.example.com", apiKey: TEST_API_KEY, protocol: "responses", quickModel: "fixture-fast", deepModel: "fixture-deep", maxOutputTokens: 2048, reasoningEffort: "", enabled: true, imageModel: "fixture-image", imageQuotaTokens: 1000 };
   const outbound: V4FetchHandler = async request => {
     const url = new URL(request.url);
     outboundUrls.push(url.toString());
     if (url.hostname === "cloudflare-dns.com" && url.pathname === "/dns-query") {
-      expect(url.searchParams.get("name")).toBe("ai-fixture.example.com");
+      expect(["ai-fixture.example.com", "www.75api.com"]).toContain(url.searchParams.get("name"));
       return MfResponse.json({ Status: 0, Answer: url.searchParams.get("type") === "A" ? [{ type: 1, data: privateDns ? "10.0.0.1" : "1.1.1.1" }] : [] });
     }
     // No network fallthrough exists. An unexpected destination is a test failure, not a fetch.
+    if (url.hostname === "www.75api.com") {
+      expect(request.headers.get("Authorization")).toBe("Bearer h3-deployment-fixture-only");
+      if (url.pathname === "/v1/models") return MfResponse.json({ data: [{ id: "minimax_h3" }] });
+      if (url.pathname.endsWith("/content")) return new MfResponse("mp4-fixture", { headers: { "Content-Type": "video/mp4" } });
+      if (request.method === "POST") { postCount++; expect(await request.json()).toMatchObject({ model: "minimax_h3", seconds: "15" }); }
+      return MfResponse.json({ id: "task_workerd_h3_fixture", status: videoCompleted ? "completed" : "queued", progress: videoCompleted ? 100 : 0 });
+    }
     expect(url.hostname).toBe("ai-fixture.example.com");
     expect(request.headers.get("Authorization")).toBe(`Bearer ${TEST_API_KEY}`);
     if (url.pathname === "/v1/models" && request.method === "GET") {
@@ -58,6 +68,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
       await new Promise<void>(resolve => { releasePending = resolve; });
     }
     if (rejectNextPost) { rejectNextPost = false; return MfResponse.json({ error: { message: TEST_API_KEY } }, { status: 401 }); }
+    if (challengeNextPost) { challengeNextPost = false; return new MfResponse(`<html>${TEST_API_KEY} private-prompt</html>`, { status: 403, headers: { "cf-mitigated": "challenge", "cf-ray": "a37be7f308e2b9b6-HKG" } }); }
     if (url.pathname === "/v1/images/generations") {
       if (imageFailureStatus) { const status = imageFailureStatus; imageFailureStatus = 0; return MfResponse.json({ error: { code: "upstream_error", message: `${TEST_API_KEY} private-prompt` } }, { status }); }
       if (imageSse) {
@@ -78,7 +89,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     bindings: {
       JWT_SECRET: "workerd-fixture-secret-".repeat(4), BOOTSTRAP_ADMIN_EMAIL: TEST_ADMIN,
       DEV_EMAIL_PREVIEW: "true", CLIENT_ORIGINS: "http://tongpin-fixture.local",
-      AI_ALLOWED_HOSTS: "ai-fixture.example.com", LORA_EXPLORER_API: "https://unused.example.com", LORA_RPC_URL: "https://unused.example.com",
+      AI_ALLOWED_HOSTS: "ai-fixture.example.com,www.75api.com", TONGPIN_H3_API_KEY: "h3-deployment-fixture-only", LORA_EXPLORER_API: "https://unused.example.com", LORA_RPC_URL: "https://unused.example.com",
     },
     outboundService: outbound, log: new Log(LogLevel.ERROR),
   }), unsafeInspectDurableObjects: true });
@@ -228,6 +239,22 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     expect(JSON.stringify(rejected)).not.toContain(TEST_API_KEY);
     expect((await api<AiStatus>("/api/ai/status", member)).quota).toMatchObject({ usedTokens: usedBeforeFailure, reservedTokens: 0 });
   });
+  it("retains sanitized gateway evidence through the Worker transport and a SQLite restart", async () => {
+    const before = postCount;
+    const usedBefore = (await api<AiStatus>("/api/ai/status", member)).quota.usedTokens;
+    challengeNextPost = true;
+    const body = requestBody();
+    const failure = await api<ErrorBody>("/api/ai/chat", member, body, "POST", 502);
+    expect(failure.error).toMatchObject({ code: "AI_PROVIDER_GATEWAY_BLOCK", diagnostic: { category: "gateway_block", httpStatus: 403, gatewaySignal: "cloudflare_challenge", cfRay: "a37be7f308e2b9b6-HKG", responseKind: "html", billing: "rejected" } });
+    expect(JSON.stringify(failure)).not.toMatch(/test-workerd-provider-not-real|private-prompt/);
+    await mf.dispose(); mf = start(); await mf.ready;
+    expect((await api<AiRequestResult>(`/api/ai/requests/${body.requestId}`, member)).error?.diagnostic).toEqual(failure.error.diagnostic);
+    const ledger = await api<{ entries: Array<{ requestId: string; diagnostic?: AiProviderDiagnostic }> }>(`/api/admin/ai/usage?userId=${member.user.id}`, admin);
+    expect(ledger.entries.find(entry => entry.requestId === body.requestId)?.diagnostic).toEqual(failure.error.diagnostic);
+    await api("/api/ai/chat", member, body, "POST", 502);
+    expect(postCount).toBe(before + 1);
+    expect((await api<AiStatus>("/api/ai/status", member)).quota).toMatchObject({ usedTokens: usedBefore, reservedTokens: 0 });
+  });
   it("persists projects and conversations across a real workerd restart, rejects stale writes and preserves independent workspaces", async () => {
     await api(`/api/admin/ai/members/${other.user.id}/quota`, admin, { limitTokens: 1000 }, "PUT");
     const state: AiWorkspaceState = { view: "chat", mode: "quick", projects: [{ id: "project-one", title: "真实保存项目", timeLabel: "刚刚" }], conversations: [{ id: "conversation-one", projectId: "project-one", title: "项目内对话", timeLabel: "刚刚", messages: [{ id: "message-one", role: "user", content: "重启后应保留", time: "14:00" }] }], artifacts: [], drafts: {}, activeConversationId: "conversation-one", activeProjectId: "project-one", enabledSkillIds: [] };
@@ -312,6 +339,23 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
       imageSse = false;
       await api("/api/admin/ai/provider", admin, { ...provider, imageStream: false }, "PUT");
     }
+  });
+  it("persists video reservation across Worker restart, authenticates content and submits exactly once", async () => {
+    await api("/api/admin/ai/video", admin, { enabled: true, quotaPoints: 500 }, "PUT");
+    expect(await api("/api/admin/ai/video/test", admin, {})).toMatchObject({ ok: true });
+    const before = postCount;
+    const request = { requestId: crypto.randomUUID(), prompt: "H3 isolated fixture", seconds: 15, resolution: "768p", aspectRatio: "16:9" };
+    const created = await api<{ job: AiVideoJob }>("/api/ai/videos", member, request);
+    expect(created.job.status).toBe("queued"); expect(JSON.stringify(created)).not.toContain("h3-deployment-fixture-only");
+    await mf.dispose(); mf = start(); await mf.ready;
+    expect((await api<AiVideoList>("/api/ai/videos", member)).jobs[0].id).toBe(request.requestId);
+    await api("/api/ai/videos", member, request); expect(postCount).toBe(before + 1);
+    videoCompleted = true;
+    expect((await api<{ job: AiVideoJob }>(`/api/ai/videos/${request.requestId}`, member)).job.status).toBe("completed");
+    await api(`/api/ai/videos/${request.requestId}/content`, other, undefined, "GET", 404);
+    const response = await mf.dispatchFetch(`http://tongpin-fixture.local/api/ai/videos/${request.requestId}/content`, { headers: { Authorization: `Bearer ${member.accessToken}`, "X-Tongpin-Account": member.user.id } });
+    expect(response.status).toBe(200); expect(response.headers.get("content-type")).toBe("video/mp4"); expect(await response.text()).toBe("mp4-fixture");
+    expect(postCount).toBe(before + 1);
   });
   it("retains granted access, persona and history when quota is exhausted, but never sends new paid work", async () => {
     const persona = await api<AiPersonaSnapshot>("/api/ai/persona", member);

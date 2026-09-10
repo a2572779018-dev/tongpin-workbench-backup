@@ -1,0 +1,25 @@
+.tp-ai-markdown { min-width: 0; font-size: 0.95rem; line-height: 1.85; overflow-wrap: anywhere; }
+.tp-ai-markdown > :first-child { margin-top: 0; }
+.tp-ai-markdown > :last-child { margin-bottom: 0; }
+.tp-ai-markdown p { margin: 0 0 0.9em; white-space: pre-wrap; }
+.tp-ai-markdown strong { font-weight: 700; }
+.tp-ai-markdown :is(h1, h2, h3, h4, h5, h6) { font-size: 1.1em; line-height: 1.5; margin: 1.2em 0 0.5em; }
+.tp-ai-markdown h1 { font-size: 1.3em; }
+.tp-ai-markdown h2 { font-size: 1.18em; }
+.tp-ai-markdown :is(ul, ol) { padding-left: 1.5em; margin: 0.6em 0 1em; }
+.tp-ai-markdown li { padding-left: 0.2em; margin: 0.3em 0; }
+.tp-ai-markdown li > p { margin: 0.25em 0; }
+.tp-ai-markdown blockquote { margin: 0.9em 0; padding: 0.25em 1em; border-left: 3px solid #d7c477; color: #635c4e; background: #f4efdf; border-radius: 0 8px 8px 0; }
+.tp-ai-markdown blockquote p:last-child { margin-bottom: 0; }
+.tp-ai-markdown a { color: #796019; text-decoration: underline; text-decoration-color: #cab674; text-underline-offset: 3px; }
+.tp-ai-markdown a:hover { color: #49370a; text-decoration-color: currentColor; }
+.tp-ai-markdown a:focus-visible { outline: 2px solid #a68b31; outline-offset: 3px; border-radius: 3px; }
+.tp-ai-markdown code { font: 0.88em/1.7 ui-monospace, monospace; background: #eee9dd; padding: 0.12em 0.35em; border-radius: 4px; }
+.tp-ai-markdown pre { max-width: 100%; overflow-x: auto; white-space: pre; padding: 1em; border: 1px solid #ddd4c2; border-radius: 10px; background: #f1ecdf; }
+.tp-ai-markdown pre code { background: transparent; padding: 0; white-space: pre; }
+.tp-ai-markdown-table { max-width: 100%; overflow-x: auto; margin: 1em 0; border: 1px solid #ddd4c2; border-radius: 8px; }
+.tp-ai-markdown table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
+.tp-ai-markdown :is(th, td) { padding: 0.55em 0.8em; text-align: left; border-bottom: 1px solid #e5dece; min-width: 6em; }
+.tp-ai-markdown th { background: #f1ead4; }
+.tp-ai-markdown tr:last-child td { border-bottom: 0; }
+.tp-ai-markdown hr { margin: 1.2em 0; border: 0; border-top: 1px solid #ddd4c2; }

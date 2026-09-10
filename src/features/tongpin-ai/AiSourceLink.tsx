@@ -1,14 +1,19 @@
-import { useRef, useState, type MouseEvent } from "react";
+import { useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { AiSource } from "../../../shared/ai";
 
 export function AiSourceLink({ source }: { source: AiSource }) {
+  return <li><AiSourceAnchor href={source.url}>{source.title || source.url}</AiSourceAnchor></li>;
+}
+
+/** Both inline citations and the source list use the desktop's existing URL policy. */
+export function AiSourceAnchor({ href, children, className }: { href: string; children: ReactNode; className?: string }) {
   const [error, setError] = useState("");
   const pending = useRef(false);
   let url: URL;
   try {
-    url = new URL(source.url);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return null;
-  } catch { return null; }
+    url = new URL(href);
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return <>{children}</>;
+  } catch { return <>{children}</>; }
 
   async function openSource(event: MouseEvent<HTMLAnchorElement>) {
     // Web previews use a normal browser link; desktop citations use the narrow
@@ -34,12 +39,12 @@ export function AiSourceLink({ source }: { source: AiSource }) {
     }
   }
 
-  return <li>
-    <a href={url.href} title={url.hostname} target="_blank" rel="noopener noreferrer"
+  return <>
+    <a className={className} href={url.href} title={url.href} target="_blank" rel="noopener noreferrer"
       onClick={event => void openSource(event)}
       onAuxClick={event => { if (event.button === 1) void openSource(event); }}>
-      {source.title || url.hostname}
+      {children || url.hostname}
     </a>
     {error ? <span className="tp-ai-source-error" role="alert">{error}</span> : null}
-  </li>;
+  </>;
 }

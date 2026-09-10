@@ -576,7 +576,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.ai = createWorkerAi(ctx.storage, () => env.JWT_SECRET, env.AI_ALLOWED_HOSTS);
+    this.ai = createWorkerAi(ctx.storage, () => env.JWT_SECRET, env.AI_ALLOWED_HOSTS, () => env.TONGPIN_H3_API_KEY ?? "");
     this.aiWorkspace = new AiWorkspaceRepository(this.ai.store.sql);
     this.aiPersona = new AiPersonaRepository(this.ai.store.sql);
     this.loraSource = new ExplorerLoraChainDataSource(

@@ -17,7 +17,7 @@ describe("Safe upstream HTTP diagnostics", () => {
   });
   it("rejects arbitrary strings even when they resemble harmless error identifiers", async () => {
     const error = await readProviderHttpError(Response.json({ error: { code: "private_customer_name", param: "sk_test_private_key", type: "secret", message: "secret" } }, { status: 400 }), "image");
-    expect(error.diagnostic).toEqual({ operation: "image", httpStatus: 400, category: "invalid_request", billing: "rejected" });
+    expect(error.diagnostic).toEqual({ operation: "image", httpStatus: 400, category: "invalid_request", billing: "rejected", responseKind: "json" });
     expect(JSON.stringify(error)).not.toMatch(/customer|sk_test|secret/);
     expect(providerHttpError(400, "image", { code: "key_should_not_leak", param: "prompt_should_not_leak" }).diagnostic).not.toHaveProperty("code");
   });
@@ -69,7 +69,36 @@ describe("Safe upstream HTTP diagnostics", () => {
   it("retains a received status if reading or cancelling the error body fails", async () => {
     const response = new Response(new ReadableStream({ pull(controller) { controller.error(new Error("secret-network-error")); } }), { status: 403 });
     const error = await readProviderHttpError(response, "models");
-    expect(error).toMatchObject({ code: "AI_PROVIDER_AUTH", diagnostic: { httpStatus: 403, operation: "models" } });
+    expect(error).toMatchObject({ code: "AI_PROVIDER_ACCESS_DENIED", diagnostic: { httpStatus: 403, operation: "models", responseKind: "unknown" } });
     expect(error.message).not.toContain("secret-network-error");
+  });
+  it.each(["invalid_api_key", "permission_denied", "model_not_found", "model_not_supported", "invalid_request_error"])("distinguishes a known JSON 403 code: %s", async code => {
+    const error = await readProviderHttpError(Response.json({ error: { code, message: "private-key" } }, { status: 403 }), "chat");
+    const category = code === "invalid_api_key" ? "authentication" : code === "invalid_request_error" ? "access_denied" : "permission";
+    expect(error.diagnostic).toMatchObject({ category, code, responseKind: "json", billing: "rejected" });
+    expect(JSON.stringify(error)).not.toContain("private-key");
+  });
+  it("does not infer a security block from a CDN Ray ID or generic HTML alone", async () => {
+    for (const body of ["<html>Access denied</html>", JSON.stringify({ error: { message: "private-key" } })]) {
+      const error = await readProviderHttpError(new Response(body, { status: 403, headers: { "cf-ray": "a37be7f308e2b9b6-HKG", server: "cloudflare" } }), "chat");
+      expect(error.diagnostic).toMatchObject({ category: "access_denied", cfRay: "a37be7f308e2b9b6-HKG" });
+      expect(error.diagnostic).not.toHaveProperty("gatewaySignal");
+      expect(error.message).toContain("尚不能确定");
+    }
+  });
+  it.each([403, 503])("recognizes a Cloudflare block template at %i without changing billing", async status => {
+    const body = '<!DOCTYPE html><html><div id="cf-error-details">Sorry, you have been blocked. Cloudflare Ray ID private-customer-IP private-key</div></html>';
+    const error = await readProviderHttpError(new Response(body, { status, headers: { "cf-ray": "a37be7f308e2b9b6" } }), "chat");
+    expect(error.diagnostic).toMatchObject({ category: status === 403 ? "gateway_block" : "upstream_unavailable", responseKind: "html", gatewaySignal: "cloudflare_block_page", billing: status === 403 ? "rejected" : "unknown" });
+    expect(JSON.stringify(error)).not.toMatch(/private-customer|private-key|cf-error-details/);
+  });
+  it("retains the official challenge signal even when the body exceeds the read cap", async () => {
+    const error = await readProviderHttpError(new Response("x".repeat(17000), { status: 403, headers: { "cf-mitigated": "challenge" } }), "image");
+    expect(error).toMatchObject({ code: "AI_PROVIDER_GATEWAY_BLOCK", diagnostic: { gatewaySignal: "cloudflare_challenge", responseKind: "unknown", billing: "rejected" } });
+  });
+  it.each(["", "sk-private-key", "a37be7f308e2b9b6-private", "a37be7f308e2b9b6-HKG trailing-secret"])("drops malformed correlation headers: %s", async ray => {
+    const error = await readProviderHttpError(new Response(null, { status: 403, headers: { "cf-ray": ray, "x-request-id": "private-prompt", "cf-mitigated": "private-key", server: "private-key" } }), "models");
+    expect(error.diagnostic).toEqual({ operation: "models", httpStatus: 403, category: "access_denied", billing: "rejected", responseKind: "empty" });
+    expect(JSON.stringify(error)).not.toContain("private");
   });
 });

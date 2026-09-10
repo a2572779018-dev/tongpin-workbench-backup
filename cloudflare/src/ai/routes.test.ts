@@ -31,6 +31,37 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     service = new AiService(store, () => createSecretBox("test-encryption-secret-with-at-least-32-bytes"), transport);
   });
   afterEach(() => { database.close(); });
+  it("keeps availability authenticated, account-bound, no-store and non-generating", async () => {
+    expect((await invoke("/api/ai/availability", "GET", admin)).status).toBe(403);
+    expect((await invoke("/api/ai/availability", "GET", { ...a, status: "disabled" } as UserRow)).status).toBe(401);
+    expect((await invoke("/api/ai/availability", "GET", a, undefined, { "X-Tongpin-Account": "b" })).status).toBe(409);
+    expect(transport).not.toHaveBeenCalled();
+    await service.saveProvider(provider); service.setQuota("a", "admin", { limitTokens: 5000 });
+    const response = await invoke("/api/ai/availability?target=chat", "GET", a);
+    expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(await response.json()).toMatchObject({ check: { state: "reachable" }, status: { quota: { usedTokens: 0 } } });
+    expect(transport.mock.calls[0][1].method).toBe("GET");
+    expect((await invoke("/api/ai/availability?target=invalid", "GET", a)).status).toBe(400);
+    expect((await invoke("/api/ai/availability", "POST", a)).status).toBe(404);
+  });
+  it("keeps video configuration admin-only and jobs/content account-bound", async () => {
+    const settings = { enabled: true, quotaPoints: 1000, apiKey: "fixture-video-only-key" };
+    expect((await invoke("/api/admin/ai/video", "PUT", a, settings)).status).toBe(403);
+    const saved = await invoke("/api/admin/ai/video", "PUT", admin, settings);
+    expect(saved.status).toBe(200); expect(await saved.text()).not.toContain(settings.apiKey);
+    const request = { requestId: crypto.randomUUID(), prompt: "测试视频", seconds: 15, resolution: "768p", aspectRatio: "16:9" };
+    expect((await invoke("/api/ai/videos", "POST", a, request)).status).toBe(403);
+    await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 5000 });
+    await invoke("/api/admin/ai/members/b/quota", "PUT", admin, { limitTokens: 5000 });
+    transport.mockResolvedValue(Response.json({ id: "task_fixture_route_123", status: "completed", progress: 100 }));
+    expect((await invoke("/api/ai/videos", "POST", a, request, { "X-Tongpin-Account": "b" })).status).toBe(409);
+    expect((await invoke("/api/ai/videos", "POST", a, request)).status).toBe(200);
+    expect((await invoke(`/api/ai/videos/${request.requestId}/content`, "GET", b)).status).toBe(404);
+    expect((await invoke(`/api/admin/ai/videos/a/${request.requestId}/reconcile`, "POST", b, { action: "release" })).status).toBe(403);
+    transport.mockResolvedValue(new Response("mp4-fixture", { headers: { "content-type": "video/mp4" } }));
+    const content = await invoke(`/api/ai/videos/${request.requestId}/content`, "GET", a);
+    expect(content.headers.get("cache-control")).toBe("no-store"); expect(await content.text()).toBe("mp4-fixture");
+  });
   it("enforces role boundaries before touching AI service", async () => {
     expect((await invoke("/api/admin/ai/provider", "GET", a)).status).toBe(403);
     expect((await invoke("/api/ai/status", "GET", admin)).status).toBe(403);
@@ -94,6 +125,26 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     expect(service.quota("existing-user").limitTokens).toBe(5000);
   });
   const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  it.each(["gateway", "permission", "unknown"])("persists sanitized %s 403 diagnostics without logout, quota loss or automatic replay", async kind => {
+    await invoke("/api/admin/ai/provider", "PUT", admin, provider);
+    await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 10000 });
+    transport.mockResolvedValueOnce(kind === "gateway"
+      ? new Response("<html>private-test-key private-prompt</html>", { status: 403, headers: { "cf-mitigated": "challenge", "cf-ray": "a37be7f308e2b9b6-HKG" } })
+      : Response.json({ error: { ...(kind === "permission" ? { code: "permission_denied" } : {}), message: "private-test-key private-prompt" } }, { status: 403 }));
+    const request = { requestId: crypto.randomUUID(), mode: "deep", messages: [{ role: "user", content: "private-prompt" }] };
+    const response = await invoke("/api/ai/chat", "POST", a, request);
+    expect(response.status).toBe(502);
+    const failure = await response.json() as { error: { diagnostic: unknown } };
+    expect(failure.error.diagnostic).toMatchObject({ operation: "chat", httpStatus: 403, category: kind === "gateway" ? "gateway_block" : kind === "permission" ? "permission" : "access_denied", billing: "rejected" });
+    const ledger = await (await invoke("/api/admin/ai/usage?userId=a", "GET", admin)).text();
+    expect(JSON.parse(ledger)).toMatchObject({ entries: expect.arrayContaining([expect.objectContaining({ requestId: request.requestId, diagnostic: failure.error.diagnostic, totalTokens: 0, status: "failed" })]) });
+    expect(JSON.stringify(failure) + ledger).not.toMatch(/private-test-key|private-prompt/);
+    expect((await invoke(`/api/ai/requests/${request.requestId}`, "GET", b)).status).toBe(404);
+    const restored = new AiService(store, () => createSecretBox("test-encryption-secret-with-at-least-32-bytes"), transport);
+    await expect(restored.chat(a.id, request)).rejects.toMatchObject({ diagnostic: failure.error.diagnostic });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(service.quota(a.id)).toMatchObject({ usedTokens: 0, reservedTokens: 0, remainingTokens: 10000 });
+  });
   it("exposes safe image failure metadata and preserves uncertain quota without replaying or leaking to another account", async () => {
     await invoke("/api/admin/ai/provider", "PUT", admin, { ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000 });
     await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 10000 });
@@ -110,7 +161,7 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     await invoke("/api/ai/images", "POST", a, request);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(service.quota(a.id)).toMatchObject({ usedTokens: 1000, reservedTokens: 0 });
-    expect(await (await invoke("/api/admin/ai/usage?userId=a", "GET", admin)).json()).toMatchObject({ entries: [expect.objectContaining({ diagnostic: { operation: "image", httpStatus: 502, category: "upstream_unavailable", billing: "unknown", code: "server_error" } }), expect.anything()] });
+    expect(await (await invoke("/api/admin/ai/usage?userId=a", "GET", admin)).json()).toMatchObject({ entries: [expect.objectContaining({ diagnostic: { operation: "image", httpStatus: 502, category: "upstream_unavailable", billing: "unknown", code: "server_error", responseKind: "json" } }), expect.anything()] });
   });
   async function generateOwnedImage() {
     await invoke("/api/admin/ai/provider", "PUT", admin, { ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });

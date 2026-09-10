@@ -55,7 +55,7 @@ export interface AiUsage {
   estimated: boolean;
   /** Quota units explicitly configured by an administrator, not provider token counts. */
   convertedTokens?: number;
-  billingKind?: "tokens" | "image_conversion" | "tokens_with_search";
+  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search";
   /** Observed provider search invocations, never inferred from generated text or citations. */
   searchCalls?: number;
   /** Separates actual text-token reporting from administrator-defined tool conversion estimates. */
@@ -63,19 +63,23 @@ export interface AiUsage {
 }
 /** Sanitized metadata only: never the provider's message, request body, URL or credentials. */
 export interface AiProviderDiagnostic {
-  operation: "chat" | "image" | "models";
+  operation: "chat" | "image" | "video" | "models";
   httpStatus: number;
-  category: "authentication" | "rate_limit" | "redirect" | "invalid_request" | "timeout" | "conflict" | "upstream_unavailable" | "rejected";
+  category: "authentication" | "permission" | "access_denied" | "gateway_block" | "rate_limit" | "redirect" | "invalid_request" | "timeout" | "conflict" | "upstream_unavailable" | "rejected";
   /** Local settlement assessment, not a claim about the provider's final invoice. */
   billing: "rejected" | "unknown";
   code?: string;
   param?: string;
+  responseKind?: "json" | "html" | "text" | "empty" | "unknown";
+  gatewaySignal?: "cloudflare_challenge" | "cloudflare_block_page";
+  /** Strictly validated upstream correlation ID, not proof of a gateway block by itself. */
+  cfRay?: string;
 }
 export interface AiUsageEntry extends AiUsage {
   id: string;
   userId: string;
   requestId: string | null;
-  kind: "chat" | "image" | "quota";
+  kind: "chat" | "image" | "video" | "quota";
   status: "completed" | "failed" | "uncertain" | "adjusted";
   model: string | null;
   mode: AiMode | null;
@@ -98,6 +102,17 @@ export interface AiStatus {
   visionEnabled?: boolean;
   webSearchEnabled?: boolean;
   webSearchQuotaTokens?: number;
+}
+/** A non-generating connection probe is not proof that inference/tools will succeed. */
+export interface AiAvailabilityCheck {
+  state: "reachable" | "unavailable" | "unverified";
+  code: string;
+  message: string;
+  checkedAt: string;
+}
+export interface AiAvailability {
+  status: AiStatus;
+  check: AiAvailabilityCheck;
 }
 export interface AiAttachment { name: string; text?: string; mediaType?: string; dataUrl?: string }
 export interface AiPresentation {

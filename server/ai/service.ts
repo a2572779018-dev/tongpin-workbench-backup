@@ -7,6 +7,9 @@ import { AiPersonaRepository } from "./persona";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { imageProviderBody, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse } from "./imageProvider";
 import { searchCallLimit } from "./searchPolicy";
+import { AiVideoService } from "./videoService";
+import { AvailabilityProbe } from "./availability";
+import type { AiAvailability } from "../../shared/ai";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -114,7 +117,31 @@ async function requestHash(value: unknown): Promise<string> {
   return Array.from(new Uint8Array(bytes), n => n.toString(16).padStart(2, "0")).join("");
 }
 export class AiService {
-  constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport) {}
+  readonly video: AiVideoService;
+  private readonly availabilityProbe: AvailabilityProbe;
+  constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, videoKey?: () => string) {
+    this.video = new AiVideoService(store, box, transport, videoKey);
+    this.availabilityProbe = new AvailabilityProbe(transport, box);
+  }
+  async availability(userId: string, target: string = "chat"): Promise<AiAvailability> {
+    if (target !== "chat" && target !== "image") throw new AiError(400, "AI_INPUT_INVALID", "检测目标不正确");
+    const status = this.status(userId);
+    const unavailable = (code: string, message: string): AiAvailability => ({ status, check: { state: "unavailable", code, message, checkedAt: new Date().toISOString() } });
+    if (!status.accessGranted) return unavailable("AI_ACCESS_NOT_GRANTED", "管理员尚未为此账号开通 AI 使用权限。");
+    if (!status.configured) return unavailable("AI_NOT_CONFIGURED", "管理员尚未启用 AI 服务。");
+    if (status.quota.remainingTokens <= 0) return unavailable("AI_QUOTA_EXHAUSTED", "当前没有可用额度，请联系管理员；历史对话仍可查看。");
+    if (target === "image" && !status.imageEnabled) return unavailable("AI_IMAGE_DISABLED", "管理员尚未启用图片生成，请切换文字对话或联系管理员。");
+    if (target === "image" && status.quota.remainingTokens < (status.imageQuotaTokens ?? 0)) return unavailable("AI_QUOTA_EXHAUSTED", "可用额度不足以生成一张图片，请联系管理员；仍可切换文字对话。");
+    const provider = this.store.provider()!;
+    const baseUrl = target === "image" && provider.imageBaseUrl ? provider.imageBaseUrl : provider.baseUrl;
+    const key = target === "image" && provider.imageBaseUrl ? provider.encryptedImageKey! : provider.encryptedKey;
+    const check = await this.availabilityProbe.check(target, baseUrl, key);
+    if (JSON.stringify(provider) !== JSON.stringify(this.store.provider())) throw new AiError(409, "AI_CONFIG_CHANGED", "服务配置已更改，请重新检测。");
+    // Re-read account state after awaiting the shared probe. Never cache member permissions/quota.
+    const current = this.status(userId);
+    if (!current.accessGranted || current.quota.remainingTokens <= 0) return { status: current, check: { state: "unavailable", code: "AI_QUOTA_EXHAUSTED", message: "当前没有可用额度，请联系管理员。", checkedAt: new Date().toISOString() } };
+    return { status: current, check };
+  }
   provider(): AiProviderConfig | null {
     const p = this.store.provider();
     if (!p) return null;
@@ -320,6 +347,7 @@ export class AiService {
       return { requestId: request.requestId, content, model, usage, quota: this.store.quota(userId), ...extras };
     } catch (error) {
       const safe = error instanceof AiError ? error : new AiError(502, "AI_CONNECTION_FAILED", "AI 服务连接失败或超时，请稍后重试；不确定用量已记录，请管理员核对");
+      this.availabilityProbe.invalidate("chat");
       knownRejection ||= safe.definitelyNotSent;
       const usage = knownRejection ? { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false } : conservativeUsage(reserved);
       this.store.sql.transaction(() => {
@@ -387,6 +415,7 @@ export class AiService {
       return result;
     } catch (error) {
       const safe = error instanceof AiError ? error : new AiError(502, "AI_CONNECTION_FAILED", "图片生成连接中断或超时，请管理员核对服务商用量");
+      this.availabilityProbe.invalidate("image");
       knownRejection ||= safe.definitelyNotSent;
       const usage: AiUsage = knownRejection ? { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false } : conservativeUsage(reserved);
       this.store.sql.transaction(() => this.settle(reserved, usage, knownRejection ? "failed" : "uncertain", knownRejection ? "图片请求未发出或被服务商拒绝，已释放预留额度" : "图片结果不确定，已记录预留折算额度，请管理员核对", undefined, safe));

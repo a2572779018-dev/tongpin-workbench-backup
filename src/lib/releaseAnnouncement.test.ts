@@ -27,19 +27,19 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "同频 AI 支持上传和粘贴图片",
+      "进入同频 AI 时检查实际服务可用性",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "视频采样不包含音频",
+      "AI 等待回复显示已等待秒数",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留任务、客户脉络图、AI 历史及原有额度",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "修复 Fleur 形象超出标题栏边界",
+      "修复 AI 回复中的 Markdown 排版",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "联网搜索新增兼容协议配置",
+      "新增 H3 15 秒视频生成入口",
     );
   });
 

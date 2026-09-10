@@ -33,6 +33,15 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (boundAccount !== null && boundAccount !== user.id) throw new AiError(409, "AI_ACCOUNT_CHANGED", "账号已切换，请重新打开工作台");
     if (path.startsWith("/api/admin/ai/") && user.role !== "admin") throw new AiError(403, "FORBIDDEN", "你没有访问此功能的权限");
     if (path.startsWith("/api/ai/") && user.role !== "member" && user.role !== "boss") throw new AiError(403, "AI_MEMBER_REQUIRED", "请使用成员或老板账号访问 AI 工作台");
+    if (path === "/api/admin/ai/video" && method === "GET") return json({ settings: service.video.settings(), pending: service.video.adminPending() });
+    if (path === "/api/admin/ai/video" && method === "PUT") return json({ settings: await service.video.configure(await parseAiJson(request)) });
+    if (path === "/api/admin/ai/video/test" && method === "POST") return json(await service.video.test());
+    const videoReconcile = path.match(/^\/api\/admin\/ai\/videos\/([^/]+)\/([^/]+)\/reconcile$/);
+    if (videoReconcile && method === "POST") return json({ job: service.video.reconcile(videoReconcile[1], videoReconcile[2], user.id, await parseAiJson(request)) });
+    if (path === "/api/ai/videos" && method === "GET") return json(service.video.list(user.id));
+    if (path === "/api/ai/videos" && method === "POST") return json({ job: await service.video.submit(user.id, await parseAiJson(request)) });
+    const videoMatch = path.match(/^\/api\/ai\/videos\/([^/]+)(\/content)?$/);
+    if (videoMatch && method === "GET") return videoMatch[2] ? await service.video.content(user.id, videoMatch[1]) : json({ job: await service.video.refresh(user.id, videoMatch[1]) });
     if (path === "/api/admin/ai/provider" && method === "GET") return json({ provider: service.provider() });
     if (path === "/api/admin/ai/provider" && method === "PUT") {
       const body = await parseAiJson<{ baseUrl?: unknown }>(request);
@@ -63,6 +72,7 @@ export async function handleAiRequest(request: Request, service: AiService, user
     }
     if (path === "/api/admin/ai/usage" && method === "GET") return json({ entries: service.store.usage(url.searchParams.get("userId") || undefined) });
     if (path === "/api/ai/status" && method === "GET") return json(service.status(user.id));
+    if (path === "/api/ai/availability" && method === "GET") return json(await service.availability(user.id, url.searchParams.get("target") ?? "chat"));
     if (path === "/api/ai/usage" && method === "GET") { service.quota(user.id); return json({ entries: service.store.usage(user.id) }); }
     if (path === "/api/ai/preflight" && method === "POST") return json(service.preflight(user.id, await parseAiJson(request)));
     if (path === "/api/ai/chat" && method === "POST") return json(await service.chat(user.id, await parseAiJson(request)));

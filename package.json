@@ -1,6 +1,6 @@
 {
   "name": "tongpin-workbench",
-  "version": "0.1.39",
+  "version": "0.1.40",
   "private": true,
   "engines": {
     "node": ">=24.0.0"
@@ -122,6 +122,8 @@
     "nodemailer": "^9.0.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "resend": "^6.18.0",
     "ws": "^8.21.1",
     "zod": "^4.4.3"

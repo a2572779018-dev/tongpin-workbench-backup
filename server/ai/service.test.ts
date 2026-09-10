@@ -51,6 +51,90 @@ describe("AI transactional service", () => {
     expect(transport).not.toHaveBeenCalled();
     expect(runtime.store.usage("member-a")).toEqual([]);
   });
+  it("checks availability only after account permission, configuration and quota checks", async () => {
+    expect((await runtime.service.availability("member-a")).check.code).toBe("AI_ACCESS_NOT_GRANTED");
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 0 });
+    expect((await runtime.service.availability("member-a")).check.code).toBe("AI_QUOTA_EXHAUSTED");
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });
+    await runtime.service.saveProvider({ ...provider, enabled: false });
+    expect((await runtime.service.availability("member-a")).check.code).toBe("AI_NOT_CONFIGURED");
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("shares a non-generating probe but never shares account quota or secrets", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });
+    runtime.service.setQuota("member-b", "admin", { limitTokens: 5000 });
+    const usageBefore = runtime.store.usage();
+    transport.mockImplementation(async () => Response.json({ data: [{ id: "quick-model" }] }));
+    const [a, b] = await Promise.all([runtime.service.availability("member-a"), runtime.service.availability("member-b")]);
+    expect(a.check.state).toBe("reachable"); expect(a.status.quota.remainingTokens).toBe(1000);
+    expect(b.check.state).toBe("reachable"); expect(b.status.quota.remainingTokens).toBe(5000);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0][0]).toBe("https://api.example.com/v1/models");
+    expect(transport.mock.calls[0][1].method).toBe("GET");
+    expect(transport.mock.calls[0][1].body).toBeUndefined();
+    expect(runtime.store.usage()).toEqual(usageBefore);
+    expect(JSON.stringify([a, b])).not.toContain(provider.apiKey);
+  });
+  it("invalidates the connection cache after key rotation", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });
+    transport.mockImplementation(async () => Response.json({ data: [] }));
+    await runtime.service.availability("member-a");
+    await runtime.service.saveProvider({ ...provider, apiKey: "new-fixture-key" });
+    await runtime.service.availability("member-a");
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(transport.mock.calls[1][1].headers.Authorization).toBe("Bearer new-fixture-key");
+  });
+  it("does not reuse a cached successful probe after a real generation failure", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 5000 });
+    transport.mockImplementation(async () => Response.json({ data: [] }));
+    expect((await runtime.service.availability("member-a")).check.state).toBe("reachable");
+    transport.mockImplementation(async () => new Response("denied", { status: 403 }));
+    await expect(runtime.service.chat("member-a", chat())).rejects.toMatchObject({ code: "AI_PROVIDER_ACCESS_DENIED" });
+    expect((await runtime.service.availability("member-a")).check.state).toBe("unavailable");
+    expect(transport.mock.calls.map(([, init]) => init.method)).toEqual(["GET", "POST", "GET"]);
+  });
+  it("does not report an obsolete provider or revoked quota as usable after an in-flight probe", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });
+    let finish!: (value: Response) => void;
+    transport.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = runtime.service.availability("member-a");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 0 });
+    finish(Response.json({ data: [] }));
+    expect((await pending).check.state).toBe("unavailable");
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });
+    await runtime.service.saveProvider({ ...provider, apiKey: "changed-fixture-key" });
+    const changed = runtime.service.availability("member-a");
+    const assertion = expect(changed).rejects.toMatchObject({ code: "AI_CONFIG_CHANGED" });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await runtime.service.saveProvider({ ...provider, enabled: false });
+    finish(Response.json({ data: [] }));
+    await assertion;
+  });
+  it("probes an independent image key without blocking the chat connection", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });
+    await runtime.service.saveProvider({ ...provider, imageModel: "picture", imageBaseUrl: "https://images.example.com", imageApiKey: "image-fixture-key", imageQuotaTokens: 100 });
+    transport.mockImplementation(async url => url.includes("images.example") ? new Response("denied", { status: 403 }) : Response.json({ data: [] }));
+    expect((await runtime.service.availability("member-a", "image")).check.state).toBe("unavailable");
+    expect((await runtime.service.availability("member-a", "chat")).check.state).toBe("reachable");
+    expect(transport.mock.calls[0][1].headers.Authorization).toBe("Bearer image-fixture-key");
+    await expect(runtime.service.availability("member-a", "https://evil.example")).rejects.toMatchObject({ code: "AI_INPUT_INVALID" });
+  });
+  it("uses the administrator's rotated key for every member's NEW request, without per-member provider keys", async () => {
+    for (const member of ["member-mac", "member-win"]) runtime.service.setQuota(member, "admin", { limitTokens: 10000 });
+    await runtime.service.chat("member-mac", chat());
+    const changedKey = "fixture-rotated-key-do-not-return";
+    await runtime.service.saveProvider({ ...provider, apiKey: changedKey });
+    await runtime.service.chat("member-win", chat());
+    await runtime.service.chat("member-mac", { ...chat(), mode: "deep" });
+    expect(transport.mock.calls.map(([, init]) => init.headers.Authorization)).toEqual([
+      `Bearer ${provider.apiKey}`, `Bearer ${changedKey}`, `Bearer ${changedKey}`,
+    ]);
+    expect(JSON.stringify(runtime.service.provider()) + JSON.stringify(runtime.store.usage())).not.toContain(changedKey);
+    expect(runtime.service.quota("member-win").usedTokens).toBe(13);
+    expect(runtime.service.quota("member-mac").usedTokens).toBe(26);
+  });
   it("does not treat zero-only adjustments as access, but retains positive-grant history beyond the latest 200 entries", async () => {
     runtime.service.setQuota("zero-member", "admin", { limitTokens: 0 });
     expect(runtime.service.status("zero-member").accessGranted).toBe(false);

@@ -2,6 +2,10 @@ import { FileText, Info, PanelRightOpen, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../auth/AuthContext";
 import { ApiRequestError } from "../lib/api";
+import { shouldRecoverReply, waitForReply } from "../features/tongpin-ai/waitForReply";
+import { useAiAvailability } from "../features/tongpin-ai/useAiAvailability";
+import { AiAvailabilityNotice } from "../features/tongpin-ai/AiAvailabilityNotice";
+import type { AiRequestResult } from "../../shared/ai";
 import type { AiChatPreflight, AiChatRequest, AiChatResponse, AiImageRequest, AiImageResponse, AiStatus } from "../../shared/ai";
 import { ChatPreflightGate, preflightNotice, sameSendContext, withPreparedChatSend } from "../features/tongpin-ai/chatPreflight";
 import type { AiWorkspaceDocument, AiWorkspaceSaveRequest, AiWorkspaceSnapshot } from "../../shared/aiWorkspace";
@@ -14,7 +18,7 @@ import { loadAiEntry, type AiEntry } from "../features/tongpin-ai/loadAiEntry";
 import type { AiPersonaSnapshot } from "../../shared/aiPersona";
 import { documentAttachments, ensureAttachmentWorkspaceCapacity, extractAttachment, workspaceAttachment, validateAttachments, WorkspaceCapacityError } from "../features/tongpin-ai/attachments";
 import { selectSkill, skillRequestIds } from "../features/tongpin-ai/skills";
-import { buildChatRequest, canRecoverChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
+import { buildChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence, typewriterDuration, TYPEWRITER_FRAME_MS } from "../features/tongpin-ai/chatPerformance";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
 import { ArtifactPreview } from "../features/tongpin-ai/ArtifactPreview";
@@ -126,7 +130,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [preflightGate] = useState(() => new ChatPreflightGate());
   const [budgetNotice, setBudgetNotice] = useState<{ context: readonly unknown[]; result: AiChatPreflight } | null>(null);
   const [responsePhase, setResponsePhase] = useState<"waiting" | "typing">("waiting");
-  const requestRef = useRef<{ controller: AbortController; conversationId: string; messageId: string; request: GenerationRequest } | null>(null);
+  const requestRef = useRef<{ controller: AbortController; conversationId: string; messageId: string } | null>(null);
   const retryRequestsRef = useRef(new Map<string, { conversationId: string; request: GenerationRequest }>());
   const pendingGenerationRef = useRef<string | null>(null);
   const pendingCancelledRef = useRef(false);
@@ -168,6 +172,10 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [draftAttachments, setDraftAttachments] = useState<Record<string, AiWorkspaceDocument[]>>(initialSession.draftAttachments ?? {});
   const [composerTool, setComposerTool] = useState<"text" | "presentation" | "image">(initialSession.composerTool ?? "text");
   const [webSearch, setWebSearch] = useState(initialSession.webSearch ?? false);
+  const availability = useAiAvailability(api, user.id, composerTool === "image" ? "image" : "chat", setAiStatus);
+  const availabilityScope = composerTool === "image" ? "image" : `${mode}:${webSearch ? "search" : "chat"}`;
+  const availabilityCheck = availability.failures[availabilityScope] ?? availability.check;
+  const availabilityBlocked = availability.checking || availabilityCheck?.state === "unavailable";
   const draftKey =
     activeConversationId ??
     (activeProjectId
@@ -687,30 +695,46 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     displayReply(conversationId, messageId, imageResult ? { ...response, content: "图片已生成，点击下方成果查看和下载。" } : response);
   }
 
-  async function performChat(conversationId: string, messageId: string, request: GenerationRequest) {
+  async function performChat(conversationId: string, messageId: string, request: GenerationRequest | string) {
     if (requestRef.current || typingRef.current) return;
+    // Reading an already submitted request remains possible even during an outage.
+    if (typeof request !== "string" && availabilityBlocked) { setResponding(false); return; }
     if (!mountedRef.current || !liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) {
       if (mountedRef.current) setResponding(false);
       return;
     }
     const controller = new AbortController();
-    requestRef.current = { controller, conversationId, messageId, request };
-    retryRequestsRef.current.set(messageId, { conversationId, request });
+    requestRef.current = { controller, conversationId, messageId };
+    // Only requests that were never sent may be POSTed by the retry button.
+    retryRequestsRef.current.delete(messageId);
+    const requestId = typeof request === "string" ? request : request.requestId;
+    const deadline = Date.now() + 180_000;
+    const recover = () => waitForReply((signal, timeoutMs) => api<AiRequestResult>(
+      `/api/ai/requests/${encodeURIComponent(requestId)}`,
+      { headers: { "X-Tongpin-Account": user.id }, signal }, timeoutMs,
+    ), controller.signal, deadline);
     setResponding(true);
     setResponsePhase("waiting");
     updateReply(conversationId, messageId, { content: "", status: "thinking" });
     try {
-      const response = await api<AiChatResponse | AiImageResponse>("prompt" in request ? "/api/ai/images" : "/api/ai/chat", {
-        method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(request), signal: controller.signal,
-      }, 130_000);
+      let response: AiChatResponse | AiImageResponse;
+      if (typeof request === "string") response = await recover();
+      else {
+        try {
+          response = await api<AiChatResponse | AiImageResponse>("prompt" in request ? "/api/ai/images" : "/api/ai/chat", {
+            method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(request), signal: controller.signal,
+          }, 130_000);
+        } catch (error) {
+          if (controller.signal.aborted || !shouldRecoverReply(error)) throw error;
+          response = await recover();
+        }
+      }
       if (!mountedRef.current || controller.signal.aborted) return;
       acceptGeneration(conversationId, messageId, response);
     } catch (error) {
       if (!mountedRef.current) return;
       const interrupted = controller.signal.aborted;
-      if (!canRecoverChatRequest(error instanceof ApiRequestError ? error.code : undefined, interrupted)) {
-        retryRequestsRef.current.delete(messageId);
-      }
+      if (!interrupted && typeof request !== "string") availability.recordFailure("prompt" in request ? "image" : `${request.mode}:${request.webSearch ? "search" : "chat"}`, error);
       updateReply(conversationId, messageId, { status: "error", content: interrupted
         ? "已停止等待。请求可能仍在处理，实际扣额请查看 Token 使用详情。"
         : error instanceof ApiRequestError && error.code === "NETWORK_UNAVAILABLE"
@@ -724,7 +748,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   }
 
   async function sendMessage() {
-    if (!persona.profile.onboardingComplete || (!draft.trim() && !attachments.length) || responding || preflightGate.busy || fileImportRef.current || pendingGenerationRef.current || requestRef.current || quotaInsufficient || !serviceConnected || connectionError) return;
+    if (!persona.profile.onboardingComplete || (!draft.trim() && !attachments.length) || responding || preflightGate.busy || fileImportRef.current || pendingGenerationRef.current || requestRef.current || quotaInsufficient || !serviceConnected || connectionError || availabilityBlocked) return;
     if (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId)) {
       showAnnouncement("此对话正在删除或已被删除，请选择其他对话"); return;
     }
@@ -847,13 +871,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     const conversation = workspaceRef.current.conversations.find(item => item.messages.some(message => message.id === messageId));
     const message = conversation?.messages.find(item => item.id === messageId);
     if (!conversation || !message?.requestId || !liveConversation(workspaceRef.current, deletingConversationRef.current, conversation.id, messageId)) return;
-    setResponding(true);
-    try {
-      const cached = await api<{ status: string; result?: AiChatResponse; imageResult?: AiImageResponse; error?: { message: string } }>(`/api/ai/requests/${encodeURIComponent(message.requestId)}`, { headers: { "X-Tongpin-Account": user.id } });
-      if (!mountedRef.current) return;
-      if (cached.result || cached.imageResult) acceptGeneration(conversation.id, messageId, (cached.result ?? cached.imageResult)!);
-      else { updateReply(conversation.id, messageId, { status: "error", content: cached.error?.message ?? "请求仍在处理，请稍后重新获取。不会再次调用模型。" }); setResponding(false); }
-    } catch (error) { if (mountedRef.current) { showAnnouncement(error instanceof Error ? error.message : "无法获取上次结果"); setResponding(false); } }
+    await performChat(conversation.id, messageId, message.requestId);
   }
 
   function stopResponse() {
@@ -1014,6 +1032,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           responding={responding}
           responsePhase={responsePhase}
           connectionLoading={connectionLoading}
+          availabilityBlocked={availabilityBlocked}
+          availabilityNotice={<AiAvailabilityNotice checking={availability.checking} check={availabilityCheck} onRetry={() => { void availability.refresh(availabilityScope); void refreshStatus(); }} />}
           connectionError={connectionError}
           onRefreshConnection={() => void refreshStatus()}
           serviceConnected={serviceConnected}

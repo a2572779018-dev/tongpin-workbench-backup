@@ -34,7 +34,7 @@ export function createWorkerAiTransport(allowedHosts?: string | readonly string[
 }
 export const workerAiTransport: AiTransport = createWorkerAiTransport();
 
-export function createWorkerAi(storage: DurableObjectStorage, secret: () => string, allowedHosts?: string | readonly string[]) {
+export function createWorkerAi(storage: DurableObjectStorage, secret: () => string, allowedHosts?: string | readonly string[], videoKey?: () => string) {
   const sql: AiSql = {
     exec(query, ...bindings) { storage.sql.exec(query, ...bindings); },
     all<T>(query: string, ...bindings: Array<string | number | null>): T[] {
@@ -43,6 +43,6 @@ export function createWorkerAi(storage: DurableObjectStorage, secret: () => stri
     transaction<T>(action: () => T): T { return storage.transactionSync(action); },
   };
   const store = new AiStore(sql);
-  const service = new AiService(store, () => createSecretBox(secret()), createWorkerAiTransport(allowedHosts));
+  const service = new AiService(store, () => createSecretBox(secret()), createWorkerAiTransport(allowedHosts), videoKey);
   return { store, service };
 }

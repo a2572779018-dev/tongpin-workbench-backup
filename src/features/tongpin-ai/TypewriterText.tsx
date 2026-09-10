@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { TYPEWRITER_FRAME_MS, typewriterDuration, typewriterOffset } from "./chatPerformance";
 
 /** Local reveal of an already received answer, not upstream network streaming. */
-export function TypewriterText({ content }: { content: string }) {
+export function TypewriterText({ content, render }: { content: string; render?: (offset: number) => ReactNode }) {
   const [offset, setOffset] = useState(0);
   useEffect(() => {
     const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -33,5 +33,5 @@ export function TypewriterText({ content }: { content: string }) {
       document.removeEventListener("visibilitychange", finishWhenInactive);
     };
   }, [content]);
-  return <>{content.slice(0, offset)}</>;
+  return <>{render ? render(offset) : content.slice(0, offset)}</>;
 }

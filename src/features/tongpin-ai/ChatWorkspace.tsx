@@ -26,6 +26,7 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import type {
   TongpinAIArtifact,
@@ -43,6 +44,7 @@ import { ATTACHMENT_ACCEPT, TEXT_ATTACHMENT_ACCEPT, workspaceAttachment } from "
 import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT } from "../../../shared/aiMedia";
 import { AttachmentChips } from "./AttachmentChips";
 import { ChatMessageRow } from "./ChatMessageRow";
+import { AiVideoPanel } from "./AiVideoPanel";
 import { CHAT_MESSAGE_PAGE_SIZE } from "./chatPerformance";
 
 interface ChatWorkspaceProps {
@@ -63,6 +65,8 @@ interface ChatWorkspaceProps {
   responding: boolean;
   responsePhase?: "waiting" | "typing";
   connectionLoading?: boolean;
+  availabilityBlocked?: boolean;
+  availabilityNotice?: ReactNode;
   connectionError?: string;
   onRefreshConnection?: () => void;
   onRetry?: (messageId: string) => void;
@@ -112,6 +116,8 @@ export function ChatWorkspace({
   responding,
   responsePhase = "waiting",
   connectionLoading = false,
+  availabilityBlocked = false,
+  availabilityNotice,
   connectionError = "",
   onRefreshConnection,
   onRetry,
@@ -149,6 +155,7 @@ export function ChatWorkspace({
   const toolsTriggerRef = useRef<HTMLButtonElement>(null);
   const followResponseRef = useRef(true);
   const [menu, setMenu] = useState<"attachments" | "tools" | null>(null);
+  const [videoOpen, setVideoOpen] = useState(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState("");
@@ -291,7 +298,7 @@ export function ChatWorkspace({
 
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    if ((!draft.trim() && !attachments.length) || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || capabilityUnavailable) return;
+    if ((!draft.trim() && !attachments.length) || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked || capabilityUnavailable) return;
     followResponseRef.current = true;
     setMenu(null);
     onSubmit();
@@ -408,6 +415,7 @@ export function ChatWorkspace({
       </div>
 
       <footer className="tp-ai-composer-wrap">
+        {availabilityNotice}
         {fileError ? <p className="tp-ai-copy-error" role="alert">{fileError}</p> : null}
         {capabilityUnavailable && serviceConnected ? <div className="tp-ai-quota-block" role="status"><span>{composerTool === "image" ? "图片生成尚未启用，请取消图片模式或联系管理员配置。" : "联网搜索当前不可用，请关闭搜索或联系管理员配置。"}</span></div> : null}
         {(connectionError || (!connectionLoading && !serviceConnected)) && (
@@ -586,6 +594,9 @@ export function ChatWorkspace({
                           <small>SKILL.md</small>
                         </button>
                         <div role="separator" />
+                        <button type="button" role="menuitem" disabled={responding || readingFiles} onClick={() => { setMenu(null); setVideoOpen(true); }}>
+                          <Video size={18} /><span>生成视频</span><small>H3 · 我的作品</small>
+                        </button>
                         <button
                           type="button"
                           role="menuitem"
@@ -677,7 +688,7 @@ export function ChatWorkspace({
                 <button
                   type="submit"
                   className="tp-ai-send-button"
-                  disabled={checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || capabilityUnavailable}
+                  disabled={checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || availabilityBlocked || capabilityUnavailable}
                   aria-label={checkingQuota ? "正在核对额度" : "发送消息"}
                   aria-busy={checkingQuota}
                 >
@@ -689,6 +700,7 @@ export function ChatWorkspace({
         </div>
         <p className="tp-ai-composer-hint">Enter 发送 · Shift + Enter 换行</p>
       </footer>
+      {videoOpen ? <AiVideoPanel initialPrompt={draft} onClose={() => { setVideoOpen(false); onRefreshConnection?.(); }} onQuotaChange={onRefreshConnection} /> : null}
     </section>
   );
 }

@@ -35,7 +35,8 @@ export const nodeAiTransport: AiTransport = async (target, init) => {
         // Expose bytes as they arrive so bounded readers and search-budget guards can cancel promptly.
         // Readable.toWeb propagates cancellation to IncomingMessage; it never retries the request.
         let size = 0;
-        const limit = Math.min(init.maxResponseBytes ?? 2_000_000, 6_000_000);
+        const videoDownload = url.origin === "https://www.75api.com" && /^\/v1\/videos\/task_[a-zA-Z0-9_-]{8,128}\/content$/.test(url.pathname) && init.method === "GET";
+        const limit = Math.min(init.maxResponseBytes ?? 2_000_000, videoDownload ? 64 * 1024 * 1024 : 6_000_000);
         const body = [204, 205, 304].includes(status) ? null : (Readable.toWeb(response) as ReadableStream<Uint8Array>).pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
           transform(chunk, controller) {
             size += chunk.byteLength;
@@ -85,7 +86,7 @@ export async function createNodeAi(dataFile: string, transport: AiTransport = no
     secret ??= localSecret(`${dataFile}.ai-key`).then(value => createSecretBox(value));
     return await secret;
   };
-  const service = new AiService(store, box, transport);
+  const service = new AiService(store, box, transport, () => process.env.TONGPIN_H3_API_KEY ?? "");
   let closed = false;
   return { service, store, close: () => { if (!closed) { closed = true; database.close(); } } };
 }

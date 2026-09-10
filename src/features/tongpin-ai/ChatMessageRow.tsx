@@ -1,7 +1,8 @@
 import { Check, Copy, FileText, Paperclip } from "lucide-react";
 import { memo } from "react";
 import { AiSourceLink } from "./AiSourceLink";
-import { TypewriterText } from "./TypewriterText";
+import { MarkdownReply } from "./MarkdownReply";
+import { ReplyWaiting } from "./ReplyWaiting";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
 
 interface ChatMessageRowProps {
@@ -35,11 +36,10 @@ export const ChatMessageRow = memo(function ChatMessageRow({
           </figure>)}</div>{file.media.kind === "video" ? <small>仅分析采样画面，不含音频</small> : null}</> : null}
         </li>)}
       </ul> : null}
-      {message.status === "thinking" ? <div className="tp-ai-thinking" role="status"><span /><span /><span />正在思考</div> :
-        <p className={message.status === "typing" ? "tp-ai-message__typing" : undefined}>
-          {message.status === "typing" ? <TypewriterText content={message.content} /> : message.content}
-          {message.status === "typing" && <span className="tp-ai-message__typing-caret" aria-hidden="true" />}
-        </p>}
+      {message.status === "thinking" ? <ReplyWaiting key={message.id} /> :
+        message.role === "assistant" && message.status !== "error"
+          ? <MarkdownReply content={message.content} typing={message.status === "typing"} />
+          : <p>{message.content}</p>}
       {artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
         <span className="tp-ai-artifact-card__icon"><FileText size={20} /></span>
         <span><small>{artifact.kind}</small><strong>{artifact.title}</strong></span>

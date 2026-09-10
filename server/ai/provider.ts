@@ -78,22 +78,42 @@ const SAFE_ERROR_PARAMS = new Set(["model", "size", "quality", "n", "prompt", "s
 function safeErrorParam(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   if (SAFE_ERROR_PARAMS.has(value)) return value;
+  if (/^tools\[\]\.(?:type|search_context_size|external_web_access)$/.test(value)) return value;
   // Some compatible gateways identify a rejected nested parameter instead of the top-level field.
   // Emit only fixed field names; arbitrary indices/paths can contain prompt or credential material.
   if (/^tools(?:\[\d{1,3}\]|\.\d{1,3})\.(?:type|search_context_size|external_web_access)$/.test(value)) return `tools[].${value.slice(value.lastIndexOf(".") + 1)}`;
   return undefined;
 }
-export function providerHttpError(status: number, operation: AiProviderDiagnostic["operation"] = "chat", metadata: { code?: string; param?: string } = {}): AiError {
-  const category: AiProviderDiagnostic["category"] = status === 401 || status === 403 ? "authentication" : status === 429 ? "rate_limit" : status >= 300 && status < 400 ? "redirect" : status === 408 || status === 504 ? "timeout" : status === 409 ? "conflict" : status >= 500 ? "upstream_unavailable" : [400, 404, 405, 406, 413, 415, 422].includes(status) ? "invalid_request" : "rejected";
+type ProviderErrorMetadata = Pick<AiProviderDiagnostic, "code" | "param" | "responseKind" | "gatewaySignal" | "cfRay">;
+function safeCfRay(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(value) ? value : undefined;
+}
+export function providerHttpError(status: number, operation: AiProviderDiagnostic["operation"] = "chat", metadata: ProviderErrorMetadata = {}): AiError {
+  const code = metadata.code && SAFE_ERROR_CODES.has(metadata.code) ? metadata.code : undefined;
+  const gatewaySignal = metadata.gatewaySignal === "cloudflare_challenge" || metadata.gatewaySignal === "cloudflare_block_page" ? metadata.gatewaySignal : undefined;
+  const responseKind = ["json", "html", "text", "empty", "unknown"].includes(metadata.responseKind ?? "") ? metadata.responseKind : undefined;
+  const cfRay = safeCfRay(metadata.cfRay);
+  // A 403 alone cannot establish that a key is invalid. A CDN Ray ID alone cannot establish a WAF block either.
+  const category: AiProviderDiagnostic["category"] = (status === 401 || status === 403) && gatewaySignal ? "gateway_block"
+    : status === 401 || status === 403 && code === "invalid_api_key" ? "authentication"
+    : status === 403 && ["permission_denied", "model_not_found", "model_not_supported"].includes(code ?? "") ? "permission"
+    : status === 403 ? "access_denied"
+    : status === 429 ? "rate_limit" : status >= 300 && status < 400 ? "redirect" : status === 408 || status === 504 ? "timeout" : status === 409 ? "conflict" : status >= 500 ? "upstream_unavailable" : [400, 404, 405, 406, 413, 415, 422].includes(status) ? "invalid_request" : "rejected";
   const param = safeErrorParam(metadata.param);
   const diagnostic: AiProviderDiagnostic = { operation, httpStatus: status, category, billing: isProviderRejection(status) ? "rejected" : "unknown",
-    ...(metadata.code && SAFE_ERROR_CODES.has(metadata.code) ? { code: metadata.code } : {}),
+    ...(code ? { code } : {}),
     ...(param ? { param } : {}),
+    ...(responseKind ? { responseKind } : {}),
+    ...(gatewaySignal ? { gatewaySignal } : {}),
+    ...(cfRay ? { cfRay } : {}),
   };
-  const prefix = operation === "image" ? "图片服务" : "AI 服务";
+  const prefix = operation === "image" ? "图片服务" : operation === "video" ? "视频服务" : "AI 服务";
   const http = `（HTTP ${status}）`;
   const failure = (code: string, message: string) => new AiError(502, code, message, false, undefined, diagnostic);
-  if (category === "authentication") return failure("AI_PROVIDER_AUTH", `${prefix}密钥无效或无权使用该模型${http}，请管理员检查对应密钥及分组权限`);
+  if (category === "authentication") return failure("AI_PROVIDER_AUTH", `${prefix}身份验证失败${http}，请管理员检查对应 API 密钥是否有效`);
+  if (category === "gateway_block") return failure("AI_PROVIDER_GATEWAY_BLOCK", `${prefix}请求被服务商安全网关拦截${http}，请管理员联系服务商核查拦截记录；这不等于密钥失效`);
+  if (category === "permission") return failure("AI_PROVIDER_PERMISSION", `${prefix}明确拒绝当前模型权限${http}，请管理员检查该密钥的模型与分组权限`);
+  if (category === "access_denied") return failure("AI_PROVIDER_ACCESS_DENIED", `${prefix}拒绝访问${http}，${code === "content_policy_violation" || code === "moderation_blocked" ? "内容未通过服务商审核" : "尚不能确定是密钥、模型权限还是安全策略限制，请管理员核对本次失败记录"}`);
   if (category === "rate_limit") return failure("AI_PROVIDER_LIMIT", `${prefix}余额不足或请求过于频繁${http}，请管理员检查服务商账号`);
   if (category === "redirect") return failure("AI_PROVIDER_REDIRECT", `API 地址发生重定向${http}，已为保护密钥停止连接，请填写最终 API 地址`);
   if (category === "timeout" || category === "conflict" || category === "upstream_unavailable" || diagnostic.billing === "unknown") {
@@ -106,18 +126,34 @@ export function providerHttpError(status: number, operation: AiProviderDiagnosti
 }
 /** Read a small error envelope, but retain only fixed allowlisted metadata. Never log/return arbitrary upstream text. */
 export async function readProviderHttpError(response: Response, operation: AiProviderDiagnostic["operation"]): Promise<AiError> {
-  let metadata: { code?: string; param?: string } = {};
+  const cfRay = safeCfRay(response.headers.get("cf-ray"));
+  const metadata: ProviderErrorMetadata = {
+    responseKind: "unknown",
+    ...(cfRay ? { cfRay } : {}),
+    ...(response.headers.get("cf-mitigated") === "challenge" ? { gatewaySignal: "cloudflare_challenge" } : {}),
+  };
   try {
-    const root = object(await readBoundedJson(response, 16 * 1024));
+    const text = response.body ? await readBoundedText(response, 16 * 1024) : "";
+    const html = /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(text);
+    metadata.responseKind = !text.trim() ? "empty" : html ? "html" : "text";
+    // Recognize a known HTML block template only with Cloudflare header evidence.
+    // The document itself is never retained, logged or sent to the client.
+    if (html && (cfRay || response.headers.get("server")?.toLowerCase() === "cloudflare")
+      && /Sorry, you have been blocked/i.test(text) && /(?:cf-error-details|Cloudflare Ray ID)/i.test(text)
+      && !metadata.gatewaySignal) metadata.gatewaySignal = "cloudflare_block_page";
+    const root = object(JSON.parse(text));
+    metadata.responseKind = "json";
     const error = object(root.error);
     // OpenAI-compatible errors sometimes put invalid_request_error in type while code is null.
     const code = [error.code, error.type].find(value => typeof value === "string" && SAFE_ERROR_CODES.has(value));
-    metadata = { ...(typeof code === "string" ? { code } : {}), ...(typeof error.param === "string" ? { param: error.param } : {}) };
+    if (typeof code === "string") metadata.code = code;
+    metadata.param = safeErrorParam(error.param);
     // Observed Codex-compatible gateway refusal: no code/param, only this exact message.
     // An anchored, known-field match is diagnostic evidence, never permission to echo arbitrary text.
     const unsupported = typeof error.message === "string" ? /^Unsupported parameter: ([a-z_]+)$/.exec(error.message) : null;
     if (unsupported && SAFE_ERROR_PARAMS.has(unsupported[1]) && !metadata.param) {
-      metadata = { code: typeof code === "string" ? code : "unsupported_parameter", param: unsupported[1] };
+      metadata.code = typeof code === "string" ? code : "unsupported_parameter";
+      metadata.param = unsupported[1];
     }
     if (error.message === "No available compatible accounts") metadata.code = "no_available_compatible_accounts";
   } catch { /* Oversized, non-JSON and interrupted error bodies do not erase the received HTTP status. */ }
