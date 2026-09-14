@@ -3,6 +3,7 @@ import { memo } from "react";
 import { AiSourceLink } from "./AiSourceLink";
 import { MarkdownReply } from "./MarkdownReply";
 import { ReplyWaiting } from "./ReplyWaiting";
+import { AiVideoReply } from "./AiVideoReply";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
 
 interface ChatMessageRowProps {
@@ -15,11 +16,12 @@ interface ChatMessageRowProps {
   onCopy: (message: TongpinAIMessage) => void;
   onOpenArtifact: (artifactId: string) => void;
   onRetry: (messageId: string) => void;
+  onVideoSettled?: () => void;
 }
 
 /** Only the current reply owns its playback updates; older messages remain untouched. */
 export const ChatMessageRow = memo(function ChatMessageRow({
-  message, artifact, assistantName, copied, retryable, retryDisabled, onCopy, onOpenArtifact, onRetry,
+  message, artifact, assistantName, copied, retryable, retryDisabled, onCopy, onOpenArtifact, onRetry, onVideoSettled,
 }: ChatMessageRowProps) {
   return <article
     className={`tp-ai-message is-${message.role}${message.status === "error" ? " is-error" : ""}`}
@@ -40,7 +42,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
         message.role === "assistant" && message.status !== "error"
           ? <MarkdownReply content={message.content} typing={message.status === "typing"} />
           : <p>{message.content}</p>}
-      {artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
+      {artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string" ? <AiVideoReply key={artifact.data.videoJobId} jobId={artifact.data.videoJobId} onSettled={onVideoSettled} /> : artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
         <span className="tp-ai-artifact-card__icon"><FileText size={20} /></span>
         <span><small>{artifact.kind}</small><strong>{artifact.title}</strong></span>
         <span className="tp-ai-artifact-card__action">打开</span>

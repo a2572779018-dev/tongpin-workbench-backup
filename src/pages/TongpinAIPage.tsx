@@ -748,6 +748,69 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     }
   }
 
+  async function sendVideo(request: import("../features/tongpin-ai/videoChat").VideoChatRequest, importOnly = false): Promise<boolean> {
+    if (!persona.profile.onboardingComplete || responding || pendingGenerationRef.current || requestRef.current || preflightGate.busy) return false;
+    if (attachments.length) { showAnnouncement("请移除普通附件，改用视频设置中的「添加参考图片」。"); return false; }
+    if (persistenceRef.current.status === "error" || persistenceRef.current.status === "conflict") { showAnnouncement("请先完成记录同步，再生成视频"); return false; }
+    if (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId)) return false;
+    const conversationId = activeConversation?.id ?? createLocalId("conversation");
+    const messageId = createLocalId("assistant"), artifactId = importOnly ? createLocalId("artifact") : `artifact-${request.requestId}`;
+    const conversation: TongpinAIConversation = {
+      ...(activeConversation ?? { id: conversationId, projectId: activeProject?.id, title: Array.from(request.prompt).slice(0, 28).join("") }),
+      timeLabel: "刚刚", messages: [...(activeConversation?.messages ?? []),
+        { id: createLocalId("user"), role: "user", content: importOnly ? `查看原视频任务：${request.prompt}` : request.prompt, time: currentTimeLabel() },
+        { id: messageId, role: "assistant", content: "视频生成任务", artifactId, status: "ready", time: currentTimeLabel() }],
+    };
+    const artifact: TongpinAIArtifact = { id: artifactId, conversationId, projectId: conversation.projectId,
+      title: "生成的视频", kind: "视频", summary: request.prompt, updatedLabel: "刚刚", sections: [], data: { videoJobId: request.requestId } };
+    const latest = workspaceRef.current;
+    const next = withPreparedChatSend({ ...persistentStateRef.current,
+      conversations: latest.conversations, projects: latest.projects, drafts: latest.drafts,
+      draftAttachments: latest.draftAttachments, activeProjectId: latest.activeProjectId,
+      artifacts: [artifact, ...latest.artifacts] }, conversation, draftKey);
+    if (importOnly) {
+      next.drafts = draftKey === conversationId ? latest.drafts : { ...latest.drafts, [conversationId]: latest.drafts[draftKey] ?? "", [draftKey]: "" };
+      next.draftAttachments = latest.draftAttachments;
+    }
+    try { ensureAttachmentWorkspaceCapacity(next, "reply"); }
+    catch (e) { showAnnouncement(e instanceof Error ? e.message : "记录空间不足"); return false; }
+    pendingGenerationRef.current = conversationId; pendingCancelledRef.current = false;
+    workspaceRef.current = { ...latest, conversations: next.conversations, artifacts: next.artifacts, drafts: next.drafts,
+      draftAttachments: next.draftAttachments ?? {}, activeConversationId: conversationId, view: "chat" };
+    persistentStateRef.current = next;
+    setConversations(next.conversations); setArtifacts(next.artifacts); setDrafts(next.drafts);
+    setDraftAttachments(next.draftAttachments ?? {}); setActiveConversationId(conversationId); setView("chat"); setResponding(true);
+    let posted = false;
+    try {
+      const saved = await persistenceRef.current.saveNow(next);
+      if (!mountedRef.current) return true;
+      if (!saved || pendingCancelledRef.current) {
+        updateReply(conversationId, messageId, { status: "error", artifactId: undefined, content: !saved ? "记录尚未保存，本次没有提交视频生成。" : "已取消，本次没有提交视频生成。" }); return true;
+      }
+      if (!liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) return true;
+      if (importOnly) return true;
+      posted = true;
+      await api("/api/ai/videos", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(request) }, 80000);
+    } catch (e) {
+      if (mountedRef.current) {
+        const rejected = !posted || e instanceof ApiRequestError && [400, 401, 402, 403, 409, 413, 429].includes(e.status);
+        updateReply(conversationId, messageId, { status: rejected ? "error" : "ready", ...(rejected ? { artifactId: undefined } : {}),
+          content: rejected ? e instanceof Error ? e.message : "视频未提交" : "提交结果正在核对，请勿重复生成。下方只查询原任务。" });
+      }
+    } finally {
+      pendingGenerationRef.current = null;
+      if (mountedRef.current) { setResponding(false); void refreshStatus(); }
+    }
+    return true;
+  }
+
+  async function useVideoHistory(jobId: string): Promise<boolean> {
+    const origin = workspaceRef.current;
+    const { job } = await api<{ job: import("../../shared/aiVideo").AiVideoJob }>(`/api/ai/videos/${encodeURIComponent(jobId)}`, { headers: { "X-Tongpin-Account": user.id } }, 30000);
+    if (!mountedRef.current || origin.activeConversationId !== workspaceRef.current.activeConversationId || origin.activeProjectId !== workspaceRef.current.activeProjectId || workspaceRef.current.view !== "chat") return false;
+    return sendVideo({ requestId: job.id, prompt: job.prompt, seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio }, true);
+  }
+
   async function sendMessage() {
     if (!persona.profile.onboardingComplete || (!draft.trim() && !attachments.length) || responding || preflightGate.busy || fileImportRef.current || pendingGenerationRef.current || requestRef.current || quotaInsufficient || !serviceConnected || connectionError || availabilityBlocked) return;
     if (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId)) {
@@ -1048,6 +1111,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onOpenNotifications={notificationToolbar?.openNotificationDrawer}
           onOpenArtifact={openArtifact}
           onSubmit={sendMessage}
+          onSubmitVideo={sendVideo}
+          onUseVideoHistory={useVideoHistory}
           onStop={stopResponse}
           onRetry={retryReply}
           retryableMessageIds={new Set([...retryRequestsRef.current.keys(), ...conversations.flatMap(item => item.messages.filter(message => message.status === "error" && message.requestId).map(message => message.id))])}
@@ -1060,7 +1125,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onClose={() => setArtifactOpen(false)}
           onImageDeleted={assetId => setArtifacts(current => current.map(artifact => !Array.isArray(artifact.data?.images) ? artifact : { ...artifact, data: { ...artifact.data, images: artifact.data.images.map(image => image && typeof image === "object" && !Array.isArray(image) && image.assetId === assetId ? { ...image, deleted: true } : image) } }))}
         />
-      ) : view === "chat" && latestConversationArtifact ? (
+      ) : view === "chat" && latestConversationArtifact && latestConversationArtifact.kind !== "视频" ? (
         <button
           type="button"
           className="tp-ai-preview-reopen"

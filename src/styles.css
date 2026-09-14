@@ -198,6 +198,20 @@ html.custom-cursor-reduced-motion .custom-cursor__arrow {
   transition: none;
 }
 
+/* Native top-layer dialogs cannot be covered by a document-level cursor,
+   regardless of z-index. Restore a pointer immediately, before the next move. */
+html.custom-cursor-enabled:has(dialog:modal) .custom-cursor { visibility: hidden; }
+html:has(dialog:modal) dialog:modal,
+html:has(dialog:modal) dialog:modal *,
+html.custom-cursor-enabled video,
+html.custom-cursor-enabled [data-native-cursor],
+html.custom-cursor-enabled [data-native-cursor] * { cursor: auto !important; }
+html:has(dialog:modal) dialog:modal button,
+html:has(dialog:modal) dialog:modal button *,
+html:has(dialog:modal) dialog:modal a { cursor: pointer !important; }
+html:has(dialog:modal) dialog:modal textarea,
+html:has(dialog:modal) dialog:modal input { cursor: text !important; }
+
 @media (pointer: coarse) {
   .custom-cursor {
     display: none;

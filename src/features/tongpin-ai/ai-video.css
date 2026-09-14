@@ -27,3 +27,18 @@
 .tp-ai-video-job small { color:#7e796c; display:block; margin-bottom:12px; }
 .tp-ai-video-job video { width:100%; max-height:400px; margin:14px 0; border-radius:12px; }
 @media(max-width:520px) { .tp-ai-video-options { grid-template-columns:1fr; gap:10px; } }
+
+.tp-ai-video-composer { border:0; border-bottom:1px solid #ded7c6; margin:0 0 12px; padding:0 0 12px; min-width:0; max-height:38vh; overflow:auto; }
+.tp-ai-video-inline-heading,.tp-ai-video-inline-heading strong { display:flex; align-items:center; gap:8px; }
+.tp-ai-video-inline-heading { justify-content:space-between; }
+.tp-ai-video-composer label { display:grid; gap:6px; font-size:12px; }
+.tp-ai-video-composer select,.tp-ai-video-composer button,.tp-ai-video-reply button,.tp-ai-video-reply a { color:inherit; background:#fffdf7; border:1px solid #d7cdb7; border-radius:9px; padding:8px 10px; font:inherit; }
+.tp-ai-video-composer .tp-ai-video-options { margin:10px 0; gap:10px; }
+.tp-ai-video-composer button:disabled { opacity:.5; }
+.tp-ai-video-composer .tp-ai-video-reference-grid { display:flex; overflow:auto; gap:8px; }
+.tp-ai-video-composer figure { flex:0 0 100px; }
+.tp-ai-video-reply { margin:12px 0; padding:16px; border:1px solid #ded7c6; border-radius:16px; background:#f8f5ec; }
+.tp-ai-video-reply small { display:block; margin:8px 0; color:#797366; }
+.tp-ai-video-reply progress { display:block; width:100%; accent-color:#c5ac4b; }
+.tp-ai-video-reply video { display:block; width:100%; max-height:520px; background:#171815; border-radius:12px; margin:12px 0; }
+.tp-ai-video-reply a { display:inline-block; text-decoration:none; }

@@ -4,6 +4,12 @@ import { describe, expect, it } from "vitest";
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 
 describe("AI directional cursor boundary", () => {
+  it("restores native cursors for top-layer dialogs and video controls", () => {
+    const styles = read("../styles.css");
+    expect(styles).toContain('html:has(dialog:modal) dialog:modal *');
+    expect(styles).toContain('html.custom-cursor-enabled:has(dialog:modal) .custom-cursor { visibility: hidden; }');
+    expect(read("../components/CustomCursor.tsx")).toContain('dialog:modal, video, textarea');
+  });
   it("keeps a native fallback and text entry affordances alongside the rotating cursor", () => {
     const styles = read("../styles.css");
     expect(styles).toContain('cursor: url("./assets/tongpin-cursor.svg") 10 2, auto !important;');

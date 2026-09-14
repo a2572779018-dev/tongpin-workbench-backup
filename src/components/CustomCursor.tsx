@@ -81,7 +81,7 @@ export function CustomCursor() {
       // Preserve native I-beams, selection handles and disabled controls. No
       // layout reads, React state updates or event interception are needed.
       suppressed = event.target instanceof Element && Boolean(event.target.closest(
-        'textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, [contenteditable]:not([contenteditable="false"]), button:disabled, [aria-disabled="true"], [data-native-cursor]',
+        'dialog:modal, video, textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, [contenteditable]:not([contenteditable="false"]), button:disabled, [aria-disabled="true"], [data-native-cursor]',
       ));
       if (suppressed) { hide(); return; }
       pointerX = event.clientX;

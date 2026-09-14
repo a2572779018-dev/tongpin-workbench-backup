@@ -44,7 +44,8 @@ import { ATTACHMENT_ACCEPT, TEXT_ATTACHMENT_ACCEPT, workspaceAttachment } from "
 import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT } from "../../../shared/aiMedia";
 import { AttachmentChips } from "./AttachmentChips";
 import { ChatMessageRow } from "./ChatMessageRow";
-import { AiVideoPanel } from "./AiVideoPanel";
+import { AiVideoComposer, type VideoComposerHandle } from "./AiVideoComposer";
+import { isVideoGenerationRequest, type VideoChatRequest } from "./videoChat";
 import { CHAT_MESSAGE_PAGE_SIZE } from "./chatPerformance";
 
 interface ChatWorkspaceProps {
@@ -97,6 +98,8 @@ interface ChatWorkspaceProps {
   onToggleSidebar?: () => void;
   onStop?: () => void;
   onSubmit: () => void;
+  onSubmitVideo?: (request: VideoChatRequest) => Promise<boolean>;
+  onUseVideoHistory?: (jobId: string) => Promise<boolean>;
 }
 
 export function ChatWorkspace({
@@ -148,6 +151,8 @@ export function ChatWorkspace({
   onToggleSidebar,
   onStop,
   onSubmit,
+  onSubmitVideo,
+  onUseVideoHistory,
 }: ChatWorkspaceProps) {
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -158,6 +163,9 @@ export function ChatWorkspace({
   const followResponseRef = useRef(true);
   const [menu, setMenu] = useState<"attachments" | "tools" | null>(null);
   const [videoOpen, setVideoOpen] = useState(false);
+  const [videoBusy, setVideoBusy] = useState(false);
+  const videoComposerRef = useRef<VideoComposerHandle>(null);
+  useEffect(() => { setVideoOpen(false); setVideoBusy(false); }, [conversationId]);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState("");
@@ -176,8 +184,9 @@ export function ChatWorkspace({
   useEffect(() => () => attachmentController.current?.abort(), [conversationId]);
   const [historyWindow, setHistoryWindow] = useState({ conversationId, count: CHAT_MESSAGE_PAGE_SIZE });
   const historyAnchorRef = useRef<{ height: number; top: number } | null>(null);
-  const callbacksRef = useRef({ onOpenArtifact, onRetry });
-  callbacksRef.current = { onOpenArtifact, onRetry };
+  const callbacksRef = useRef({ onOpenArtifact, onRetry, onRefreshConnection });
+  callbacksRef.current = { onOpenArtifact, onRetry, onRefreshConnection };
+  const videoSettled = useCallback(() => callbacksRef.current.onRefreshConnection?.(), []);
   const openArtifact = useCallback((id: string) => callbacksRef.current.onOpenArtifact(id), []);
   const retryMessage = useCallback((id: string) => callbacksRef.current.onRetry?.(id), []);
   const visibleCount = historyWindow.conversationId === conversationId ? historyWindow.count : CHAT_MESSAGE_PAGE_SIZE;
@@ -227,7 +236,7 @@ export function ChatWorkspace({
   useEffect(() => {
     // Local typewriter updates do not rerender this workspace. Observe only the
     // active reply's height to retain follow-to-bottom without a polling loop.
-    if (!responding || typeof ResizeObserver === "undefined") return;
+    if ((!responding && (!lastMessage?.artifactId || artifactById.get(lastMessage.artifactId)?.kind !== "视频")) || typeof ResizeObserver === "undefined") return;
     const list = messageListRef.current;
     const reply = list?.lastElementChild;
     if (!list || !reply) return;
@@ -236,7 +245,7 @@ export function ChatWorkspace({
     });
     observer.observe(reply);
     return () => observer.disconnect();
-  }, [responding, responsePhase, conversationId, messages.length]);
+  }, [responding, responsePhase, conversationId, messages.length, lastMessage?.artifactId, artifactById]);
   useEffect(() => {
     if (composerFocusRequest > 0) composerRef.current?.focus();
   }, [composerFocusRequest]);
@@ -303,6 +312,13 @@ export function ChatWorkspace({
 
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
+    if (videoOpen) {
+      if (attachments.length) { setFileError("请移除普通附件，改用视频设置中的「添加参考图片」。"); return; }
+      if (!responding && !videoBusy) videoComposerRef.current?.submit(); return;
+    }
+    if (onSubmitVideo && !responding && isVideoGenerationRequest(draft)) {
+      setVideoOpen(true); setMenu(null); onComposerToolChange?.("text"); onWebSearchChange?.(false); return;
+    }
     if ((!draft.trim() && !attachments.length) || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked || capabilityUnavailable) return;
     followResponseRef.current = true;
     setMenu(null);
@@ -319,7 +335,7 @@ export function ChatWorkspace({
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
       return;
-    if (event.key !== "Enter" || event.shiftKey) return;
+    if (event.key !== "Enter" || event.shiftKey || event.repeat) return;
     event.preventDefault();
     submitMessage();
   }
@@ -414,6 +430,7 @@ export function ChatWorkspace({
               retryable={Boolean(retryableMessageIds?.has(message.id))}
               retryDisabled={message.status === "error" && responding}
               onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
+              onVideoSettled={videoSettled}
             />)}
           </>
         )}
@@ -465,6 +482,7 @@ export function ChatWorkspace({
         )}
         <div className="tp-ai-beam-wrap">
           <form className="tp-ai-composer" onSubmit={submitMessage}>
+            {videoOpen && onSubmitVideo ? <AiVideoComposer ref={videoComposerRef} prompt={draft} onSubmit={onSubmitVideo} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); }} /> : null}
             <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);
@@ -496,14 +514,16 @@ export function ChatWorkspace({
               ref={composerRef}
               id="tp-ai-message-input"
               value={draft}
+              readOnly={videoBusy}
               rows={2}
-              placeholder={composerTool === "image" ? "描述你想生成的图片…" : composerTool === "presentation" ? "告诉我 PPT 的主题、用途和页数…" : `把任务交给${assistantName}…`}
+              placeholder={videoOpen ? "描述你想生成的视频…" : composerTool === "image" ? "描述你想生成的图片…" : composerTool === "presentation" ? "告诉我 PPT 的主题、用途和页数…" : `把任务交给${assistantName}…`}
               onChange={(event) => onDraftChange(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               onPaste={event => {
                 const images = Array.from(event.clipboardData.files).filter(file => file.type.startsWith("image/"));
                 if (!images.length) return;
                 event.preventDefault();
+                if (videoOpen) { setFileError("请用视频设置中的「添加参考图片」上传参考图"); return; }
                 if (composerTool === "image") { setFileError("图片生成模式暂不支持参考图，请切换到对话后添加图片"); return; }
                 if (!visionEnabled) { setFileError("请管理员先启用图片理解"); return; }
                 if (!responding) void addFiles(images);
@@ -513,6 +533,7 @@ export function ChatWorkspace({
               <div className="tp-ai-composer__actions">
                 <button
                   ref={actionTriggerRef}
+                  disabled={videoBusy || responding}
                   type="button"
                   className="tp-ai-action-trigger"
                   aria-label="添加附件或生成内容"
@@ -527,6 +548,7 @@ export function ChatWorkspace({
                 </button>
                 <button
                   ref={toolsTriggerRef}
+                  disabled={videoOpen || videoBusy || responding}
                   type="button"
                   className="tp-ai-tools-trigger"
                   aria-label="选择工具"
@@ -597,7 +619,7 @@ export function ChatWorkspace({
                           <span>导入技能说明</span>
                         </button>
                         <div role="separator" />
-                        <button type="button" role="menuitem" disabled={responding || readingFiles} onClick={() => { setMenu(null); setVideoOpen(true); }}>
+                        <button type="button" role="menuitem" disabled={responding || readingFiles || !onSubmitVideo} onClick={() => { setMenu(null); setVideoOpen(true); onComposerToolChange?.("text"); onWebSearchChange?.(false); composerRef.current?.focus(); }}>
                           <Video size={18} /><span>生成视频</span>
                         </button>
                         <button
@@ -660,7 +682,7 @@ export function ChatWorkspace({
                   </div>
                 )}
               </div>
-              {composerTool === "image" ? <span className="tp-ai-image-mode-label"><ImageIcon size={15} />图片生成</span> : <label className="tp-ai-mode-select">
+              {videoOpen ? <span className="tp-ai-image-mode-label"><Video size={15} />视频生成</span> : composerTool === "image" ? <span className="tp-ai-image-mode-label"><ImageIcon size={15} />图片生成</span> : <label className="tp-ai-mode-select">
                 {mode === "quick" ? <Zap size={15} /> : <Brain size={15} />}
                 <select
                   aria-label="思考模式"
@@ -689,8 +711,8 @@ export function ChatWorkspace({
                 <button
                   type="submit"
                   className="tp-ai-send-button"
-                  disabled={checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || availabilityBlocked || capabilityUnavailable}
-                  aria-label={checkingQuota ? "正在核对额度" : "发送消息"}
+                  disabled={videoOpen ? videoBusy || !draft.trim() : checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || availabilityBlocked || capabilityUnavailable}
+                  aria-label={videoOpen ? "确认发送并生成视频" : checkingQuota ? "正在核对额度" : "发送消息"}
                   aria-busy={checkingQuota}
                 >
                   {checkingQuota ? <LoaderCircle size={20} /> : <ArrowUp size={20} strokeWidth={2.5} />}
@@ -701,7 +723,6 @@ export function ChatWorkspace({
         </div>
         <p className="tp-ai-composer-hint">Enter 发送 · Shift + Enter 换行</p>
       </footer>
-      {videoOpen ? <AiVideoPanel initialPrompt={draft} onClose={() => { setVideoOpen(false); onRefreshConnection?.(); }} onQuotaChange={onRefreshConnection} /> : null}
     </section>
   );
 }

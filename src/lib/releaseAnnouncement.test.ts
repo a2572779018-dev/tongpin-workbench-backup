@@ -27,19 +27,19 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "同频 AI 导航增加图标",
+      "视频生成融入同频 AI 对话",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "新增快速 Auto 配置",
+      "生成进度与视频播放器直接显示在 AI 回复中",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留任务、客户脉络图、AI 历史、密钥和已有成员额度",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "修复视频提交被明确拒绝后无法继续操作的问题",
+      "修复模态弹窗和视频控件中的鼠标不可见问题",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "视频生成支持上传最多 8 张参考图片",
+      "刷新后恢复原视频任务",
     );
   });
 
