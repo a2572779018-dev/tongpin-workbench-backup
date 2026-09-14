@@ -40,6 +40,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
   } else {
     router.use(requireRole("member", "boss"));
     router.get("/videos", (request, response) => response.json(service.video.list(request.currentUser!.id)));
+    router.post("/video-references", async (request, response) => response.json(await service.video.uploadReference(request.currentUser!.id, request.body)));
     router.post("/videos", async (request, response) => response.json({ job: await service.video.submit(request.currentUser!.id, request.body) }));
     router.get("/videos/:id", async (request, response) => response.json({ job: await service.video.refresh(request.currentUser!.id, request.params.id) }));
     router.get("/videos/:id/content", async (request, response) => {

@@ -9,6 +9,8 @@ import { imageProviderBody, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse 
 import { searchCallLimit } from "./searchPolicy";
 import { AiVideoService } from "./videoService";
 import { AvailabilityProbe } from "./availability";
+import { routeChatProvider } from "./autoRouting";
+import { BAI_QUICK_AUTO } from "../../shared/aiAuto";
 import type { AiAvailability } from "../../shared/ai";
 
 type MemberIdentity = Omit<AiMember, "quota">;
@@ -74,9 +76,10 @@ function parseProvider(value: unknown, existing: StoredProvider | null): AiProvi
   if (imageModel && !imageQuotaTokens) throw new AiError(400, "AI_IMAGE_QUOTA_REQUIRED", "启用图片模型前，请设置每张图片的折算额度");
   if (webSearchEnabled && (protocol !== "responses" || !webSearchQuotaTokens)) throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "联网搜索需使用 Responses 协议，并设置每次搜索的折算额度");
   if (!imageBaseUrl && typeof p.imageApiKey === "string" && p.imageApiKey.trim()) throw new AiError(400, "AI_INPUT_INVALID", "填写独立图片密钥时，还需填写图片 API 地址");
+  if (p.quickModel === BAI_QUICK_AUTO && new URL(safeBaseUrl(p.baseUrl)).hostname !== "api.b.ai") throw new AiError(400, "AI_AUTO_PROVIDER_INVALID", "当前自动模式仅支持 B.AI");
   return {
     name: text(p.name ?? "AI 服务", "服务名称", 80), baseUrl: safeBaseUrl(p.baseUrl), protocol,
-    quickModel: text(p.quickModel, "快速模型", 160), deepModel: text(p.deepModel, "深度模型", 160),
+    quickModel: text(p.quickModel, "快速模型", 160), deepModel: p.quickModel === BAI_QUICK_AUTO ? "gpt-6-astra" : text(p.deepModel, "深度模型", 160),
     maxOutputTokens: Number(p.maxOutputTokens), reasoningEffort: (p.reasoningEffort ?? "") as AiProviderInput["reasoningEffort"], enabled: p.enabled,
     imageModel, imageBaseUrl, imageQuotaTokens: Number(imageQuotaTokens), imageStream, visionEnabled, visionInputReserveTokens: Number(visionInputReserveTokens), webSearchEnabled, webSearchQuotaTokens: Number(webSearchQuotaTokens), webSearchProtocol,
     ...(typeof p.apiKey === "string" && p.apiKey.trim() ? { apiKey: text(p.apiKey, "API 密钥", 4096) } : {}),
@@ -197,8 +200,9 @@ export class AiService {
   }
   members(users: MemberIdentity[]): AiMember[] { return users.map(user => ({ ...user, quota: this.quota(user.id) })); }
   private chatProvider(request: AiChatRequest): StoredProvider {
-    const provider = this.store.provider();
-    if (!provider?.enabled) throw new AiError(503, "AI_NOT_CONFIGURED", "管理员尚未启用 AI 服务");
+    const saved = this.store.provider();
+    if (!saved?.enabled) throw new AiError(503, "AI_NOT_CONFIGURED", "管理员尚未启用 AI 服务");
+    const provider = routeChatProvider(saved, request);
     if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
     if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) throw new AiError(403, "AI_VISION_DISABLED", "管理员尚未启用图片理解，请上传可提取文字的文档");
     return provider;

@@ -799,6 +799,9 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       const path = url.pathname;
       const method = request.method;
 
+      if (method === "GET" && /^\/api\/video-reference\/[a-f0-9]{64}$/.test(path)) {
+        return await this.ai.service.video.referenceContent(path.split("/").pop()!);
+      }
       if (path.startsWith("/api/ai/") || path.startsWith("/api/admin/ai/")) {
         const user = await this.requireUser(request, path.startsWith("/api/admin/") ? ["admin"] : undefined);
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);

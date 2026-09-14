@@ -32,6 +32,28 @@ describe("durable H3 jobs and isolated quotas", () => {
     await expect(runtime.service.video.configure({ enabled: true, quotaPoints: 0 })).rejects.toMatchObject({ code: "AI_VIDEO_SETTINGS_INVALID" });
     await expect(runtime.service.video.configure({ ...config, apiKey: "bad\nkey" })).rejects.toMatchObject({ code: "AI_KEY_INVALID" });
   });
+  it("keeps reference images encrypted, account-bound and expiring; retries do not generate twice", async () => {
+    const video = runtime.service.video;
+    const dataUrl = "data:image/jpeg;base64,/9j/" + "AAAA".repeat(20000);
+    const reference = await video.uploadReference("a", { dataUrl });
+    expect(reference.id).toMatch(/^[a-f0-9]{64}$/);
+    const stored = runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_video_references WHERE id=?", reference.id)[0].data;
+    expect(stored).not.toContain(dataUrl.slice(0, 100));
+    const image = await video.referenceContent(reference.id);
+    expect(image.status).toBe(200); expect(image.headers.get("content-type")).toBe("image/jpeg");
+    expect(new Uint8Array(await image.arrayBuffer())).toEqual(Uint8Array.from(atob(dataUrl.split(",")[1]), c => c.charCodeAt(0)));
+    const req = { ...input(), referenceIds: [reference.id] };
+    await expect(video.submit("b", req)).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
+    await video.submit("a", req); await video.submit("a", req);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(transport.mock.calls[0][1].body!).images).toEqual([`https://notify.samhubs.com/api/video-reference/${reference.id}`]);
+    await expect(video.submit("a", { ...req, referenceIds: [] })).rejects.toMatchObject({ code: "AI_VIDEO_REQUEST_CONFLICT" });
+    expect(JSON.stringify(video.list("a"))).not.toContain(reference.id);
+    runtime.store.sql.exec("UPDATE ai_video_references SET expires_at=0 WHERE id=?", reference.id);
+    expect((await video.referenceContent(reference.id)).status).toBe(404);
+    await expect(video.submit("a", { ...input(), referenceIds: [reference.id] })).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
+    await expect(video.uploadReference("zero", { dataUrl })).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
+  });
   it("reserves once across concurrent duplicate submissions, with private key snapshots", async () => {
     const req = input(); const result = await Promise.all([runtime.service.video.submit("a", req), runtime.service.video.submit("a", req)]);
     expect(transport).toHaveBeenCalledTimes(1); expect(result.every(j => j.id === req.requestId)).toBe(true);

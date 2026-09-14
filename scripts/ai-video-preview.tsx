@@ -16,6 +16,7 @@ window.fetch = async (target, init) => {
   if (url.pathname.startsWith("/api/auth/")) return Response.json({ user, accessToken: "nonsecret-fixture", refreshToken: "nonsecret-fixture" });
   if (url.pathname === "/api/admin/ai/video") { if (method === "PUT") settings = { ...settings, ...JSON.parse(String(init?.body)), apiKey: undefined }; return Response.json({ settings, pending: [] }); }
   if (url.pathname === "/api/admin/ai/video/test") return Response.json({ message: "隔离测试：未调用真实服务" });
+  if (url.pathname === "/api/ai/video-references" && method === "POST") return Response.json({ id: "a".repeat(64) });
   if (url.pathname === "/api/ai/videos") {
     if (method === "POST") { const data = JSON.parse(String(init?.body)); const job = { ...data, id: data.requestId, status: "queued", progress: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), quotaPoints: 1000, reserved: true }; jobs.unshift(job); return Response.json({ job }); }
     return Response.json({ settings, jobs, quota: { limitTokens: 10000, usedTokens: 0, reservedTokens: 0, remainingTokens: 10000, inputTokens: 0, outputTokens: 0 } });

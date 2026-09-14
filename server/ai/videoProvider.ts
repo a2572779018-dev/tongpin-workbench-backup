@@ -7,6 +7,7 @@ export interface H3VideoInput {
   seconds: number;
   resolution: "480p" | "768p";
   aspectRatio: "16:9" | "9:16";
+  images?: string[];
 }
 export interface H3VideoTask {
   id: string;
@@ -21,9 +22,9 @@ export function parseH3VideoInput(value: unknown): H3VideoInput {
   if (!Number.isInteger(p.seconds) || Number(p.seconds) < 5 || Number(p.seconds) > 15) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "视频时长需为 5–15 秒的整数", true);
   if (p.resolution !== "480p" && p.resolution !== "768p") throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择 480p 或 768p", true);
   if (p.aspectRatio !== "16:9" && p.aspectRatio !== "9:16") throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择横屏或竖屏", true);
-  // Reference media require a separate consent + private upload flow. Never silently ignore attachments.
-  if (p.images !== undefined || p.audios !== undefined || p.attachments !== undefined) throw new AiError(400, "AI_VIDEO_REFERENCES_UNSUPPORTED", "此接口暂只接收文字描述，不会上传参考图片或音频", true);
-  return { prompt: p.prompt.trim(), seconds: Number(p.seconds), resolution: p.resolution, aspectRatio: p.aspectRatio };
+  if (p.audios !== undefined || p.attachments !== undefined || p.firstFrame !== undefined || p.lastFrame !== undefined) throw new AiError(400, "AI_VIDEO_REFERENCES_UNSUPPORTED", "当前视频接口不支持音频附件或精确首尾帧控制", true);
+  if (p.images !== undefined && (!Array.isArray(p.images) || p.images.length > 8 || p.images.some(url => typeof url !== "string" || !/^https:\/\/notify\.samhubs\.com\/api\/video-reference\/[a-f0-9]{64}$/.test(url)))) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请重新上传参考图片，最多 8 张", true);
+  return { prompt: p.prompt.trim(), seconds: Number(p.seconds), resolution: p.resolution, aspectRatio: p.aspectRatio, ...(Array.isArray(p.images) && p.images.length ? { images: p.images as string[] } : {}) };
 }
 
 function taskId(value: unknown): string {
@@ -48,7 +49,7 @@ export async function submitH3Video(transport: AiTransport, connection: VideoCon
   const input = parseH3VideoInput(value);
   const response = await transport(`${safeBaseUrl(connection.baseUrl)}/videos`, {
     method: "POST", headers: { Authorization: `Bearer ${connection.apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ model: "minimax_h3", prompt: input.prompt, seconds: String(input.seconds), resolution: input.resolution, aspect_ratio: input.aspectRatio }),
+    body: JSON.stringify({ model: "minimax_h3", prompt: input.prompt, seconds: String(input.seconds), resolution: input.resolution, aspect_ratio: input.aspectRatio, ...(input.images ? { images: input.images } : {}) }),
     signal: AbortSignal.timeout(60_000), maxResponseBytes: 32 * 1024,
   });
   if (!response.ok) throw await readProviderHttpError(response, "video");

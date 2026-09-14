@@ -6,6 +6,7 @@ import { shouldRecoverReply, waitForReply } from "../features/tongpin-ai/waitFor
 import { useAiAvailability } from "../features/tongpin-ai/useAiAvailability";
 import { AiAvailabilityNotice } from "../features/tongpin-ai/AiAvailabilityNotice";
 import type { AiRequestResult } from "../../shared/ai";
+import { BAI_QUICK_AUTO } from "../../shared/aiAuto";
 import type { AiChatPreflight, AiChatRequest, AiChatResponse, AiImageRequest, AiImageResponse, AiStatus } from "../../shared/ai";
 import { ChatPreflightGate, preflightNotice, sameSendContext, withPreparedChatSend } from "../features/tongpin-ai/chatPreflight";
 import type { AiWorkspaceDocument, AiWorkspaceSaveRequest, AiWorkspaceSnapshot } from "../../shared/aiWorkspace";
@@ -1015,7 +1016,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onComposerToolChange={setComposerTool}
           imageEnabled={aiStatus?.imageEnabled === true}
           visionEnabled={aiStatus?.visionEnabled === true}
-          webSearchEnabled={aiStatus?.webSearchEnabled === true}
+          quickAuto={aiStatus?.quickModel === BAI_QUICK_AUTO}
+          webSearchEnabled={aiStatus?.webSearchEnabled === true && !(mode === "quick" && aiStatus.quickModel === BAI_QUICK_AUTO)}
           webSearch={webSearch}
           onWebSearchChange={setWebSearch}
           enabledSkills={TONGPIN_AI_SKILLS.filter((skill) =>

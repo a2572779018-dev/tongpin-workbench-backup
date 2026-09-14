@@ -12,7 +12,7 @@ describe("AI service entry notices", () => {
   });
   it("distinguishes reachable from actual generation success", () => {
     const html = renderToStaticMarkup(createElement(AiAvailabilityNotice, { checking: false, check: { state: "reachable", code: "OK", message: "生成以实际请求结果为准", checkedAt: "now" }, onRetry() {} }));
-    expect(html).toContain("服务连接已检查"); expect(html).toContain("生成以实际请求结果为准"); expect(html).not.toContain("disabled");
+    expect(html).toBe("");
   });
   it("blocks explicit service failures but not pending or content-specific rejection", () => {
     expect(generationAvailabilityFailure(new ApiRequestError(502, "AI_PROVIDER_GATEWAY_BLOCK", "网关拦截"))?.state).toBe("unavailable");

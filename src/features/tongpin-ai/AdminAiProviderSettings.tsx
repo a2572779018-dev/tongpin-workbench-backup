@@ -2,7 +2,21 @@ import { Globe, Image, KeyRound, RefreshCw, Save } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type { AiProviderConfig, AiProviderInput, AiProviderTestResult } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
+import { BAI_QUICK_AUTO, BAI_QUICK_MODELS } from "../../../shared/aiAuto";
 import { adminAiErrorMessage, normalizeAiBaseUrl, validateAiProviderConnection, validateAiProviderInput } from "./adminAiForms";
+
+const BAI_PRESET_MODELS = [
+  ...BAI_QUICK_MODELS,
+  "gpt-6-astra",
+] as const;
+
+function getProviderModelOptions(baseUrl: string, discoveredModels: string[]): string[] {
+  const options = new Set(discoveredModels);
+  try {
+    if (new URL(baseUrl).hostname === "api.b.ai") BAI_PRESET_MODELS.forEach((model) => options.add(model));
+  } catch { /* Keep discovered models only when URL is invalid/unset. */ }
+  return [...options];
+}
 
 const EMPTY_PROVIDER: AiProviderInput = {
   name: "AI 服务",
@@ -41,6 +55,7 @@ export function AdminAiProviderSettings() {
   const [notice, setNotice] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [imageModels, setImageModels] = useState<string[]>([]);
+  const modelOptions = getProviderModelOptions(draft.baseUrl, models);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -217,11 +232,12 @@ export function AdminAiProviderSettings() {
               <input id={`${id}-quick`} value={draft.quickModel} required maxLength={160} list={`${id}-models`}
                 placeholder="填写服务商提供的模型 ID" spellCheck={false} onChange={(event) => update("quickModel", event.target.value)} />
             </label>
+            {(() => { try { return new URL(draft.baseUrl).hostname === "api.b.ai"; } catch { return false; } })() ? <button type="button" className="tp-ai-admin-button" onClick={() => setDraft(current => ({ ...current, quickModel: BAI_QUICK_AUTO, deepModel: "gpt-6-astra", protocol: "responses", reasoningEffort: "medium" }))}>快速 Auto · 深度 Astra 6</button> : null}
             <label className="tp-ai-admin-field" htmlFor={`${id}-deep`}>深度思考 · 模型 ID
-              <input id={`${id}-deep`} value={draft.deepModel} required maxLength={160} list={`${id}-models`}
+              <input id={`${id}-deep`} value={draft.deepModel} readOnly={draft.quickModel === BAI_QUICK_AUTO} required maxLength={160} list={`${id}-models`}
                 placeholder="可与快速模式使用相同模型" spellCheck={false} onChange={(event) => update("deepModel", event.target.value)} />
             </label>
-            <datalist id={`${id}-models`}>{models.map((model) => <option key={model} value={model} />)}</datalist>
+            <datalist id={`${id}-models`}>{modelOptions.map((model) => <option key={model} value={model} />)}</datalist>
             <label className="tp-ai-admin-field" htmlFor={`${id}-max`}>单次最大文本输出 · Token
               <input id={`${id}-max`} type="number" min="16" max="32768" step="1" required value={Number.isNaN(draft.maxOutputTokens) ? "" : draft.maxOutputTokens}
                 onChange={(event) => update("maxOutputTokens", event.target.valueAsNumber)} />

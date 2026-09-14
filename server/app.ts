@@ -154,6 +154,11 @@ export async function createRuntime(
     createAuthRouter(store, config, requireAuth),
   );
   app.use("/api/tasks", createTasksRouter(store, requireAuth, realtime));
+  app.get("/api/video-reference/:id", async (request, response) => {
+    const image = await ai.service.video.referenceContent(request.params.id);
+    image.headers.forEach((value, key) => response.set(key, value));
+    response.status(image.status).send(Buffer.from(await image.arrayBuffer()));
+  });
   app.use("/api/admin/ai", createAiRouter(ai.service, store, requireAuth, true));
   app.use("/api/ai", createAiRouter(ai.service, store, requireAuth));
   app.use("/api/admin", createAdminRouter(store, requireAuth));

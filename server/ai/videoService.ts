@@ -15,6 +15,41 @@ export class AiVideoService {
   constructor(private store: AiStore, private box: () => Promise<SecretBox>, private transport: AiTransport, private deploymentKey: () => string = () => "") {}
   private saved(): Settings { const row = this.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0]; return row ? JSON.parse(row.data) : { enabled: false, quotaPoints: 0 }; }
   settings(): AiVideoSettings { const s = this.saved(); return { enabled: s.enabled, quotaPoints: s.quotaPoints, apiKeyConfigured: Boolean(s.encryptedKey || this.deploymentKey()) }; }
+  async uploadReference(userId: string, value: unknown): Promise<{ id: string }> {
+    this.store.assertAccess(userId);
+    const s = this.settings();
+    if (!s.enabled || !s.apiKeyConfigured) throw new AiError(403, "AI_VIDEO_DISABLED", "管理员尚未启用视频生成");
+    const p = object(value);
+    if (typeof p.dataUrl !== "string" || p.dataUrl.length > 400000 || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(p.dataUrl)) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片格式或大小不正确，请重新选择图片");
+    const box = await this.box(), chunks: string[] = [];
+    for (let i = 0; i < p.dataUrl.length; i += 16000) chunks.push(await box.encrypt(p.dataUrl.slice(i, i + 16000)));
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(32)), n => n.toString(16).padStart(2, "0")).join("");
+    this.store.sql.transaction(() => {
+      this.store.sql.exec("DELETE FROM ai_video_references WHERE expires_at <= ?", Date.now());
+      const count = this.store.sql.all<{ n: number }>("SELECT COUNT(*) AS n FROM ai_video_references WHERE user_id=?", userId)[0].n;
+      if (count >= 32) throw new AiError(429, "AI_VIDEO_IMAGE_LIMIT", "暂存图片已达上限，请稍后再试");
+      this.store.sql.exec("INSERT INTO ai_video_references(id,user_id,expires_at,data) VALUES(?,?,?,?)", id, userId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify(chunks));
+    });
+    return { id };
+  }
+  /** Unguessable, expiring capability URL for provider retrieval; no member credentials in the URL. */
+  async referenceContent(id: string): Promise<Response> {
+    const row = /^[a-f0-9]{64}$/.test(id) ? this.store.sql.all<{ data: string; expires_at: number }>("SELECT data,expires_at FROM ai_video_references WHERE id=?", id)[0] : undefined;
+    if (!row || row.expires_at <= Date.now()) return new Response(null, { status: 404 });
+    const box = await this.box();
+    const data = (await Promise.all((JSON.parse(row.data) as string[]).map(chunk => box.decrypt(chunk)))).join("");
+    const bytes = Uint8Array.from(atob(data.slice(data.indexOf(",") + 1)), c => c.charCodeAt(0));
+    return new Response(bytes, { headers: { "Content-Type": "image/jpeg", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
+  }
+  private references(userId: string, value: unknown): string[] | undefined {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value) || value.length > 8 || value.some(id => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "最多上传 8 张参考图片");
+    return value.map(id => {
+      const row = this.store.sql.all<{ expires_at: number }>("SELECT expires_at FROM ai_video_references WHERE id=? AND user_id=?", id, userId)[0];
+      if (!row || row.expires_at <= Date.now()) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片已过期，请重新上传");
+      return `https://notify.samhubs.com/api/video-reference/${id}`;
+    });
+  }
   async configure(value: unknown): Promise<AiVideoSettings> {
     const p = object(value), existing = this.saved();
     if (typeof p.enabled !== "boolean" || !Number.isSafeInteger(p.quotaPoints) || Number(p.quotaPoints) < 0 || Number(p.quotaPoints) > 10_000_000 || (p.enabled && !p.quotaPoints)) throw new AiError(400, "AI_VIDEO_SETTINGS_INVALID", "启用视频前，请设置每段视频的同频点折算值（1–1000 万）");
@@ -67,13 +102,15 @@ export class AiVideoService {
   }
   async submit(userId: string, value: unknown): Promise<AiVideoJob> {
     this.store.assertAccess(userId); this.recover(userId);
-    const p = object(value), input = parseH3VideoInput(p);
+    const p = object(value);
+    if (p.images !== undefined) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "请使用上传的参考图片");
+    const input = parseH3VideoInput({ ...p, images: this.references(userId, p.referenceIds) });
     if (!validId(p.requestId)) throw new AiError(400, "AI_VIDEO_ID_INVALID", "请提供有效视频请求编号");
     const id = p.requestId;
     const existing = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE user_id=? AND id=?", userId, id)[0];
     if (existing) {
       const job: Job = JSON.parse(existing.data);
-      if (Object.entries(input).some(([k, v]) => job[k as keyof Job] !== v)) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
+      if (Object.entries({ ...input, images: input.images }).some(([k, v]) => JSON.stringify(job[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
       return this.public(job);
     }
     const s = this.saved();
@@ -91,7 +128,7 @@ export class AiVideoService {
     });
     if (!reserved) {
       const current = this.raw(userId, id);
-      if (Object.entries(input).some(([k, v]) => current[k as keyof Job] !== v)) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
+      if (Object.entries({ ...input, images: input.images }).some(([k, v]) => JSON.stringify(current[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
       return this.public(current);
     }
     try {

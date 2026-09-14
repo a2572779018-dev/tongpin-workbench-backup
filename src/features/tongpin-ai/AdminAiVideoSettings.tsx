@@ -18,7 +18,7 @@ export function AdminAiVideoSettings() {
   async function action(fn: () => Promise<void>) { if (busyRef.current) return; busyRef.current = true; setBusy(true); setNotice(""); try { await fn(); } catch (e) { setNotice(e instanceof Error ? e.message : "操作失败"); } finally { busyRef.current = false; setBusy(false); } }
   if (openedAccount.current !== account) return null;
   return <section className="tp-ai-admin-card" aria-label="视频生成接入">
-    <header className="tp-ai-admin-heading"><div><h2>视频生成 · H3</h2><p>好漫剧独立接口 · 文字生成 5–15 秒视频</p></div></header>
+    <header className="tp-ai-admin-heading"><div><h2>视频生成 · H3</h2><p>文字或图片参考生成 5–15 秒视频</p></div></header>
     {!settings ? <p role="status">{notice || "读取配置中…"}</p> : <>
       <form onSubmit={e => { e.preventDefault(); void action(async () => {
         const r = await api<{ settings: AiVideoSettings }>("/api/admin/ai/video", { method: "PUT", headers, body: JSON.stringify({ enabled, quotaPoints: Number(points), ...(key ? { apiKey: key } : {}) }) });

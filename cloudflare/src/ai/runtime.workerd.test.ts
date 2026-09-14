@@ -343,11 +343,17 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   it("persists video reservation across Worker restart, authenticates content and submits exactly once", async () => {
     await api("/api/admin/ai/video", admin, { enabled: true, quotaPoints: 500 }, "PUT");
     expect(await api("/api/admin/ai/video/test", admin, {})).toMatchObject({ ok: true });
+    const reference = await api<{ id: string }>("/api/ai/video-references", member, { dataUrl: "data:image/jpeg;base64,/9j/AAAA" });
+    const referenceResponse = await mf.dispatchFetch(`http://tongpin-fixture.local/api/video-reference/${reference.id}`);
+    expect(referenceResponse.status).toBe(200);
+    expect(referenceResponse.headers.get("content-type")).toBe("image/jpeg");
+    expect((await mf.dispatchFetch(`http://tongpin-fixture.local/api/video-reference/${"0".repeat(64)}`)).status).toBe(404);
     const before = postCount;
-    const request = { requestId: crypto.randomUUID(), prompt: "H3 isolated fixture", seconds: 15, resolution: "768p", aspectRatio: "16:9" };
+    const request = { requestId: crypto.randomUUID(), prompt: "H3 isolated fixture", seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [reference.id] };
     const created = await api<{ job: AiVideoJob }>("/api/ai/videos", member, request);
     expect(created.job.status).toBe("queued"); expect(JSON.stringify(created)).not.toContain("h3-deployment-fixture-only");
     await mf.dispose(); mf = start(); await mf.ready;
+    expect((await mf.dispatchFetch(`http://tongpin-fixture.local/api/video-reference/${reference.id}`)).status).toBe(200);
     expect((await api<AiVideoList>("/api/ai/videos", member)).jobs[0].id).toBe(request.requestId);
     await api("/api/ai/videos", member, request); expect(postCount).toBe(before + 1);
     videoCompleted = true;

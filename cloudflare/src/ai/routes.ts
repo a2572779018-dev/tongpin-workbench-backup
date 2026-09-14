@@ -39,6 +39,7 @@ export async function handleAiRequest(request: Request, service: AiService, user
     const videoReconcile = path.match(/^\/api\/admin\/ai\/videos\/([^/]+)\/([^/]+)\/reconcile$/);
     if (videoReconcile && method === "POST") return json({ job: service.video.reconcile(videoReconcile[1], videoReconcile[2], user.id, await parseAiJson(request)) });
     if (path === "/api/ai/videos" && method === "GET") return json(service.video.list(user.id));
+    if (path === "/api/ai/video-references" && method === "POST") return json(await service.video.uploadReference(user.id, await parseAiJson(request)));
     if (path === "/api/ai/videos" && method === "POST") return json({ job: await service.video.submit(user.id, await parseAiJson(request)) });
     const videoMatch = path.match(/^\/api\/ai\/videos\/([^/]+)(\/content)?$/);
     if (videoMatch && method === "GET") return videoMatch[2] ? await service.video.content(user.id, videoMatch[1]) : json({ job: await service.video.refresh(user.id, videoMatch[1]) });

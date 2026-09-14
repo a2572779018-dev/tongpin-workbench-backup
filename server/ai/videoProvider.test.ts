@@ -25,8 +25,16 @@ describe("75api MiniMax H3 documented protocol", () => {
   it.each([{ resolution: "720p" }, { aspectRatio: "1:1" }, { prompt: "" }, { prompt: "x".repeat(4001) }, { prompt: "x\0y" }])("rejects invalid parameters", patch => {
     expect(() => parseH3VideoInput({ ...input, ...patch })).toThrow();
   });
-  it.each(["images", "audios", "attachments"])("does not silently discard unsupported %s", name => {
-    expect(() => parseH3VideoInput({ ...input, [name]: [] })).toThrow("暂只接收文字描述");
+  it.each(["audios", "attachments", "firstFrame", "lastFrame"])("does not silently discard unsupported %s", name => {
+    expect(() => parseH3VideoInput({ ...input, [name]: [] })).toThrow("不支持");
+  });
+  it("sends the documented images array with managed reference URLs", async () => {
+    const images = [`https://notify.samhubs.com/api/video-reference/${"a".repeat(64)}`];
+    const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json(task));
+    await submitH3Video(transport, connection, { ...input, images });
+    expect(JSON.parse(transport.mock.calls[0][1].body!).images).toEqual(images);
+    expect(() => parseH3VideoInput({ ...input, images: Array(9).fill(images[0]) })).toThrow();
+    expect(() => parseH3VideoInput({ ...input, images: ["http://localhost/private.jpg"] })).toThrow();
   });
   it.each([403, 502, 503])("does not retry paid POST on HTTP %i", async status => {
     const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json({ error: { code: "upstream_error", message: connection.apiKey } }, { status }));

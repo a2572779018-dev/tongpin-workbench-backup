@@ -83,6 +83,7 @@ interface ChatWorkspaceProps {
   imageEnabled?: boolean;
   visionEnabled?: boolean;
   webSearchEnabled?: boolean;
+  quickAuto?: boolean;
   webSearch?: boolean;
   onWebSearchChange?: (enabled: boolean) => void;
   assistantName?: string;
@@ -133,6 +134,7 @@ export function ChatWorkspace({
   imageEnabled = false,
   visionEnabled = false,
   webSearchEnabled = false,
+  quickAuto = false,
   webSearch = false,
   onWebSearchChange,
   assistantName = "同频 AI",
@@ -181,6 +183,9 @@ export function ChatWorkspace({
   const visibleCount = historyWindow.conversationId === conversationId ? historyWindow.count : CHAT_MESSAGE_PAGE_SIZE;
   const hiddenCount = Math.max(0, messages.length - visibleCount);
   const capabilityUnavailable = composerTool === "image" ? !imageEnabled : webSearch && !webSearchEnabled;
+  useEffect(() => {
+    if (quickAuto && mode === "quick" && webSearch) onWebSearchChange?.(false);
+  }, [quickAuto, mode, webSearch, onWebSearchChange]);
   const lastMessage = messages.at(-1);
   const responseFailed = lastMessage?.role === "assistant" && lastMessage.status === "error";
   const currentReplyPending = lastMessage?.role === "assistant" && (lastMessage.status === "thinking" || lastMessage.status === "typing");
@@ -570,17 +575,16 @@ export function ChatWorkspace({
                         >
                           <Paperclip size={18} />
                           <span>上传文件</span>
-                          <small>文档资料</small>
                         </button>
                         <button type="button" role="menuitem" disabled={responding || readingFiles || composerTool === "image" || !visionEnabled || !onAddFiles}
                           title={!visionEnabled ? "请管理员启用支持视觉输入的模型" : "PNG、JPEG、WebP，单张最大 12 MB"}
                           onClick={() => { setMenu(null); imageInputRef.current?.click(); }}>
-                          <ImageIcon size={18} /><span>上传图片</span><small>{visionEnabled ? "图片理解" : "需管理员启用"}</small>
+                          <ImageIcon size={18} /><span>上传图片</span>
                         </button>
                         <button type="button" role="menuitem" disabled={responding || readingFiles || composerTool === "image" || !visionEnabled || !onAddFiles}
                           title={!visionEnabled ? "请管理员启用支持视觉输入的模型" : "最多 2 分钟 / 50 MB；分析最多 4 个采样画面，不含音频"}
                           onClick={() => { setMenu(null); videoInputRef.current?.click(); }}>
-                          <Video size={18} /><span>上传视频</span><small>采样画面 · 无音频</small>
+                          <Video size={18} /><span>上传视频</span>
                         </button>
                         <button
                           type="button"
@@ -591,11 +595,10 @@ export function ChatWorkspace({
                         >
                           <Sparkles size={18} />
                           <span>导入技能说明</span>
-                          <small>SKILL.md</small>
                         </button>
                         <div role="separator" />
                         <button type="button" role="menuitem" disabled={responding || readingFiles} onClick={() => { setMenu(null); setVideoOpen(true); }}>
-                          <Video size={18} /><span>生成视频</span><small>H3 · 我的作品</small>
+                          <Video size={18} /><span>生成视频</span>
                         </button>
                         <button
                           type="button"
@@ -608,7 +611,6 @@ export function ChatWorkspace({
                         >
                           <Presentation size={18} />
                           <span>生成 PPT</span>
-                          <small>可编辑 PPTX</small>
                         </button>
                         <button
                           type="button"
@@ -622,7 +624,6 @@ export function ChatWorkspace({
                         >
                           <ImageIcon size={18} />
                           <span>生成图片</span>
-                          <small>{imageEnabled ? "文字生成" : "需管理员配置"}</small>
                         </button>
                       </>
                     ) : (
@@ -640,11 +641,11 @@ export function ChatWorkspace({
                           <ChevronDown size={14} />
                         </button>
                         <button type="button" role="menuitemcheckbox" aria-checked={webSearch} disabled={responding || !webSearchEnabled || composerTool === "image" || !onWebSearchChange}
-                          title={!webSearchEnabled ? "请管理员启用联网搜索并设置折算额度" : "使用服务商的联网搜索工具"}
+                          title={quickAuto && mode === "quick" ? "请切换深度思考后使用联网搜索" : !webSearchEnabled ? "请管理员启用联网搜索并设置折算额度" : "使用服务商的联网搜索工具"}
                           onClick={() => { onWebSearchChange?.(!webSearch); setMenu(null); }}>
                           <Globe size={18} />
                           <span>联网搜索</span>
-                          <small>{webSearchEnabled ? webSearch ? "已开启" : "未开启" : "需管理员配置"}</small>
+                          <small>{quickAuto && mode === "quick" ? "深度模式可用" : webSearchEnabled ? webSearch ? "已开启" : "未开启" : "需管理员配置"}</small>
                         </button>
                         {enabledSkills.length > 0 && (
                           <div className="tp-ai-selected-skills">
@@ -669,7 +670,7 @@ export function ChatWorkspace({
                     onModeChange(event.target.value as TongpinAIMode)
                   }
                 >
-                  <option value="quick">快速模式</option>
+                  <option value="quick">{quickAuto ? "快速 Auto" : "快速模式"}</option>
                   <option value="deep">深度思考</option>
                 </select>
                 <ChevronDown size={12} />

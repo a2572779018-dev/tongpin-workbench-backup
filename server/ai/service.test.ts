@@ -21,6 +21,18 @@ describe("AI transactional service", () => {
     await runtime.service.saveProvider(provider);
   });
   afterEach(async () => { runtime.close(); await rm(directory, { recursive: true }); });
+  it("resolves Auto before budget and transport, stores actual model and retains token usage", async () => {
+    await runtime.service.saveProvider({ ...provider, baseUrl: "https://api.b.ai/v1", protocol: "responses", quickModel: "tongpin-auto", deepModel: "old" });
+    runtime.service.setQuota("auto-member", "admin", { limitTokens: 100000 });
+    const req = chat();
+    expect(runtime.service.preflight("auto-member", req).canSend).toBe(true);
+    const result = await runtime.service.chat("auto-member", req);
+    expect(result.model).toBe("hy3"); expect(result.usage.totalTokens).toBe(13);
+    expect(transport.mock.calls[0][0]).toBe("https://api.b.ai/v1/chat/completions");
+    expect(JSON.parse(transport.mock.calls[0][1].body!).model).toBe("hy3");
+    await runtime.service.chat("auto-member", req); expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.service.provider()?.deepModel).toBe("gpt-6-astra");
+  });
   it("normalizes endpoint paths, encrypts write-only keys and applies supported file permissions", async () => {
     expect(runtime.service.provider()).toMatchObject({ baseUrl: "https://api.example.com/v1", apiKeyConfigured: true });
     expect(JSON.stringify(runtime.service.provider())).not.toContain(provider.apiKey);
