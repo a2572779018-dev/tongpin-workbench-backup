@@ -15,7 +15,11 @@ export function generatedMediaForFollowup(conversation: TongpinAIConversation | 
     if (message.role !== "assistant" || message.status === "error") continue;
     const artifact = artifacts.find(a => a.id === message.artifactId && a.conversationId === conversation.id);
     if (!artifact) continue;
-    if (typeof artifact.data?.videoJobId === "string" && kind !== "image") return artifact;
+    if (typeof artifact.data?.videoJobId === "string" && kind !== "image") {
+      const id = artifact.data.videoJobId;
+      if (conversation.messages.some(m => m.attachments?.some(a => a.media?.kind === "video" && a.name.includes(id)))) return undefined;
+      return artifact;
+    }
     if (Array.isArray(artifact.data?.images) && kind !== "video") return artifact;
   }
 }

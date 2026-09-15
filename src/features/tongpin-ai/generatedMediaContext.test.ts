@@ -17,6 +17,10 @@ describe("generated media continuity", () => {
     expect(generatedMediaForFollowup(JSON.parse(JSON.stringify(c)), [video, picture], "评价视频")).toBe(video);
     expect(generatedMediaForFollowup(c, [video, picture], "这张好看吗")).toBe(picture);
   });
+  it("does not duplicate frames after the same generated video was manually uploaded", () => {
+    const c = { ...conversation, messages: [...conversation.messages, { id: "upload", role: "user" as const, content: "评价", time: "", attachments: [{ id: "upload", name: "同频视频-job.mp4", content: "", mimeType: "video/mp4", media: { kind: "video" as const, durationSeconds: 15, frames: [{ dataUrl: "data:image/jpeg;base64,YQ==", timeSeconds: 0 }] } }] }] };
+    expect(generatedMediaForFollowup(c, [video], "视频好看吗")).toBeUndefined();
+  });
   it("only GETs original video and supplies timestamped visual evidence, never audio claims", async () => {
     const calls: string[] = [];
     const api = vi.fn(async (route, init) => {
