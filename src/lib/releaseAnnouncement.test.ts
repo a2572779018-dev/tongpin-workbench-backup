@@ -27,19 +27,19 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "视频设置更加紧凑",
+      "重新编辑并生成",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "生成进度与视频播放器继续保留在 AI 回复中",
+      "参考图随对话保留",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留任务、客户脉络图、AI 历史、密钥和已有成员额度",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "参考图片支持拖入",
+      "避免被参考图片遮住",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "快速 Auto 暂不支持搜索",
+      "结果待核对或费用未结算时不重复生成",
     );
   });
 
