@@ -161,9 +161,10 @@ export function ChatWorkspace({
   const followResponseRef = useRef(true);
   const [menu, setMenu] = useState<"attachments" | "tools" | null>(null);
   const [videoOpen, setVideoOpen] = useState(false);
+  const [videoInitial, setVideoInitial] = useState<VideoChatRequest | undefined>();
   const [videoBusy, setVideoBusy] = useState(false);
   const videoComposerRef = useRef<VideoComposerHandle>(null);
-  useEffect(() => { setVideoOpen(false); setVideoBusy(false); }, [conversationId]);
+  useEffect(() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); }, [conversationId]);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState("");
@@ -429,6 +430,8 @@ export function ChatWorkspace({
               retryDisabled={message.status === "error" && responding}
               onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
               onVideoSettled={videoSettled}
+              videoEditDisabled={responding || videoBusy || videoOpen || Boolean(draft.trim()) || Boolean(attachments.length)}
+              onEditVideo={onSubmitVideo ? request => { setVideoInitial(request); onDraftChange(request.prompt); setVideoOpen(true); onComposerToolChange?.("text"); onWebSearchChange?.(false); composerRef.current?.focus(); } : undefined}
             />)}
           </>
         )}
@@ -479,7 +482,7 @@ export function ChatWorkspace({
         )}
         <div className="tp-ai-beam-wrap">
           <form className="tp-ai-composer" onSubmit={submitMessage}>
-            {videoOpen && onSubmitVideo ? <AiVideoComposer ref={videoComposerRef} prompt={draft} onSubmit={onSubmitVideo} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); }} /> : null}
+            {videoOpen && onSubmitVideo ? <AiVideoComposer ref={videoComposerRef} initialRequest={videoInitial} prompt={draft} onSubmit={onSubmitVideo} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); }} /> : null}
             <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);

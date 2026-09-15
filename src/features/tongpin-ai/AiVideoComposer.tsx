@@ -10,15 +10,16 @@ import "./ai-video.css";
 export interface VideoComposerHandle { submit(): void }
 export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   prompt: string; onClose(): void; onBusy(busy: boolean): void;
+  initialRequest?: VideoChatRequest;
   onSubmit(request: VideoChatRequest): Promise<boolean>;
   onUseHistory?: (jobId: string) => Promise<boolean>;
-}>(function AiVideoComposer({ prompt, onClose, onBusy, onSubmit, onUseHistory }, ref) {
+}>(function AiVideoComposer({ prompt, onClose, onBusy, onSubmit, onUseHistory, initialRequest }, ref) {
   const { api, session } = useAuth();
   const [data, setData] = useState<AiVideoList | null>(null);
   const [error, setError] = useState("");
-  const [seconds, setSeconds] = useState(15);
-  const [model, setModel] = useState<VideoModelId>("minimax_h3");
-  const [resolution, setResolution] = useState<VideoResolution>("768p");
+  const [seconds, setSeconds] = useState(initialRequest?.seconds ?? 15);
+  const [model, setModel] = useState<VideoModelId>(initialRequest?.model ?? "minimax_h3");
+  const [resolution, setResolution] = useState<VideoResolution>(initialRequest?.resolution ?? "768p");
   const [submitted, setSubmitted] = useState(false);
   const [dragging, setDragging] = useState(false);
   const spec = videoModel(model)!;
@@ -28,8 +29,8 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     const durations = videoSeconds(id, r);
     setModel(id); setResolution(r); setSeconds(n => durations.includes(n) ? n : durations[durations.length - 1]);
   }
-  const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16">("16:9");
-  const [images, setImages] = useState<Array<{ name: string; dataUrl: string }>>([]);
+  const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16">(initialRequest?.aspectRatio ?? "16:9");
+  const [images, setImages] = useState<Array<{ name: string; dataUrl: string }>>(initialRequest?.referenceImages ?? []);
   const [busy, setBusy] = useState(false);
   const lock = useRef(false), live = useRef(true), input = useRef<HTMLInputElement>(null);
   const controller = useRef<AbortController | null>(null);

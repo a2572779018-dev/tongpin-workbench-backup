@@ -7,7 +7,7 @@ import { h3VideoContentUrl, parseH3VideoInput, queryH3Video, submitH3Video, type
 
 const BASE = "https://www.75api.com/v1";
 interface Settings { enabled: boolean; quotaPoints: number; encryptedKey?: string }
-interface Job extends AiVideoJob { userId: string; providerId?: string; encryptedKey: string; pollAt: number }
+interface Job extends AiVideoJob { userId: string; providerId?: string; encryptedKey: string; pollAt: number; images?: string[] }
 const now = () => new Date().toISOString();
 const validId = (id: unknown): id is string => typeof id === "string" && /^[a-zA-Z0-9_-]{16,100}$/.test(id);
 
@@ -79,7 +79,7 @@ export class AiVideoService {
   }
   private write(job: Job) { this.store.sql.exec("INSERT INTO ai_video_jobs(user_id,id,data) VALUES(?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET data=excluded.data", job.userId, job.id, JSON.stringify(job)); }
   private public(job: Job): AiVideoJob {
-    return { id: job.id, prompt: job.prompt, ...(job.model ? { model: job.model } : {}), seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio, status: job.status, progress: job.progress, createdAt: job.createdAt, updatedAt: job.updatedAt, quotaPoints: job.quotaPoints, reserved: job.reserved, ...(job.error ? { error: job.error } : {}), ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) };
+    return { referenceIds: (job.images ?? []).map(url => url.split("/").at(-1)!).filter(id => /^[a-f0-9]{64}$/.test(id)), id: job.id, prompt: job.prompt, ...(job.model ? { model: job.model } : {}), seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio, status: job.status, progress: job.progress, createdAt: job.createdAt, updatedAt: job.updatedAt, quotaPoints: job.quotaPoints, reserved: job.reserved, ...(job.error ? { error: job.error } : {}), ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) };
   }
   private recover(userId?: string) {
     this.store.sql.transaction(() => {

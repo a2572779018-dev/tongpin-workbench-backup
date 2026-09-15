@@ -6,5 +6,6 @@ export interface AiVideoJob {
   id: string; prompt: string; model?: VideoModelId; seconds: number; resolution: VideoResolution; aspectRatio: "16:9" | "9:16";
   status: AiVideoJobStatus; progress: number; createdAt: string; updatedAt: string;
   quotaPoints: number; reserved: boolean; error?: string; diagnostic?: AiProviderDiagnostic;
+  referenceIds?: string[];
 }
 export interface AiVideoList { settings: AiVideoSettings; jobs: AiVideoJob[]; quota: AiQuota }

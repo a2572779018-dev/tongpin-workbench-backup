@@ -48,7 +48,8 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(transport).toHaveBeenCalledTimes(1);
     expect(JSON.parse(transport.mock.calls[0][1].body!).images).toEqual([`https://notify.samhubs.com/api/video-reference/${reference.id}`]);
     await expect(video.submit("a", { ...req, referenceIds: [] })).rejects.toMatchObject({ code: "AI_VIDEO_REQUEST_CONFLICT" });
-    expect(JSON.stringify(video.list("a"))).not.toContain(reference.id);
+    expect(video.list("a").jobs.find(job => job.id === req.requestId)?.referenceIds).toEqual([reference.id]);
+    expect(JSON.stringify(video.list("b"))).not.toContain(reference.id);
     runtime.store.sql.exec("UPDATE ai_video_references SET expires_at=0 WHERE id=?", reference.id);
     expect((await video.referenceContent(reference.id)).status).toBe(404);
     await expect(video.submit("a", { ...input(), referenceIds: [reference.id] })).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });

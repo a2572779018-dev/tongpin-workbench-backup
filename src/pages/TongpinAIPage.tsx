@@ -762,7 +762,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         { id: messageId, role: "assistant", content: "视频生成任务", artifactId, status: "ready", time: currentTimeLabel() }],
     };
     const artifact: TongpinAIArtifact = { id: artifactId, conversationId, projectId: conversation.projectId,
-      title: "生成的视频", kind: "视频", summary: request.prompt, updatedLabel: "刚刚", sections: [], data: { videoJobId: request.requestId } };
+      title: "生成的视频", kind: "视频", summary: request.prompt, updatedLabel: "刚刚", sections: [], data: { videoJobId: request.requestId, ...(!importOnly ? { videoRequest: JSON.parse(JSON.stringify(request)) } : {}) } };
     const latest = workspaceRef.current;
     const next = withPreparedChatSend({ ...persistentStateRef.current,
       conversations: latest.conversations, projects: latest.projects, drafts: latest.drafts,
