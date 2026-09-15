@@ -30,7 +30,7 @@ export async function publicRequest<T>(
   path: string,
   init: RequestInit = {},
   timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  responseMode: "json" | "blob" = "json",
+  responseMode: "json" | "blob" | "image" = "json",
 ): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -68,12 +68,15 @@ export async function publicRequest<T>(
     }
 
     if (response.status === 204) return undefined as T;
-    if (responseMode === "blob") {
-      if (!response.body || !/^video\/mp4(?:;|$)/i.test(response.headers.get("content-type") ?? "")) throw new ApiRequestError(502, "INVALID_VIDEO", "服务器未返回有效视频");
+    if (responseMode === "blob" || responseMode === "image") {
+      const image = responseMode === "image";
+      const mime = image ? "image/jpeg" : "video/mp4";
+      const validType = image ? /^image\/jpeg(?:;|$)/i : /^video\/mp4(?:;|$)/i;
+      if (!response.body || !validType.test(response.headers.get("content-type") ?? "")) throw new ApiRequestError(502, image ? "INVALID_IMAGE" : "INVALID_VIDEO", image ? "服务器未返回有效参考图" : "服务器未返回有效视频");
       const reader = response.body.getReader(), chunks: BlobPart[] = []; let size = 0;
-      try { while (true) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > 64 * 1024 * 1024) { await reader.cancel(); throw new ApiRequestError(413, "VIDEO_TOO_LARGE", "视频超过 64 MB 限制"); } chunks.push(value); } }
+      try { while (true) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > (image ? 300000 : 64 * 1024 * 1024)) { await reader.cancel(); throw new ApiRequestError(413, image ? "IMAGE_TOO_LARGE" : "VIDEO_TOO_LARGE", image ? "参考图大小超出限制" : "视频超过 64 MB 限制"); } chunks.push(value); } }
       finally { reader.releaseLock(); }
-      return new Blob(chunks, { type: "video/mp4" }) as T;
+      return new Blob(chunks, { type: mime }) as T;
     }
     try {
       return (await response.json()) as T;

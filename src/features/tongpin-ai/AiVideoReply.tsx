@@ -25,7 +25,7 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, onEdit, editDisab
     const abort = new AbortController(); restoreAbort.current = abort;
     try {
       const request = await restoreVideoRequest(job, savedRequest, async id => {
-        const blob = await api<Blob>(`/api/video-reference/${id}`, { signal: abort.signal }, 30000, "blob");
+        const blob = await api<Blob>(`/api/video-reference/${id}`, { signal: abort.signal }, 30000, "image");
         if (blob.size > 300000) throw Error("参考图大小超出限制");
         const bytes = new Uint8Array(await blob.arrayBuffer());
         let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);

@@ -6,6 +6,19 @@ import {
 } from "./api";
 
 describe("API network handling", () => {
+  it("restores JPEG references with an explicit image mode without weakening video validation", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => new Response(new Uint8Array([255, 216, 255, 217]), { headers: { "Content-Type": "image/jpeg" } })));
+    const image = await publicRequest<Blob>("/api/video-reference/test", {}, 1000, "image");
+    expect(image.type).toBe("image/jpeg");
+    expect(image.size).toBe(4);
+    await expect(publicRequest("/api/videos/content", {}, 1000, "blob")).rejects.toMatchObject({ code: "INVALID_VIDEO" });
+  });
+  it("rejects HTML and oversized responses while restoring reference pictures", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("error", { headers: { "Content-Type": "text/html" } })));
+    await expect(publicRequest("/api/video-reference/test", {}, 1000, "image")).rejects.toMatchObject({ code: "INVALID_IMAGE" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new Uint8Array(300001), { headers: { "Content-Type": "image/jpeg" } })));
+    await expect(publicRequest("/api/video-reference/test", {}, 1000, "image")).rejects.toMatchObject({ code: "IMAGE_TOO_LARGE" });
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
