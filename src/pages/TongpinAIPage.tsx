@@ -172,7 +172,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   );
   const [draftAttachments, setDraftAttachments] = useState<Record<string, AiWorkspaceDocument[]>>(initialSession.draftAttachments ?? {});
   const [composerTool, setComposerTool] = useState<"text" | "presentation" | "image">(initialSession.composerTool ?? "text");
-  const [webSearch, setWebSearch] = useState(initialSession.webSearch ?? false);
+  const [webSearch, setWebSearch] = useState(false);
   const availability = useAiAvailability(api, user.id, composerTool === "image" ? "image" : "chat", setAiStatus);
   const availabilityScope = composerTool === "image" ? "image" : `${mode}:${webSearch ? "search" : "chat"}`;
   const availabilityCheck = availability.failures[availabilityScope] ?? availability.check;
@@ -789,8 +789,15 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       }
       if (!liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) return true;
       if (importOnly) return true;
+      const { referenceImages, ...wireRequest } = request;
+      const referenceIds = [...(request.referenceIds ?? [])];
+      for (const image of referenceImages ?? []) {
+        const ref = await api<{ id: string }>("/api/ai/video-references", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify({ dataUrl: image.dataUrl }) });
+        referenceIds.push(ref.id);
+        if (!mountedRef.current || pendingCancelledRef.current || !liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) return true;
+      }
       posted = true;
-      await api("/api/ai/videos", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(request) }, 80000);
+      await api("/api/ai/videos", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify({ ...wireRequest, ...(referenceIds.length ? { referenceIds } : {}) }) }, 80000);
     } catch (e) {
       if (mountedRef.current) {
         const rejected = !posted || e instanceof ApiRequestError && [400, 401, 402, 403, 409, 413, 429].includes(e.status);
@@ -837,7 +844,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       request = composerTool === "image" ? { requestId, prompt: content } : {
         ...buildChatRequest(requestId, mode, messages), skillIds: skillRequestIds(enabledSkillIds),
         projectContext: activeProject?.instructions || undefined,
-        attachments: documentPayload, outputFormat: composerTool === "presentation" ? "presentation" : "text", webSearch,
+        attachments: documentPayload, outputFormat: composerTool === "presentation" ? "presentation" : "text", webSearchMode: "auto",
       };
     } catch (error) { showAnnouncement(error instanceof Error ? error.message : "内容超出限制"); return; }
     // Check before saving a sent message, clearing the draft or calling a provider.
@@ -849,6 +856,17 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       setCheckingQuota(true);
       setBudgetNotice(null);
       try {
+        const { generatedMediaForFollowup, readGeneratedMedia } = await import("../features/tongpin-ai/generatedMediaContext");
+        const media = attachments.some(item => item.media) ? undefined : generatedMediaForFollowup(activeConversation, workspaceRef.current.artifacts, content);
+        if (media) {
+          if (!aiStatus?.visionEnabled) throw new Error("当前模型未开启视觉理解，无法评价生成画面，请管理员启用。草稿已保留。");
+          const { extractMediaAttachment } = await import("../features/tongpin-ai/mediaAttachments");
+          const visual = await readGeneratedMedia(media, api, user.id, controller.signal, extractMediaAttachment);
+          if (!mountedRef.current || !preflightGate.isCurrent(ticket, sendContextRef.current)) return;
+          // Prior source documents remain intact; never silently drop them to fit a new visual request.
+          if ((request.attachments?.length ?? 0) + visual.length > 5) throw new Error("历史附件与视频画面超过本次分析上限，请在新对话上传要评价的视频。草稿已保留。");
+          request.attachments = [...(request.attachments ?? []), ...visual];
+        }
         const result = await api<AiChatPreflight>("/api/ai/preflight", {
           method: "POST", body: JSON.stringify(request), signal: controller.signal,
           headers: { "X-Tongpin-Account": user.id },

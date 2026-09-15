@@ -218,7 +218,7 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
       ? { role: message.role, content: [{ type: "input_text", text: message.content }, ...images.map(item => ({ type: "input_image", image_url: item.dataUrl, detail: "low" }))] }
       : message),
     max_output_tokens: maxOutputTokens, stream: true, store: false,
-    ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], ...(provider.webSearchProtocol === "compatible" ? {} : { max_tool_calls: 1 }), tool_choice: "required", include: ["web_search_call.action.sources"] } : {}),
+    ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], ...(provider.webSearchProtocol === "compatible" ? {} : { max_tool_calls: 1 }), tool_choice: request.webSearchMode === "auto" ? "auto" : "required", include: ["web_search_call.action.sources"] } : {}),
     ...(request.mode === "deep" && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort } } : {}),
   };
   const isBaiChat = new URL(provider.baseUrl).hostname === "api.b.ai";

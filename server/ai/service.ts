@@ -203,6 +203,7 @@ export class AiService {
     const saved = this.store.provider();
     if (!saved?.enabled) throw new AiError(503, "AI_NOT_CONFIGURED", "管理员尚未启用 AI 服务");
     const provider = routeChatProvider(saved, request);
+    if (request.webSearchMode === "auto") request.webSearch = Boolean(provider.protocol === "responses" && provider.webSearchEnabled && provider.webSearchQuotaTokens);
     if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
     if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) throw new AiError(403, "AI_VISION_DISABLED", "管理员尚未启用图片理解，请上传可提取文字的文档");
     return provider;
@@ -215,6 +216,10 @@ export class AiService {
     if (!request.webSearch) return { canSend: reason === null, reason, quota, budget };
     const ordinaryBudget = chatBudget({ ...request, webSearch: false }, provider, quota, persona, model);
     const ordinaryReason = budgetReason(ordinaryBudget, quota, pending);
+    if (request.webSearchMode === "auto" && reason !== null && ordinaryReason === null) {
+      request.webSearch = false;
+      return { canSend: true, reason: null, quota, budget: ordinaryBudget };
+    }
     return { canSend: reason === null, reason, quota, budget,
       withoutWebSearch: { canSend: ordinaryReason === null, reason: ordinaryReason, budget: ordinaryBudget } };
   }
@@ -326,7 +331,7 @@ export class AiService {
         this.store.sql.transaction(() => this.settle(reserved, usage, "uncertain", usage.estimated ? "生成未完成，用量不确定，按预留上限计入" : "生成未完成，按服务商实际 Token 用量计入", undefined, error));
         throw error;
       }
-      if (request.webSearch && (result.searchCalls < 1 || result.searchCalls > maxSearchCalls || result.completedSearchCalls !== result.searchCalls)) {
+      if (request.webSearch && ((request.webSearchMode !== "auto" && result.searchCalls < 1) || result.searchCalls > maxSearchCalls || result.completedSearchCalls !== result.searchCalls)) {
         const error = new AiError(502, "AI_SEARCH_NOT_COMPLETED", "服务商未按要求完成联网搜索，请管理员检查模型支持；已记录生成用量");
         this.store.sql.transaction(() => this.settle(reserved, usage, "uncertain", "联网搜索执行不符合请求限制，已记录用量，请管理员核对", undefined, error));
         throw error;

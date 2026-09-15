@@ -1,4 +1,5 @@
 import type { AiVideoJob, AiVideoList, AiVideoSettings } from "../../shared/aiVideo";
+import { videoModel } from "../../shared/aiVideoModels";
 import { AiStore } from "./storage";
 import { AiError, type SecretBox } from "./security";
 import { object, readBoundedJson, readProviderHttpError, type AiTransport } from "./provider";
@@ -43,7 +44,7 @@ export class AiVideoService {
   }
   private references(userId: string, value: unknown): string[] | undefined {
     if (value === undefined) return undefined;
-    if (!Array.isArray(value) || value.length > 8 || value.some(id => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "最多上传 8 张参考图片");
+    if (!Array.isArray(value) || value.length > 9 || value.some(id => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "最多上传 9 张参考图片");
     return value.map(id => {
       const row = this.store.sql.all<{ expires_at: number }>("SELECT expires_at FROM ai_video_references WHERE id=? AND user_id=?", id, userId)[0];
       if (!row || row.expires_at <= Date.now()) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片已过期，请重新上传");
@@ -67,8 +68,8 @@ export class AiVideoService {
     const response = await this.transport(`${BASE}/models`, { method: "GET", headers: { Authorization: `Bearer ${await this.key()}`, Accept: "application/json" }, signal: AbortSignal.timeout(20_000), maxResponseBytes: 512000 });
     if (!response.ok) throw await readProviderHttpError(response, "models");
     const data = object(await readBoundedJson(response, 512000));
-    if (!Array.isArray(data.data) || !data.data.some(row => object(row).id === "minimax_h3")) throw new AiError(502, "AI_VIDEO_MODEL_UNAVAILABLE", "视频密钥的模型列表中没有 minimax_h3，请检查模型权限");
-    return { ok: true, message: "已验证 H3 模型权限；未生成视频，未扣成员额度" };
+    if (!Array.isArray(data.data) || !data.data.some(row => videoModel(String(object(row).id)))) throw new AiError(502, "AI_VIDEO_MODEL_UNAVAILABLE", "视频密钥没有可用的视频模型，请检查模型权限");
+    return { ok: true, message: "已验证视频模型权限；未生成视频，未扣成员额度" };
   }
   private raw(userId: string, id: string): Job {
     if (!validId(id)) throw new AiError(400, "AI_VIDEO_ID_INVALID", "视频任务编号无效");
@@ -78,7 +79,7 @@ export class AiVideoService {
   }
   private write(job: Job) { this.store.sql.exec("INSERT INTO ai_video_jobs(user_id,id,data) VALUES(?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET data=excluded.data", job.userId, job.id, JSON.stringify(job)); }
   private public(job: Job): AiVideoJob {
-    return { id: job.id, prompt: job.prompt, seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio, status: job.status, progress: job.progress, createdAt: job.createdAt, updatedAt: job.updatedAt, quotaPoints: job.quotaPoints, reserved: job.reserved, ...(job.error ? { error: job.error } : {}), ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) };
+    return { id: job.id, prompt: job.prompt, ...(job.model ? { model: job.model } : {}), seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio, status: job.status, progress: job.progress, createdAt: job.createdAt, updatedAt: job.updatedAt, quotaPoints: job.quotaPoints, reserved: job.reserved, ...(job.error ? { error: job.error } : {}), ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) };
   }
   private recover(userId?: string) {
     this.store.sql.transaction(() => {
@@ -98,7 +99,7 @@ export class AiVideoService {
     if (q.reservedTokens < job.quotaPoints) throw new AiError(409, "AI_VIDEO_QUOTA_CONFLICT", "视频预留额度异常，请管理员核查");
     this.store.saveQuota(job.userId, { ...q, reservedTokens: q.reservedTokens - job.quotaPoints, usedTokens: q.usedTokens + points });
     job.reserved = false;
-    this.store.addUsage({ id: crypto.randomUUID(), userId: job.userId, requestId: job.id, kind: "video", status: points ? "completed" : "failed", model: "minimax_h3", mode: null, createdAt: now(), reason: actorId ? "管理员按服务商记录核对视频结算" : points ? "视频生成完成" : "服务商拒绝视频请求，已释放预留", limitTokens: null, actorId, inputTokens: 0, outputTokens: 0, totalTokens: points, convertedTokens: points, billingKind: "video_conversion", estimated: false, ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) });
+    this.store.addUsage({ id: crypto.randomUUID(), userId: job.userId, requestId: job.id, kind: "video", status: points ? "completed" : "failed", model: job.model ?? "minimax_h3", mode: null, createdAt: now(), reason: actorId ? "管理员按服务商记录核对视频结算" : points ? "视频生成完成" : "服务商拒绝视频请求，已释放预留", limitTokens: null, actorId, inputTokens: 0, outputTokens: 0, totalTokens: points, convertedTokens: points, billingKind: "video_conversion", estimated: false, ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) });
   }
   async submit(userId: string, value: unknown): Promise<AiVideoJob> {
     this.store.assertAccess(userId); this.recover(userId);
@@ -110,7 +111,7 @@ export class AiVideoService {
     const existing = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE user_id=? AND id=?", userId, id)[0];
     if (existing) {
       const job: Job = JSON.parse(existing.data);
-      if (Object.entries({ ...input, images: input.images }).some(([k, v]) => JSON.stringify(job[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
+      if (Object.entries({ ...input, model: input.model ?? "minimax_h3", images: input.images }).some(([k, v]) => JSON.stringify(k === "model" ? job.model ?? "minimax_h3" : job[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
       return this.public(job);
     }
     const s = this.saved();
@@ -128,7 +129,7 @@ export class AiVideoService {
     });
     if (!reserved) {
       const current = this.raw(userId, id);
-      if (Object.entries({ ...input, images: input.images }).some(([k, v]) => JSON.stringify(current[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
+      if (Object.entries({ ...input, model: input.model ?? "minimax_h3", images: input.images }).some(([k, v]) => JSON.stringify(k === "model" ? current.model ?? "minimax_h3" : current[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
       return this.public(current);
     }
     try {

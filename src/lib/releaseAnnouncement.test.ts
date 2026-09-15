@@ -27,19 +27,19 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "视频生成融入同频 AI 对话",
+      "视频设置更加紧凑",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "生成进度与视频播放器直接显示在 AI 回复中",
+      "生成进度与视频播放器继续保留在 AI 回复中",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留任务、客户脉络图、AI 历史、密钥和已有成员额度",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "修复模态弹窗和视频控件中的鼠标不可见问题",
+      "参考图片支持拖入",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "刷新后恢复原视频任务",
+      "快速 Auto 暂不支持搜索",
     );
   });
 

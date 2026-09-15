@@ -42,3 +42,11 @@
 .tp-ai-video-reply progress { display:block; width:100%; accent-color:#c5ac4b; }
 .tp-ai-video-reply video { display:block; width:100%; max-height:520px; background:#171815; border-radius:12px; margin:12px 0; }
 .tp-ai-video-reply a { display:inline-block; text-decoration:none; }
+.tp-ai-composer .tp-ai-video-composer { padding:14px 18px; margin:0; max-height:32vh; }
+.tp-ai-video-composer .tp-ai-video-options { grid-template-columns:1.6fr .7fr .8fr 1fr; }
+.tp-ai-video-composer select { width:100%; min-width:0; font-size:12px; }
+.tp-ai-video-composer .tp-ai-video-reference-grid figure { flex:0 0 72px; }
+.tp-ai-video-composer .tp-ai-video-reference-grid img { height:64px; }
+.tp-ai-video-composer figcaption { overflow:hidden; overflow-wrap:anywhere; gap:4px; font-size:10px; }
+.tp-ai-video-composer.is-dragging { background:#fff3bd; outline:2px dashed #b59b32; outline-offset:-6px; }
+@media(max-width:640px) { .tp-ai-video-composer .tp-ai-video-options { grid-template-columns:1fr 1fr; } }

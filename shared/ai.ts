@@ -130,6 +130,7 @@ export interface AiChatRequest {
   attachments?: AiAttachment[];
   outputFormat?: "text" | "presentation";
   webSearch?: boolean;
+  webSearchMode?: "auto";
 }
 export type AiChatPreflightReason = null | "quota_exhausted" | "search_quota_insufficient" | "quota_insufficient" | "request_in_progress";
 /** Conservative quota reservations, not actual provider usage or currency prices. */

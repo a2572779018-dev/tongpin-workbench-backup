@@ -1,10 +1,14 @@
+import type { VideoModelId, VideoResolution } from "../../../shared/aiVideoModels";
 export interface VideoChatRequest {
   requestId: string;
   prompt: string;
   seconds: number;
-  resolution: "480p" | "768p";
+  model?: VideoModelId;
+  resolution: VideoResolution;
   aspectRatio: "16:9" | "9:16";
   referenceIds?: string[];
+  /** Local-only; uploaded after the conversation is persisted, never sent in the generation JSON. */
+  referenceImages?: Array<{ name: string; dataUrl: string }>;
 }
 
 /** Only offer the tool for explicit requests; recognizing intent never charges. */

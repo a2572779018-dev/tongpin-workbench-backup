@@ -3,7 +3,6 @@ import {
   ArrowUp,
   Brain,
   ChevronDown,
-  Globe,
   Image as ImageIcon,
   LoaderCircle,
   PanelLeft,
@@ -116,7 +115,6 @@ export function ChatWorkspace({
   quotaInsufficient,
   checkingQuota = false,
   budgetNotice,
-  onDisableSearch,
   responding,
   responsePhase = "waiting",
   connectionLoading = false,
@@ -464,7 +462,6 @@ export function ChatWorkspace({
         {budgetNotice && (
           <div className="tp-ai-quota-block tp-ai-budget-notice" role="alert">
             <span><strong>{budgetNotice.title}</strong><small>{budgetNotice.message}</small></span>
-            {budgetNotice.canDisableSearch && <button type="button" onClick={onDisableSearch} disabled={checkingQuota}>关闭联网，保留草稿</button>}
           </div>
         )}
         {quotaInsufficient && !budgetNotice && (
@@ -501,11 +498,10 @@ export function ChatWorkspace({
             }} />
             {attachments.length ? <AttachmentChips attachments={attachments.map(workspaceAttachment)} onRemove={index => onRemoveAttachment?.(index)} disabled={responding || readingFiles} /> : null}
             {readingFiles ? <div className="tp-ai-attachment-progress" role="status"><LoaderCircle size={16} />正在处理附件…<button type="button" onClick={() => attachmentController.current?.abort()}>取消</button></div> : null}
-            {composerTool !== "text" || webSearch ? <div className="tp-ai-composer-capabilities" aria-label="当前生成设置">
-              {composerTool !== "text" ? <button type="button" disabled={responding} onClick={() => onComposerToolChange?.("text")} aria-label={`取消${composerTool === "presentation" ? "生成 PPT" : "生成图片"}`}>
+            {composerTool !== "text" ? <div className="tp-ai-composer-capabilities" aria-label="当前生成设置">
+              <button type="button" disabled={responding} onClick={() => onComposerToolChange?.("text")} aria-label={`取消${composerTool === "presentation" ? "生成 PPT" : "生成图片"}`}>
                 {composerTool === "presentation" ? <Presentation size={14} /> : <ImageIcon size={14} />}{composerTool === "presentation" ? "生成 PPT" : "生成图片"}<X size={13} />
-              </button> : null}
-              {webSearch && composerTool !== "image" ? <button type="button" disabled={responding} onClick={() => onWebSearchChange?.(false)} aria-label="关闭联网搜索"><Globe size={14} />联网搜索<X size={13} /></button> : null}
+              </button>
             </div> : null}
             <label htmlFor="tp-ai-message-input" className="sr-only">
               输入你的任务
@@ -661,13 +657,6 @@ export function ChatWorkspace({
                           <Sparkles size={18} />
                           <span>选择 Skill</span>
                           <ChevronDown size={14} />
-                        </button>
-                        <button type="button" role="menuitemcheckbox" aria-checked={webSearch} disabled={responding || !webSearchEnabled || composerTool === "image" || !onWebSearchChange}
-                          title={quickAuto && mode === "quick" ? "请切换深度思考后使用联网搜索" : !webSearchEnabled ? "请管理员启用联网搜索并设置折算额度" : "使用服务商的联网搜索工具"}
-                          onClick={() => { onWebSearchChange?.(!webSearch); setMenu(null); }}>
-                          <Globe size={18} />
-                          <span>联网搜索</span>
-                          <small>{quickAuto && mode === "quick" ? "深度模式可用" : webSearchEnabled ? webSearch ? "已开启" : "未开启" : "需管理员配置"}</small>
                         </button>
                         {enabledSkills.length > 0 && (
                           <div className="tp-ai-selected-skills">

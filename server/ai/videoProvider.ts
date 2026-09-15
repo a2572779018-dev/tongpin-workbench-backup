@@ -1,11 +1,13 @@
 import { AiError, safeBaseUrl } from "./security";
 import { object, readBoundedJson, readProviderHttpError, type AiTransport } from "./provider";
+import { videoModel, videoSeconds, type VideoModelId, type VideoResolution } from "../../shared/aiVideoModels";
 
 /** 75api's documented adapter, not a claim about the official MiniMax API. */
 export interface H3VideoInput {
   prompt: string;
+  model?: VideoModelId;
   seconds: number;
-  resolution: "480p" | "768p";
+  resolution: VideoResolution;
   aspectRatio: "16:9" | "9:16";
   images?: string[];
 }
@@ -18,13 +20,16 @@ export interface VideoConnection { baseUrl: string; apiKey: string }
 
 export function parseH3VideoInput(value: unknown): H3VideoInput {
   const p = object(value);
+  const model = videoModel(typeof p.model === "string" ? p.model : p.model === undefined ? "minimax_h3" : "");
+  if (!model) throw new AiError(400, "AI_VIDEO_MODEL_INVALID", "请选择支持的视频模型", true);
   if (typeof p.prompt !== "string" || !p.prompt.trim() || p.prompt.length > 4000 || p.prompt.includes("\0")) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请输入 1–4000 字的视频描述", true);
-  if (!Number.isInteger(p.seconds) || Number(p.seconds) < 5 || Number(p.seconds) > 15) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "视频时长需为 5–15 秒的整数", true);
-  if (p.resolution !== "480p" && p.resolution !== "768p") throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择 480p 或 768p", true);
+  if (!(model.resolutions as readonly unknown[]).includes(p.resolution)) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择该模型支持的清晰度", true);
+  if (!Number.isInteger(p.seconds) || !videoSeconds(model.id, p.resolution as VideoResolution).includes(Number(p.seconds))) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择该模型支持的视频时长", true);
   if (p.aspectRatio !== "16:9" && p.aspectRatio !== "9:16") throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择横屏或竖屏", true);
   if (p.audios !== undefined || p.attachments !== undefined || p.firstFrame !== undefined || p.lastFrame !== undefined) throw new AiError(400, "AI_VIDEO_REFERENCES_UNSUPPORTED", "当前视频接口不支持音频附件或精确首尾帧控制", true);
-  if (p.images !== undefined && (!Array.isArray(p.images) || p.images.length > 8 || p.images.some(url => typeof url !== "string" || !/^https:\/\/notify\.samhubs\.com\/api\/video-reference\/[a-f0-9]{64}$/.test(url)))) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请重新上传参考图片，最多 8 张", true);
-  return { prompt: p.prompt.trim(), seconds: Number(p.seconds), resolution: p.resolution, aspectRatio: p.aspectRatio, ...(Array.isArray(p.images) && p.images.length ? { images: p.images as string[] } : {}) };
+  if (p.images !== undefined && (!Array.isArray(p.images) || p.images.length > model.maxImages || p.images.some(url => typeof url !== "string" || !/^https:\/\/notify\.samhubs\.com\/api\/video-reference\/[a-f0-9]{64}$/.test(url)))) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请重新上传参考图片，数量不能超过模型限制", true);
+  if (model.requiresImage && (!Array.isArray(p.images) || !p.images.length)) throw new AiError(400, "AI_VIDEO_IMAGE_REQUIRED", "该模型需要至少一张参考图片", true);
+  return { ...(p.model !== undefined ? { model: model.id } : {}), prompt: p.prompt.trim(), seconds: Number(p.seconds), resolution: p.resolution as VideoResolution, aspectRatio: p.aspectRatio, ...(Array.isArray(p.images) && p.images.length ? { images: p.images as string[] } : {}) };
 }
 
 function taskId(value: unknown): string {
@@ -49,7 +54,7 @@ export async function submitH3Video(transport: AiTransport, connection: VideoCon
   const input = parseH3VideoInput(value);
   const response = await transport(`${safeBaseUrl(connection.baseUrl)}/videos`, {
     method: "POST", headers: { Authorization: `Bearer ${connection.apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ model: "minimax_h3", prompt: input.prompt, seconds: String(input.seconds), resolution: input.resolution, aspect_ratio: input.aspectRatio, ...(input.images ? { images: input.images } : {}) }),
+    body: JSON.stringify({ model: input.model ?? "minimax_h3", prompt: input.prompt, seconds: String(input.seconds), resolution: input.resolution, aspect_ratio: input.aspectRatio, ...(input.images ? { images: input.images } : {}) }),
     signal: AbortSignal.timeout(60_000), maxResponseBytes: 32 * 1024,
   });
   if (!response.ok) throw await readProviderHttpError(response, "video");

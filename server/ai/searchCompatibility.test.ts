@@ -24,6 +24,16 @@ describe("Explicit compatible Responses search and bounded settlement", () => {
     runtime.service.setQuota("member", "admin", { limitTokens: 100_000 });
   });
   afterEach(async () => { runtime.close(); await rm(directory, { recursive: true }); });
+  it.each([0, 1])("automatic search accepts %i actual calls and bills only observed use", async calls => {
+    transport.mockResolvedValue(Response.json(result(calls)));
+    const request = { ...chat(), webSearch: false, webSearchMode: "auto" as const };
+    const response = await runtime.service.chat("member", request);
+    expect(response.usage.convertedTokens ?? 0).toBe(calls * 100);
+    expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ tool_choice: "auto" });
+    await runtime.service.chat("member", request);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.service.quota("member").reservedTokens).toBe(0);
+  });
 
   it("defaults old configs to standard search and disabled vision while preserving explicit later settings", async () => {
     expect(runtime.service.provider()).toMatchObject({ webSearchProtocol: "standard", visionEnabled: false, visionInputReserveTokens: 4096 });

@@ -73,10 +73,10 @@ describe("composer spacing and mode focus", () => {
     expect(markup).not.toContain('tabindex="-1"');
   });
 
-  it("keeps the capability chip dismissible and mode selection disabled during generation", () => {
+  it("hides legacy manual search controls and locks mode during generation", () => {
     const markup = renderComposer({ webSearch: true, webSearchEnabled: true, responding: true });
-    expect(markup).toContain('class="tp-ai-composer-capabilities" aria-label="当前生成设置"');
-    expect(markup).toContain('aria-label="关闭联网搜索"');
+    expect(markup).not.toContain('class="tp-ai-composer-capabilities"');
+    expect(markup).not.toContain('aria-label="关闭联网搜索"');
     expect(markup).toContain('<select aria-label="思考模式" disabled="">');
   });
 });

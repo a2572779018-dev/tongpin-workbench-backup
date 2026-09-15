@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { h3VideoContentUrl, parseH3VideoInput, parseH3VideoTask, queryH3Video, submitH3Video } from "./videoProvider";
 import type { AiTransport } from "./provider";
+import { VIDEO_MODELS, videoSeconds } from "../../shared/aiVideoModels";
 
 const connection = { baseUrl: "https://www.75api.com/v1", apiKey: "fixture-private-video-key" };
 const input = { prompt: "雨后的花园，镜头缓慢前移", seconds: 15, resolution: "768p", aspectRatio: "9:16" };
@@ -8,6 +9,21 @@ const id = "task_9XxxSYXrZjnpkVdPgIvNm0YHkqmGDYyj";
 const task = { id, task_id: id, status: "queued", progress: 0 };
 
 describe("75api MiniMax H3 documented protocol", () => {
+  it.each(VIDEO_MODELS)("uses the real model ID for $label", async model => {
+    const resolution = model.resolutions[0];
+    const seconds = videoSeconds(model.id, resolution)[0];
+    const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json(task));
+    await submitH3Video(transport, connection, { ...input, model: model.id, resolution, seconds,
+      ...(model.requiresImage ? { images: [`https://notify.samhubs.com/api/video-reference/${"a".repeat(64)}`] } : {}) });
+    expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ model: model.id, seconds: String(seconds), resolution });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("enforces model-specific limits before contacting the provider", () => {
+    expect(() => parseH3VideoInput({ ...input, model: "minimax_h3_no_audios_1080", seconds: 10, resolution: "1080p" })).toThrow("参考图片");
+    expect(() => parseH3VideoInput({ ...input, model: "sd-2.0-fast", resolution: "720p" })).toThrow("时长");
+    expect(() => parseH3VideoInput({ ...input, model: "sd-2.5-c1", resolution: "720p" })).toThrow("时长");
+    expect(() => parseH3VideoInput({ ...input, model: "unknown" })).toThrow("模型");
+  });
   it("submits 15 seconds as a STRING to /v1/videos, not the text-chat API", async () => {
     const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json(task));
     expect(await submitH3Video(transport, connection, input)).toEqual({ id, status: "queued", progress: 0 });
