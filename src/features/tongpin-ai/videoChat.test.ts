@@ -7,6 +7,15 @@ import { hydrateWorkspace, serializeWorkspace } from "./workspaceState";
 import type { AiWorkspaceState } from "../../../shared/aiWorkspace";
 
 describe("video conversations", () => {
+  it("shows submission failures outside the scrolling video settings", () => {
+    const source = readFileSync(new URL("./AiVideoComposer.tsx", import.meta.url), "utf8");
+    const fieldsetEnd = source.indexOf("</fieldset>");
+    const alert = source.indexOf('role="alert"');
+    expect(fieldsetEnd).toBeGreaterThan(0);
+    expect(alert).toBeGreaterThan(fieldsetEnd);
+    expect(source).toContain("尚未提交生成任务");
+    expect(source.indexOf("data.quota.remainingTokens < data.settings.quotaPoints")).toBeLessThan(source.indexOf("await onSubmit("));
+  });
   it.each(["生成视频", "帮我生成一个15秒视频", "请帮我制作一个产品短片", "做一个小猫视频", "Generate a video of a cat"])("offers inline confirmation for %s", text => {
     expect(isVideoGenerationRequest(text)).toBe(true);
   });

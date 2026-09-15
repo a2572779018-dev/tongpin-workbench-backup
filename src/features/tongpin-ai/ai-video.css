@@ -21,6 +21,8 @@
 .tp-ai-video-dialog button:disabled { opacity:.5; }
 .tp-ai-video-hint { color:#7e796c; font-size:13px; }
 .tp-ai-video-error { color:#946229; overflow-wrap:anywhere; }
+.tp-ai-video-submit-error { flex-shrink:0; margin:8px 18px; padding:10px 12px; border:1px solid #e1c58e; border-radius:10px; background:#fff6df; font-size:13px; }
+.tp-ai-video-submit-error button { margin-left:8px; padding:4px 8px; border:1px solid #d7cdb7; border-radius:6px; background:#fffdf7; color:inherit; font:inherit; }
 .tp-ai-video-history-heading { display:flex; justify-content:space-between; align-items:center; margin-top:28px; }
 .tp-ai-video-job { border:1px solid #e1dacb; border-radius:14px; padding:16px; margin:12px 0; }
 .tp-ai-video-job p { overflow-wrap:anywhere; white-space:pre-wrap; }

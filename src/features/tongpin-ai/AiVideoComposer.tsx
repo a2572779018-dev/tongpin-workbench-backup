@@ -46,7 +46,7 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     if (!prompt.trim()) { setError("请在对话输入框描述要生成的视频"); return; }
     if (unavailable || !data) { setError("视频服务未启用或未配置密钥，请联系管理员"); return; }
     if (data.jobs.some(job => job.reserved)) { setError("已有视频正在处理或等待核对，请先查看原任务"); return; }
-    if (data.quota.remainingTokens < data.settings.quotaPoints) { setError("剩余额度不足以生成视频"); return; }
+    if (data.quota.remainingTokens < data.settings.quotaPoints) { setError("剩余额度不足以生成这段视频，请联系管理员增加额度。尚未提交生成任务。"); return; }
     if (images.length > spec.maxImages || (spec.requiresImage && !images.length)) { setError(spec.requiresImage && !images.length ? "此模型需要添加参考图片" : `最多添加 ${spec.maxImages} 张参考图片`); return; }
     setWorking(true); setError(""); setSubmitted(true);
     try {
@@ -76,7 +76,7 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     finally { lock.current = false; if (live.current) setWorking(false); }
   }
   if (submitted) return null;
-  return <fieldset className={`tp-ai-video-composer${dragging ? " is-dragging" : ""}`} disabled={busy}
+  return <><fieldset className={`tp-ai-video-composer${dragging ? " is-dragging" : ""}`} disabled={busy}
     onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
     onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
     onDrop={e => { e.preventDefault(); e.stopPropagation(); setDragging(false); void addImages(Array.from(e.dataTransfer.files)); }}>
@@ -91,7 +91,6 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     <button type="button" disabled={images.length >= spec.maxImages} onClick={() => input.current?.click()}>拖入或添加参考图片（{images.length}/{spec.maxImages}）</button>
     <div className="tp-ai-video-reference-grid">{images.map((image, index) => <figure key={`${index}-${image.name}`}><img src={image.dataUrl} alt={`参考图 ${index + 1}`} /><figcaption>{image.name}<button type="button" aria-label={`移除参考图 ${index + 1}`} onClick={() => setImages(current => current.filter((_, i) => i !== index))}><X size={12} /></button></figcaption></figure>)}</div>
     {!data ? <p role="status">正在检查视频服务…</p> : unavailable ? <p role="status">请管理员启用视频服务并配置密钥。</p> : null}
-    {error ? <p role="alert" className="tp-ai-video-error">{error}<button type="button" onClick={() => void refresh()}>重新检查</button></p> : null}
     {busy ? <p role="status">正在读取图片…</p> : null}
     {data?.jobs.length && onUseHistory ? <details className="tp-ai-video-hint"><summary>已有视频任务</summary>{data.jobs.map(job => <button type="button" key={job.id} onClick={async () => {
       if (lock.current) return; setWorking(true);
@@ -99,5 +98,7 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
       catch (e) { if (live.current) setError(e instanceof Error ? e.message : "无法读取原任务"); }
       finally { lock.current = false; if (live.current) setWorking(false); }
     }}>查看原任务：{job.prompt.slice(0, 40)}</button>)}</details> : null}
-  </fieldset>;
+  </fieldset>
+    {error ? <p role="alert" className="tp-ai-video-error tp-ai-video-submit-error">{error}<button type="button" onClick={() => void refresh()}>重新检查</button></p> : null}
+  </>;
 });
