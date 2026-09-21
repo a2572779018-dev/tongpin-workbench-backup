@@ -1,0 +1,41 @@
+.tp-ai-computer { display:grid; gap:10px; padding:14px; border:1px solid color-mix(in srgb, var(--tp-ai-accent, #846900) 42%, transparent); border-radius:16px; background:color-mix(in srgb, #fff8d8 68%, var(--tp-ai-panel, #fff)); color:inherit; }
+.tp-ai-computer > header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.tp-ai-computer > header > span { display:flex; align-items:center; gap:7px; font-weight:750; }
+.tp-ai-computer button,.tp-ai-computer select,.tp-ai-computer textarea { font:inherit; }
+.tp-ai-computer button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:34px; border:1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius:9px; background:color-mix(in srgb, #fff 80%, transparent); color:inherit; cursor:pointer; }
+.tp-ai-computer button:disabled { cursor:not-allowed; opacity:.5; }
+.tp-ai-computer > header button { width:34px; padding:0; }
+.tp-ai-computer__boundary,.tp-ai-computer__notice,.tp-ai-computer__error,.tp-ai-computer__empty-plan { margin:0; font-size:12px; line-height:1.5; }
+.tp-ai-computer__boundary { color:color-mix(in srgb, currentColor 76%, transparent); }
+.tp-ai-computer__notice { padding:8px 10px; border-radius:9px; background:color-mix(in srgb, #fff 76%, transparent); }
+.tp-ai-computer__error { color:#a52929; }
+.tp-ai-computer__loading { display:flex; align-items:center; gap:7px; font-size:13px; }
+.tp-ai-computer__probe { display:grid; gap:4px; margin:0; font-size:12px; }
+.tp-ai-computer__probe > div { display:flex; justify-content:space-between; gap:12px; }
+.tp-ai-computer__probe dt { color:color-mix(in srgb, currentColor 60%, transparent); }
+.tp-ai-computer__probe dd { margin:0; text-align:right; }
+.tp-ai-computer__primary { width:100%; padding:8px 12px; font-weight:700; background:#241f12 !important; color:#fff !important; }
+.tp-ai-computer__target { display:grid; grid-template-columns:minmax(0, 1fr) auto auto; align-items:end; gap:8px; }
+.tp-ai-computer label { display:grid; gap:5px; min-width:0; font-size:12px; }
+.tp-ai-computer select,.tp-ai-computer textarea { width:100%; min-height:36px; padding:7px 9px; border:1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius:8px; background:var(--tp-ai-panel, #fff); color:inherit; }
+.tp-ai-computer textarea { resize:vertical; }
+.tp-ai-computer__target > button { padding:0 10px; }
+.tp-ai-computer__state { display:grid; grid-template-columns:minmax(180px, .85fr) minmax(240px, 1.15fr); gap:12px; }
+.tp-ai-computer__snapshot { display:grid; align-content:start; gap:5px; min-width:0; }
+.tp-ai-computer__snapshot img { display:block; width:100%; max-height:250px; object-fit:contain; border:1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius:9px; background:#111; }
+.tp-ai-computer__snapshot p,.tp-ai-computer__snapshot small { margin:0; font-size:11px; color:color-mix(in srgb, currentColor 64%, transparent); }
+.tp-ai-computer__actions { display:grid; align-content:start; gap:9px; min-width:0; margin:0; padding:10px; border:1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius:10px; }
+.tp-ai-computer__actions legend { padding:0 5px; font-size:12px; font-weight:700; }
+.tp-ai-computer__kind { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+.tp-ai-computer__kind button { padding:6px 8px; }
+.tp-ai-computer__kind button.is-active { border-color:#8b6f00; background:#fff0ad; }
+.tp-ai-computer__type-fields { display:grid; gap:8px; }
+.tp-ai-computer__plan { padding:8px 9px; border-radius:9px; background:color-mix(in srgb, #fff 78%, transparent); }
+.tp-ai-computer__plan strong,.tp-ai-computer__plan p,.tp-ai-computer__plan small { display:block; margin:0; font-size:12px; line-height:1.45; }
+.tp-ai-computer__plan small { color:color-mix(in srgb, currentColor 62%, transparent); }
+.tp-ai-computer .is-spinning { animation:tp-ai-computer-spin .8s linear infinite; }
+@keyframes tp-ai-computer-spin { to { transform:rotate(360deg); } }
+@media (max-width:760px) {
+  .tp-ai-computer__target,.tp-ai-computer__state { grid-template-columns:1fr; }
+  .tp-ai-computer__target > button { width:100%; }
+}

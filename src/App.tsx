@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { LogOut, RefreshCw, WifiOff } from "lucide-react";
 import { useAuth } from "./auth/AuthContext";
 import { flushAiBeforeLeave } from "./features/tongpin-ai/workspaceLeaveGuard";
+import { AiHarnessContinuationRunner } from "./features/tongpin-ai/AiHarnessContinuationRunner";
 import { AppShell, type AppView } from "./components/AppShell";
 import { CustomCursor } from "./components/CustomCursor";
 import { DesktopTitlebar } from "./components/DesktopTitlebar";
@@ -203,6 +204,9 @@ export function App() {
   return (
     <>
       <QuickTaskBridge />
+      {session && !loading && !startupError && (session.user.role === "member" || session.user.role === "boss") ? (
+        <AiHarnessContinuationRunner accountId={session.user.id} aiViewActive={view === "ai"} />
+      ) : null}
       <CustomCursor />
       <DesktopTitlebar
         hideBrandMark={view === "ai"}

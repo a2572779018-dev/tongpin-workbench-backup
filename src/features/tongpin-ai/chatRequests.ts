@@ -1,4 +1,5 @@
 import type { AiChatRequest, AiChatResponse } from "../../../shared/ai";
+import { fitAiChatMessages } from "../../../shared/aiContext";
 import type { TongpinAIConversation, TongpinAIMessage, TongpinAIMode } from "./types";
 
 // Only replay a request whose result is unknown or which never entered the ledger.
@@ -18,10 +19,10 @@ export function buildChatRequest(
   return {
     requestId,
     mode,
-    messages: messages
+    messages: fitAiChatMessages(messages
       .filter((message) => message.content.trim() &&
         !["error", "thinking", "typing"].includes(message.status ?? "ready"))
-      .map(({ role, content }) => ({ role, content })),
+      .map(({ role, content }) => ({ role, content }))),
   };
 }
 
@@ -29,7 +30,7 @@ export function replaceChatMessage(
   conversations: TongpinAIConversation[],
   conversationId: string,
   messageId: string,
-  patch: Partial<Pick<TongpinAIMessage, "content" | "status" | "model" | "usage" | "artifactId" | "sources">>,
+    patch: Partial<Pick<TongpinAIMessage, "content" | "status" | "model" | "usage" | "artifactId" | "sources" | "trace" | "startedAt">>,
 ) {
   return conversations.map((conversation) => conversation.id === conversationId
     ? { ...conversation, messages: conversation.messages.map((message) =>
@@ -47,6 +48,6 @@ export function recoverInterruptedMessages(conversations: TongpinAIConversation[
   }));
 }
 
-export function completedReply(response: AiChatResponse) {
-  return { content: response.content, status: "ready" as const, model: response.model, usage: response.usage, ...(response.sources ? { sources: response.sources } : {}) };
+export function completedReply(response: AiChatResponse, options: { preserveExistingTrace?: boolean } = {}) {
+  return { content: response.content, status: "ready" as const, model: response.model, usage: response.usage, ...(response.sources ? { sources: response.sources } : {}), ...(!options.preserveExistingTrace && response.trace ? { trace: response.trace } : {}) };
 }

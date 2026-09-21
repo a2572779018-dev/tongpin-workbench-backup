@@ -3,10 +3,22 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const asar = require("@electron/asar");
+const { verifyPackagedComputerUseRuntime } = require("./verify-computer-use-runtime.cjs");
 
 const archivePath = process.argv[2];
+const targetIndex = process.argv.indexOf("--target");
+const target = targetIndex >= 0 ? process.argv[targetIndex + 1] : null;
 if (!archivePath || !path.isAbsolute(path.resolve(archivePath))) {
-  throw new Error("Usage: node scripts/verify-asar-contents.cjs <app.asar>");
+  throw new Error(
+    "Usage: node scripts/verify-asar-contents.cjs <app.asar> [--target win32-x64|darwin-universal]",
+  );
+}
+if (
+  targetIndex >= 0 &&
+  target !== "win32-x64" &&
+  target !== "darwin-universal"
+) {
+  throw new Error("Unsupported packaged runtime target");
 }
 const resolvedArchive = path.resolve(archivePath);
 if (!fs.statSync(resolvedArchive).isFile()) {
@@ -85,6 +97,15 @@ if (packagedPackage.version !== expectedVersion) {
   throw new Error(
     `Packaged app version ${packagedPackage.version} does not match ${expectedVersion}`,
   );
+}
+
+if (target) {
+  verifyPackagedComputerUseRuntime({
+    archivePath: resolvedArchive,
+    archiveEntries: entries,
+    readArchiveFile: (entry) => asar.extractFile(resolvedArchive, entry),
+    target,
+  });
 }
 
 process.stdout.write(`Verified ${required.length} required app.asar entries.\n`);

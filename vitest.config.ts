@@ -6,6 +6,7 @@ export default defineConfig({
     include: [
       "server/**/*.test.ts",
       "cloudflare/src/**/*.test.ts",
+      "electron/**/*.test.mjs",
       "src/**/*.test.ts",
       "src/**/*.test.mjs",
     ],

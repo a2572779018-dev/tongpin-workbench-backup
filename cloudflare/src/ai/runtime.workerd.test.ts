@@ -109,6 +109,24 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   };
   const login = (email: string) => api<Session>("/api/auth/login", undefined, { email, password: TEST_PASSWORD });
   const requestBody = () => ({ requestId: crypto.randomUUID(), mode: "quick", messages: [{ role: "user", content: "请检查云端对话" }] });
+  const saveToolPlan = async (session: Session, plan: { kind: "image"; prompt: string } | { kind: "video"; prompt: string; videoParameters: { model: string; seconds: number; resolution: string; aspectRatio: "16:9" | "9:16"; referenceCount: number; referenceFingerprints: string[] } }) => {
+    const requestId = crypto.randomUUID();
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify({ projectContext: "", attachments: [] })));
+    const contextFingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    const stored = {
+      requestId, userId: session.user.id, hash: `fixture-${requestId}`, status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "fixture-fast", mode: "quick",
+      toolPlanContextFingerprint: contextFingerprint,
+      result: {
+        requestId, content: `已整理${plan.kind === "video" ? "视频" : "图片"}任务，请确认后生成。`, model: "fixture-fast",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false },
+        toolPlan: { ...plan, summary: "workerd 工具方案" },
+      },
+    };
+    const storage = await mf.unsafeGetDurableObjectStorage(WORKER_NAME, "TongpinCore", { name: "primary" });
+    await storage.exec("INSERT INTO ai_requests(user_id,request_id,data) VALUES(?,?,?)", session.user.id, requestId, JSON.stringify(stored));
+    return requestId;
+  };
 
   beforeAll(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-ai-workerd-"));
@@ -271,7 +289,8 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   });
   it("stores private generated image assets in SQLite, supports recovery without rebilling and denies another member", async () => {
     const before = postCount;
-    const request = { requestId: crypto.randomUUID(), prompt: "隔离图片 fixture" };
+    const prompt = "隔离图片 fixture";
+    const request = { requestId: crypto.randomUUID(), prompt, planRequestId: await saveToolPlan(member, { kind: "image", prompt }) };
     const generated = await api<AiImageResponse>("/api/ai/images", member, request);
     const assetId = generated.images[0].assetId;
     expect(generated.usage).toMatchObject({ totalTokens: 1000, inputTokens: 0, outputTokens: 0, convertedTokens: 1000, estimated: true });
@@ -312,7 +331,8 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   it("keeps image gateway failures uncertain and HTTP diagnostics private across a workerd restart without another POST", async () => {
     const before = postCount, used = (await api<AiStatus>("/api/ai/status", member)).quota.usedTokens;
     imageFailureStatus = 502;
-    const request = { requestId: crypto.randomUUID(), prompt: "诊断测试图片", mode: "deep" };
+    const prompt = "诊断测试图片";
+    const request = { requestId: crypto.randomUUID(), prompt, mode: "deep", planRequestId: await saveToolPlan(member, { kind: "image", prompt }) };
     const error = await api<ErrorBody>("/api/ai/images", member, request, "POST", 502);
     expect(error.error).toMatchObject({ code: "AI_PROVIDER_UNAVAILABLE", diagnostic: { operation: "image", httpStatus: 502, billing: "unknown", code: "upstream_error" } });
     expect(JSON.stringify(error)).not.toMatch(/test-workerd-provider-not-real|private-prompt/);
@@ -328,7 +348,8 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     imageSse = true;
     const before = postCount;
     try {
-      const request = { requestId: crypto.randomUUID(), prompt: "标准流式图片" };
+      const prompt = "标准流式图片";
+      const request = { requestId: crypto.randomUUID(), prompt, planRequestId: await saveToolPlan(member, { kind: "image", prompt }) };
       const result = await api<AiImageResponse>("/api/ai/images", member, request);
       expect(result.usage).toMatchObject({ totalTokens: 1000, convertedTokens: 1000, estimated: true });
       expect((await api<{ base64: string }>(`/api/ai/assets/${result.images[0].assetId}`, member)).base64).toBe(PNG);
@@ -343,13 +364,17 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   it("persists video reservation across Worker restart, authenticates content and submits exactly once", async () => {
     await api("/api/admin/ai/video", admin, { enabled: true, quotaPoints: 500 }, "PUT");
     expect(await api("/api/admin/ai/video/test", admin, {})).toMatchObject({ ok: true });
-    const reference = await api<{ id: string }>("/api/ai/video-references", member, { dataUrl: "data:image/jpeg;base64,/9j/AAAA" });
+    const referenceDataUrl = "data:image/jpeg;base64,/9j/AAAA";
+    const reference = await api<{ id: string }>("/api/ai/video-references", member, { dataUrl: referenceDataUrl });
     const referenceResponse = await mf.dispatchFetch(`http://tongpin-fixture.local/api/video-reference/${reference.id}`);
     expect(referenceResponse.status).toBe(200);
     expect(referenceResponse.headers.get("content-type")).toBe("image/jpeg");
     expect((await mf.dispatchFetch(`http://tongpin-fixture.local/api/video-reference/${"0".repeat(64)}`)).status).toBe(404);
     const before = postCount;
-    const request = { requestId: crypto.randomUUID(), prompt: "H3 isolated fixture", seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [reference.id] };
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(referenceDataUrl));
+    const fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    const videoParameters = { model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9" as const, referenceCount: 1, referenceFingerprints: [fingerprint] };
+    const request = { requestId: crypto.randomUUID(), prompt: "H3 isolated fixture", seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [reference.id], planRequestId: await saveToolPlan(member, { kind: "video", prompt: "H3 isolated fixture", videoParameters }) };
     const created = await api<{ job: AiVideoJob }>("/api/ai/videos", member, request);
     expect(created.job.status).toBe("queued"); expect(JSON.stringify(created)).not.toContain("h3-deployment-fixture-only");
     await mf.dispose(); mf = start(); await mf.ready;
@@ -374,7 +399,8 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     for (const session of [member, other]) {
       expect(await api<AiStatus>("/api/ai/status", session)).toMatchObject({ accessGranted: true, quota: { remainingTokens: 0 } });
       expect((await api<ErrorBody>("/api/ai/chat", session, requestBody(), "POST", 402)).error.code).toBe("AI_QUOTA_EXHAUSTED");
-      await api("/api/ai/images", session, { requestId: crypto.randomUUID(), prompt: "额度耗尽" }, "POST", 402);
+      const prompt = "额度耗尽";
+      await api("/api/ai/images", session, { requestId: crypto.randomUUID(), prompt, planRequestId: await saveToolPlan(session, { kind: "image", prompt }) }, "POST", 402);
     }
     expect(await api<AiPersonaSnapshot>("/api/ai/persona", member)).toEqual(persona);
     expect(await api<AiWorkspaceSnapshot>("/api/ai/workspace", member)).toEqual(workspace);

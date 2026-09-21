@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { flushAiBeforeLeave, registerAiLeaveGuard } from "./workspaceLeaveGuard";
+import { flushAiBeforeLeave, notifyAiWorkspaceSaved, registerAiLeaveGuard, registerAiWorkspaceActivityListener } from "./workspaceLeaveGuard";
 
 describe("account-scoped AI navigation guards", () => {
   const cleanups: Array<() => void> = [];
@@ -65,5 +65,14 @@ describe("account-scoped AI navigation guards", () => {
     await Promise.resolve(); expect(left).toBe(false);
     deleted(); await Promise.resolve(); expect(left).toBe(false);
     saved(false); expect(await leaving).toBe(false);
+  });
+  it("wakes only the saved account and unregisters the listener", () => {
+    const first = vi.fn(), second = vi.fn();
+    const unregister = registerAiWorkspaceActivityListener("member-a", first);
+    const unregisterSecond = registerAiWorkspaceActivityListener("member-b", second);
+    notifyAiWorkspaceSaved("member-b");
+    expect(first).not.toHaveBeenCalled(); expect(second).toHaveBeenCalledTimes(1);
+    notifyAiWorkspaceSaved("member-a"); expect(first).toHaveBeenCalledTimes(1);
+    unregister(); unregisterSecond(); notifyAiWorkspaceSaved("member-a"); expect(first).toHaveBeenCalledTimes(1);
   });
 });

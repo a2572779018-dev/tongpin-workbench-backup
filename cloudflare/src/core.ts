@@ -568,6 +568,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   private readonly aiWorkspace: AiWorkspaceRepository;
   private readonly aiPersona: AiPersonaRepository;
   private readonly sql: SqlStorage;
+  private aiSchemaReady = false;
   private readonly loraSource: ExplorerLoraChainDataSource;
   private loraCollectionInFlight: Promise<LoraDashboardData> | null = null;
   private loraAggregateCollectionInFlight: Promise<LoraDashboardData> | null =
@@ -585,14 +586,50 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     );
     ctx.blockConcurrencyWhile(async () => {
       this.migrate();
-      // AI has its own additive schema. Always initialize even when the legacy migration exits early.
-      this.ai.store.initialize();
-      this.aiWorkspace.initialize();
-      this.aiPersona.initialize();
+      // Tenant-aware AI routes consume only this authenticated, server-owned field.
+      // Legacy installations deterministically remain in the default tenant.
+      try {
+        if (!this.hasColumn("users", "tenant_id")) {
+          this.sql.exec("ALTER TABLE users ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'");
+        }
+      } catch (error) {
+        if (!isDurableObjectRowWriteLimit(error)) throw error;
+      }
+      // AI has its own additive schema. Always initialize even when the legacy
+      // migration exits early. A free-plan daily row-write limit must not take
+      // unrelated tasks, notifications, or authentication offline; AI requests
+      // retry this idempotent migration and stay fail-closed until it completes.
+      try {
+        this.initializeAiSchema();
+      } catch (error) {
+        if (!isDurableObjectRowWriteLimit(error)) throw error;
+        this.aiSchemaReady = false;
+      }
       if (!LORA_RAW_COLLECTION_PAUSED) {
         await this.scheduleNextAlarm();
       }
     });
+  }
+
+  private initializeAiSchema(): void {
+    this.ai.store.initialize();
+    this.aiWorkspace.initialize();
+    this.aiPersona.initialize();
+    this.aiSchemaReady = true;
+  }
+
+  private ensureAiSchemaReady(): void {
+    if (this.aiSchemaReady) return;
+    try {
+      this.initializeAiSchema();
+    } catch (error) {
+      if (!isDurableObjectRowWriteLimit(error)) throw error;
+      throw new ApiError(
+        503,
+        "AI_SCHEMA_MAINTENANCE",
+        "AI 数据正在完成升级，请稍后重试",
+      );
+    }
   }
 
   private hasColumn(table: "users" | "tasks" | "direct_messages", column: string) {
@@ -800,9 +837,11 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       const method = request.method;
 
       if (method === "GET" && /^\/api\/video-reference\/[a-f0-9]{64}$/.test(path)) {
+        this.ensureAiSchemaReady();
         return await this.ai.service.video.referenceContent(path.split("/").pop()!);
       }
       if (path.startsWith("/api/ai/") || path.startsWith("/api/admin/ai/")) {
+        this.ensureAiSchemaReady();
         const user = await this.requireUser(request, path.startsWith("/api/admin/") ? ["admin"] : undefined);
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
         if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);

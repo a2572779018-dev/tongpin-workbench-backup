@@ -16,6 +16,7 @@ import {
 import { normalizeSession, normalizeUser } from "../lib/user";
 import type { Session, User } from "../types";
 import { flushAiBeforeLeave } from "../features/tongpin-ai/workspaceLeaveGuard";
+import { videoBlobCache } from "../features/tongpin-ai/mediaCache";
 
 const SESSION_KEY = "tongpin.session.v1";
 
@@ -35,7 +36,7 @@ interface AuthContextValue {
   login(
     email: string,
     password: string,
-    rememberPassword?: boolean,
+    rememberAccount?: boolean,
   ): Promise<void>;
   logout(): Promise<void>;
   retryStartup(): Promise<void>;
@@ -84,7 +85,15 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const refreshInFlight = useRef<Promise<Session | null> | null>(null);
 
   const setSession = useCallback(async (next: Session | null) => {
+    if (sessionRef.current?.user.id !== next?.user.id) {
+      try {
+        await window.tongpin?.computerUse?.stopSession();
+      } catch {
+        // Account changes must continue even if the native runtime already exited.
+      }
+    }
     await persistSession(next);
+    if (sessionRef.current?.user.id !== next?.user.id) videoBlobCache.clear();
     sessionRef.current = next;
     setSessionState(next);
   }, []);
@@ -206,7 +215,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
     async (
       email: string,
       password: string,
-      rememberPassword = true,
+      rememberAccount = true,
     ) => {
       const next = await publicRequest<Session>("/api/auth/login", {
         method: "POST",
@@ -214,13 +223,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
       });
       if (window.tongpin?.credentials) {
         try {
-          await window.tongpin.credentials.save({
-            email,
-            password,
-            rememberPassword,
-          });
+          if (rememberAccount) {
+            await window.tongpin.credentials.save({ email });
+          } else {
+            await window.tongpin.credentials.remove(email);
+          }
         } catch {
-          // 安全存储失败不能阻止用户登录，也绝不降级为明文保存。
+          // 本机账号历史失败不能阻止用户登录；密码始终只用于本次请求。
         }
       }
       await setSession(normalizeSession(next));

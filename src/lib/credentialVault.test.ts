@@ -1,14 +1,14 @@
 import {
-  access,
   mkdtemp,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const {
@@ -27,31 +27,13 @@ const {
   ): Promise<void>;
   createCredentialVault(options: {
     userDataPath: string;
-    safeStorage: ReturnType<typeof fakeSafeStorage>;
-    fileSystem?: {
-      readFile(path: string, encoding?: string): Promise<Buffer | string>;
-    };
-    atomicWrite?: (path: string, content: Buffer | string) => Promise<void>;
     now?: () => Date;
   }): {
     list(): Promise<{
       state: "ready" | "unavailable";
-      accounts: Array<{
-        email: string;
-        hasPassword: boolean;
-        lastUsedAt: string;
-      }>;
+      accounts: Array<{ email: string; lastUsedAt: string }>;
     }>;
-    load(email: string): Promise<{
-      email: string;
-      password: string | null;
-      rememberPassword: boolean;
-    } | null>;
-    save(value: {
-      email: string;
-      password: string;
-      rememberPassword: boolean;
-    }): Promise<boolean>;
+    save(value: { email: string }): Promise<boolean>;
     touch(email: string): Promise<boolean>;
     remove(email: string): Promise<boolean>;
   };
@@ -67,211 +49,43 @@ afterEach(async () => {
   );
 });
 
-function fakeSafeStorage() {
-  return {
-    isEncryptionAvailable: () => true,
-    encryptString: (value: string) =>
-      Buffer.from(`encv1:${Buffer.from(value).toString("base64")}`),
-    decryptString: (value: Buffer) => {
-      const serialized = value.toString();
-      if (!serialized.startsWith("encv1:")) {
-        throw new Error("ciphertext belongs to another OS user");
-      }
-      return Buffer.from(serialized.slice(6), "base64").toString();
-    },
-  };
-}
-
-function asyncCompatibleSafeStorage() {
-  const sync = fakeSafeStorage();
-  return {
-    isEncryptionAvailable: vi.fn(sync.isEncryptionAvailable),
-    encryptString: vi.fn(sync.encryptString),
-    decryptString: vi.fn(sync.decryptString),
-    isAsyncEncryptionAvailable: vi.fn().mockResolvedValue(true),
-    encryptStringAsync: vi.fn(async (value: string) =>
-      sync.encryptString(value)),
-    decryptStringAsync: vi.fn(async (value: Buffer) => ({
-      result: sync.decryptString(value),
-      shouldReEncrypt: false,
-    })),
-  };
-}
-
 async function temporaryDirectory() {
   const directory = await mkdtemp(join(tmpdir(), "tongpin-credential-vault-"));
   temporaryDirectories.push(directory);
   return directory;
 }
 
-describe("credential vault", () => {
-  it("keeps passwords encrypted while maintaining a password-free email index", async () => {
+describe("account-only credential history", () => {
+  it("stores only normalized account identifiers and never exposes a password field", async () => {
     const directory = await temporaryDirectory();
     const vault = createCredentialVault({
       userDataPath: directory,
-      safeStorage: fakeSafeStorage(),
       now: () => new Date("2026-08-27T01:02:03.000Z"),
     });
 
-    await expect(vault.list()).resolves.toEqual({
-      state: "ready",
-      accounts: [],
-    });
-    await vault.save({
-      email: " Boss@Example.com ",
-      password: "not-plaintext-on-disk",
-      rememberPassword: true,
-    });
+    await vault.save({ email: " Boss@Example.com " });
 
-    await expect(vault.list()).resolves.toEqual({
+    const result = await vault.list();
+    expect(result).toEqual({
       state: "ready",
       accounts: [
         {
           email: "boss@example.com",
-          hasPassword: true,
           lastUsedAt: "2026-08-27T01:02:03.000Z",
         },
       ],
     });
-    await expect(vault.load("boss@example.com")).resolves.toEqual({
-      email: "boss@example.com",
-      password: "not-plaintext-on-disk",
-      rememberPassword: true,
-    });
-
-    const encrypted = await readFile(
-      join(directory, CREDENTIAL_VAULT_FILE_NAME),
-      "utf8",
-    );
-    expect(encrypted).not.toContain("boss@example.com");
-    expect(encrypted).not.toContain("not-plaintext-on-disk");
+    expect(JSON.stringify(result)).not.toContain("password");
     const index = await readFile(
       join(directory, CREDENTIAL_INDEX_FILE_NAME),
       "utf8",
     );
     expect(index).toContain("boss@example.com");
-    expect(index).not.toContain("not-plaintext-on-disk");
     expect(index).not.toContain("password");
   });
 
-  it("backs up the previous ciphertext before an atomic replacement", async () => {
+  it("preserves legacy encrypted password files without decrypting or returning them", async () => {
     const directory = await temporaryDirectory();
-    let sequence = 0;
-    const vault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage: fakeSafeStorage(),
-      now: () => new Date(`2026-08-27T01:02:0${sequence++}.000Z`),
-    });
-    await vault.save({
-      email: "member@example.com",
-      password: "first-password",
-      rememberPassword: true,
-    });
-    const firstCiphertext = await readFile(
-      join(directory, CREDENTIAL_VAULT_FILE_NAME),
-    );
-    await vault.save({
-      email: "member@example.com",
-      password: "second-password",
-      rememberPassword: true,
-    });
-
-    expect(
-      await readFile(join(directory, CREDENTIAL_VAULT_BACKUP_FILE_NAME)),
-    ).toEqual(firstCiphertext);
-    await expect(vault.load("member@example.com")).resolves.toMatchObject({
-      password: "second-password",
-    });
-  });
-
-  it("reads legacy sync ciphertext through async without rewriting the login vault", async () => {
-    const directory = await temporaryDirectory();
-    const legacyVault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage: fakeSafeStorage(),
-      now: () => new Date("2026-08-27T01:02:03.000Z"),
-    });
-    await legacyVault.save({
-      email: "member@example.com",
-      password: "legacy-password",
-      rememberPassword: true,
-    });
-    const target = join(directory, CREDENTIAL_VAULT_FILE_NAME);
-    const originalCiphertext = await readFile(target);
-    const safeStorage = asyncCompatibleSafeStorage();
-    const asyncVault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage,
-    });
-
-    await expect(asyncVault.load("member@example.com")).resolves.toMatchObject({
-      email: "member@example.com",
-      password: "legacy-password",
-      rememberPassword: true,
-    });
-    expect(safeStorage.decryptStringAsync).toHaveBeenCalledOnce();
-    expect(safeStorage.encryptStringAsync).not.toHaveBeenCalled();
-    expect(await readFile(target)).toEqual(originalCiphertext);
-  });
-
-  it("writes new login records with async encryption", async () => {
-    const directory = await temporaryDirectory();
-    const safeStorage = asyncCompatibleSafeStorage();
-    const vault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage,
-      now: () => new Date("2026-08-31T01:02:03.000Z"),
-    });
-
-    await vault.save({
-      email: "member@example.com",
-      password: "async-password",
-      rememberPassword: true,
-    });
-
-    expect(safeStorage.encryptStringAsync).toHaveBeenCalledOnce();
-    expect(safeStorage.encryptString).not.toHaveBeenCalled();
-    await expect(vault.load("member@example.com")).resolves.toMatchObject({
-      password: "async-password",
-    });
-  });
-
-  it("reports safeStorage decryption failure without calling credentials damaged", async () => {
-    const directory = await temporaryDirectory();
-    const legacyVault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage: fakeSafeStorage(),
-    });
-    await legacyVault.save({
-      email: "member@example.com",
-      password: "encrypted-password",
-      rememberPassword: true,
-    });
-    const safeStorage = asyncCompatibleSafeStorage();
-    safeStorage.decryptStringAsync.mockRejectedValue(
-      new Error("Keychain denied access"),
-    );
-    const vault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage,
-    });
-
-    await expect(
-      vault.save({
-        email: "new@example.com",
-        password: "new-password",
-        rememberPassword: true,
-      }),
-    ).rejects.toThrow(
-      "系统安全存储无法解密本机登录记录，原加密文件已保留",
-    );
-  });
-
-  it("uses the non-secret index when ciphertext is unreadable and never overwrites it", async () => {
-    const directory = await temporaryDirectory();
-    const vaultPath = join(directory, CREDENTIAL_VAULT_FILE_NAME);
-    const originalCiphertext = Buffer.from("dpapi-data-from-another-user");
-    await writeFile(vaultPath, originalCiphertext);
     await writeFile(
       join(directory, CREDENTIAL_INDEX_FILE_NAME),
       JSON.stringify({
@@ -284,123 +98,76 @@ describe("credential vault", () => {
         ],
       }),
     );
-    const vault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage: fakeSafeStorage(),
-    });
+    await writeFile(
+      join(directory, CREDENTIAL_VAULT_FILE_NAME),
+      "legacy-encrypted-passwords",
+    );
+    await writeFile(
+      join(directory, CREDENTIAL_VAULT_BACKUP_FILE_NAME),
+      "legacy-encrypted-passwords-backup",
+    );
+    const vault = createCredentialVault({ userDataPath: directory });
 
     await expect(vault.list()).resolves.toEqual({
-      state: "unavailable",
+      state: "ready",
       accounts: [
         {
           email: "member@example.com",
-          hasPassword: false,
           lastUsedAt: "2026-08-26T10:00:00.000Z",
         },
       ],
     });
-    await expect(vault.load("member@example.com")).resolves.toEqual({
-      email: "member@example.com",
-      password: null,
-      rememberPassword: false,
-    });
-    await expect(
-      vault.save({
-        email: "new@example.com",
-        password: "new-password",
-        rememberPassword: true,
-      }),
-    ).rejects.toThrow("原加密文件已保留");
-    await expect(vault.remove("member@example.com")).rejects.toThrow(
-      "原加密文件已保留",
-    );
-    expect(await readFile(vaultPath)).toEqual(originalCiphertext);
-    await expect(
-      access(join(directory, CREDENTIAL_VAULT_BACKUP_FILE_NAME)),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      await readFile(join(directory, CREDENTIAL_VAULT_FILE_NAME), "utf8"),
+    ).toBe("legacy-encrypted-passwords");
+    expect(
+      await readFile(
+        join(directory, CREDENTIAL_VAULT_BACKUP_FILE_NAME),
+        "utf8",
+      ),
+    ).toBe("legacy-encrypted-passwords-backup");
   });
 
-  it("treats only ENOENT as an empty vault", async () => {
+  it("updates only an already remembered account and never recreates an opted-out account", async () => {
     const directory = await temporaryDirectory();
-    const writes = vi.fn(async () => undefined);
-    const fileSystem = {
-      readFile: vi.fn(async (target: string) => {
-        if (target.endsWith(CREDENTIAL_INDEX_FILE_NAME)) {
-          const error = new Error("missing") as NodeJS.ErrnoException;
-          error.code = "ENOENT";
-          throw error;
-        }
-        const error = new Error("access denied") as NodeJS.ErrnoException;
-        error.code = "EACCES";
-        throw error;
-      }),
-    };
+    let tick = 2;
     const vault = createCredentialVault({
       userDataPath: directory,
-      safeStorage: fakeSafeStorage(),
-      fileSystem,
-      atomicWrite: writes,
+      now: () => new Date(`2026-08-27T01:02:0${tick++}.000Z`),
     });
 
+    await expect(vault.touch("unknown@example.com")).resolves.toBe(false);
+    await vault.save({ email: "member@example.com" });
+    await expect(vault.touch("member@example.com")).resolves.toBe(true);
+    await expect(vault.list()).resolves.toMatchObject({
+      accounts: [
+        {
+          email: "member@example.com",
+          lastUsedAt: "2026-08-27T01:02:03.000Z",
+        },
+      ],
+    });
+    await vault.remove("member@example.com");
+    await expect(vault.touch("member@example.com")).resolves.toBe(false);
     await expect(vault.list()).resolves.toEqual({
-      state: "unavailable",
+      state: "ready",
       accounts: [],
     });
-    await expect(
-      vault.save({
-        email: "member@example.com",
-        password: "password",
-        rememberPassword: true,
-      }),
-    ).rejects.toThrow("无法读取");
-    expect(writes).not.toHaveBeenCalled();
   });
 
-  it("never downgrades passwords to plaintext when safe storage is unavailable", async () => {
+  it("keeps the account index private on POSIX", async () => {
     const directory = await temporaryDirectory();
-    await writeFile(
-      join(directory, CREDENTIAL_INDEX_FILE_NAME),
-      JSON.stringify({
-        version: 1,
-        accounts: [
-          {
-            email: "member@example.com",
-            lastUsedAt: "2026-08-26T10:00:00.000Z",
-          },
-        ],
-      }),
-    );
-    const vault = createCredentialVault({
-      userDataPath: directory,
-      safeStorage: {
-        ...fakeSafeStorage(),
-        isEncryptionAvailable: () => false,
-      },
-    });
+    const vault = createCredentialVault({ userDataPath: directory });
+    await vault.save({ email: "member@example.com" });
 
-    await expect(vault.list()).resolves.toEqual({
-      state: "unavailable",
-      accounts: [
-        {
-          email: "member@example.com",
-          hasPassword: false,
-          lastUsedAt: "2026-08-26T10:00:00.000Z",
-        },
-      ],
-    });
-    await expect(
-      vault.save({
-        email: "member@example.com",
-        password: "password",
-        rememberPassword: true,
-      }),
-    ).rejects.toThrow("原加密登录记录已保留");
-    await expect(
-      access(join(directory, CREDENTIAL_VAULT_FILE_NAME)),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    if (process.platform !== "win32") {
+      expect(
+        (await stat(join(directory, CREDENTIAL_INDEX_FILE_NAME))).mode & 0o777,
+      ).toBe(0o600);
+    }
   });
 
-  it("can preserve a previous encrypted session before replacing it", async () => {
+  it("backs up a private file before an atomic replacement", async () => {
     const directory = await temporaryDirectory();
     const target = join(directory, "secure-session.bin");
     await writeFile(target, Buffer.from("old-session-ciphertext"));

@@ -1,7 +1,144 @@
+import type { AiWorkflowId } from "./aiWorkflows";
+
 /** Browser-safe contract. API credentials and prompts never appear in admin usage records. */
 export type AiProtocol = "chat_completions" | "responses";
-export type AiMode = "quick" | "deep";
+/** Member-facing service levels. Provider names and model IDs stay admin-only. */
+export type AiMode = "quick" | "standard" | "deep" | "pro";
 export type AiReasoningEffort = "" | "low" | "medium" | "high";
+export const AI_BUSINESS_TIERS: readonly AiMode[] = ["quick", "standard", "deep", "pro"] as const;
+export const AI_BUSINESS_TIER_LABELS: Record<AiMode, string> = {
+  quick: "快速",
+  standard: "标准",
+  deep: "深度",
+  pro: "Pro",
+};
+export type AiHarnessCapability = "chat" | "vision" | "web_search" | "image" | "video" | "presentation" | "computer";
+export type AiHarnessStrategy = "direct" | "react" | "plan_execute";
+export interface AiHarnessProviderInput {
+  id: string;
+  name: string;
+  baseUrl: string;
+  protocol: AiProtocol;
+  apiKey?: string;
+  enabled: boolean;
+}
+export interface AiHarnessProviderConfig extends Omit<AiHarnessProviderInput, "apiKey"> {
+  apiKeyConfigured: boolean;
+  modelsVerified: boolean;
+  availableModels: string[];
+  modelsVerifiedAt: string | null;
+}
+export interface AiHarnessTierRoute {
+  /** Text / planning route. Members only see the business tier label. */
+  providerId: string;
+  modelId: string;
+  protocol: AiProtocol;
+  maxOutputTokens: number;
+  reasoningEffort: AiReasoningEffort;
+  capabilities: AiHarnessCapability[];
+  enabled: boolean;
+  /** OpenAI-compatible Images API route for this business tier. */
+  imageProviderId?: string;
+  imageModelId?: string;
+  /** 75API video route for this business tier. Other video protocols fail closed. */
+  videoProviderId?: string;
+  videoModelId?: string;
+}
+export interface AiHarnessPolicy {
+  strategy: AiHarnessStrategy;
+  maxToolSteps: number;
+  requireApproval: boolean;
+  autoWebSearch: boolean;
+}
+export interface AiHarnessInput {
+  providers: AiHarnessProviderInput[];
+  tiers: Record<AiMode, AiHarnessTierRoute>;
+  policy: AiHarnessPolicy;
+}
+export interface AiHarnessConfig extends Omit<AiHarnessInput, "providers"> {
+  providers: AiHarnessProviderConfig[];
+  updatedAt: string | null;
+  migratedFromLegacy: boolean;
+}
+export type AiHarnessRunStatus = "planned" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
+export type AiHarnessStepStatus = "planned" | "waiting_approval" | "running" | "succeeded" | "failed" | "cancelled";
+export type AiHarnessApprovalStatus = "not_required" | "waiting" | "approved" | "consumed" | "cancelled";
+export type AiHarnessNextAction = "none" | "poll" | "approve_tool" | "resume";
+export interface AiHarnessStep {
+  id: string;
+  kind: "strategy" | "route" | "workflow" | "plan" | "model" | "tool" | "approval" | "result";
+  capability: AiHarnessCapability;
+  title: string;
+  summary: string;
+  status: AiHarnessStepStatus;
+  createdAt: string;
+  updatedAt: string;
+  /** Immutable strategy snapshot stored with the run. */
+  strategy?: AiHarnessStrategy;
+  maxToolSteps?: number;
+  /** Code-owned workflow snapshot. It never contains user prompts or model reasoning. */
+  workflowId?: AiWorkflowId;
+  workflowVersion?: number;
+  workflowStepId?: string;
+  /** Persisted before an autonomous follow-up model call. A restart never
+   * silently replays the same external request. */
+  continuationRequestId?: string;
+  /** Tool proposal metadata. Prompts and model reasoning are never stored here. */
+  proposalId?: string;
+  sequence?: number;
+  requiresApproval?: boolean;
+  approvalStatus?: AiHarnessApprovalStatus;
+  /** Binds a one-time approval to one persisted execution request. */
+  executionRequestId?: string;
+}
+/** Public/workspace projection. Restart-only continuation identifiers never cross the API boundary. */
+export type AiHarnessPublicStep = Omit<AiHarnessStep, "continuationRequestId">;
+export interface AiHarnessTrace {
+  runId: string;
+  tier: AiMode;
+  strategy: AiHarnessStrategy;
+  status: AiHarnessRunStatus;
+  reasoningSummary: string;
+  nextAction: AiHarnessNextAction;
+  toolBudget: { used: number; max: number; remaining: number };
+  steps: AiHarnessPublicStep[];
+}
+export interface AiObservabilitySlice {
+  tier: AiMode | "all";
+  provider: string;
+  capability: AiHarnessCapability;
+  operation: "planning" | "execution" | "all";
+  requests: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+  errorRate: number;
+  averageLatencyMs: number;
+  maxLatencyMs: number;
+  errors: Array<{ code: string; count: number }>;
+}
+export interface AiObservabilityAlert {
+  id: string;
+  severity: "warning" | "critical";
+  code: "HIGH_ERROR_RATE" | "HIGH_LATENCY" | "PROVIDER_UNAVAILABLE";
+  message: string;
+  tier: AiMode | "all";
+  provider: string;
+  capability: AiHarnessCapability;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  occurrences: number;
+  acknowledgedAt: string | null;
+  resolvedAt: string | null;
+}
+export interface AiObservabilityDashboard {
+  generatedAt: string;
+  windowMinutes: number;
+  totals: AiObservabilitySlice;
+  slices: AiObservabilitySlice[];
+  alerts: AiObservabilityAlert[];
+  alertHistory: AiObservabilityAlert[];
+}
 export interface AiProviderInput {
   name: string;
   baseUrl: string;
@@ -30,6 +167,11 @@ export interface AiProviderInput {
 export interface AiProviderConfig extends Omit<AiProviderInput, "apiKey" | "imageApiKey"> {
   apiKeyConfigured: boolean;
   imageApiKeyConfigured?: boolean;
+  /** B.AI Agent model discovery is bound to the currently saved config and key. */
+  modelsVerified?: boolean;
+  /** Only deployment-allowlisted models returned by the current key's /models response. */
+  availableModels?: string[];
+  modelsVerifiedAt?: string | null;
   updatedAt: string | null;
 }
 export interface AiQuota {
@@ -102,6 +244,9 @@ export interface AiStatus {
   visionEnabled?: boolean;
   webSearchEnabled?: boolean;
   webSearchQuotaTokens?: number;
+  /** Business tiers only. Provider and model identities are intentionally absent. */
+  availableTiers?: AiMode[];
+  quickAgent?: boolean;
 }
 /** A non-generating connection probe is not proof that inference/tools will succeed. */
 export interface AiAvailabilityCheck {
@@ -120,15 +265,56 @@ export interface AiPresentation {
   subtitle?: string;
   slides: Array<{ title: string; bullets: string[]; notes?: string }>;
 }
+export type AiToolPlanKind = "image" | "video" | "presentation";
+export interface AiVideoPlanParameters {
+  /** Filled and persisted by the server-side business-tier router. */
+  model?: string;
+  seconds: number;
+  resolution: string;
+  aspectRatio: "16:9" | "9:16";
+  referenceCount: number;
+  /** SHA-256 of each normalized reference data URL, in the submitted order. */
+  referenceFingerprints: string[];
+}
+export type AiComputerPlanAction =
+  | { kind: "click"; elementToken: string }
+  | { kind: "type"; elementToken: string; text: string };
+export interface AiComputerPlan {
+  kind: "computer";
+  summary: string;
+  action: AiComputerPlanAction;
+}
+/** A model-authored proposal. The application must validate it and obtain an
+ * explicit confirmation before invoking a paid or state-changing service. */
+export interface AiToolPlan {
+  kind: AiToolPlanKind;
+  summary: string;
+  prompt: string;
+  /** Server-attached immutable parameters from the planning request. */
+  videoParameters?: AiVideoPlanParameters;
+  /** Added by the client from the persisted planning response; never model-authored. */
+  planRequestId?: string;
+  /** Public application-owned execution progress attached after plan validation. */
+  trace?: AiHarnessTrace;
+}
 export interface AiSource { title: string; url: string }
 export interface AiChatRequest {
   requestId: string;
   mode: AiMode;
+  /** Stable local conversation identity; allows bounded parallel conversations. */
+  conversationId?: string;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   skillIds?: string[];
+  /** A versioned, code-owned Hub template invoked from an explicit @ mention. */
+  workflowId?: AiWorkflowId;
   projectContext?: string;
   attachments?: AiAttachment[];
-  outputFormat?: "text" | "presentation";
+  outputFormat?: "text" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan";
+  /** Required when executing a presentation plan; the server binds it to the
+   * exact model-authored prompt before asking the model for slide data. */
+  toolPlanRequestId?: string;
+  /** Accepted only for video_plan and copied into the persisted plan by the server. */
+  videoParameters?: AiVideoPlanParameters;
   webSearch?: boolean;
   webSearchMode?: "auto";
 }
@@ -160,10 +346,21 @@ export interface AiChatResponse {
   usage: AiUsage;
   quota: AiQuota;
   presentation?: AiPresentation;
+  toolPlan?: AiToolPlan;
+  computerPlan?: AiComputerPlan;
   sources?: AiSource[];
+  trace?: AiHarnessTrace;
 }
 export type AiImageMimeType = "image/png" | "image/jpeg" | "image/webp";
-export interface AiImageRequest { requestId: string; prompt: string }
+export interface AiImageRequest {
+  requestId: string;
+  conversationId?: string;
+  prompt: string;
+  planRequestId?: string;
+  /** Must match the untrusted project/attachment context used for the approved image plan. */
+  projectContext?: string;
+  attachments?: AiAttachment[];
+}
 export interface AiImageResponse {
   requestId: string;
   model: string;
@@ -183,9 +380,15 @@ export interface AiProviderTestResult {
   ok: boolean;
   models: string[];
   message: string;
+  /** Present only for the B.AI quick Agent allowlist check. */
+  availableModels?: string[];
+  /** True only when the result was persisted against the saved key and config. */
+  modelsVerified?: boolean;
+  modelsVerifiedAt?: string;
 }
 export interface AiProviderTestInput {
-  baseUrl: string;
+  /** Omit after saving to force use of the encrypted credential and saved origin. */
+  baseUrl?: string;
   apiKey?: string;
   protocol?: AiProtocol;
   target?: "chat" | "image";

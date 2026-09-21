@@ -27,19 +27,19 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "重新编辑并生成",
+      "快速、标准、深度、Pro 业务档位",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "参考图随对话保留",
+      "Agent Harness",
+    );
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
+      "多对话并行",
+    );
+    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
+      "@computer",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留任务、客户脉络图、AI 历史、密钥和已有成员额度",
-    );
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "避免被参考图片遮住",
-    );
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "结果待核对或费用未结算时不重复生成",
     );
   });
 

@@ -9,7 +9,7 @@ const id = "task_9XxxSYXrZjnpkVdPgIvNm0YHkqmGDYyj";
 const task = { id, task_id: id, status: "queued", progress: 0 };
 
 describe("75api MiniMax H3 documented protocol", () => {
-  it.each(VIDEO_MODELS)("uses the real model ID for $label", async model => {
+  it.each(VIDEO_MODELS.filter(model => model.generationEnabled))("uses the real model ID for $label", async model => {
     const resolution = model.resolutions[0];
     const seconds = videoSeconds(model.id, resolution)[0];
     const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json(task));
@@ -21,8 +21,15 @@ describe("75api MiniMax H3 documented protocol", () => {
   it("enforces model-specific limits before contacting the provider", () => {
     expect(() => parseH3VideoInput({ ...input, model: "minimax_h3_no_audios_1080", seconds: 10, resolution: "1080p" })).toThrow("参考图片");
     expect(() => parseH3VideoInput({ ...input, model: "sd-2.0-fast", resolution: "720p" })).toThrow("时长");
-    expect(() => parseH3VideoInput({ ...input, model: "sd-2.5-c1", resolution: "720p" })).toThrow("时长");
+    expect(parseH3VideoInput({ ...input, model: "sd-2.5-c1", seconds: 30, resolution: "720p" })).toMatchObject({ model: "sd-2.5-c1", seconds: 30, resolution: "720p" });
     expect(() => parseH3VideoInput({ ...input, model: "unknown" })).toThrow("模型");
+  });
+  it("keeps the existing SD 2.5 30-second provider contract unchanged", async () => {
+    const model = VIDEO_MODELS.find(item => item.id === "sd-2.5-c1")!;
+    expect(videoSeconds(model.id, "720p")).toEqual([30]);
+    const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json(task));
+    await submitH3Video(transport, connection, { ...input, model: model.id, seconds: 30, resolution: "720p" });
+    expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ model: model.id, seconds: "30", resolution: "720p" });
   });
   it("submits 15 seconds as a STRING to /v1/videos, not the text-chat API", async () => {
     const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json(task));
@@ -32,6 +39,21 @@ describe("75api MiniMax H3 documented protocol", () => {
     expect(url).toBe("https://www.75api.com/v1/videos");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body!)).toEqual({ model: "minimax_h3", prompt: input.prompt, seconds: "15", resolution: "768p", aspect_ratio: "9:16" });
+  });
+  it.each([
+    ["processing", "processing"],
+    ["in_progress", "processing"],
+    ["succeeded", "completed"],
+    ["completed", "completed"],
+  ] as const)("normalizes documented New API status %s to %s", (providerStatus, status) => {
+    expect(parseH3VideoTask({ id: "video_123", status: providerStatus, progress: status === "completed" ? 100 : 25, seconds: "5", size: "1920x1080" })).toEqual({ id: "video_123", status, progress: status === "completed" ? 100 : 25 });
+  });
+  it("queries and downloads with the documented video_ task ID without trusting response URLs", async () => {
+    const videoId = "video_123";
+    const transport = vi.fn<AiTransport>().mockResolvedValue(Response.json({ id: videoId, status: "succeeded", progress: 100, seconds: "5", size: "1920x1080", url: "https://attacker.invalid/private.mp4" }));
+    expect(await queryH3Video(transport, connection, videoId)).toEqual({ id: videoId, status: "completed", progress: 100 });
+    expect(transport.mock.calls[0][0]).toBe(`https://www.75api.com/v1/videos/${videoId}`);
+    expect(h3VideoContentUrl(connection.baseUrl, videoId)).toBe(`https://www.75api.com/v1/videos/${videoId}/content`);
   });
   it.each([0, 4, 16, 5.5, "15", null])("rejects unsupported duration %s before a request", async seconds => {
     const transport = vi.fn<AiTransport>();
@@ -71,7 +93,7 @@ describe("75api MiniMax H3 documented protocol", () => {
     expect(transport.mock.calls[0][1].method).toBe("GET");
     expect(h3VideoContentUrl(connection.baseUrl, id)).toBe(`https://www.75api.com/v1/videos/${id}/content`);
   });
-  it.each(["../../internal", "task_12345678?key=private", "task_12345678/../../foo", "https://attacker.invalid/"])("rejects malicious task ID %s", async badId => {
+  it.each(["../../internal", "task_12345678?key=private", "task_12345678/../../foo", "video_12", "https://attacker.invalid/"])("rejects malicious or unsupported task ID %s", async badId => {
     const transport = vi.fn<AiTransport>();
     await expect(queryH3Video(transport, connection, badId)).rejects.toMatchObject({ code: "AI_VIDEO_RESPONSE_INVALID" });
     expect(transport).not.toHaveBeenCalled();

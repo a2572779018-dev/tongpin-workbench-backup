@@ -54,7 +54,7 @@ describe("chat quota preflight feedback", () => {
   });
   it("preflights before clearing drafts or persisting sent messages, without auto-disabling search", () => {
     const source = readFileSync(new URL("../../pages/TongpinAIPage.tsx", import.meta.url), "utf8");
-    const send = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("async function retryReply"));
+    const send = source.slice(source.indexOf("async function sendMessage("), source.indexOf("async function retryReply"));
     expect(send.indexOf('"/api/ai/preflight"')).toBeLessThan(send.indexOf("setDrafts(nextState.drafts)"));
     expect(send.indexOf('"/api/ai/preflight"')).toBeLessThan(send.indexOf("persistenceRef.current.saveNow"));
     expect(send).not.toContain("setWebSearch(false)");
@@ -117,7 +117,8 @@ describe("preflight send ownership", () => {
     const next = withPreparedChatSend(latest, sent, "new-conversation");
     expect(next.conversations).toEqual([sent, latest.conversations[0]]);
     expect(next.projects).toBe(latest.projects);
-    expect(next.drafts).toEqual({ "new-conversation": "", other: "保留另外的草稿" });
+    expect(next.drafts).toEqual({ other: "保留另外的草稿" });
+    expect(next.draftAttachments).not.toHaveProperty("new-conversation");
     expect(next.draftAttachments?.other).toBe(latest.draftAttachments.other);
     expect(next.sidebarCollapsed).toBe(true);
     expect(next.activeConversationId).toBe("sent");

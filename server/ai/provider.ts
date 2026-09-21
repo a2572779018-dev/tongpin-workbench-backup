@@ -219,13 +219,13 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
       : message),
     max_output_tokens: maxOutputTokens, stream: true, store: false,
     ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], ...(provider.webSearchProtocol === "compatible" ? {} : { max_tool_calls: 1 }), tool_choice: request.webSearchMode === "auto" ? "auto" : "required", include: ["web_search_call.action.sources"] } : {}),
-    ...(request.mode === "deep" && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort } } : {}),
+    ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort } } : {}),
   };
   const isBaiChat = new URL(provider.baseUrl).hostname === "api.b.ai";
   return {
     model, messages: [{ role: "system", content: instructions }, ...messages.map((message, index) => images.length && index === messages.length - 1
       ? { role: message.role, content: [{ type: "text", text: message.content }, ...images.map(item => ({ type: "image_url", image_url: { url: item.dataUrl, detail: "low" } }))] }
       : message)], ...(isBaiChat ? { max_tokens: maxOutputTokens } : { max_completion_tokens: maxOutputTokens }), stream: false,
-    ...(!isBaiChat && request.mode === "deep" && provider.reasoningEffort ? { reasoning_effort: provider.reasoningEffort } : {}),
+    ...(!isBaiChat && (request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning_effort: provider.reasoningEffort } : {}),
   };
 }

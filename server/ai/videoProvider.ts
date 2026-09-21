@@ -22,6 +22,7 @@ export function parseH3VideoInput(value: unknown): H3VideoInput {
   const p = object(value);
   const model = videoModel(typeof p.model === "string" ? p.model : p.model === undefined ? "minimax_h3" : "");
   if (!model) throw new AiError(400, "AI_VIDEO_MODEL_INVALID", "请选择支持的视频模型", true);
+  if (!model.generationEnabled) throw new AiError(409, "AI_VIDEO_PROVIDER_CONTRACT_MISMATCH", model.unavailableReason, true);
   if (typeof p.prompt !== "string" || !p.prompt.trim() || p.prompt.length > 4000 || p.prompt.includes("\0")) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请输入 1–4000 字的视频描述", true);
   if (!(model.resolutions as readonly unknown[]).includes(p.resolution)) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择该模型支持的清晰度", true);
   if (!Number.isInteger(p.seconds) || !videoSeconds(model.id, p.resolution as VideoResolution).includes(Number(p.seconds))) throw new AiError(400, "AI_VIDEO_INPUT_INVALID", "请选择该模型支持的视频时长", true);
@@ -33,8 +34,21 @@ export function parseH3VideoInput(value: unknown): H3VideoInput {
 }
 
 function taskId(value: unknown): string {
-  if (typeof value !== "string" || !/^task_[a-zA-Z0-9_-]{8,128}$/.test(value)) throw new AiError(502, "AI_VIDEO_RESPONSE_INVALID", "视频服务没有返回有效任务编号，请核对服务商记录，勿重复生成");
+  // New API's OpenAI-video contract uses video_* IDs, while the existing
+  // 75api adapter has returned task_* IDs. Keep the accepted alphabet path-
+  // segment safe and do not broaden this to arbitrary provider identifiers.
+  if (typeof value !== "string" || !/^(?:task_[a-zA-Z0-9_-]{8,128}|video_[a-zA-Z0-9_-]{3,128})$/.test(value)) throw new AiError(502, "AI_VIDEO_RESPONSE_INVALID", "视频服务没有返回有效任务编号，请核对服务商记录，勿重复生成");
   return value;
+}
+
+function taskStatus(value: unknown): H3VideoTask["status"] {
+  // New API's published examples use processing/succeeded while its current
+  // DTO uses in_progress/completed. Normalize only those documented aliases.
+  if (value === "queued") return "queued";
+  if (value === "processing" || value === "in_progress") return "processing";
+  if (value === "succeeded" || value === "completed") return "completed";
+  if (value === "failed") return "failed";
+  throw new AiError(502, "AI_VIDEO_RESPONSE_INVALID", "视频任务状态无法识别，请稍后查询；不会重新提交生成");
 }
 
 export function parseH3VideoTask(value: unknown, expectedId?: string): H3VideoTask {
@@ -42,8 +56,7 @@ export function parseH3VideoTask(value: unknown, expectedId?: string): H3VideoTa
   // The documented query examples have different id/task_id values. id is the canonical resource URL ID.
   const id = taskId(root.id ?? root.task_id);
   if (expectedId && id !== expectedId) throw new AiError(502, "AI_VIDEO_RESPONSE_INVALID", "视频服务返回的任务不匹配，请核对服务商记录");
-  const status = root.status;
-  if (status !== "queued" && status !== "processing" && status !== "completed" && status !== "failed") throw new AiError(502, "AI_VIDEO_RESPONSE_INVALID", "视频任务状态无法识别，请稍后查询；不会重新提交生成");
+  const status = taskStatus(root.status);
   if (typeof root.progress !== "number" || !Number.isFinite(root.progress) || root.progress < 0 || root.progress > 100) throw new AiError(502, "AI_VIDEO_RESPONSE_INVALID", "视频任务进度无效，请稍后查询");
   // Do not return provider error text, URLs, prompts, headers or unknown fields.
   return { id, status, progress: root.progress };

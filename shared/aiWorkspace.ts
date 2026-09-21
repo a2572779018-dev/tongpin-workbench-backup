@@ -1,4 +1,4 @@
-import type { AiMode, AiSource, AiUsage } from "./ai";
+import type { AiHarnessTrace, AiMode, AiSource, AiUsage } from "./ai";
 
 /** JSON-only workspace payload. Provider credentials and executable code never belong here. */
 export type AiWorkspaceJson = null | boolean | number | string | AiWorkspaceJson[] | { [key: string]: AiWorkspaceJson };
@@ -24,13 +24,19 @@ export interface AiWorkspaceMessage {
   role: "user" | "assistant";
   content: string;
   time: string;
+  /** Epoch milliseconds for a durable in-flight timer. UI remounts must not restart it. */
+  startedAt?: number;
   status?: "thinking" | "typing" | "ready" | "error" | "stopped";
   artifactId?: string;
   requestId?: string;
+  /** Parent approved tool-plan request, distinct from the execution request. */
+  harnessPlanRequestId?: string;
   model?: string;
   usage?: AiUsage;
   attachments?: AiWorkspaceDocument[];
   sources?: AiSource[];
+  /** Concise application-owned rationale and tool lifecycle; never private chain-of-thought. */
+  trace?: AiHarnessTrace;
 }
 
 export interface AiWorkspaceConversation {
@@ -92,8 +98,11 @@ export interface AiWorkspaceSaveRequest {
 
 /** Rejections never truncate a snapshot or silently remove older conversations. */
 export const AI_WORKSPACE_LIMITS = {
-  stateBytes: 2 * 1024 * 1024,
-  requestBytes: 2 * 1024 * 1024 + 4096,
+  // Snapshots are persisted as bounded SQL chunks. Keep a finite account quota,
+  // but do not make a healthy new conversation fail just because earlier chats
+  // and generated-media context have crossed the former 2 MiB transport cap.
+  stateBytes: 8 * 1024 * 1024,
+  requestBytes: 8 * 1024 * 1024 + 4096,
   projects: 100,
   conversations: 500,
   messagesPerConversation: 500,
@@ -105,4 +114,11 @@ export const AI_WORKSPACE_LIMITS = {
   draftCharacters: 24000,
   titleCharacters: 200,
   instructionsCharacters: 24000,
+  /**
+   * A plan-execute run can contain the initial strategy/route/plan/model
+   * steps, three code-owned workflow steps, and up to eight bounded
+   * model/tool/approval/result cycles. Keep a small forward-compatible
+   * margin while retaining a hard workspace boundary.
+   */
+  harnessStepsPerTrace: 48,
 } as const;

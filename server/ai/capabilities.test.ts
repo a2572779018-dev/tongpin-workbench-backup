@@ -5,23 +5,59 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatRequest, AiProviderInput } from "../../shared/ai";
 import { createNodeAi } from "./node";
 import { type AiTransport, parseProviderResult } from "./provider";
-import { chatInputReserve, parseChatCapabilities, parsePresentation, safeSource, validateImageBase64 } from "./capabilities";
+import { chatInputReserve, parseChatCapabilities, parsePresentation, parseToolPlan, safeSource, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
+import { AI_CHAT_CONTEXT_LIMITS, AI_CONTEXT_WINDOW_PREFIX } from "../../shared/aiContext";
+import { toolPlanContextFingerprint } from "./toolPlans";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const dataUrl = `data:image/png;base64,${PNG}`;
 const provider: AiProviderInput = { name: "Capability tests", baseUrl: "https://text.example.com", apiKey: "test-text-key-not-real", protocol: "responses", quickModel: "text-fast", deepModel: "text-deep", maxOutputTokens: 2048, reasoningEffort: "", enabled: true };
 const chat = (extra: Partial<AiChatRequest> = {}): AiChatRequest => ({ requestId: crypto.randomUUID(), mode: "quick", messages: [{ role: "user", content: "整理资料" }], ...extra });
 const reply = (content = "已整理资料", extra: Record<string, unknown> = {}) => Response.json({ output_text: content, status: "completed", usage: { input_tokens: 20, output_tokens: 30, total_tokens: 50 }, ...extra });
+const videoParameters = { model: "minimax_h3" as const, seconds: 15, resolution: "768p", aspectRatio: "16:9" as const, referenceCount: 0, referenceFingerprints: [] };
 
 describe("Reviewed AI capabilities through transactional service", () => {
   let directory: string;
   let runtime: Awaited<ReturnType<typeof createNodeAi>>;
+  let emptyToolPlanContextFingerprint: string;
   const transport = vi.fn<AiTransport>();
+  const saveImagePlan = (userId: string, prompt: string) => {
+    const requestId = crypto.randomUUID();
+    runtime.store.saveRequest({
+      requestId, userId, hash: `fixture-${requestId}`, status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, kind: "chat", model: "text-fast", mode: "quick",
+      toolPlanContextFingerprint: emptyToolPlanContextFingerprint,
+      result: {
+        requestId, model: "text-fast", content: "已整理图片任务，请确认后生成。",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimated: false },
+        toolPlan: { kind: "image", summary: "测试图片方案", prompt },
+      },
+    });
+    return requestId;
+  };
+  const savePresentationPlan = (userId: string, prompt: string) => {
+    const requestId = crypto.randomUUID();
+    runtime.store.saveRequest({
+      requestId, userId, hash: `fixture-${requestId}`, status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "text-fast", mode: "quick",
+      toolPlanContextFingerprint: emptyToolPlanContextFingerprint,
+      result: {
+        requestId, model: "text-fast", content: "已整理 PPT 任务，请确认后生成。",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimated: false },
+        toolPlan: { kind: "presentation", summary: "测试 PPT 方案", prompt },
+      },
+    });
+    return requestId;
+  };
+  const imageRequest = (userId = "member", prompt = "图片", extra: Record<string, unknown> = {}) => ({
+    ...extra, requestId: crypto.randomUUID(), prompt, planRequestId: saveImagePlan(userId, prompt),
+  });
   beforeEach(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-ai-capabilities-"));
     transport.mockReset(); transport.mockImplementation(async () => reply());
     runtime = await createNodeAi(path.join(directory, "test.json"), transport);
+    emptyToolPlanContextFingerprint = await toolPlanContextFingerprint();
     await runtime.service.saveProvider(provider);
     runtime.service.setQuota("member", "admin", { limitTokens: 500_000 });
   });
@@ -73,7 +109,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
   it("includes Skill, attachments, project and output format in idempotency fingerprint", async () => {
     const request = chat({ skillIds: ["meeting-notes"], projectContext: "项目A", attachments: [{ name: "a.txt", text: "资料" }] });
     await runtime.service.chat("member", request);
-    for (const change of [{ skillIds: ["content-editor"] }, { projectContext: "项目B" }, { attachments: [{ name: "b.txt", text: "新资料" }] }, { outputFormat: "presentation" }]) {
+    for (const change of [{ skillIds: ["content-editor"] }, { projectContext: "项目B" }, { attachments: [{ name: "b.txt", text: "新资料" }] }, { outputFormat: "presentation", toolPlanRequestId: savePresentationPlan("member", request.messages.at(-1)!.content) }]) {
       await expect(runtime.service.chat("member", { ...request, ...change })).rejects.toMatchObject({ code: "AI_REQUEST_CONFLICT" });
     }
     expect(transport).toHaveBeenCalledTimes(1);
@@ -81,13 +117,78 @@ describe("Reviewed AI capabilities through transactional service", () => {
   it("counts all text context in the input reservation and rejects oversized totals before charging", async () => {
     const simple = chat();
     expect(chatInputReserve(chat({ attachments: [{ name: "a.txt", text: "资料".repeat(100) }] }))).toBeGreaterThan(chatInputReserve(simple));
-    await expect(runtime.service.chat("member", chat({ attachments: [{ name: "a.txt", text: "资料".repeat(11000) }] }))).rejects.toMatchObject({ code: "AI_CONTEXT_TOO_LONG" });
+    const error = await runtime.service.chat("member", chat({ attachments: [{ name: "a.txt", text: "资料".repeat(11000) }] })).then(() => null, reason => reason);
+    expect(error).toMatchObject({ code: "AI_CONTEXT_TOO_LONG" });
+    expect(error.message).toContain("本轮消息与当前资料");
+    expect(error.message).not.toContain("新建对话");
     expect(transport).not.toHaveBeenCalled();
+  });
+  it("rejects records beyond the persisted-conversation ceiling without suggesting a new chat", async () => {
+    const messages = Array.from({ length: AI_CHAT_CONTEXT_LIMITS.incomingMessages + 1 }, (_, index) => ({
+      role: index === AI_CHAT_CONTEXT_LIMITS.incomingMessages || index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: `message-${index}`,
+    }));
+    const error = await runtime.service.chat("member", chat({ messages })).then(() => null, reason => reason);
+    expect(error).toMatchObject({ code: "AI_CONTEXT_TOO_LONG" });
+    expect(error.message).toContain("刷新后重试");
+    expect(error.message).not.toContain("新建对话");
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("bounds long restored chats while preserving the latest turn and current sampled-media context", async () => {
+    await runtime.service.saveProvider({ ...provider, visionEnabled: true });
+    const messages: AiChatRequest["messages"] = [
+      ...Array.from({ length: 90 }, (_, index) => ({
+        role: index % 2 ? "assistant" as const : "user" as const,
+        content: `old-${index}-${"历史资料".repeat(350)}`,
+      })),
+      { role: "assistant", content: `近期视频任务结果-${"镜头".repeat(8_000)}-最后结论` },
+      { role: "user", content: "结合刚才的采样画面和上下文继续讨论" },
+    ];
+    const request = chat({
+      messages,
+      projectContext: "当前项目：品牌视频",
+      attachments: [{
+        name: "生成视频.mp4，采样时间 14.95 秒",
+        mediaType: "image/png",
+        dataUrl,
+        text: `这是当前对话生成的视频采样画面，实际总长 15 秒。不含音频，不能声称看过未采样部分或听过声音。${"画面元数据".repeat(1_800)}`,
+      }],
+    });
+    const savedMessages = structuredClone(messages);
+    await runtime.service.chat("member", request);
+
+    const body = JSON.parse(transport.mock.calls[0][1].body!);
+    expect(body.input.length).toBeLessThanOrEqual(AI_CHAT_CONTEXT_LIMITS.requestMessages);
+    expect(body.input.at(-1).role).toBe("user");
+    expect(body.input.at(-1).content[0].text).toContain("结合刚才的采样画面和上下文继续讨论");
+    expect(body.input.at(-1).content.some((part: { type: string }) => part.type === "input_image")).toBe(true);
+    const outbound = JSON.stringify(body);
+    expect(outbound).toContain(AI_CONTEXT_WINDOW_PREFIX);
+    expect(outbound).toContain("近期视频任务结果");
+    expect(outbound).toContain("最后结论");
+    expect(outbound).toContain("较长历史消息已有界压缩");
+    expect(outbound).toContain("实际总长 15 秒");
+    expect(outbound).toContain("不含音频");
+    expect(outbound).not.toContain("old-0-");
+    expect(outbound).not.toContain("请新建对话");
+    expect(messages).toEqual(savedMessages);
+  });
+  it("does not carry one member's bounded media context into another member's request", async () => {
+    await runtime.service.saveProvider({ ...provider, visionEnabled: true });
+    runtime.service.setQuota("other", "admin", { limitTokens: 50_000 });
+    await runtime.service.chat("member", chat({ attachments: [{ name: "member-only.png", mediaType: "image/png", dataUrl, text: "member-private-sampled-frame" }] }));
+    await runtime.service.chat("other", chat({ messages: [{ role: "user", content: "你好" }] }));
+    const memberBody = JSON.stringify(JSON.parse(transport.mock.calls[0][1].body!));
+    const otherBody = JSON.stringify(JSON.parse(transport.mock.calls[1][1].body!));
+    expect(memberBody).toContain("member-private-sampled-frame");
+    expect(otherBody).not.toContain("member-private-sampled-frame");
+    expect(otherBody).not.toContain("member-only.png");
   });
   it("returns validated presentation data and replays it after restart without a second generation", async () => {
     const presentation = { title: "客户提案", subtitle: "同频", slides: [{ title: "业务目标", bullets: ["确认需求", "分阶段交付"], notes: "不要虚构数据" }] };
     transport.mockResolvedValueOnce(reply(JSON.stringify(presentation)));
-    const request = chat({ outputFormat: "presentation" });
+    const prompt = "整理资料";
+    const request = chat({ messages: [{ role: "user", content: prompt }], outputFormat: "presentation", toolPlanRequestId: savePresentationPlan("member", prompt) });
     const first = await runtime.service.chat("member", request);
     expect(first.presentation).toEqual(presentation);
     expect(first.content).toContain("共 1 页");
@@ -97,9 +198,157 @@ describe("Reviewed AI capabilities through transactional service", () => {
     expect(runtime.service.getRequestResult("member", request.requestId).result?.presentation).toEqual(presentation);
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it.each(["image", "video"] as const)("returns a validated %s tool plan without invoking the generation provider", async kind => {
+    const plan = { kind, summary: `整理${kind}任务`, prompt: `${kind} provider prompt` };
+    if (kind === "image") await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    else await runtime.service.video.configure({ enabled: true, quotaPoints: 1000, apiKey: "video-test-key-not-real" });
+    transport.mockResolvedValueOnce(reply(JSON.stringify(plan)));
+    const request = chat({ outputFormat: kind === "image" ? "image_plan" : "video_plan", ...(kind === "video" ? { videoParameters } : {}) });
+    const result = await runtime.service.chat("member", request);
+    const { model: _internalVideoModel, ...memberVideoParameters } = videoParameters;
+    expect(result.toolPlan).toEqual(kind === "video" ? { ...plan, videoParameters: memberVideoParameters } : plan);
+    if (kind === "video") expect(runtime.store.request("member", request.requestId)?.result?.toolPlan?.videoParameters).toEqual(videoParameters);
+    expect(result.content).toContain("请确认后生成");
+    const body = JSON.parse(transport.mock.calls[0][1].body!);
+    expect(body.instructions).toContain("不是在生成");
+    expect(body.tools).toBeUndefined();
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0][0]).toBe("https://text.example.com/v1/responses");
+    expect(transport.mock.calls.some(([url]) => /\/images\/generations|\/videos(?:\/|$)/.test(url))).toBe(false);
+    expect(runtime.store.sql.all("SELECT request_id FROM ai_requests WHERE user_id=? AND json_extract(data,'$.kind')='image'", "member")).toEqual([]);
+    expect(kind === "video" ? runtime.service.video.list("member").jobs : []).toEqual([]);
+  });
+  it("rejects a mismatched or malformed tool plan once and never treats it as a completed tool", async () => {
+    transport.mockResolvedValueOnce(reply(JSON.stringify({ kind: "image", summary: "错", prompt: "错" })));
+    const request = chat({ outputFormat: "video_plan", videoParameters });
+    await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_TOOL_PLAN_INVALID" });
+    await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_TOOL_PLAN_INVALID" });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("binds image generation to the same account, tool kind and exact approved prompt", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    runtime.service.setQuota("other", "admin", { limitTokens: 50_000 });
+    const imagePlan = { kind: "image" as const, summary: "白色背景品牌图", prompt: "白色背景，蓝色 Logo，正方形" };
+    transport.mockResolvedValueOnce(reply(JSON.stringify(imagePlan)));
+    const planned = await runtime.service.chat("member", chat({ outputFormat: "image_plan" }));
+    const planCalls = transport.mock.calls.length;
+    const generate = (userId: string, planRequestId: string, prompt = imagePlan.prompt) => runtime.service.generateImage(userId, { requestId: crypto.randomUUID(), prompt, planRequestId });
+
+    await expect(generate("other", planned.requestId)).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    await expect(generate("member", planned.requestId, "被篡改的生成提示词")).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+
+    const videoPlan = { kind: "video" as const, summary: "视频方案", prompt: "缓慢推镜" };
+    transport.mockResolvedValueOnce(reply(JSON.stringify(videoPlan)));
+    const wrongKind = await runtime.service.chat("member", chat({ outputFormat: "video_plan", videoParameters }));
+    const afterPlans = transport.mock.calls.length;
+    await expect(generate("member", wrongKind.requestId, videoPlan.prompt)).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    await expect(generate("member", "short", imagePlan.prompt)).rejects.toMatchObject({ code: "AI_TOOL_PLAN_INVALID" });
+    expect(transport).toHaveBeenCalledTimes(afterPlans);
+    expect(afterPlans).toBe(planCalls + 1);
+    expect(runtime.store.sql.all("SELECT request_id FROM ai_requests WHERE json_extract(data,'$.kind')='image'")).toEqual([]);
+
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    const result = await generate("member", planned.requestId);
+    expect(result.images).toHaveLength(1);
+    expect(transport.mock.lastCall?.[0]).toBe("https://text.example.com/v1/images/generations");
+    expect(JSON.parse(transport.mock.lastCall?.[1].body ?? "{}")).toMatchObject({ prompt: imagePlan.prompt });
+  });
+  it("binds an image plan to the exact normalized project and attachment context", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    const imagePlan = { kind: "image" as const, summary: "项目品牌图", prompt: "蓝色项目品牌图" };
+    const context = { projectContext: "项目 A", attachments: [{ name: "brief.txt", text: "蓝色品牌" }, { name: "copy.txt", text: "不要标题" }] };
+    transport.mockResolvedValueOnce(reply(JSON.stringify(imagePlan)));
+    const planned = await runtime.service.chat("member", chat({ outputFormat: "image_plan", ...context }));
+    expect(runtime.store.request("member", planned.requestId)?.toolPlanContextFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    const generate = (extra: Record<string, unknown> = {}) => runtime.service.generateImage("member", {
+      requestId: crypto.randomUUID(), prompt: imagePlan.prompt, planRequestId: planned.requestId, ...context, ...extra,
+    });
+
+    await expect(generate({ projectContext: "项目 B" })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONTEXT_MISMATCH" });
+    await expect(generate({ attachments: [...context.attachments].reverse() })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONTEXT_MISMATCH" });
+    await expect(generate({ attachments: [{ ...context.attachments[0], text: "红色品牌" }, context.attachments[1]] })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONTEXT_MISMATCH" });
+    expect(transport).toHaveBeenCalledTimes(1);
+
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    await expect(generate()).resolves.toMatchObject({ images: [{ mimeType: "image/png" }] });
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it("binds a PPT plan to the exact project and attachment context before provider execution", async () => {
+    const plan = { kind: "presentation" as const, summary: "项目汇报", prompt: "基于附件生成项目汇报" };
+    const context = { projectContext: "项目 A", attachments: [{ name: "brief.txt", text: "项目目标" }, { name: "data.txt", text: "项目数据" }] };
+    transport.mockResolvedValueOnce(reply(JSON.stringify(plan)));
+    const planned = await runtime.service.chat("member", chat({ outputFormat: "presentation_plan", ...context }));
+    const execute = (extra: Partial<AiChatRequest> = {}) => runtime.service.chat("member", chat({
+      messages: [{ role: "user", content: plan.prompt }], outputFormat: "presentation", toolPlanRequestId: planned.requestId, ...context, ...extra,
+    }));
+
+    await expect(execute({ projectContext: "项目 B" })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONTEXT_MISMATCH" });
+    await expect(execute({ attachments: [...context.attachments].reverse() })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONTEXT_MISMATCH" });
+    expect(transport).toHaveBeenCalledTimes(1);
+
+    transport.mockResolvedValueOnce(reply(JSON.stringify({ title: "项目汇报", slides: [{ title: "目标", bullets: ["项目目标"] }] })));
+    await expect(execute()).resolves.toMatchObject({ presentation: { title: "项目汇报" } });
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it("rejects a legacy image plan without a context fingerprint instead of bypassing the binding", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    const prompt = "旧方案";
+    const planRequestId = saveImagePlan("member", prompt);
+    const stored = runtime.store.request("member", planRequestId)!;
+    delete stored.toolPlanContextFingerprint;
+    runtime.store.saveRequest(stored);
+    await expect(runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt, planRequestId })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONTEXT_MISMATCH" });
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("allows one image generation per plan, replays the same request, and rejects a new request before transport", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    const prompt = "只生成一次的图片";
+    const planRequestId = saveImagePlan("member", prompt);
+    const requestId = crypto.randomUUID();
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+
+    const first = await runtime.service.generateImage("member", { requestId, prompt, planRequestId });
+    const calls = transport.mock.calls.length;
+    expect((await runtime.service.generateImage("member", { requestId, prompt, planRequestId })).requestId).toBe(first.requestId);
+    await expect(runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt, planRequestId })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONSUMED" });
+    expect(transport).toHaveBeenCalledTimes(calls);
+  });
+  it("rejects an expired image plan before transport or quota reservation", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    const prompt = "过期图片方案";
+    const planRequestId = saveImagePlan("member", prompt);
+    const stored = runtime.store.request("member", planRequestId)!;
+    runtime.store.saveRequest({ ...stored, toolPlanExpiresAt: 0 });
+    const quota = runtime.service.quota("member");
+
+    await expect(runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt, planRequestId })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_EXPIRED" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.service.quota("member")).toEqual(quota);
+  });
+  it("allows one presentation generation per plan while preserving idempotent replay", async () => {
+    const prompt = "整理一次性演示文稿";
+    const planRequestId = savePresentationPlan("member", prompt);
+    const request = chat({ messages: [{ role: "user", content: prompt }], outputFormat: "presentation", toolPlanRequestId: planRequestId });
+    transport.mockResolvedValueOnce(reply(JSON.stringify({ title: "方案", slides: [{ title: "第一页", bullets: ["内容"] }] })));
+
+    const first = await runtime.service.chat("member", request);
+    const calls = transport.mock.calls.length;
+    expect((await runtime.service.chat("member", request)).requestId).toBe(first.requestId);
+    await expect(runtime.service.chat("member", { ...request, requestId: crypto.randomUUID() })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONSUMED" });
+    expect(transport).toHaveBeenCalledTimes(calls);
+  });
+  it("fails closed before transport, reservation or generation when an image plan is missing", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    const requestId = crypto.randomUUID();
+    await expect(runtime.service.generateImage("member", { requestId, prompt: "图片" })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_REQUIRED" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.store.request("member", requestId)).toBeUndefined();
+    expect(runtime.service.quota("member").reservedTokens).toBe(0);
+  });
   it("does not fake an export on invalid presentation JSON, charges known usage once and returns the saved error", async () => {
     transport.mockResolvedValueOnce(reply('{"title":"半截"'));
-    const request = chat({ outputFormat: "presentation" });
+    const prompt = "整理资料";
+    const request = chat({ messages: [{ role: "user", content: prompt }], outputFormat: "presentation", toolPlanRequestId: savePresentationPlan("member", prompt) });
     await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_PRESENTATION_INVALID" });
     await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_PRESENTATION_INVALID" });
     expect(runtime.service.quota("member").usedTokens).toBe(50);
@@ -210,7 +459,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
     new AiPersonaRepository(runtime.store.sql).save("member", { expectedRevision: 0, profile: { name: "不能污染图片的小频", tone: "warm", customStyle: "", preferences: "", onboardingComplete: true } });
     await runtime.service.saveProvider({ ...provider, imageModel: "gpt-image-test", imageQuotaTokens: 1000 });
     transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
-    const request = { requestId: crypto.randomUUID(), prompt: "白色背景的同频图标" };
+    const request = imageRequest("member", "白色背景的同频图标");
     const result = await runtime.service.generateImage("member", request);
     expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, totalTokens: 1000, convertedTokens: 1000, billingKind: "image_conversion", estimated: true });
     const assetId = result.images[0].assetId;
@@ -245,7 +494,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
   it("uses the independent image key even on the same host and never applies deep chat settings", async () => {
     await runtime.service.saveProvider({ ...provider, reasoningEffort: "high", imageModel: "gpt-image-2", imageBaseUrl: "https://text.example.com/api/v1/images/generations", imageApiKey: "test-image-group-key", imageQuotaTokens: 1000 });
     transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
-    await runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt: "同频图标", mode: "deep", model: "malicious-model", apiKey: "malicious-key" });
+    await runtime.service.generateImage("member", imageRequest("member", "同频图标", { mode: "deep", model: "malicious-model", apiKey: "malicious-key" }));
     const [url, init] = transport.mock.calls[0];
     expect(url).toBe("https://text.example.com/api/v1/images/generations");
     expect(init.headers.Authorization).toBe("Bearer test-image-group-key");
@@ -258,7 +507,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
     expect(runtime.service.provider()?.imageStream).toBe(true);
     const stream = `: heartbeat\n\nevent: image_generation.completed\ndata: ${JSON.stringify({ type: "image_generation.completed", b64_json: PNG, usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } })}\n\n`;
     transport.mockResolvedValueOnce(new Response(stream, { headers: { "content-type": "text/event-stream" } }));
-    const request = { requestId: crypto.randomUUID(), prompt: "流式图片", mode: "deep" };
+    const request = imageRequest("member", "流式图片", { mode: "deep" });
     const result = await runtime.service.generateImage("member", request);
     expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ model: "gpt-image-2", stream: true, partial_images: 0, n: 1 });
     expect(transport.mock.calls[0][1].headers.Accept).toContain("text/event-stream");
@@ -274,7 +523,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
   it("does not retry, refund or create an asset after an interrupted image stream", async () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000, imageStream: true });
     transport.mockResolvedValueOnce(new Response(`data: ${JSON.stringify({ type: "image_generation.partial_image", b64_json: PNG })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } }));
-    const request = { requestId: crypto.randomUUID(), prompt: "未完成的图片" };
+    const request = imageRequest("member", "未完成的图片");
     await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ code: "AI_IMAGE_STREAM_INTERRUPTED" });
     await runtime.service.saveProvider({ ...provider, imageStream: false });
     await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ code: "AI_IMAGE_STREAM_INTERRUPTED" });
@@ -286,7 +535,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
   it.each([400, 403, 404, 422, 429, 408, 409, 500, 502, 504])("settles image HTTP %i exactly once and preserves safe diagnostics across restart", async status => {
     await runtime.service.saveProvider({ ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000 });
     transport.mockResolvedValueOnce(Response.json({ error: { code: "model_not_found", param: "model", message: `${provider.apiKey} PRIVATE_PROMPT` } }, { status }));
-    const request = { requestId: crypto.randomUUID(), prompt: "图片" };
+    const request = imageRequest("member", "图片");
     const rejected = [400, 403, 404, 422, 429].includes(status);
     const diagnostic = { operation: "image", httpStatus: status, billing: rejected ? "rejected" : "unknown", code: "model_not_found", param: "model" };
     await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ diagnostic });
@@ -303,23 +552,23 @@ describe("Reviewed AI capabilities through transactional service", () => {
   });
   it("preflights image quota and storage capacity without paid upstream calls", async () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
-    await expect(runtime.service.generateImage("zero-member", { requestId: crypto.randomUUID(), prompt: "图片" })).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
+    await expect(runtime.service.generateImage("zero-member", imageRequest("zero-member", "图片"))).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
     runtime.store.sql.exec("INSERT INTO ai_assets(id,user_id,mime_type,byte_length,created_at) VALUES(?,?,?,?,?)", "filled", "member", "image/png", 50 * 1024 * 1024, new Date().toISOString());
-    await expect(runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt: "图片" })).rejects.toMatchObject({ code: "AI_ASSET_CAPACITY" });
+    await expect(runtime.service.generateImage("member", imageRequest("member", "图片"))).rejects.toMatchObject({ code: "AI_ASSET_CAPACITY" });
     expect(transport).not.toHaveBeenCalled();
     expect(runtime.service.quota("member").reservedTokens).toBe(0);
   });
   it("bounds simultaneous image buffering across members before sending paid requests", async () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
     for (let index = 0; index < 3; index++) runtime.store.saveRequest({ requestId: `inflight-image-${index}`, userId: `other-${index}`, kind: "image", hash: "h", status: "pending", createdAt: new Date().toISOString(), expiresAt: Date.now() + 10000, inputReserve: 0, outputReserve: 0, convertedReserve: 1000, model: "image", mode: "quick" });
-    await expect(runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt: "图片" })).rejects.toMatchObject({ code: "AI_CAPACITY_BUSY" });
+    await expect(runtime.service.generateImage("member", imageRequest("member", "图片"))).rejects.toMatchObject({ code: "AI_CAPACITY_BUSY" });
     expect(transport).not.toHaveBeenCalled();
     expect(runtime.service.quota("member").reservedTokens).toBe(0);
   });
   it("never follows provider image URLs and saves an uncertain result without pretending it delivered an image", async () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
     transport.mockResolvedValueOnce(Response.json({ data: [{ url: "https://169.254.169.254/secret" }] }));
-    const request = { requestId: crypto.randomUUID(), prompt: "图片" };
+    const request = imageRequest("member", "图片");
     await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ code: "AI_IMAGE_FORMAT_UNSUPPORTED" });
     await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ code: "AI_IMAGE_FORMAT_UNSUPPORTED" });
     expect(transport).toHaveBeenCalledTimes(1);
@@ -330,7 +579,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
     let release!: () => void;
     transport.mockImplementationOnce(async () => { await new Promise<void>(resolve => { release = resolve; }); return Response.json({ data: [{ b64_json: PNG }] }); });
-    const image = runtime.service.generateImage("member", { requestId: crypto.randomUUID(), prompt: "图片" });
+    const image = runtime.service.generateImage("member", imageRequest("member", "图片"));
     await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
     await expect(runtime.service.chat("member", chat())).rejects.toMatchObject({ code: "AI_REQUEST_IN_PROGRESS" });
     release(); await image;
@@ -349,6 +598,14 @@ describe("Reviewed AI capabilities through transactional service", () => {
 });
 
 describe("Capability input and provider output limits", () => {
+  it("accepts only versioned code-owned Hub templates and owns their Skill set", () => {
+    expect(parseChatCapabilities({ workflowId: "hub-research-brief" })).toMatchObject({
+      workflowId: "hub-research-brief",
+      skillIds: ["deep-research", "data-reader", "content-editor"],
+    });
+    expect(() => parseChatCapabilities({ workflowId: "hub-research-brief", skillIds: ["content-editor"] })).toThrow(expect.objectContaining({ code: "AI_WORKFLOW_SKILLS_MISMATCH" }));
+    expect(() => parseChatCapabilities({ workflowId: "hub-unreviewed" })).toThrow(expect.objectContaining({ code: "AI_WORKFLOW_INVALID" }));
+  });
   it("validates raster signatures and canonical base64 without allowing SVG, type spoofing or external URLs", () => {
     expect(validateImageBase64(PNG)).toMatchObject({ mimeType: "image/png", width: 1, height: 1 });
     expect(() => validateImageBase64(btoa('<svg onload="alert(1)"></svg>'))).toThrow();
@@ -361,6 +618,11 @@ describe("Capability input and provider output limits", () => {
   });
   it.each([{ title: "空", slides: [] }, { title: "多", slides: Array.from({ length: 31 }, () => ({ title: "页", bullets: ["点"] })) }, { title: "错", slides: [{ title: "页", bullets: "不是数组" }] }, { title: "长", slides: [{ title: "页", bullets: ["x".repeat(501)] }] }])("rejects invalid presentation schema %j", value => {
     expect(() => parsePresentation(JSON.stringify(value))).toThrow();
+  });
+  it("strictly validates model-authored tool plans", () => {
+    expect(parseToolPlan('{"kind":"video","summary":"镜头方案","prompt":"缓慢推进"}', "video")).toEqual({ kind: "video", summary: "镜头方案", prompt: "缓慢推进" });
+    expect(() => parseToolPlan('{"kind":"image","summary":"错","prompt":"错"}', "video")).toThrow();
+    expect(() => parseToolPlan('{"kind":"video","summary":"","prompt":"半截"}', "video")).toThrow();
   });
   it("does not accept a truncated Chat Completions response as a complete answer", () => {
     expect(parseProviderResult({ choices: [{ message: { content: "半句话" }, finish_reason: "length" }] }, "chat_completions").status).toBe("incomplete");

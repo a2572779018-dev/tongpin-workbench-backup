@@ -19,6 +19,21 @@
 .tp-ai-starters { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; max-width: 38rem; }
 .tp-ai-starters button { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #ded8c9; background: #faf7ef; color: #655e4f; border-radius: 12px; padding: 10px 13px; font-size: .8rem; cursor: pointer; }
 .tp-ai-starters button:hover { background: #f3ead0; color: #343025; }
+.tp-ai-page .tp-ai-messages { scroll-behavior: auto; }
+.tp-ai-page .tp-ai-starters button,
+.tp-ai-page .tp-ai-artifact-card,
+.tp-ai-page .tp-ai-video-reply,
+.tp-ai-page .tp-ai-load-earlier,
+.tp-ai-page .tp-ai-composer button,
+.tp-ai-page .tp-ai-expression-grid button {
+  transition: transform 150ms ease, border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+.tp-ai-page .tp-ai-starters button:hover,
+.tp-ai-page .tp-ai-artifact-card:hover,
+.tp-ai-page .tp-ai-load-earlier:hover {
+  transform: translateY(-1px);
+}
+.tp-ai-page button:active:not(:disabled) { transform: translateY(0) scale(.98); }
 .tp-ai-page .tp-ai-message.is-assistant { display: block; }
 .tp-ai-character { flex: none; width: 64px; height: 72px; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; pointer-events: none; }
 /* Tall expression viewBoxes must not enlarge the grid's intrinsic auto track. */

@@ -3,17 +3,12 @@ const path = require("node:path");
 const {
   atomicWritePrivateFile,
 } = require("./relationship-graph-vault.cjs");
-const {
-  createSafeStorageAdapter,
-  isSafeStorageUnavailableError,
-} = require("./safe-storage-adapter.cjs");
 
 const CREDENTIAL_VAULT_FILE_NAME = "secure-accounts.bin";
 const CREDENTIAL_VAULT_BACKUP_FILE_NAME = "secure-accounts.bin.bak";
 const CREDENTIAL_INDEX_FILE_NAME = "remembered-accounts.json";
 const CREDENTIAL_INDEX_VERSION = 1;
 const MAX_CREDENTIAL_ACCOUNTS = 20;
-const MAX_CREDENTIAL_PAYLOAD_LENGTH = 100_000;
 
 class CredentialVaultError extends Error {
   constructor(code, message, cause) {
@@ -39,29 +34,6 @@ function sortAndLimitAccounts(accounts) {
   return accounts
     .sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt))
     .slice(0, MAX_CREDENTIAL_ACCOUNTS);
-}
-
-function normalizeEncryptedAccounts(value) {
-  if (!Array.isArray(value)) {
-    throw new CredentialVaultError(
-      "CREDENTIAL_VAULT_INVALID",
-      "本机登录记录无法读取，原加密文件已保留",
-    );
-  }
-  const accounts = [];
-  const seen = new Set();
-  for (const entry of value) {
-    const email = normalizeCredentialEmail(entry?.email);
-    if (!isCredentialEmail(email) || seen.has(email)) continue;
-    seen.add(email);
-    accounts.push({
-      email,
-      password: typeof entry?.password === "string" ? entry.password : null,
-      rememberPassword: entry?.rememberPassword !== false,
-      lastUsedAt: normalizeLastUsedAt(entry?.lastUsedAt),
-    });
-  }
-  return sortAndLimitAccounts(accounts);
 }
 
 function normalizeEmailIndex(value) {
@@ -125,8 +97,6 @@ async function atomicWritePrivateFileWithBackup(
 
 function createCredentialVault({
   userDataPath,
-  safeStorage,
-  safeStorageAdapter,
   fileSystem = fsp,
   atomicWrite = atomicWritePrivateFile,
   now = () => new Date(),
@@ -134,27 +104,8 @@ function createCredentialVault({
   if (typeof userDataPath !== "string" || !path.isAbsolute(userDataPath)) {
     throw new Error("登录记录存储目录无效");
   }
-  const vaultPath = path.join(userDataPath, CREDENTIAL_VAULT_FILE_NAME);
-  const backupPath = path.join(
-    userDataPath,
-    CREDENTIAL_VAULT_BACKUP_FILE_NAME,
-  );
   const indexPath = path.join(userDataPath, CREDENTIAL_INDEX_FILE_NAME);
   let mutationQueue = Promise.resolve();
-  const secureStorage =
-    safeStorageAdapter ?? createSafeStorageAdapter(safeStorage);
-
-  async function assertEncryptionAvailable() {
-    try {
-      await secureStorage.ensureAvailable();
-    } catch (error) {
-      throw new CredentialVaultError(
-        "CREDENTIAL_VAULT_UNAVAILABLE",
-        "系统安全存储暂时不可用，原加密登录记录已保留",
-        error,
-      );
-    }
-  }
 
   async function waitForMutations() {
     try {
@@ -189,183 +140,31 @@ function createCredentialVault({
     await atomicWrite(indexPath, payload);
   }
 
-  async function readEncryptedVault() {
-    await assertEncryptionAvailable();
-    let encrypted;
-    try {
-      encrypted = await fileSystem.readFile(vaultPath);
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        return { state: "missing", accounts: [] };
-      }
-      throw new CredentialVaultError(
-        "CREDENTIAL_VAULT_READ_FAILED",
-        "本机登录记录无法读取，原加密文件已保留",
-        error,
-      );
-    }
-    try {
-      const { result: decrypted } =
-        await secureStorage.decryptString(encrypted);
-      return {
-        state: "ready",
-        accounts: normalizeEncryptedAccounts(JSON.parse(decrypted)),
-      };
-    } catch (error) {
-      if (error instanceof CredentialVaultError) throw error;
-      if (isSafeStorageUnavailableError(error)) {
-        throw new CredentialVaultError(
-          "CREDENTIAL_VAULT_UNAVAILABLE",
-          "系统安全存储暂时不可用，原加密登录记录已保留",
-          error,
-        );
-      }
-      if (error?.code === "SAFE_STORAGE_DECRYPT_FAILED") {
-        throw new CredentialVaultError(
-          "CREDENTIAL_VAULT_DECRYPT_FAILED",
-          "系统安全存储无法解密本机登录记录，原加密文件已保留",
-          error,
-        );
-      }
-      throw new CredentialVaultError(
-        "CREDENTIAL_VAULT_UNREADABLE",
-        "本机登录记录无法解密或已损坏，原加密文件已保留",
-        error,
-      );
-    }
-  }
-
-  async function writeEncryptedAccounts(accounts) {
-    await assertEncryptionAvailable();
-    const payload = JSON.stringify(
-      normalizeEncryptedAccounts(accounts).slice(0, MAX_CREDENTIAL_ACCOUNTS),
-    );
-    if (payload.length > MAX_CREDENTIAL_PAYLOAD_LENGTH) {
-      throw new Error("记住的账号数量过多");
-    }
-    let encrypted;
-    try {
-      encrypted = await secureStorage.encryptString(payload);
-    } catch (error) {
-      if (isSafeStorageUnavailableError(error)) {
-        throw new CredentialVaultError(
-          "CREDENTIAL_VAULT_UNAVAILABLE",
-          "系统安全存储暂时不可用，原加密登录记录已保留",
-          error,
-        );
-      }
-      throw error;
-    }
-    await atomicWritePrivateFileWithBackup(vaultPath, encrypted, {
-      fileSystem,
-      atomicWrite,
-      backupPath,
-    });
-  }
-
   async function list() {
     await waitForMutations();
     const index = await readEmailIndex();
-    try {
-      const stored = await readEncryptedVault();
-      if (stored.state === "missing") {
-        return {
-          state: "ready",
-          accounts: index.map((account) => ({
-            ...account,
-            hasPassword: false,
-          })),
-        };
-      }
-      const indexed = mergeEmailIndex(stored.accounts, index);
-      try {
-        await writeEmailIndex(indexed);
-      } catch {
-        // A non-secret index failure must not hide decryptable credentials.
-      }
-      const encryptedByEmail = new Map(
-        stored.accounts.map((account) => [account.email, account]),
-      );
-      return {
-        state: "ready",
-        accounts: indexed.map((entry) => {
-          const account = encryptedByEmail.get(entry.email);
-          return {
-            email: entry.email,
-            hasPassword: Boolean(
-              account?.rememberPassword &&
-                typeof account.password === "string",
-            ),
-            lastUsedAt: entry.lastUsedAt,
-          };
-        }),
-      };
-    } catch (error) {
-      if (!(error instanceof CredentialVaultError)) throw error;
-      return {
-        state: "unavailable",
-        accounts: index.map((account) => ({
-          ...account,
-          hasPassword: false,
-        })),
-      };
-    }
-  }
-
-  async function load(emailValue) {
-    await waitForMutations();
-    const email = normalizeCredentialEmail(emailValue);
-    if (!isCredentialEmail(email)) return null;
-    const index = await readEmailIndex();
-    const indexed = index.find((account) => account.email === email);
-    try {
-      const stored = await readEncryptedVault();
-      const account = stored.accounts.find((entry) => entry.email === email);
-      if (account) {
-        return {
-          email: account.email,
-          password:
-            account.rememberPassword && typeof account.password === "string"
-              ? account.password
-              : null,
-          rememberPassword: account.rememberPassword,
-        };
-      }
-      return indexed
-        ? { email, password: null, rememberPassword: false }
-        : null;
-    } catch (error) {
-      if (!(error instanceof CredentialVaultError) || !indexed) throw error;
-      return { email, password: null, rememberPassword: false };
-    }
+    return {
+      state: "ready",
+      accounts: index,
+    };
   }
 
   function save(value) {
     return mutate(async () => {
       const email = normalizeCredentialEmail(value?.email);
-      const password = typeof value?.password === "string" ? value.password : "";
-      const rememberPassword = value?.rememberPassword !== false;
-      if (
-        !isCredentialEmail(email) ||
-        password.length < 1 ||
-        password.length > 512
-      ) {
+      if (!isCredentialEmail(email)) {
         throw new Error("无效的登录账号");
       }
-      const stored = await readEncryptedVault();
       const timestamp = now().toISOString();
+      const index = await readEmailIndex();
       const next = [
         {
           email,
-          password: rememberPassword ? password : null,
-          rememberPassword,
           lastUsedAt: timestamp,
         },
-        ...stored.accounts.filter((account) => account.email !== email),
+        ...index.filter((account) => account.email !== email),
       ];
-      const index = await readEmailIndex();
-      await writeEncryptedAccounts(next);
-      await writeEmailIndex(mergeEmailIndex(next, index));
+      await writeEmailIndex(next);
       return true;
     });
   }
@@ -374,20 +173,17 @@ function createCredentialVault({
     return mutate(async () => {
       const email = normalizeCredentialEmail(emailValue);
       if (!isCredentialEmail(email)) return false;
-      const stored = await readEncryptedVault();
-      const existing = stored.accounts.find((account) => account.email === email);
+      const index = await readEmailIndex();
+      const existing = index.find((account) => account.email === email);
+      if (!existing) return false;
       const next = [
         {
           email,
-          password: existing?.password ?? null,
-          rememberPassword: existing?.rememberPassword ?? false,
           lastUsedAt: now().toISOString(),
         },
-        ...stored.accounts.filter((account) => account.email !== email),
+        ...index.filter((account) => account.email !== email),
       ];
-      const index = await readEmailIndex();
-      await writeEncryptedAccounts(next);
-      await writeEmailIndex(mergeEmailIndex(next, index));
+      await writeEmailIndex(next);
       return true;
     });
   }
@@ -396,13 +192,7 @@ function createCredentialVault({
     return mutate(async () => {
       const email = normalizeCredentialEmail(emailValue);
       if (!isCredentialEmail(email)) return false;
-      const stored = await readEncryptedVault();
       const index = await readEmailIndex();
-      if (stored.state === "ready") {
-        await writeEncryptedAccounts(
-          stored.accounts.filter((account) => account.email !== email),
-        );
-      }
       await writeEmailIndex(
         index.filter((account) => account.email !== email),
       );
@@ -410,7 +200,7 @@ function createCredentialVault({
     });
   }
 
-  return { list, load, remove, save, touch };
+  return { list, remove, save, touch };
 }
 
 module.exports = {

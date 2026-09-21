@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import express from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AI_WORKSPACE_LIMITS, type AiWorkspaceSaveRequest, type AiWorkspaceState } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
 import { createAiWorkspaceRouter } from "./workspaceRoutes";
 import { ApiError, errorHandler } from "../errors";
 import { AiStore, emptyQuota, type AiSql } from "./storage";
@@ -13,6 +13,7 @@ import { AiWorkspaceRepository, validateAiWorkspaceState } from "./workspace";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
 import { completedReply } from "../../src/features/tongpin-ai/chatRequests";
+import type { AiHarnessStep, AiHarnessTrace } from "../../shared/ai";
 
 // Keep Worker global types out of the browser/Node tsconfig. The Worker source is
 // separately typechecked by cloudflare/tsconfig.json and executed here unchanged.
@@ -41,6 +42,25 @@ function fixture(): AiWorkspaceState {
   };
 }
 function saveRequest(state = fixture(), expectedRevision = 0): AiWorkspaceSaveRequest { return { expectedRevision, mutationId: crypto.randomUUID(), state }; }
+const TRACE_TIME = "2026-09-21T08:30:00.000Z";
+function traceStep(index: number, overrides: Partial<AiHarnessStep> = {}): AiHarnessStep {
+  return { id: `trace-step-${index}`, kind: "model", capability: "video", title: `步骤 ${index}`, summary: "仅保存应用拥有的进度摘要。", status: "succeeded", createdAt: TRACE_TIME, updatedAt: TRACE_TIME, ...overrides };
+}
+function harnessTrace(): AiHarnessTrace {
+  return {
+    runId: "trace-run-a", tier: "deep", strategy: "plan_execute", status: "waiting_approval",
+    reasoningSummary: "已形成有界计划，等待确认下一步工具。", nextAction: "approve_tool",
+    toolBudget: { used: 1, max: 8, remaining: 7 },
+    steps: [
+      traceStep(1, { kind: "strategy", title: "执行策略", strategy: "plan_execute", maxToolSteps: 8, workflowId: "hub-research-brief", workflowVersion: 1 }),
+      traceStep(2, { kind: "route", title: "深度档位" }),
+      traceStep(3, { kind: "workflow", title: "1. 界定问题", workflowId: "hub-research-brief", workflowVersion: 1, workflowStepId: "scope" }),
+      traceStep(4, { kind: "plan", title: "制定执行计划" }),
+      traceStep(5, { kind: "tool", title: "工具提案", status: "waiting_approval", proposalId: "proposal-a", sequence: 1, requiresApproval: true, approvalStatus: "waiting" }),
+      traceStep(6, { kind: "approval", title: "等待确认", status: "waiting_approval", proposalId: "proposal-a", sequence: 1, requiresApproval: true, approvalStatus: "waiting" }),
+    ],
+  };
+}
 
 describe("AI durable member workspace", () => {
   let directory: string;
@@ -77,6 +97,97 @@ describe("AI durable member workspace", () => {
     expect(repository.read("member-a")).toEqual(first);
     expect(first.state).toEqual(request.state);
     expect(first.updatedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+  });
+  it("round-trips the latest public Harness trace without leaking internal continuation state", async () => {
+    const state = fixture();
+    state.conversations[0].messages[1].trace = harnessTrace();
+    state.conversations[0].messages[1].harnessPlanRequestId = crypto.randomUUID();
+    const saved = await repository.save("member-a", saveRequest(state));
+    database.close(); database = new DatabaseSync(path.join(directory, "workspace.sqlite"));
+    repository = new AiWorkspaceRepository(adapter(database)); repository.initialize();
+    const restored = repository.read("member-a");
+    expect(restored).toEqual(saved);
+    expect(restored.state!.conversations[0].messages[1].trace).toEqual(state.conversations[0].messages[1].trace);
+    expect(restored.state!.conversations[0].messages[1].harnessPlanRequestId).toBe(state.conversations[0].messages[1].harnessPlanRequestId);
+    expect(JSON.stringify(restored.state!.conversations[0].messages[1].trace)).not.toContain("continuationRequestId");
+  });
+  it("accepts the derived 39-step Harness path and enforces the 48-step safety boundary", async () => {
+    const trace = harnessTrace();
+    trace.status = "succeeded"; trace.nextAction = "none"; trace.toolBudget = { used: 8, max: 8, remaining: 0 };
+    trace.steps = [
+      traceStep(1, { kind: "strategy", title: "执行策略", strategy: "plan_execute", maxToolSteps: 8, workflowId: "hub-research-brief", workflowVersion: 1 }),
+      traceStep(2, { kind: "route", title: "深度档位" }),
+      traceStep(3, { kind: "workflow", title: "1. 界定问题", workflowId: "hub-research-brief", workflowVersion: 1, workflowStepId: "scope" }),
+      traceStep(4, { kind: "workflow", title: "2. 整理证据", workflowId: "hub-research-brief", workflowVersion: 1, workflowStepId: "evidence" }),
+      traceStep(5, { kind: "workflow", title: "3. 形成简报", workflowId: "hub-research-brief", workflowVersion: 1, workflowStepId: "deliver" }),
+      traceStep(6, { kind: "plan", title: "制定执行计划" }),
+      traceStep(7, { kind: "model", title: "初始模型响应" }),
+    ];
+    for (let sequence = 1; sequence <= 8; sequence += 1) {
+      const offset = 7 + ((sequence - 1) * 4);
+      const metadata = { proposalId: `proposal-${sequence}`, sequence, approvalStatus: "consumed" as const, executionRequestId: `execution-${sequence}` };
+      trace.steps.push(
+        traceStep(offset + 1, { kind: "model", title: `续步决策 ${sequence}` }),
+        traceStep(offset + 2, { kind: "tool", title: `工具 ${sequence}`, requiresApproval: true, ...metadata }),
+        traceStep(offset + 3, { kind: "approval", title: `确认 ${sequence}`, requiresApproval: true, ...metadata }),
+        traceStep(offset + 4, { id: `result:tool-${sequence}`, kind: "result", title: `结果 ${sequence}`, ...metadata }),
+      );
+    }
+    expect(trace.steps).toHaveLength(39);
+    const state = fixture(); state.conversations[0].messages[1].trace = trace;
+    expect((await repository.save("member-a", saveRequest(state))).state!.conversations[0].messages[1].trace!.steps).toHaveLength(39);
+
+    const boundary = structuredClone(state);
+    for (let index = 40; index <= AI_WORKSPACE_LIMITS.harnessStepsPerTrace; index += 1) boundary.conversations[0].messages[1].trace!.steps.push(traceStep(index));
+    expect(() => validateAiWorkspaceState(boundary)).not.toThrow();
+    boundary.conversations[0].messages[1].trace!.steps.push(traceStep(AI_WORKSPACE_LIMITS.harnessStepsPerTrace + 1));
+    expect(() => validateAiWorkspaceState(boundary)).toThrow(expect.objectContaining({ status: 413, code: "AI_WORKSPACE_TOO_LARGE" }));
+  });
+  it("rejects private Harness fields, unknown fields and inconsistent public metadata without changing the snapshot", async () => {
+    const state = fixture(); state.conversations[0].messages[1].trace = harnessTrace();
+    const saved = await repository.save("member-a", saveRequest(state));
+    const mutate = (change: (trace: Record<string, unknown>, step: Record<string, unknown>) => void) => {
+      const next = structuredClone(state);
+      const trace = next.conversations[0].messages[1].trace as unknown as Record<string, unknown>;
+      const step = (trace.steps as Array<Record<string, unknown>>)[0];
+      change(trace, step);
+      return next;
+    };
+    const malicious = [
+      mutate(trace => { trace.providerId = "secret-provider"; }),
+      mutate((_trace, step) => { step.continuationRequestId = crypto.randomUUID(); }),
+      mutate((_trace, step) => { step.privatePrompt = "do not persist"; }),
+      mutate(trace => { (trace.toolBudget as Record<string, unknown>).remaining = 8; }),
+      mutate(trace => { trace.nextAction = "poll"; }),
+      mutate((_trace, step) => { step.workflowStepId = "unowned-node"; }),
+      mutate(trace => { trace.toolBudget = JSON.parse('{"used":1,"max":8,"remaining":7,"__proto__":{"admin":true}}') as unknown; }),
+      mutate((_trace, step) => { step.maxToolSteps = 9; }),
+    ];
+    for (const candidate of malicious) {
+      await expect(repository.save("member-a", saveRequest(candidate, 1))).rejects.toMatchObject({ status: 400, code: "AI_WORKSPACE_INVALID" });
+      expect(repository.read("member-a")).toEqual(saved);
+    }
+  });
+  it("accepts exact Harness text limits and rejects one character beyond them", async () => {
+    const state = fixture(); const trace = harnessTrace();
+    trace.reasoningSummary = "摘".repeat(1000); trace.steps[0].summary = "要".repeat(500);
+    state.conversations[0].messages[1].trace = trace;
+    const saved = await repository.save("member-a", saveRequest(state));
+    const tooLongSummary = structuredClone(state); tooLongSummary.conversations[0].messages[1].trace!.reasoningSummary += "长";
+    await expect(repository.save("member-a", saveRequest(tooLongSummary, 1))).rejects.toMatchObject({ status: 413, code: "AI_WORKSPACE_TOO_LARGE" });
+    const tooLongStep = structuredClone(state); tooLongStep.conversations[0].messages[1].trace!.steps[0].summary += "长";
+    await expect(repository.save("member-a", saveRequest(tooLongStep, 1))).rejects.toMatchObject({ status: 413, code: "AI_WORKSPACE_TOO_LARGE" });
+    expect(repository.read("member-a")).toEqual(saved);
+  });
+  it("keeps the prior public trace shape saveable but rejects mixed incomplete schema upgrades", async () => {
+    const legacyTrace = {
+      runId: "legacy-run", tier: "quick", status: "succeeded", reasoningSummary: "历史公开摘要",
+      steps: [{ id: "legacy-route", kind: "route", capability: "chat", title: "快速档位", summary: "历史公开步骤", status: "succeeded", createdAt: TRACE_TIME, updatedAt: TRACE_TIME }],
+    };
+    const state = fixture(); state.conversations[0].messages[1].trace = legacyTrace as unknown as AiHarnessTrace;
+    expect((await repository.save("member-a", saveRequest(state))).state!.conversations[0].messages[1].trace).toEqual(legacyTrace);
+    const mixed = structuredClone(state); (mixed.conversations[0].messages[1].trace as unknown as Record<string, unknown>).strategy = "direct";
+    await expect(repository.save("member-a", saveRequest(mixed, 1))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
   });
   it("durably saves visual draft/message frames only inside the authenticated member workspace", async () => {
     const state = fixture();
@@ -213,7 +324,7 @@ describe("AI durable member workspace", () => {
     state.conversations[0].messages[0].content = content;
     expect((await repository.save("member-a", saveRequest(state))).state!.conversations[0].messages[0].content).toBe(content);
   });
-  it("counts UTF-8 bytes and accepts the exact 2 MiB boundary using safe SQL chunks", async () => {
+  it("counts UTF-8 bytes and accepts the exact workspace boundary using safe SQL chunks", async () => {
     const state = fixture(); state.artifacts[0].data = { padding: "" };
     const overhead = new TextEncoder().encode(JSON.stringify(state)).byteLength;
     state.artifacts[0].data.padding = "a".repeat(AI_WORKSPACE_LIMITS.stateBytes - overhead);
@@ -264,6 +375,14 @@ describe("AI durable member workspace", () => {
 
   const actor = (id = "member-a", role: "member" | "admin" | "boss" = "member") => ({ id, role, status: "active" as const });
   const invoke = (repository: AiWorkspaceRepository, method: string, body?: unknown, member = actor(), suffix = "") => handleAiWorkspaceRequest(new Request(`https://tongpin.example/api/ai/workspace${suffix}`, { method, ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) }), repository, member);
+  it("Cloudflare shared route round-trips the latest public Harness trace", async () => {
+    const state = fixture(); state.conversations[0].messages[1].trace = harnessTrace();
+    const saved = await invoke(repository, "PUT", saveRequest(state));
+    expect(saved.status).toBe(200);
+    const restored = await invoke(repository, "GET", undefined, actor(), "?ignored=1");
+    expect(restored.status).toBe(200);
+    expect((await restored.json() as AiWorkspaceSnapshot).state!.conversations[0].messages[1].trace).toEqual(state.conversations[0].messages[1].trace);
+  });
   it("Cloudflare route denies admin, ungranted boss and inactive actors, and ignores account queries", async () => {
     expect((await invoke(repository, "GET", undefined, actor("admin", "admin"))).status).toBe(403);
     expect((await invoke(repository, "GET", undefined, actor("boss", "boss"))).status).toBe(403);

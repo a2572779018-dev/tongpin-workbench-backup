@@ -60,6 +60,8 @@ describe("AI administrator provider forms", () => {
     expect(adminAiErrorMessage(new ApiRequestError(502, "AI_PROVIDER_AUTH", "secret-token"), "连接失败")).toContain("API 密钥无效");
     expect(adminAiErrorMessage(new ApiRequestError(409, "AI_CONFIG_CHANGED", "secret-token"), "连接失败")).toContain("接入配置");
     expect(adminAiErrorMessage(new ApiRequestError(400, "AI_HOST_NOT_ALLOWED", "secret-token"), "连接失败")).toContain("服务商域名尚未接入");
+    expect(adminAiErrorMessage(new ApiRequestError(503, "AI_AGENT_MODELS_UNVERIFIED", "secret-token"), "连接失败")).toContain("模型检查");
+    expect(adminAiErrorMessage(new ApiRequestError(503, "AI_AGENT_ASTRA_UNAVAILABLE", "secret-token"), "连接失败")).toContain("Astra");
   });
   it("keeps secrets in a write-only password field and permits model discovery before saving", () => {
     const source = readFileSync(new URL("./AdminAiProviderSettings.tsx", import.meta.url), "utf8");
@@ -71,6 +73,15 @@ describe("AI administrator provider forms", () => {
     expect(testHandler).not.toContain("validateAiProviderInput");
     expect(testHandler).not.toContain("|| dirty");
     expect(testHandler).not.toContain("result.message");
+  });
+  it("automatically checks the saved credential and never treats hard-coded B.AI names as verified", () => {
+    const source = readFileSync(new URL("./AdminAiProviderSettings.tsx", import.meta.url), "utf8");
+    const saveHandler = source.slice(source.indexOf("async function save"), source.indexOf("async function testImageConnection"));
+    expect(saveHandler).toContain('"/api/admin/ai/provider/test"');
+    expect(saveHandler).toContain('JSON.stringify({ target: "chat" })');
+    expect(saveHandler).toContain("接入已保存，但模型检查未通过");
+    expect(source).not.toContain("BAI_PRESET_MODELS");
+    expect(source).toContain("saved.availableModels?.forEach");
   });
   it("requires explicit image conversion and never reuses the text key for a new image host", () => {
     expect(validateAiProviderInput({ ...provider, imageModel: "image" }, saved)).toContain("折算的同频点");

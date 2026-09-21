@@ -1,10 +1,12 @@
 import { AI_PERSONA_LIMITS, defaultAiPersonaProfile, isAiPersonaExpression, type AiPersonaProfile, type AiPersonaSnapshot } from "../../shared/aiPersona";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
+import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey } from "./tenant";
 
 export const AI_PERSONA_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_personas (
   user_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}',
   revision INTEGER NOT NULL,
   schema_version INTEGER NOT NULL,
   updated_at TEXT NOT NULL,
@@ -46,25 +48,34 @@ export function validateAiPersonaProfile(value: unknown): AiPersonaProfile {
 /** Only authenticated member ids are accepted by routes; administrators have no read-all endpoint. */
 export class AiPersonaRepository {
   constructor(readonly sql: AiSql) {}
-  initialize(): void { this.sql.exec(AI_PERSONA_SCHEMA); }
-  read(userId: string): AiPersonaSnapshot {
+  initialize(): void {
+    this.sql.exec(AI_PERSONA_SCHEMA);
+    const columns = this.sql.all<{ name: string }>("PRAGMA table_info(ai_personas)");
+    if (!columns.some(column => column.name === "tenant_id")) this.sql.exec(`ALTER TABLE ai_personas ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}'`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS ai_personas_tenant_user ON ai_personas(tenant_id,user_id)");
+  }
+  read(userId: string, tenantId: string = DEFAULT_AI_TENANT_ID): AiPersonaSnapshot {
     accountId(userId);
-    new AiStore(this.sql).assertAccess(userId);
-    const row = this.sql.all<{ revision: number; schema_version: number; data: string }>("SELECT revision,schema_version,data FROM ai_personas WHERE user_id=?", userId)[0];
+    const tenant = normalizeAiTenantId(tenantId);
+    const storedUserId = tenantStorageKey(tenant, userId);
+    new AiStore(this.sql, tenant).assertAccess(userId);
+    const row = this.sql.all<{ revision: number; schema_version: number; data: string }>("SELECT revision,schema_version,data FROM ai_personas WHERE tenant_id=? AND user_id=?", tenant, storedUserId)[0];
     if (!row) return { revision: 0, profile: defaultAiPersonaProfile() };
     if (row.schema_version !== 1) throw new AiError(409, "AI_PERSONA_VERSION_UNSUPPORTED", "专属 AI 设置版本已更新，请升级客户端");
     return { revision: row.revision, profile: validateAiPersonaProfile(JSON.parse(row.data)) };
   }
-  save(userId: string, value: unknown): AiPersonaSnapshot {
+  save(userId: string, value: unknown, tenantId: string = DEFAULT_AI_TENANT_ID): AiPersonaSnapshot {
     accountId(userId);
-    new AiStore(this.sql).assertAccess(userId);
+    const tenant = normalizeAiTenantId(tenantId);
+    const storedUserId = tenantStorageKey(tenant, userId);
+    new AiStore(this.sql, tenant).assertAccess(userId);
     const body = record(value, ["expectedRevision", "profile", "reset"]);
     if (!Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 || Number(body.expectedRevision) >= Number.MAX_SAFE_INTEGER) invalid("设置版本无效，请重新加载");
     if (body.reset !== undefined && typeof body.reset !== "boolean") invalid("重置选项格式不正确");
     if (body.reset === true && body.profile !== undefined) invalid("重置时不能同时提交其他设置");
     const profile = body.reset === true ? defaultAiPersonaProfile() : validateAiPersonaProfile(body.profile);
     return this.sql.transaction(() => {
-      const current = this.read(userId);
+      const current = this.read(userId, tenant);
       if (current.revision !== body.expectedRevision) throw new AiError(409, "AI_PERSONA_CONFLICT", "专属 AI 设置已在其他窗口修改，本次未覆盖，请重新加载后再确认");
       // Older clients omit this visual-only field when saving textual preferences.
       // Preserve an existing choice inside the same CAS transaction; only reset or
@@ -73,7 +84,7 @@ export class AiPersonaRepository {
         profile.expression = current.profile.expression ?? "auto";
       }
       const revision = current.revision + 1;
-      this.sql.exec("INSERT INTO ai_personas(user_id,revision,schema_version,updated_at,data) VALUES(?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,schema_version=excluded.schema_version,updated_at=excluded.updated_at,data=excluded.data", userId, revision, new Date().toISOString(), JSON.stringify(profile));
+      this.sql.exec("INSERT INTO ai_personas(user_id,tenant_id,revision,schema_version,updated_at,data) VALUES(?,?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET tenant_id=excluded.tenant_id,revision=excluded.revision,schema_version=excluded.schema_version,updated_at=excluded.updated_at,data=excluded.data", storedUserId, tenant, revision, new Date().toISOString(), JSON.stringify(profile));
       return { revision, profile };
     });
   }

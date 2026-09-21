@@ -1,0 +1,8 @@
+.tp-ai-composer { position: relative; }
+.tp-ai-skill-mentions { position:absolute; z-index:30; bottom:100%; left:12px; width:min(390px,calc(100% - 24px)); max-height:280px; overflow:auto; padding:8px; margin-bottom:8px; border:1px solid #d3c7a9; border-radius:16px; background:#fffcf5; box-shadow:0 8px 30px #28200e1a; }
+.tp-ai-skill-mentions button { display:flex; justify-content:space-between; gap:16px; width:100%; padding:10px 12px; border:0; border-radius:9px; background:transparent; text-align:left; color:#363329; }
+.tp-ai-skill-mentions button[aria-selected="true"], .tp-ai-skill-mentions button:hover { background:#f5e9b5; }
+.tp-ai-skill-mentions button:disabled { cursor:not-allowed; opacity:.58; }
+.tp-ai-skill-mentions small { color:#776e5c; }
+.tp-ai-skill-mentions p { padding:8px 12px; }
+.tp-ai-computer-input-warning { margin:4px 6px 0; color:#8b4b21; font-size:12px; line-height:1.45; }

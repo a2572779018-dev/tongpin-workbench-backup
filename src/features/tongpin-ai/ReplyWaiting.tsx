@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
-/** Keep one-second clock updates out of the conversation and persistence state. */
-export function ReplyWaiting() {
-  const [startedAt] = useState(Date.now);
-  const [seconds, setSeconds] = useState(0);
+/** Keep one-second clock updates out of the conversation while preserving the request's real start time. */
+export function ReplyWaiting({ startedAt: persistedStartedAt }: { startedAt?: number }) {
+  const [startedAt] = useState(() => Number.isSafeInteger(persistedStartedAt) && persistedStartedAt! >= 0 ? persistedStartedAt! : Date.now());
+  const [seconds, setSeconds] = useState(() => Math.max(0, Math.floor((Date.now() - startedAt) / 1_000)));
   useEffect(() => {
     const timer = window.setInterval(() => setSeconds(Math.floor((Date.now() - startedAt) / 1_000)), 1_000);
     return () => window.clearInterval(timer);

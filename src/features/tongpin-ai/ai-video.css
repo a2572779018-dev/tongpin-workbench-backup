@@ -51,4 +51,11 @@
 .tp-ai-video-composer .tp-ai-video-reference-grid img { height:64px; }
 .tp-ai-video-composer figcaption { overflow:hidden; overflow-wrap:anywhere; gap:4px; font-size:10px; }
 .tp-ai-video-composer.is-dragging { background:#fff3bd; outline:2px dashed #b59b32; outline-offset:-6px; }
+.tp-ai-tool-plan { display:grid; gap:7px; margin:10px 0; padding:10px 12px; border:1px solid #d8c77d; border-radius:12px; background:#fff9df; }
+.tp-ai-tool-plan p,.tp-ai-tool-plan small { margin:0; }
+.tp-ai-tool-plan p { font-size:13px; }
+.tp-ai-tool-plan small,.tp-ai-tool-plan-hint { color:#766f60; font-size:12px; }
+.tp-ai-tool-plan label { display:grid; gap:5px; font-size:12px; }
+.tp-ai-tool-plan textarea { width:100%; min-height:72px; max-height:150px; resize:vertical; padding:9px 10px; border:1px solid #d7cdb7; border-radius:9px; background:#fffdf7; color:inherit; font:inherit; }
+.tp-ai-tool-confirm { margin-top:6px; background:#f3d75b!important; border-color:#b59b32!important; font-weight:700!important; }
 @media(max-width:640px) { .tp-ai-video-composer .tp-ai-video-options { grid-template-columns:1fr 1fr; } }

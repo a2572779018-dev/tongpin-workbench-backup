@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
 import { WorkspaceSaveQueue, type WorkspaceSyncStatus } from "./workspaceSync";
-import { registerAiLeaveGuard } from "./workspaceLeaveGuard";
+import { notifyAiWorkspaceSaved, registerAiLeaveGuard } from "./workspaceLeaveGuard";
 
 export function useWorkspacePersistence(
   initial: AiWorkspaceSnapshot,
@@ -13,6 +13,7 @@ export function useWorkspacePersistence(
   const [status, setStatus] = useState<WorkspaceSyncStatus>("saved");
   const [error, setError] = useState("");
   const [queue] = useState(() => new WorkspaceSaveQueue(initial, write, (next, message = "") => {
+    if (next === "saved") notifyAiWorkspaceSaved(accountId);
     if (active.current) { setStatus(next); setError(message); }
   }));
   useEffect(() => registerAiLeaveGuard(accountId, () => queue.flushSaved()), [accountId, queue]);

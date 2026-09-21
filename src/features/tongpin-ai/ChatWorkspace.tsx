@@ -4,6 +4,7 @@ import {
   Brain,
   ChevronDown,
   Image as ImageIcon,
+  ImagePlus,
   LoaderCircle,
   PanelLeft,
   Paperclip,
@@ -21,12 +22,14 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import autoAnimate from "@formkit/auto-animate";
 import type {
   TongpinAIArtifact,
   TongpinAIDemoAction,
@@ -37,6 +40,7 @@ import type {
 import { TongpinAINotificationButton } from "./TongpinAINotificationButton";
 import { TongpinAICharacter } from "./visuals/TongpinAICharacter";
 import type { AiPersonaExpression } from "../../../shared/aiPersona";
+import type { AiHarnessTrace, AiToolPlan } from "../../../shared/ai";
 import { didCharacterReplyComplete, type CharacterActivity, type CharacterReplySnapshot } from "./visuals/characterExpression";
 import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
 import { ATTACHMENT_ACCEPT, TEXT_ATTACHMENT_ACCEPT, workspaceAttachment } from "./attachments";
@@ -44,8 +48,18 @@ import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT } from "../../../shared/aiMedia";
 import { AttachmentChips } from "./AttachmentChips";
 import { ChatMessageRow } from "./ChatMessageRow";
 import { AiVideoComposer, type VideoComposerHandle } from "./AiVideoComposer";
-import { isVideoGenerationRequest, type VideoChatRequest } from "./videoChat";
+import { ComputerUsePanel } from "./ComputerUsePanel";
+import type { ComputerUseModelPlan } from "./computerUseFlow";
+import type { ComputerUseWindowState } from "../../../shared/computerUse";
+import type { VideoChatRequest } from "./videoChat";
 import { CHAT_MESSAGE_PAGE_SIZE } from "./chatPerformance";
+import { TONGPIN_AI_SKILLS } from "./mockData";
+import { activeSkillMention, insertSkillMention, mentionedToolIds, resolveToolIntent, TOOL_MENTIONS, WORKFLOW_MENTIONS } from "./skillMentions";
+import { ToolPlanRequestGate, toolPlanClientContextKey } from "./toolPlanState";
+import { videoReferencesFromAttachments, type LocalVideoReferenceImage } from "./videoReferenceAttachments";
+import "./skill-mentions.css";
+
+const EMPTY_PROJECT_DOCUMENTS: AiWorkspaceDocument[] = [];
 
 interface ChatWorkspaceProps {
   artifactById: Map<string, TongpinAIArtifact>;
@@ -57,7 +71,10 @@ interface ChatWorkspaceProps {
   messages: TongpinAIMessage[];
   mode: TongpinAIMode;
   notificationUnread: number;
+  projectId?: string;
   projectTitle?: string;
+  projectContext?: string;
+  projectDocuments?: AiWorkspaceDocument[];
   quotaInsufficient: boolean;
   checkingQuota?: boolean;
   budgetNotice?: { title: string; message: string; canDisableSearch: boolean };
@@ -70,6 +87,7 @@ interface ChatWorkspaceProps {
   connectionError?: string;
   onRefreshConnection?: () => void;
   onRetry?: (messageId: string) => void;
+  onTraceChange?: (messageId: string, trace: AiHarnessTrace) => void;
   retryableMessageIds?: Set<string>;
   sidebarCollapsed?: boolean;
   serviceConnected?: boolean;
@@ -96,9 +114,16 @@ interface ChatWorkspaceProps {
   onOpenSkills?: () => void;
   onToggleSidebar?: () => void;
   onStop?: () => void;
-  onSubmit: () => void;
+  onSubmit: (approvedPlan?: AiToolPlan & { originalPrompt: string }) => void;
+  onPlanTool?: (kind: "image" | "video" | "presentation", prompt: string, videoRequest?: VideoChatRequest) => Promise<AiToolPlan>;
   onSubmitVideo?: (request: VideoChatRequest) => Promise<boolean>;
   onUseVideoHistory?: (jobId: string) => Promise<boolean>;
+  computerAvailable?: boolean;
+  computerRequest?: { id: string; originalPrompt: string };
+  onOpenComputer?: (prompt: string) => void;
+  onPlanComputer?: (originalPrompt: string, state: ComputerUseWindowState) => Promise<ComputerUseModelPlan>;
+  onCloseComputer?: () => void;
+  onComputerResult?: (message: string) => void;
 }
 
 export function ChatWorkspace({
@@ -111,7 +136,10 @@ export function ChatWorkspace({
   messages,
   mode,
   notificationUnread,
+  projectId,
   projectTitle,
+  projectContext,
+  projectDocuments = EMPTY_PROJECT_DOCUMENTS,
   quotaInsufficient,
   checkingQuota = false,
   budgetNotice,
@@ -123,6 +151,7 @@ export function ChatWorkspace({
   connectionError = "",
   onRefreshConnection,
   onRetry,
+  onTraceChange,
   retryableMessageIds,
   sidebarCollapsed = false,
   serviceConnected = false,
@@ -149,11 +178,35 @@ export function ChatWorkspace({
   onToggleSidebar,
   onStop,
   onSubmit,
+  onPlanTool,
   onSubmitVideo,
   onUseVideoHistory,
+  computerAvailable = false,
+  computerRequest,
+  onOpenComputer,
+  onPlanComputer,
+  onCloseComputer,
+  onComputerResult,
 }: ChatWorkspaceProps) {
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [mention, setMention] = useState<ReturnType<typeof activeSkillMention>>();
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const mentionSkills = mention ? [
+    ...TONGPIN_AI_SKILLS.map(({ id, name }) => ({ id, name, available: true })),
+    ...WORKFLOW_MENTIONS.map(({ id, name }) => ({ id, name: `${name} · 工作流`, available: true })),
+    ...TOOL_MENTIONS.map(tool => ({
+      ...tool,
+      available: tool.id !== "computer" || computerAvailable,
+    })),
+  ].filter(s => `${s.id} ${s.name}`.toLowerCase().includes(mention.query)) : [];
+  function trackMention(value: string, caret: number) { setMention(activeSkillMention(value, caret)); setMentionIndex(0); }
+  function chooseMention(id: string) {
+    if (!mention || videoBusy || (id === "computer" && !computerAvailable)) return;
+    const next = insertSkillMention(draft, mention, id);
+    onDraftChange(next.text); setMention(undefined);
+    requestAnimationFrame(() => { composerRef.current?.focus(); composerRef.current?.setSelectionRange(next.caret, next.caret); });
+  }
   const toolbarRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const actionTriggerRef = useRef<HTMLButtonElement>(null);
@@ -162,9 +215,56 @@ export function ChatWorkspace({
   const [menu, setMenu] = useState<"attachments" | "tools" | null>(null);
   const [videoOpen, setVideoOpen] = useState(false);
   const [videoInitial, setVideoInitial] = useState<VideoChatRequest | undefined>();
+  const [videoAttachmentReferences, setVideoAttachmentReferences] = useState<LocalVideoReferenceImage[]>([]);
   const [videoBusy, setVideoBusy] = useState(false);
+
+  useEffect(() => {
+    const list = messageListRef.current;
+    if (!list) return;
+    const controller = autoAnimate(list, { duration: 160, easing: "ease-out" });
+    return () => controller.disable();
+  }, []);
+  const [imagePlan, setImagePlan] = useState<(AiToolPlan & { originalPrompt: string }) | null>(null);
+  const [presentationPlan, setPresentationPlan] = useState<(AiToolPlan & { originalPrompt: string }) | null>(null);
+  const [imagePlanning, setImagePlanning] = useState(false);
+  const [queuedToolPlan, setQueuedToolPlan] = useState<{
+    kind: "image" | "presentation";
+    originalPrompt: string;
+    contextKey: string;
+  } | null>(null);
+  const toolPlanGateRef = useRef(new ToolPlanRequestGate());
   const videoComposerRef = useRef<VideoComposerHandle>(null);
-  useEffect(() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); }, [conversationId]);
+  const enabledSkillPlanKey = enabledSkills.map(skill => skill.id).sort().join("\u0000");
+  const toolPlanContextKeyFor = useCallback((tool: "text" | "presentation" | "image") => toolPlanClientContextKey({
+      conversationId,
+      projectId,
+      projectContext,
+      projectDocuments,
+      currentAttachments: attachments,
+      messages,
+      draft,
+      composerTool: tool,
+      mode,
+      enabledSkillIds: enabledSkillPlanKey ? enabledSkillPlanKey.split("\u0000") : [],
+    }),
+    [attachments, conversationId, draft, enabledSkillPlanKey, messages, mode, projectContext, projectDocuments, projectId],
+  );
+  const toolPlanContextKey = useMemo(() => toolPlanContextKeyFor(composerTool), [composerTool, toolPlanContextKeyFor]);
+  const latestToolPlanContextKeyRef = useRef(toolPlanContextKey);
+  latestToolPlanContextKeyRef.current = toolPlanContextKey;
+  toolPlanGateRef.current.syncContext(toolPlanContextKey);
+  useEffect(() => {
+    setVideoOpen(false);
+    setVideoBusy(false);
+    setVideoInitial(undefined);
+    setVideoAttachmentReferences([]);
+  }, [conversationId]);
+  useEffect(() => {
+    setImagePlan(null);
+    setPresentationPlan(null);
+    setImagePlanning(false);
+  }, [toolPlanContextKey]);
+  useEffect(() => () => toolPlanGateRef.current.invalidate(), []);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState("");
@@ -185,12 +285,88 @@ export function ChatWorkspace({
   const historyAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const callbacksRef = useRef({ onOpenArtifact, onRetry, onRefreshConnection });
   callbacksRef.current = { onOpenArtifact, onRetry, onRefreshConnection };
+  const videoComposerContextRef = useRef({ attachments, onComposerToolChange, onDraftChange, onWebSearchChange });
+  videoComposerContextRef.current = { attachments, onComposerToolChange, onDraftChange, onWebSearchChange };
   const videoSettled = useCallback(() => callbacksRef.current.onRefreshConnection?.(), []);
   const openArtifact = useCallback((id: string) => callbacksRef.current.onOpenArtifact(id), []);
   const retryMessage = useCallback((id: string) => callbacksRef.current.onRetry?.(id), []);
   const visibleCount = historyWindow.conversationId === conversationId ? historyWindow.count : CHAT_MESSAGE_PAGE_SIZE;
   const hiddenCount = Math.max(0, messages.length - visibleCount);
   const capabilityUnavailable = composerTool === "image" ? !imageEnabled : webSearch && !webSearchEnabled;
+  const computerMentioned = mentionedToolIds(draft).includes("computer");
+  const openVideoComposer = useCallback((initial?: VideoChatRequest) => {
+    const { attachments: currentAttachments, onComposerToolChange: changeComposerTool, onWebSearchChange: changeWebSearch } = videoComposerContextRef.current;
+    const migration = videoReferencesFromAttachments(currentAttachments);
+    if (!migration.ok) {
+      setFileError(migration.message);
+      return false;
+    }
+    setFileError("");
+    setVideoInitial(initial);
+    setVideoAttachmentReferences(initial?.referenceImages ?? migration.images);
+    setVideoOpen(true);
+    setMenu(null);
+    changeComposerTool?.("text");
+    changeWebSearch?.(false);
+    requestAnimationFrame(() => composerRef.current?.focus());
+    return true;
+  }, []);
+  const editVideo = useCallback((request: VideoChatRequest) => {
+    videoComposerContextRef.current.onDraftChange(request.originalPrompt ?? request.prompt);
+    openVideoComposer(request);
+  }, [openVideoComposer]);
+  const beginToolPlan = useCallback((kind: "image" | "presentation", originalPrompt: string, contextKey: string) => {
+    if (!onPlanTool) {
+      setFileError("同频 AI 任务规划暂不可用，请稍后重试");
+      return;
+    }
+    const ticket = toolPlanGateRef.current.start(contextKey);
+    setImagePlanning(true);
+    setFileError("");
+    void onPlanTool(kind, originalPrompt).then(plan => {
+      if (!toolPlanGateRef.current.isCurrent(ticket, latestToolPlanContextKeyRef.current)) return;
+      if (plan.kind !== kind) throw new Error(`同频 AI 返回的不是${kind === "image" ? "图片" : "PPT"}任务，请重新整理`);
+      const confirmed = { ...plan, originalPrompt };
+      if (kind === "image") setImagePlan(confirmed);
+      else setPresentationPlan(confirmed);
+    }).catch(error => {
+      if (toolPlanGateRef.current.isCurrent(ticket, latestToolPlanContextKeyRef.current)) setFileError(error instanceof Error ? error.message : `同频 AI 暂时无法整理${kind === "image" ? "图片" : "PPT"}任务`);
+    }).finally(() => {
+      if (toolPlanGateRef.current.isCurrent(ticket, latestToolPlanContextKeyRef.current)) setImagePlanning(false);
+    });
+  }, [onPlanTool]);
+  useEffect(() => {
+    if (!queuedToolPlan) return;
+    const targetTool = queuedToolPlan.kind === "image" ? "image" : "presentation";
+    if (toolPlanContextKeyFor(targetTool) !== queuedToolPlan.contextKey) {
+      setQueuedToolPlan(null);
+      return;
+    }
+    if (composerTool !== targetTool) return;
+    setQueuedToolPlan(null);
+    if (
+      !queuedToolPlan.originalPrompt || responding || checkingQuota || readingFiles || fileReadingRef.current
+      || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked
+      || (queuedToolPlan.kind === "image" && (!imageEnabled || attachments.length > 0))
+    ) return;
+    beginToolPlan(queuedToolPlan.kind, queuedToolPlan.originalPrompt, queuedToolPlan.contextKey);
+  }, [
+    attachments.length,
+    availabilityBlocked,
+    beginToolPlan,
+    checkingQuota,
+    composerTool,
+    connectionError,
+    connectionLoading,
+    imageEnabled,
+    queuedToolPlan,
+    quotaInsufficient,
+    readingFiles,
+    responding,
+    serviceConnected,
+    toolPlanContextKey,
+    toolPlanContextKeyFor,
+  ]);
   useEffect(() => {
     if (quickAuto && mode === "quick" && webSearch) onWebSearchChange?.(false);
   }, [quickAuto, mode, webSearch, onWebSearchChange]);
@@ -311,17 +487,74 @@ export function ChatWorkspace({
 
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
+    const { mentionedTools, requestedTool } = resolveToolIntent(draft);
+    if (mentionedTools.length > 1) {
+      setFileError("一次只能选择一个 @ 工具，请移除多余工具后重试。");
+      return;
+    }
+    if (mentionedTools[0] === "computer") {
+      if (responding || checkingQuota || readingFiles || fileReadingRef.current) return;
+      if (attachments.length) {
+        setFileError("电脑控制不会读取聊天附件，请先移除附件再开启。");
+        return;
+      }
+      if (!onOpenComputer) {
+        setFileError("电脑控制只在已接入安全桌面桥的同频安装版中可用。");
+        return;
+      }
+      setFileError("");
+      setMenu(null);
+      setVideoOpen(false);
+      setVideoInitial(undefined);
+      setVideoAttachmentReferences([]);
+      setImagePlan(null);
+      setPresentationPlan(null);
+      onComposerToolChange?.("text");
+      onWebSearchChange?.(false);
+      onOpenComputer(draft.trim());
+      return;
+    }
     if (videoOpen) {
-      if (attachments.length) { setFileError("请移除普通附件，改用视频设置中的「添加参考图片」。"); return; }
       if (!responding && !videoBusy) videoComposerRef.current?.submit(); return;
     }
-    if (onSubmitVideo && !responding && isVideoGenerationRequest(draft)) {
-      setVideoOpen(true); setMenu(null); onComposerToolChange?.("text"); onWebSearchChange?.(false); return;
+    if (onSubmitVideo && !responding && requestedTool === "video") {
+      openVideoComposer(); return;
+    }
+    if ((requestedTool === "image" && composerTool !== "image") || (requestedTool === "ppt" && composerTool !== "presentation")) {
+      if (responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked) return;
+      if (requestedTool === "image" && !imageEnabled) {
+        setFileError("图片生成尚未启用，请联系管理员配置。");
+        return;
+      }
+      if (requestedTool === "image" && attachments.length) {
+        setFileError("图片生成暂不支持普通附件，请先移除附件再试。");
+        return;
+      }
+      const pendingPlanKind = requestedTool === "image" ? "image" : "presentation";
+      const targetComposerTool = pendingPlanKind === "image" ? "image" : "presentation";
+      const originalPrompt = draft.trim();
+      setQueuedToolPlan({ kind: pendingPlanKind, originalPrompt, contextKey: toolPlanContextKeyFor(targetComposerTool) });
+      onComposerToolChange?.(targetComposerTool);
+      if (pendingPlanKind === "image") onWebSearchChange?.(false);
+      setMenu(null);
+      return;
     }
     if ((!draft.trim() && !attachments.length) || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked || capabilityUnavailable) return;
+    const pendingPlanKind = composerTool === "image" ? "image" : composerTool === "presentation" ? "presentation" : undefined;
+    const approvedPlan = composerTool === "image" ? imagePlan : composerTool === "presentation" ? presentationPlan : null;
+    if (pendingPlanKind && !approvedPlan) {
+      if (imagePlanning || !draft.trim()) return;
+      if (pendingPlanKind === "image" && attachments.length) {
+        setFileError("图片生成暂不支持普通附件，请先移除附件再试。");
+        return;
+      }
+      const originalPrompt = draft.trim();
+      beginToolPlan(pendingPlanKind, originalPrompt, toolPlanContextKey);
+      return;
+    }
     followResponseRef.current = true;
     setMenu(null);
-    onSubmit();
+    onSubmit(imagePlan ?? presentationPlan ?? undefined);
   }
   async function addFiles(files: File[]) {
     if (!files.length || !onAddFiles || fileReadingRef.current) return;
@@ -334,6 +567,15 @@ export function ChatWorkspace({
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
       return;
+    if (mention) {
+      if (event.key === "Escape") { event.preventDefault(); setMention(undefined); return; }
+      if (mentionSkills.length && ["ArrowDown", "ArrowUp", "Enter", "Tab"].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === "Enter" || event.key === "Tab") chooseMention(mentionSkills[mentionIndex % mentionSkills.length].id);
+        else setMentionIndex(n => (n + (event.key === "ArrowDown" ? 1 : -1) + mentionSkills.length) % mentionSkills.length);
+        return;
+      }
+    }
     if (event.key !== "Enter" || event.shiftKey || event.repeat) return;
     event.preventDefault();
     submitMessage();
@@ -422,26 +664,31 @@ export function ChatWorkspace({
               followResponseRef.current = false;
               setHistoryWindow({ conversationId, count: visibleCount + CHAT_MESSAGE_PAGE_SIZE });
             }}>加载更早的消息（还有 {hiddenCount} 条）</button>}
-            {messages.slice(hiddenCount).map(message => <ChatMessageRow
-              key={message.id} message={message}
-              artifact={message.artifactId ? artifactById.get(message.artifactId) : undefined}
-              assistantName={assistantName} copied={copiedId === message.id}
-              retryable={Boolean(retryableMessageIds?.has(message.id))}
-              retryDisabled={message.status === "error" && responding}
-              onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
-              onVideoSettled={videoSettled}
-              videoEditDisabled={responding || videoBusy || videoOpen || Boolean(draft.trim()) || Boolean(attachments.length)}
-              onEditVideo={onSubmitVideo ? request => { setVideoInitial(request); onDraftChange(request.prompt); setVideoOpen(true); onComposerToolChange?.("text"); onWebSearchChange?.(false); composerRef.current?.focus(); } : undefined}
-            />)}
+            {messages.slice(hiddenCount).map(message => {
+              const artifact = message.artifactId ? artifactById.get(message.artifactId) : undefined;
+              const isVideoArtifact = artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string";
+              return <ChatMessageRow
+                key={message.id} message={message}
+                artifact={artifact}
+                assistantName={assistantName} copied={copiedId === message.id}
+                retryable={Boolean(retryableMessageIds?.has(message.id))}
+                retryDisabled={message.status === "error" && responding}
+                onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
+                onTraceChange={onTraceChange}
+                onVideoSettled={isVideoArtifact ? videoSettled : undefined}
+                videoEditDisabled={isVideoArtifact ? responding || videoBusy || videoOpen || Boolean(draft.trim()) || Boolean(attachments.length) : undefined}
+                onEditVideo={isVideoArtifact && onSubmitVideo ? editVideo : undefined}
+              />;
+            })}
           </>
         )}
       </div>
 
       <footer className="tp-ai-composer-wrap">
-        {availabilityNotice}
+        {!computerRequest && availabilityNotice}
         {fileError ? <p className="tp-ai-copy-error" role="alert">{fileError}</p> : null}
-        {capabilityUnavailable && serviceConnected ? <div className="tp-ai-quota-block" role="status"><span>{composerTool === "image" ? "图片生成尚未启用，请取消图片模式或联系管理员配置。" : "联网搜索当前不可用，请关闭搜索或联系管理员配置。"}</span></div> : null}
-        {(connectionError || (!connectionLoading && !serviceConnected)) && (
+        {!computerRequest && capabilityUnavailable && serviceConnected ? <div className="tp-ai-quota-block" role="status"><span>{composerTool === "image" ? "图片生成尚未启用，请取消图片模式或联系管理员配置。" : "联网搜索当前不可用，请关闭搜索或联系管理员配置。"}</span></div> : null}
+        {!computerRequest && (connectionError || (!connectionLoading && !serviceConnected)) && (
           <div className="tp-ai-quota-block" role="status">
             <span>{connectionError || "管理员尚未启用 AI 服务。"}</span>
             <button type="button" onClick={onRefreshConnection}>刷新状态</button>
@@ -462,12 +709,12 @@ export function ChatWorkspace({
             <ArrowDown size={17} />
           </button>
         )}
-        {budgetNotice && (
+        {!computerRequest && budgetNotice && (
           <div className="tp-ai-quota-block tp-ai-budget-notice" role="alert">
             <span><strong>{budgetNotice.title}</strong><small>{budgetNotice.message}</small></span>
           </div>
         )}
-        {quotaInsufficient && !budgetNotice && (
+        {!computerRequest && quotaInsufficient && !budgetNotice && (
           <div className="tp-ai-quota-block" role="alert">
             <span>
               <strong>AI 额度不足</strong>
@@ -481,8 +728,16 @@ export function ChatWorkspace({
           </p>
         )}
         <div className="tp-ai-beam-wrap">
+          {computerRequest && onPlanComputer ? <ComputerUsePanel
+            key={computerRequest.id}
+            requestId={computerRequest.id}
+            originalPrompt={computerRequest.originalPrompt}
+            onPlan={onPlanComputer}
+            onClose={onCloseComputer ?? (() => undefined)}
+            onResult={onComputerResult ?? (() => undefined)}
+          /> : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑动作规划器未接入，已停止流程。</p> : (
           <form className="tp-ai-composer" onSubmit={submitMessage}>
-            {videoOpen && onSubmitVideo ? <AiVideoComposer ref={videoComposerRef} initialRequest={videoInitial} prompt={draft} onSubmit={onSubmitVideo} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); }} /> : null}
+            {videoOpen && onSubmitVideo && onPlanTool ? <AiVideoComposer ref={videoComposerRef} tier={mode} initialRequest={videoInitial} initialReferenceImages={videoAttachmentReferences} prompt={draft} onPlan={request => onPlanTool("video", request.prompt, request)} onSubmit={onSubmitVideo} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }} /> : null}
             <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);
@@ -499,13 +754,14 @@ export function ChatWorkspace({
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);
             }} />
-            {attachments.length ? <AttachmentChips attachments={attachments.map(workspaceAttachment)} onRemove={index => onRemoveAttachment?.(index)} disabled={responding || readingFiles} /> : null}
+            {!videoOpen && attachments.length ? <AttachmentChips attachments={attachments.map(workspaceAttachment)} onRemove={index => onRemoveAttachment?.(index)} disabled={responding || readingFiles} /> : null}
             {readingFiles ? <div className="tp-ai-attachment-progress" role="status"><LoaderCircle size={16} />正在处理附件…<button type="button" onClick={() => attachmentController.current?.abort()}>取消</button></div> : null}
             {composerTool !== "text" ? <div className="tp-ai-composer-capabilities" aria-label="当前生成设置">
               <button type="button" disabled={responding} onClick={() => onComposerToolChange?.("text")} aria-label={`取消${composerTool === "presentation" ? "生成 PPT" : "生成图片"}`}>
                 {composerTool === "presentation" ? <Presentation size={14} /> : <ImageIcon size={14} />}{composerTool === "presentation" ? "生成 PPT" : "生成图片"}<X size={13} />
               </button>
             </div> : null}
+            {composerTool === "image" && imagePlan ? <section className="tp-ai-tool-plan" aria-label="同频 AI 整理的图片任务"><strong>同频 AI 已整理任务</strong><p>{imagePlan.summary}</p><label>生成提示词<textarea value={imagePlan.prompt} readOnly /></label><small>如需修改，请直接改上方任务描述，再让同频 AI 重新整理。</small></section> : composerTool === "presentation" && presentationPlan ? <section className="tp-ai-tool-plan" aria-label="同频 AI 整理的 PPT 任务"><strong>同频 AI 已整理任务</strong><p>{presentationPlan.summary}</p><label>PPT 生成要求<textarea value={presentationPlan.prompt} readOnly /></label><small>如需修改，请直接改上方任务描述，再让同频 AI 重新整理。</small></section> : composerTool === "image" || composerTool === "presentation" ? <p className="tp-ai-tool-plan-hint">先由同频 AI 整理任务，再由你确认生成。</p> : null}
             <label htmlFor="tp-ai-message-input" className="sr-only">
               输入你的任务
             </label>
@@ -516,7 +772,12 @@ export function ChatWorkspace({
               readOnly={videoBusy}
               rows={2}
               placeholder={videoOpen ? "描述你想生成的视频…" : composerTool === "image" ? "描述你想生成的图片…" : composerTool === "presentation" ? "告诉我 PPT 的主题、用途和页数…" : `把任务交给${assistantName}…`}
-              onChange={(event) => onDraftChange(event.target.value)}
+              aria-controls={mention ? "tp-ai-skill-mentions" : undefined}
+              aria-expanded={Boolean(mention)}
+              aria-activedescendant={mentionSkills.length ? `tp-ai-mention-${mentionSkills[mentionIndex % mentionSkills.length].id}` : undefined}
+              onChange={(event) => { setImagePlan(null); setPresentationPlan(null); onDraftChange(event.target.value); trackMention(event.target.value, event.target.selectionStart); }}
+              onClick={event => trackMention(draft, event.currentTarget.selectionStart)}
+              onBlur={() => setMention(undefined)}
               onKeyDown={handleComposerKeyDown}
               onPaste={event => {
                 const images = Array.from(event.clipboardData.files).filter(file => file.type.startsWith("image/"));
@@ -528,6 +789,10 @@ export function ChatWorkspace({
                 if (!responding) void addFiles(images);
               }}
             />
+            {computerMentioned ? <p className="tp-ai-computer-input-warning" role="note">请勿在 @computer 请求中填写密码、验证码、API 密钥或其他敏感信息；请求会发送给同频 AI 规划。</p> : null}
+            {mention && !videoBusy ? <div className="tp-ai-skill-mentions" id="tp-ai-skill-mentions" role="listbox" aria-label="选择技能">
+              {mentionSkills.length ? mentionSkills.map((skill, index) => <button type="button" role="option" id={`tp-ai-mention-${skill.id}`} key={skill.id} disabled={!skill.available} aria-disabled={!skill.available} aria-selected={index === mentionIndex % mentionSkills.length} onMouseDown={e => e.preventDefault()} onClick={() => chooseMention(skill.id)}><span>{skill.name}</span><small>{skill.available ? `@${skill.id}` : "仅桌面端可用"}</small></button>) : <p>没有已接入的匹配技能</p>}
+            </div> : null}
             <div className="tp-ai-composer__toolbar" ref={toolbarRef}>
               <div className="tp-ai-composer__actions">
                 <button
@@ -600,7 +865,7 @@ export function ChatWorkspace({
                         <button type="button" role="menuitem" disabled={responding || readingFiles || composerTool === "image" || !visionEnabled || !onAddFiles}
                           title={!visionEnabled ? "请管理员启用支持视觉输入的模型" : "PNG、JPEG、WebP，单张最大 12 MB"}
                           onClick={() => { setMenu(null); imageInputRef.current?.click(); }}>
-                          <ImageIcon size={18} /><span>上传图片</span>
+                          <ImagePlus size={18} /><span>上传图片</span>
                         </button>
                         <button type="button" role="menuitem" disabled={responding || readingFiles || composerTool === "image" || !visionEnabled || !onAddFiles}
                           title={!visionEnabled ? "请管理员启用支持视觉输入的模型" : "最多 2 分钟 / 50 MB；分析最多 4 个采样画面，不含音频"}
@@ -618,7 +883,7 @@ export function ChatWorkspace({
                           <span>导入技能说明</span>
                         </button>
                         <div role="separator" />
-                        <button type="button" role="menuitem" disabled={responding || readingFiles || !onSubmitVideo} onClick={() => { setMenu(null); setVideoOpen(true); onComposerToolChange?.("text"); onWebSearchChange?.(false); composerRef.current?.focus(); }}>
+                        <button type="button" role="menuitem" disabled={responding || readingFiles || !onSubmitVideo} onClick={() => { openVideoComposer(); }}>
                           <Video size={18} /><span>生成视频</span>
                         </button>
                         <button
@@ -637,7 +902,7 @@ export function ChatWorkspace({
                           type="button"
                           role="menuitem"
                           disabled={responding || readingFiles || !imageEnabled || attachments.length > 0 || !onComposerToolChange}
-                          title={!imageEnabled ? "请管理员配置图片模型与折算额度" : attachments.length ? "请先移除附件，图片模式仅支持文字描述" : "生成一张图片"}
+                          title={!imageEnabled ? "请管理员配置图片生成与折算额度" : attachments.length ? "请先移除附件，图片模式仅支持文字描述" : "生成一张图片"}
                           onClick={() => {
                             setMenu(null);
                             onWebSearchChange?.(false); onComposerToolChange?.("image"); composerRef.current?.focus();
@@ -684,8 +949,10 @@ export function ChatWorkspace({
                     onModeChange(event.target.value as TongpinAIMode)
                   }
                 >
-                  <option value="quick">{quickAuto ? "快速 Auto" : "快速模式"}</option>
+                  <option value="quick">快速模式</option>
+                  <option value="standard">标准模式</option>
                   <option value="deep">深度思考</option>
+                  <option value="pro">Pro 模式</option>
                 </select>
                 <ChevronDown size={12} />
               </label>}
@@ -703,17 +970,18 @@ export function ChatWorkspace({
                 <button
                   type="submit"
                   className="tp-ai-send-button"
-                  disabled={videoOpen ? videoBusy || !draft.trim() : checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || availabilityBlocked || capabilityUnavailable}
-                  aria-label={videoOpen ? "确认发送并生成视频" : checkingQuota ? "正在核对额度" : "发送消息"}
-                  aria-busy={checkingQuota}
+                  disabled={computerMentioned ? responding || readingFiles || !onOpenComputer || attachments.length > 0 : videoOpen ? videoBusy || !draft.trim() : imagePlanning || checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || availabilityBlocked || capabilityUnavailable}
+                  aria-label={computerMentioned ? "进入安全电脑控制" : videoOpen ? "继续视频生成流程" : imagePlanning ? `同频 AI 正在整理${composerTool === "presentation" ? "PPT" : "图片"}任务` : composerTool === "image" && imagePlan ? "确认生成图片" : composerTool === "presentation" && presentationPlan ? "确认生成 PPT" : composerTool === "image" ? "让同频 AI 整理图片任务" : composerTool === "presentation" ? "让同频 AI 整理 PPT 任务" : checkingQuota ? "正在核对额度" : "发送消息"}
+                  aria-busy={checkingQuota || imagePlanning}
                 >
-                  {checkingQuota ? <LoaderCircle size={20} /> : <ArrowUp size={20} strokeWidth={2.5} />}
+                  {checkingQuota || imagePlanning ? <LoaderCircle size={20} /> : <ArrowUp size={20} strokeWidth={2.5} />}
                 </button>
               )}
             </div>
           </form>
+          )}
         </div>
-        <p className="tp-ai-composer-hint">Enter 发送 · Shift + Enter 换行</p>
+        <p className="tp-ai-composer-hint">{computerRequest ? "每个动作都需要一次原生确认；关闭即停止本机会话" : "Enter 发送 · Shift + Enter 换行"}</p>
       </footer>
     </section>
   );

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AI_MEDIA_LIMITS, mediaFrameByteLength, videoSampleTimes } from "../../../shared/aiMedia";
-import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS, type AiWorkspaceDocument } from "../../../shared/aiWorkspace";
 import { documentAttachments, ensureAttachmentWorkspaceCapacity, extractAttachment, validateAttachments, workspaceAttachment, WorkspaceCapacityError } from "./attachments";
 import { imageDimensions } from "./mediaAttachments";
 import { hydrateWorkspace, serializeWorkspace } from "./workspaceState";
@@ -68,18 +68,19 @@ describe("bounded visual attachments", () => {
     await expect(extractAttachment(new File(["test"], "x.mp4"), { signal: controller.signal })).rejects.toHaveProperty("name", "AbortError");
   });
   it("refuses new attachments before exhausting snapshot space and never edits the old state", () => {
-    const state = { notes: "x".repeat(2 * 1024 * 1024) };
+    const state = { notes: "x".repeat(AI_WORKSPACE_LIMITS.stateBytes) };
     const before = state.notes;
     expect(() => ensureAttachmentWorkspaceCapacity(state)).toThrow("本次附件未添加");
     expect(() => ensureAttachmentWorkspaceCapacity(state)).toThrow(WorkspaceCapacityError);
     expect(state.notes).toBe(before);
     expect(() => ensureAttachmentWorkspaceCapacity({ attachments: [document()] })).not.toThrow();
-    expect(() => ensureAttachmentWorkspaceCapacity({ oldHistory: "x".repeat(1500000) }, "reply")).toThrow("草稿已保留，本次未发送、未扣费");
+    expect(() => ensureAttachmentWorkspaceCapacity({ oldHistory: "x".repeat(AI_WORKSPACE_LIMITS.stateBytes - 400000) }, "reply")).toThrow("草稿已保留，本次未发送、未扣费");
+    expect(() => ensureAttachmentWorkspaceCapacity({ oldHistory: "x".repeat(AI_WORKSPACE_LIMITS.stateBytes - 100000) }, "video")).not.toThrow();
     try { ensureAttachmentWorkspaceCapacity(state, "reply"); }
     catch (error) { expect(error).toBeInstanceOf(WorkspaceCapacityError); expect((error as WorkspaceCapacityError).phase).toBe("reply"); }
     // A 96 KiB reply must fit after an accepted near-boundary media state.
     const nearBoundary = { oldHistory: "x".repeat(1000000), attachments: [document()] };
     expect(() => ensureAttachmentWorkspaceCapacity(nearBoundary)).not.toThrow();
-    expect(new TextEncoder().encode(JSON.stringify({ ...nearBoundary, reply: "x".repeat(96000) })).length).toBeLessThan(2 * 1024 * 1024);
+    expect(new TextEncoder().encode(JSON.stringify({ ...nearBoundary, reply: "x".repeat(96000) })).length).toBeLessThan(AI_WORKSPACE_LIMITS.stateBytes);
   });
 });

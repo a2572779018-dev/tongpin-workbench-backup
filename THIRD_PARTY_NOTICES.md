@@ -1,5 +1,60 @@
 # Third-party notices
 
+## OpenSquilla routing design reference
+
+Tongpin's bounded quick-agent router follows the documented architecture of
+OpenSquilla's local turn router: each turn is classified before selecting a
+permitted model, while the surrounding account, quota, approval, persistence,
+and tool-result loop remains owned by Tongpin. Tongpin does not bundle or claim
+to run OpenSquilla's Python gateway, ONNX model, LightGBM runtime, telemetry, or
+desktop application; this avoids adding a second privileged runtime to every
+member device.
+
+OpenSquilla 0.5.4 is available at
+https://github.com/TokenRhythm/opensquilla and is licensed under the Apache
+License 2.0. Its documentation and project name are used here for attribution
+and architectural provenance; no OpenSquilla model asset is redistributed.
+
+## Cua Driver local computer-use runtime
+
+`@trycua/cua-driver` 0.28.1 provides the typed, same-process desktop driver
+used by the Electron main process. The dependency is version-locked; its native
+platform packages are unpacked from ASAR so their N-API runtime and adjacent
+dynamic library can be loaded by the signed desktop application. Tongpin does
+not expose Cua Driver's generic tool surface, daemon, shell, clipboard, file, or
+network capabilities to the renderer.
+
+The package root is licensed under the MIT License:
+
+Copyright (c) 2025 Cua AI, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The selected native package also contains `cua_driver_node_runtime.node`, a
+compatibility build derived from `uniffi-bindgen-react-native` 0.31.0-3 and
+licensed under Mozilla Public License 2.0. Its packaged
+`node-runtime-NOTICE.md` is retained. The corresponding source and deterministic
+build transformation are available in the Cua repository at the matching
+release tag. This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this file, one
+can be obtained at https://mozilla.org/MPL/2.0/.
+
 ## AI reply Markdown rendering
 
 `react-markdown` 10.1.0 (https://github.com/remarkjs/react-markdown) and
@@ -356,3 +411,18 @@ The export did not include an open-source license. It is not relicensed under
 any MIT notice in this document; use remains subject to the user's purchase
 terms. The original archive and standalone demo are not distributed as public
 download assets. Only the internal application component is bundled here.
+## awesome-ai-persona-skills
+
+- Source: https://github.com/momozi1996/awesome-ai-persona-skills
+- License: MIT
+- Copyright: Copyright (c) 2026 moyan
+- Use in Tongpin: product-safe persona catalogue patterns. Tongpin does not ship
+  third-party identity claims or tool permissions as trusted system prompts.
+
+## FormKit AutoAnimate
+
+- Source: https://github.com/formkit/auto-animate
+- Version: 0.9.0
+- License: MIT
+- Use in Tongpin: lightweight message-list entry and layout transitions. The
+  library's default reduced-motion behavior is preserved.

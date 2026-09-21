@@ -139,6 +139,72 @@ describe("同频 API 纵向流程", () => {
     });
   }
 
+  it("persists verification failures and locks registration and reset codes after five attempts", async () => {
+    const registrationEmail = "registration-lockout@example.com";
+    const registration = await request(runtime.app)
+      .post("/api/auth/register")
+      .send({
+        name: "注册锁定测试",
+        email: registrationEmail,
+        password: "Register123",
+      })
+      .expect(201);
+    const wrongRegistrationCode =
+      registration.body.debugCode === "000000" ? "999999" : "000000";
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const rejected = await request(runtime.app)
+        .post("/api/auth/verify-email")
+        .send({ email: registrationEmail, code: wrongRegistrationCode })
+        .expect(400);
+      expect(rejected.body.error.code).toBe("CODE_INVALID");
+    }
+    const registrationLocked = await request(runtime.app)
+      .post("/api/auth/verify-email")
+      .send({ email: registrationEmail, code: registration.body.debugCode })
+      .expect(429);
+    expect(registrationLocked.body.error.code).toBe("CODE_LOCKED");
+
+    const resetEmail = "reset-lockout@example.com";
+    const resetRegistration = await request(runtime.app)
+      .post("/api/auth/register")
+      .send({
+        name: "重置锁定测试",
+        email: resetEmail,
+        password: "BeforeReset123",
+      })
+      .expect(201);
+    await request(runtime.app)
+      .post("/api/auth/verify-email")
+      .send({ email: resetEmail, code: resetRegistration.body.debugCode })
+      .expect(200);
+    const forgot = await request(runtime.app)
+      .post("/api/auth/forgot-password")
+      .send({ email: resetEmail })
+      .expect(200);
+    const wrongResetCode =
+      forgot.body.debugCode === "000000" ? "999999" : "000000";
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const rejected = await request(runtime.app)
+        .post("/api/auth/reset-password")
+        .send({
+          email: resetEmail,
+          code: wrongResetCode,
+          password: "AfterReset123",
+        })
+        .expect(400);
+      expect(rejected.body.error.code).toBe("CODE_INVALID");
+    }
+    const resetLocked = await request(runtime.app)
+      .post("/api/auth/reset-password")
+      .send({
+        email: resetEmail,
+        code: forgot.body.debugCode,
+        password: "AfterReset123",
+      })
+      .expect(429);
+    expect(resetLocked.body.error.code).toBe("CODE_LOCKED");
+  });
+
   it("完成邮箱注册、验证、等待审批、批准与登录", async () => {
     const health = await request(runtime.app).get("/api/health").expect(200);
     expect(health.body.mailMode).toBe("preview");

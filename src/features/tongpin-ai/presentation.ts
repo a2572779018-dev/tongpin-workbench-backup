@@ -94,11 +94,7 @@ export async function createPresentationBytes(value: unknown): Promise<Uint8Arra
 export async function downloadPresentation(value: unknown): Promise<void> {
   const document = validatePresentation(value);
   const bytes = await createPresentationBytes(document);
-  const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: PRESENTATION_MIME }));
-  const link = window.document.createElement("a");
-  link.href = url;
-  link.download = presentationFileName(document.title);
-  link.hidden = true;
-  try { window.document.body.append(link); link.click(); }
-  finally { link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 30_000); }
+  const { saveBlobWithFeedback } = await import("./downloadFeedback");
+  const result = await saveBlobWithFeedback(new Blob([new Uint8Array(bytes)], { type: PRESENTATION_MIME }), presentationFileName(document.title));
+  if (result.state === "error") throw new Error(result.message);
 }

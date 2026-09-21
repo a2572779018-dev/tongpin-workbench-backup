@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
+const { fileURLToPath } = require("node:url");
 const { createHash, randomUUID } = require("node:crypto");
 const {
   app,
@@ -73,6 +74,9 @@ const {
   createSecureSessionStore,
   persistSecureSessionWithMemoryFallback,
 } = require("./secure-session-binding-store.cjs");
+const {
+  createComputerUseController,
+} = require("./computer-use.cjs");
 
 autoUpdater.logger = null;
 const safeStorageAdapter = createSafeStorageAdapter(safeStorage);
@@ -133,6 +137,7 @@ let relationshipSessionGeneration = 0;
 let relationshipGraphOpenSequence = 0;
 let relationshipWindowCloseApproved = false;
 let relationshipQuitIntent = false;
+let computerUseController = null;
 const pendingRelationshipFlushRequests = new Map();
 
 function prepareSameVolumeUpdaterTemp() {
@@ -224,6 +229,7 @@ function requestSilentInstallIfEligible(now = new Date()) {
 
 app.on("before-quit", () => {
   relationshipQuitIntent = true;
+  void computerUseController?.shutdown();
   if (process.platform !== "win32") return;
   if (!updateReady || updateInstallCoordinator.isInstallRequested()) return;
   try {
@@ -873,6 +879,26 @@ function sessionEmailFromPayload(payload) {
   }
 }
 
+function isAllowedMainRendererUrl(rawUrl) {
+  try {
+    const candidate = new URL(rawUrl);
+    if (isDevelopment) {
+      const developmentUrl = new URL(process.env.VITE_DEV_SERVER_URL);
+      return candidate.origin === developmentUrl.origin;
+    }
+    if (candidate.protocol !== "file:") return false;
+    return path.resolve(fileURLToPath(candidate)) === path.resolve(
+      __dirname,
+      "..",
+      "dist",
+      "renderer",
+      "index.html",
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isMainRendererEvent(event) {
   try {
     if (
@@ -889,7 +915,8 @@ function isMainRendererEvent(event) {
         !senderFrame.detached &&
         mainFrame &&
         senderFrame.processId === mainFrame.processId &&
-        senderFrame.frameToken === mainFrame.frameToken,
+        senderFrame.frameToken === mainFrame.frameToken &&
+        isAllowedMainRendererUrl(senderFrame.url),
     );
   } catch {
     return false;
@@ -900,6 +927,46 @@ function assertMainRendererEvent(event) {
   if (!isMainRendererEvent(event)) {
     throw new Error("不允许从当前窗口访问本机安全数据");
   }
+}
+
+function getComputerUseController() {
+  if (computerUseController) return computerUseController;
+  computerUseController = createComputerUseController({
+    platform: process.platform,
+    arch: process.arch,
+    osVersion: app.getSystemVersion(),
+    hostPid: process.pid,
+    confirmSession: async () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false;
+      const choice = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "开启本机电脑控制？",
+        message: "允许同频读取你接下来主动选择的窗口？",
+        detail:
+          "开启会话本身不上传窗口内容。你选定窗口并请求 AI 规划后，当前请求、应用/窗口名称及最多 60 个控件的标签、角色和临时令牌会发给同频 AI；截图、辅助功能树和字段值不上传。快照不落盘。每次单击或输入仍需单独在系统确认框中允许；关闭流程、退出登录或切换账号会停止会话。",
+        buttons: ["取消", "开启本次会话"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      return choice.response === 1;
+    },
+    confirmAction: async ({ title, message, detail }) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false;
+      const choice = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title,
+        message,
+        detail,
+        buttons: ["取消", "仅允许这一次"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      return choice.response === 1;
+    },
+  });
+  return computerUseController;
 }
 
 function sessionMemoryOnlyMarkerPath() {
@@ -1273,6 +1340,9 @@ async function createWindow() {
     });
   });
   mainWindow.on("closed", () => {
+    const closingComputerUseController = computerUseController;
+    computerUseController = null;
+    void closingComputerUseController?.shutdown();
     resetRelationshipGraphScope();
     mainWindow = null;
     quickTasksAvailable = false;
@@ -1289,11 +1359,7 @@ async function createWindow() {
   });
 
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    const developmentUrl = process.env.VITE_DEV_SERVER_URL;
-    const allowed =
-      (developmentUrl && url.startsWith(developmentUrl)) ||
-      url.startsWith("file://");
-    if (!allowed) event.preventDefault();
+    if (!isAllowedMainRendererUrl(url)) event.preventDefault();
   });
 
   if (isDevelopment) {
@@ -1333,6 +1399,35 @@ function registerDesktopIpc() {
   });
   ipcMain.on("desktop:get-app-version", (event) => {
     event.returnValue = app.getVersion();
+  });
+
+  ipcMain.handle("computer-use:probe", async (event) => {
+    assertMainRendererEvent(event);
+    return getComputerUseController().probe();
+  });
+  ipcMain.handle("computer-use:start-session", async (event) => {
+    assertMainRendererEvent(event);
+    return getComputerUseController().startSession();
+  });
+  ipcMain.handle("computer-use:stop-session", async (event) => {
+    assertMainRendererEvent(event);
+    return getComputerUseController().stopSession();
+  });
+  ipcMain.handle("computer-use:list-windows", async (event) => {
+    assertMainRendererEvent(event);
+    return getComputerUseController().listWindows();
+  });
+  ipcMain.handle("computer-use:get-window-state", async (event, target) => {
+    assertMainRendererEvent(event);
+    return getComputerUseController().getWindowState(target);
+  });
+  ipcMain.handle("computer-use:request-action-approval", async (event, action) => {
+    assertMainRendererEvent(event);
+    return getComputerUseController().requestActionApproval(action);
+  });
+  ipcMain.handle("computer-use:execute-approved-action", async (event, token) => {
+    assertMainRendererEvent(event);
+    return getComputerUseController().executeApprovedAction(token);
   });
 
   ipcMain.on("quick-task:set-availability", (event, enabled) => {
@@ -1639,11 +1734,6 @@ function registerDesktopIpc() {
     return getCredentialVault().list();
   });
 
-  ipcMain.handle("credentials:load", async (event, emailValue) => {
-    assertMainRendererEvent(event);
-    return getCredentialVault().load(emailValue);
-  });
-
   ipcMain.handle("credentials:save", async (event, value) => {
     assertMainRendererEvent(event);
     return getCredentialVault().save(value);
@@ -1652,15 +1742,6 @@ function registerDesktopIpc() {
   ipcMain.handle("credentials:remove", async (event, emailValue) => {
     assertMainRendererEvent(event);
     return getCredentialVault().remove(emailValue);
-  });
-
-  ipcMain.handle("credentials:open-system-storage", async (event) => {
-    assertMainRendererEvent(event);
-    if (!isMac) return false;
-    const result = await shell.openPath(
-      "/System/Library/CoreServices/Applications/Keychain Access.app",
-    );
-    return result === "";
   });
 
   ipcMain.handle("relationship-graph:open", async (event) => {

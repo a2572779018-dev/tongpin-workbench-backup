@@ -1,4 +1,4 @@
-import type { AiQuota, AiUsage, AiSource } from "../../../shared/ai";
+import type { AiHarnessTrace, AiQuota, AiUsage, AiSource } from "../../../shared/ai";
 import type { AiWorkspaceDocument, AiWorkspaceJson } from "../../../shared/aiWorkspace";
 
 export type AiQuotaFilter = "all" | "available" | "low" | "empty";
@@ -30,7 +30,7 @@ export interface AiQuotaLedgerEntry {
 
 // Shared P0 member-workbench contracts. These live beside the quota contracts so
 // the independently-built AI surfaces can use one type-only module when composed.
-export type TongpinAIMode = "quick" | "deep";
+export type TongpinAIMode = "quick" | "standard" | "deep" | "pro";
 
 export type TongpinAIWorkspaceView = "chat" | "project" | "skills";
 
@@ -41,13 +41,17 @@ export interface TongpinAIMessage {
   role: "user" | "assistant";
   content: string;
   time: string;
+  /** Epoch milliseconds for a durable in-flight timer. */
+  startedAt?: number;
   status?: "thinking" | "typing" | "ready" | "error" | "stopped";
   artifactId?: string;
   requestId?: string;
+  harnessPlanRequestId?: string;
   model?: string;
   usage?: AiUsage;
   attachments?: AiWorkspaceDocument[];
   sources?: AiSource[];
+  trace?: AiHarnessTrace;
 }
 
 export interface TongpinAIConversation {

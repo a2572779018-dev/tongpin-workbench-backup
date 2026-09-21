@@ -41,13 +41,19 @@ export class ChatPreflightGate {
 
 /** Merge after the check, preserving changes outside the submitted conversation. */
 export function withPreparedChatSend(latest: AiWorkspaceState, conversation: AiWorkspaceConversation, draftKey: string): AiWorkspaceState {
+  const drafts = { ...latest.drafts };
+  const draftAttachments = { ...latest.draftAttachments };
+  // Missing and empty drafts hydrate identically. Removing the consumed entries
+  // avoids accumulating thousands of empty keys and never deletes conversation data.
+  delete drafts[draftKey];
+  delete draftAttachments[draftKey];
   return {
     ...latest,
     conversations: [conversation, ...latest.conversations.filter(item => item.id !== conversation.id)],
     activeConversationId: conversation.id,
     view: "chat",
-    drafts: { ...latest.drafts, [draftKey]: "" },
-    draftAttachments: { ...latest.draftAttachments, [draftKey]: [] },
+    drafts,
+    draftAttachments,
   };
 }
 

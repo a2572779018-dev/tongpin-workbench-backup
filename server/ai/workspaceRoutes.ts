@@ -4,6 +4,7 @@ import { ApiError } from "../errors";
 import { requireRole } from "../middleware";
 import { AiError } from "./security";
 import type { AiWorkspaceRepository } from "./workspace";
+import { aiTenantIdFromPrincipal } from "./tenant";
 
 /** Mount at /api/ai/workspace before any smaller global JSON body parser. */
 export function createAiWorkspaceRouter(
@@ -19,9 +20,9 @@ export function createAiWorkspaceRouter(
     next();
   });
   router.use(json({ limit: AI_WORKSPACE_LIMITS.requestBytes }));
-  router.get("/", (request, response) => response.json(repository.read(request.currentUser!.id)));
+  router.get("/", (request, response) => response.json(repository.read(request.currentUser!.id, aiTenantIdFromPrincipal(request.currentUser))));
   router.put("/", async (request, response) => {
-    response.json(await repository.save(request.currentUser!.id, request.body));
+    response.json(await repository.save(request.currentUser!.id, request.body, aiTenantIdFromPrincipal(request.currentUser)));
   });
   router.all("/", (_request, response) => response.set("Allow", "GET, PUT").status(405).json({ error: { code: "METHOD_NOT_ALLOWED", message: "此接口仅支持读取或保存工作台" } }));
   router.use((error: unknown, _request: Request, response: Response, next: NextFunction) => {

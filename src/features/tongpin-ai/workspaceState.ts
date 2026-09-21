@@ -53,7 +53,19 @@ export function saveWorkspaceSession(
 }
 
 export function serializeWorkspace(session: TongpinAIWorkspaceSession): AiWorkspaceState {
-  return { ...session, enabledSkillIds: [...session.enabledSkillIds].sort() };
+  const { draftAttachments: _sessionDraftAttachments, ...sessionWithoutDraftAttachments } = session;
+  const drafts = Object.fromEntries(
+    Object.entries(session.drafts).filter(([, value]) => value.length > 0),
+  );
+  const draftAttachments = session.draftAttachments
+    ? Object.fromEntries(Object.entries(session.draftAttachments).filter(([, value]) => value.length > 0))
+    : undefined;
+  return {
+    ...sessionWithoutDraftAttachments,
+    drafts,
+    ...(draftAttachments && Object.keys(draftAttachments).length ? { draftAttachments } : {}),
+    enabledSkillIds: [...session.enabledSkillIds].sort(),
+  };
 }
 
 export function hydrateWorkspace(state: AiWorkspaceState | null): TongpinAIWorkspaceSession {

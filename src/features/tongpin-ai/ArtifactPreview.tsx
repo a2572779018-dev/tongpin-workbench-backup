@@ -12,6 +12,7 @@ import { GeneratedArtifact } from "./GeneratedArtifact";
 import { validatePresentation } from "./presentation";
 import { ImageArtifact } from "./ImageArtifact";
 import type { AiImageMimeType } from "../../../shared/ai";
+import { saveBlobWithFeedback } from "./downloadFeedback";
 
 interface ArtifactPreviewProps {
   artifact: TongpinAIArtifact;
@@ -89,14 +90,12 @@ export function ArtifactPreview({ artifact, onClose, onImageDeleted }: ArtifactP
     }, 1_800);
   }
 
-  function downloadArtifact() {
+  async function downloadArtifact() {
     if (exportTimerRef.current !== null) {
       window.clearTimeout(exportTimerRef.current);
       exportTimerRef.current = null;
     }
 
-    let href: string | null = null;
-    let anchor: HTMLAnchorElement | null = null;
     try {
       const text = [
         `# ${artifact.title}`,
@@ -110,24 +109,10 @@ export function ArtifactPreview({ artifact, onClose, onImageDeleted }: ArtifactP
           "",
         ]),
       ].join("\n");
-      href = URL.createObjectURL(
-        new Blob([text], { type: "text/markdown;charset=utf-8" }),
-      );
-      anchor = document.createElement("a");
-      anchor.href = href;
-      anchor.download = "tongpin-ai-result.md";
-      anchor.hidden = true;
-      document.body.append(anchor);
-      anchor.click();
-      setExportState("started");
+      const result = await saveBlobWithFeedback(new Blob([text], { type: "text/markdown;charset=utf-8" }), "tongpin-ai-result.md");
+      setExportState(result.state === "error" ? "error" : "started");
     } catch {
       setExportState("error");
-    } finally {
-      anchor?.remove();
-      if (href !== null) {
-        const objectUrl = href;
-        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-      }
     }
 
     exportTimerRef.current = window.setTimeout(() => {
@@ -207,7 +192,7 @@ export function ArtifactPreview({ artifact, onClose, onImageDeleted }: ArtifactP
           type="button"
           className="is-primary"
           aria-live="polite"
-          onClick={downloadArtifact}
+          onClick={() => void downloadArtifact()}
         >
           {exportState === "started" ? (
             <Check size={16} />

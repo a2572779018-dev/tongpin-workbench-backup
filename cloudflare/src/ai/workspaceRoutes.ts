@@ -2,6 +2,7 @@ import { AI_WORKSPACE_LIMITS } from "../../../shared/aiWorkspace";
 import { AiError } from "../../../server/ai/security";
 import type { AiWorkspaceRepository } from "../../../server/ai/workspace";
 import { json, type UserRow } from "../platform";
+import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
 
 async function parseWorkspaceJson(request: Request): Promise<unknown> {
   if (!request.body) throw new AiError(400, "INVALID_JSON", "请提交有效 JSON 内容");
@@ -38,9 +39,10 @@ export async function handleAiWorkspaceRequest(
     if (new URL(request.url).pathname !== "/api/ai/workspace") throw new AiError(404, "NOT_FOUND", "请求的接口不存在");
     const expectedAccount = request.headers.get("X-Tongpin-Account");
     if (expectedAccount !== null && expectedAccount !== user.id) throw new AiError(409, "AI_WORKSPACE_ACCOUNT_CHANGED", "当前登录账号已改变，请重新打开工作台");
-    if (request.method === "GET") return json(repository.read(user.id));
+    const tenantId = aiTenantIdFromPrincipal(user);
+    if (request.method === "GET") return json(repository.read(user.id, tenantId));
     if (request.method === "PUT") {
-      return json(await repository.save(user.id, await parseWorkspaceJson(request)));
+      return json(await repository.save(user.id, await parseWorkspaceJson(request), tenantId));
     }
     return json({ error: { code: "METHOD_NOT_ALLOWED", message: "此接口仅支持读取或保存工作台" } }, 405, { Allow: "GET, PUT" });
   } catch (error) {

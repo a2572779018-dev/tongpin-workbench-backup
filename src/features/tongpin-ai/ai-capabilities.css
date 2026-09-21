@@ -1,4 +1,15 @@
 .tp-ai-load-state { display: grid; place-content: center; min-height: 55vh; gap: 16px; text-align: center; color: #4e514b; }
+.tp-ai-run-trace { margin-top: 12px; max-width: 720px; border: 1px solid #ded9ca; border-radius: 12px; background: #fbf9f2; color: #55574f; font-size: 12px; }
+.tp-ai-run-trace > summary { cursor: pointer; padding: 10px 12px; line-height: 1.5; font-weight: 600; }
+.tp-ai-run-trace ol { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0 12px 12px; }
+.tp-ai-run-trace li { display: flex; align-items: flex-start; gap: 8px; }
+.tp-ai-run-trace li > svg { flex: 0 0 auto; margin-top: 2px; }
+.tp-ai-run-trace li span { display: grid; gap: 2px; }
+.tp-ai-run-trace li small { color: #77796f; line-height: 1.45; }
+.tp-ai-run-trace li.is-failed { color: #954c3d; }
+.tp-ai-run-trace .is-spinning { animation: tp-ai-trace-spin .9s linear infinite; }
+@keyframes tp-ai-trace-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .tp-ai-run-trace .is-spinning { animation: none; } }
 .tp-ai-load-state button, .tp-ai-sync-error button, .tp-ai-capacity-notice button { border: 1px solid #bcbcaf; border-radius: 9px; padding: 8px 14px; background: #faf7ef; color: #252721; cursor: pointer; }
 .tp-ai-workspace-notices { position: absolute; z-index: 90; top: 8px; left: 50%; transform: translateX(-50%); width: min(740px, 94%); display: grid; gap: 8px; }
 .tp-ai-sync-error, .tp-ai-capacity-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; border: 1px solid #ceaa83; border-radius: 12px; background: #fff5e7; color: #653f23; box-shadow: 0 6px 24px #29231715; }
@@ -17,11 +28,19 @@
 .tp-ai-persona-field { display: grid; gap: 9px; margin: 18px 0; font-size: 13px; font-weight: 600; }
 .tp-ai-persona-field input, .tp-ai-persona-field textarea { width: 100%; box-sizing: border-box; padding: 12px 14px; border: 1px solid #cfcfc2; border-radius: 12px; background: #fffef9; color: #292c28; font: inherit; font-weight: 400; line-height: 1.65; resize: vertical; }
 .tp-ai-persona-field input:focus, .tp-ai-persona-field textarea:focus { outline: 2px solid #d3b65a; outline-offset: 2px; }
-.tp-ai-personalities { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tp-ai-persona-library-tools { display: grid; gap: 9px; margin-bottom: 10px; }
+.tp-ai-persona-library-tools label { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 11px; border: 1px solid #dad9cf; border-radius: 11px; background: #fffdf8; }
+.tp-ai-persona-library-tools input { width: 100%; border: 0; outline: 0; background: transparent; color: inherit; }
+.tp-ai-persona-library-tools > div { display: flex; gap: 6px; flex-wrap: wrap; }
+.tp-ai-persona-library-tools button { border: 1px solid #dedbcf; border-radius: 999px; background: #fbfaf5; color: #66695f; padding: 6px 11px; cursor: pointer; }
+.tp-ai-persona-library-tools button.is-selected { border-color: #b29c4e; background: #f8efc9; color: #38351d; }
+.tp-ai-personalities { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-height: 286px; overflow: auto; padding: 2px; overscroll-behavior: contain; }
 .tp-ai-personalities button { position: relative; display: grid; gap: 8px; padding: 17px; text-align: left; background: #fbfaf5; border: 1px solid #dad9cf; border-radius: 14px; color: #45483e; cursor: pointer; }
 .tp-ai-personalities button.is-selected { border-color: #b29c4e; background: #f8efc9; box-shadow: 0 0 0 1px #b29c4e; }
 .tp-ai-personalities small { font-size: 11px; color: #72756a; font-weight: 400; line-height: 1.6; }
 .tp-ai-personality-check { position: absolute; top: 15px; right: 15px; }
+.tp-ai-personality-category { width: max-content; color: #84743d; font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+.tp-ai-persona-library-source, .tp-ai-persona-library-empty { margin: 10px 0 0; color: #7a7e72; font-size: 11px; line-height: 1.6; }
 .tp-ai-persona-dialog form > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 23px; }
 .tp-ai-persona-dialog footer button, .tp-ai-persona-reset button { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #dad7c9; padding: 11px 15px; border-radius: 11px; background: #faf8ee; color: #45483e; cursor: pointer; font-size: 13px; }
 .tp-ai-persona-dialog footer button.is-primary { background: #efda86; border-color: #d4bf71; color: #38351d; font-weight: 600; }

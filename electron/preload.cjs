@@ -7,6 +7,18 @@ contextBridge.exposeInMainWorld("tongpin", {
     app: ipcRenderer.sendSync("desktop:get-app-version"),
     electron: process.versions.electron,
   },
+  computerUse: Object.freeze({
+    probe: () => ipcRenderer.invoke("computer-use:probe"),
+    startSession: () => ipcRenderer.invoke("computer-use:start-session"),
+    stopSession: () => ipcRenderer.invoke("computer-use:stop-session"),
+    listWindows: () => ipcRenderer.invoke("computer-use:list-windows"),
+    getWindowState: (target) =>
+      ipcRenderer.invoke("computer-use:get-window-state", target),
+    requestActionApproval: (action) =>
+      ipcRenderer.invoke("computer-use:request-action-approval", action),
+    executeApprovedAction: (token) =>
+      ipcRenderer.invoke("computer-use:execute-approved-action", String(token)),
+  }),
   session: {
     load: () => ipcRenderer.invoke("session:load"),
     save: (payload) => ipcRenderer.invoke("session:save", payload),
@@ -14,12 +26,9 @@ contextBridge.exposeInMainWorld("tongpin", {
   },
   credentials: {
     list: () => ipcRenderer.invoke("credentials:list"),
-    load: (email) => ipcRenderer.invoke("credentials:load", String(email)),
     save: (payload) => ipcRenderer.invoke("credentials:save", payload),
     remove: (email) =>
       ipcRenderer.invoke("credentials:remove", String(email)),
-    openSystemStorage: () =>
-      ipcRenderer.invoke("credentials:open-system-storage"),
   },
   relationshipGraph: {
     open: () => ipcRenderer.invoke("relationship-graph:open"),

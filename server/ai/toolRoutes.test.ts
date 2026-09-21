@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createRuntime, type AppRuntime } from "../app";
 import type { AppConfig } from "../config";
 import type { AiTransport } from "./provider";
+import { toolPlanContextFingerprint } from "./toolPlans";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const KEY = "tool-routes-fixture-key-not-real";
@@ -14,17 +15,34 @@ const PASSWORD = "ToolRoutesFixture20260905!";
 describe.sequential("AI tool APIs through real isolated Node authentication", () => {
   let directory: string;
   let runtime: AppRuntime;
+  let emptyToolPlanContextFingerprint: string;
   const sessions: Record<string, { token: string; id: string }> = {};
   const transport = vi.fn<AiTransport>();
   function headers(actor: string, accountId = sessions[actor].id) {
     return { Authorization: `Bearer ${sessions[actor].token}`, "X-Tongpin-Account": accountId };
   }
+  function saveImagePlan(actor: string, prompt: string) {
+    const requestId = crypto.randomUUID();
+    runtime.aiStore.saveRequest({
+      requestId, userId: sessions[actor].id, hash: `fixture-${requestId}`, status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "quick", mode: "quick",
+      toolPlanContextFingerprint: emptyToolPlanContextFingerprint,
+      result: {
+        requestId, content: "已整理图片任务，请确认后生成。", model: "quick",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false },
+        toolPlan: { kind: "image", summary: "测试图片方案", prompt },
+      },
+    });
+    return requestId;
+  }
   async function createImage() {
     const requestId = crypto.randomUUID();
-    const response = await request(runtime.app).post("/api/ai/images").set(headers("a")).send({ requestId, prompt: "隔离测试的私有图片", userId: sessions.b.id }).expect(200);
+    const prompt = "隔离测试的私有图片";
+    const response = await request(runtime.app).post("/api/ai/images").set(headers("a")).send({ requestId, prompt, planRequestId: saveImagePlan("a", prompt), userId: sessions.b.id }).expect(200);
     return { requestId, assetId: response.body.images[0].assetId as string, result: response.body };
   }
   beforeAll(async () => {
+    emptyToolPlanContextFingerprint = await toolPlanContextFingerprint();
     directory = await mkdtemp(path.join(tmpdir(), "tongpin-tools-route-test-"));
     const config: AppConfig = {
       host: "127.0.0.1", port: 0, dataFile: path.join(directory, "runtime.json"), jwtSecret: "tool-route-fixture-jwt-secret-not-for-production",
@@ -93,7 +111,8 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
   it("returns safe upstream image diagnostics without repeating a paid failure", async () => {
     const usedBefore = runtime.aiStore.quota(sessions.a.id).usedTokens;
     transport.mockResolvedValueOnce(Response.json({ error: { code: "server_error", param: "output_format", message: `${KEY} PRIVATE_IMAGE_PROMPT` } }, { status: 503 }));
-    const body = { requestId: crypto.randomUUID(), prompt: "图片测试" };
+    const prompt = "图片测试";
+    const body = { requestId: crypto.randomUUID(), prompt, planRequestId: saveImagePlan("a", prompt) };
     const failed = await request(runtime.app).post("/api/ai/images").set(headers("a")).send(body).expect(502);
     expect(failed.headers["cache-control"]).toBe("no-store");
     expect(failed.body.error).toMatchObject({ code: "AI_PROVIDER_UNAVAILABLE", diagnostic: { operation: "image", httpStatus: 503, billing: "unknown", code: "server_error", param: "output_format" } });
@@ -198,7 +217,8 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     let release!: () => void; const hold = new Promise<void>(resolve => { release = resolve; });
     transport.mockImplementationOnce(async () => { await hold; return Response.json({ data: [{ b64_json: PNG }] }); });
     const requestId = crypto.randomUUID();
-    const generating = request(runtime.app).post("/api/ai/images").set(headers("a")).send({ requestId, prompt: "仍在生成中的测试图片" }).then(value => value);
+    const prompt = "仍在生成中的测试图片";
+    const generating = request(runtime.app).post("/api/ai/images").set(headers("a")).send({ requestId, prompt, planRequestId: saveImagePlan("a", prompt) }).then(value => value);
     try {
       await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
       const pending = await request(runtime.app).get(`/api/ai/requests/${requestId}`).set(headers("a")).expect(200);

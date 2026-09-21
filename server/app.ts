@@ -125,7 +125,7 @@ export async function createRuntime(
       },
     }),
   );
-  // Workspace snapshots have a separate authenticated 2 MiB limit; do not grow every API body limit.
+  // Workspace snapshots have a separate authenticated, chunk-backed limit; do not grow every API body limit.
   app.use("/api/ai/workspace", createAiWorkspaceRouter(aiWorkspace, requireAuth));
   app.use("/api/ai/persona", createAiPersonaRouter(aiPersona, requireAuth));
   app.use("/api/ai/chat", express.json({ limit: 1600 * 1024 }));

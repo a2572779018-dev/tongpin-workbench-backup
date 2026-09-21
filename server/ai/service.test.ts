@@ -6,6 +6,7 @@ import type { AiProviderInput } from "../../shared/ai";
 import { createNodeAi } from "./node";
 import type { AiTransport } from "./provider";
 import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "./security";
+import { BAI_AGENT_MODELS, TONGPIN_QUICK_AGENT } from "../../shared/aiAuto";
 
 describe("AI transactional service", () => {
   let directory: string;
@@ -23,14 +24,17 @@ describe("AI transactional service", () => {
   afterEach(async () => { runtime.close(); await rm(directory, { recursive: true }); });
   it("resolves Auto before budget and transport, stores actual model and retains token usage", async () => {
     await runtime.service.saveProvider({ ...provider, baseUrl: "https://api.b.ai/v1", protocol: "responses", quickModel: "tongpin-auto", deepModel: "old" });
+    expect(runtime.service.provider()?.quickModel).toBe("tongpin-agent");
+    transport.mockResolvedValueOnce(Response.json({ data: BAI_AGENT_MODELS.map(id => ({ id })) }));
+    await expect(runtime.service.testProvider({ target: "chat" })).resolves.toMatchObject({ modelsVerified: true, availableModels: BAI_AGENT_MODELS });
     runtime.service.setQuota("auto-member", "admin", { limitTokens: 100000 });
     const req = chat();
     expect(runtime.service.preflight("auto-member", req).canSend).toBe(true);
     const result = await runtime.service.chat("auto-member", req);
-    expect(result.model).toBe("hy3"); expect(result.usage.totalTokens).toBe(13);
-    expect(transport.mock.calls[0][0]).toBe("https://api.b.ai/v1/chat/completions");
-    expect(JSON.parse(transport.mock.calls[0][1].body!).model).toBe("hy3");
-    await runtime.service.chat("auto-member", req); expect(transport).toHaveBeenCalledTimes(1);
+    expect(result.model).toBe("快速"); expect(result.usage.totalTokens).toBe(13);
+    expect(transport.mock.calls[1][0]).toBe("https://api.b.ai/v1/chat/completions");
+    expect(JSON.parse(transport.mock.calls[1][1].body!).model).toBe("hy3");
+    await runtime.service.chat("auto-member", req); expect(transport).toHaveBeenCalledTimes(2);
     expect(runtime.service.provider()?.deepModel).toBe("gpt-6-astra");
   });
   it("normalizes endpoint paths, encrypts write-only keys and applies supported file permissions", async () => {
@@ -179,11 +183,12 @@ describe("AI transactional service", () => {
     const waiting = new Promise<void>(resolve => { release = resolve; });
     transport.mockImplementationOnce(async () => { await waiting; return complete(); });
     runtime.service.setQuota("member-a", "admin", { limitTokens: 5000 });
-    const first = runtime.service.chat("member-a", chat());
+    const conversationId = "conversation-a";
+    const first = runtime.service.chat("member-a", { ...chat(), conversationId });
     await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
     expect(runtime.service.quota("member-a").reservedTokens).toBeGreaterThan(1024);
     expect(() => runtime.service.setQuota("member-a", "admin", { limitTokens: 0 })).toThrow();
-    await expect(runtime.service.chat("member-a", chat())).rejects.toMatchObject({ code: "AI_REQUEST_IN_PROGRESS" });
+    await expect(runtime.service.chat("member-a", { ...chat(), conversationId })).rejects.toMatchObject({ code: "AI_REQUEST_IN_PROGRESS" });
     expect(transport).toHaveBeenCalledTimes(1);
     release(); await first;
     expect(runtime.service.quota("member-a").reservedTokens).toBe(0);
@@ -255,6 +260,96 @@ describe("AI transactional service", () => {
     expect(await runtime.service.testProvider()).toMatchObject({ ok: true, models: ["model-a", "model-b"] });
     expect(transport.mock.calls[0][1].method).toBe("GET");
     expect(runtime.store.usage()).toEqual([]);
+  });
+  it("persists only allowlisted B.AI models discovered with the saved key and keeps verification across restart", async () => {
+    await runtime.service.saveProvider({ ...provider, baseUrl: "https://api.b.ai/v1", protocol: "responses", quickModel: TONGPIN_QUICK_AGENT, deepModel: "ignored" });
+    expect(runtime.service.provider()).toMatchObject({ modelsVerified: false, availableModels: [] });
+    transport.mockResolvedValueOnce(Response.json({ data: [
+      { id: "unknown-provider-model" }, { id: "hy3" }, { id: "qwen3.8-flash" }, { id: "mimo-v2.5" }, { id: "gpt-6-astra" },
+    ] }));
+    const result = await runtime.service.testProvider({ target: "chat" });
+    expect(result).toMatchObject({ ok: true, modelsVerified: true, availableModels: BAI_AGENT_MODELS });
+    expect(result.models).toContain("unknown-provider-model");
+    const raw = runtime.store.provider()!;
+    expect(raw.verifiedModels).toEqual(BAI_AGENT_MODELS);
+    expect(raw.verifiedModelConfigVersion).toBe(raw.modelConfigVersion);
+    expect(raw.verifiedModelKeyVersion).toBe(raw.modelKeyVersion);
+    expect(runtime.service.provider()).toMatchObject({ modelsVerified: true, availableModels: BAI_AGENT_MODELS });
+    expect(JSON.stringify(runtime.service.provider())).not.toMatch(/modelConfigVersion|modelKeyVersion|verifiedModels/);
+    expect(runtime.store.usage()).toEqual([]);
+
+    runtime.close();
+    runtime = await createNodeAi(path.join(directory, "test.json"), transport);
+    runtime.service.setQuota("verified-member", "admin", { limitTokens: 10_000 });
+    expect(runtime.service.provider()).toMatchObject({ modelsVerified: true, availableModels: BAI_AGENT_MODELS });
+    expect(runtime.service.preflight("verified-member", chat()).canSend).toBe(true);
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("never applies draft-key discovery to the saved Agent verification", async () => {
+    await runtime.service.saveProvider({ ...provider, baseUrl: "https://api.b.ai/v1", protocol: "responses", quickModel: TONGPIN_QUICK_AGENT, deepModel: "ignored" });
+    const stored = runtime.store.provider();
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "hy3" }, { id: "gpt-6-astra" }, { id: "not-allowlisted" }] }));
+    const result = await runtime.service.testProvider({ baseUrl: "https://api.b.ai/v1", apiKey: "draft-only-key", target: "chat" });
+    expect(result).toMatchObject({ modelsVerified: false, availableModels: ["hy3", "gpt-6-astra"] });
+    expect(runtime.store.provider()).toEqual(stored);
+    expect(runtime.service.provider()).toMatchObject({ modelsVerified: false, availableModels: [] });
+    expect(transport.mock.calls[0][1].headers.Authorization).toBe("Bearer draft-only-key");
+  });
+  it("clears Agent verification after a configuration or key save and fails locally until rechecked", async () => {
+    const agent = { ...provider, baseUrl: "https://api.b.ai/v1", protocol: "responses" as const, quickModel: TONGPIN_QUICK_AGENT, deepModel: "ignored" };
+    await runtime.service.saveProvider(agent);
+    transport.mockResolvedValueOnce(Response.json({ data: BAI_AGENT_MODELS.map(id => ({ id })) }));
+    await runtime.service.testProvider({ target: "chat" });
+    runtime.service.setQuota("verified-member", "admin", { limitTokens: 10_000 });
+    const first = runtime.store.provider()!;
+
+    await runtime.service.saveProvider({ ...agent, apiKey: "", maxOutputTokens: 2048 });
+    const changed = runtime.store.provider()!;
+    expect(changed.modelConfigVersion).not.toBe(first.modelConfigVersion);
+    expect(changed.modelKeyVersion).toBe(first.modelKeyVersion);
+    expect(runtime.service.provider()).toMatchObject({ modelsVerified: false, availableModels: [] });
+    expect(() => runtime.service.preflight("verified-member", chat())).toThrow(expect.objectContaining({ code: "AI_AGENT_MODELS_UNVERIFIED" }));
+
+    transport.mockResolvedValueOnce(Response.json({ data: BAI_AGENT_MODELS.map(id => ({ id })) }));
+    await runtime.service.testProvider({ target: "chat" });
+    const reverified = runtime.store.provider()!;
+    await runtime.service.saveProvider({ ...agent, apiKey: "rotated-bai-key", maxOutputTokens: 2048 });
+    const rotated = runtime.store.provider()!;
+    expect(rotated.modelKeyVersion).not.toBe(reverified.modelKeyVersion);
+    expect(runtime.service.provider()).toMatchObject({ modelsVerified: false, availableModels: [] });
+    expect(() => runtime.service.preflight("verified-member", chat())).toThrow(expect.objectContaining({ code: "AI_AGENT_MODELS_UNVERIFIED" }));
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it("does not let a stale model-list response authorize a newer Agent configuration", async () => {
+    const agent = { ...provider, baseUrl: "https://api.b.ai/v1", protocol: "responses" as const, quickModel: TONGPIN_QUICK_AGENT, deepModel: "ignored" };
+    await runtime.service.saveProvider(agent);
+    let finish!: (response: Response) => void;
+    transport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const checking = runtime.service.testProvider({ target: "chat" });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await runtime.service.saveProvider({ ...agent, apiKey: "", maxOutputTokens: 2048 });
+    finish(Response.json({ data: BAI_AGENT_MODELS.map(id => ({ id })) }));
+    await expect(checking).rejects.toMatchObject({ code: "AI_CONFIG_CHANGED" });
+    expect(runtime.service.provider()).toMatchObject({ modelsVerified: false, availableModels: [] });
+  });
+  it("fails before quota reservation or provider generation when a verified Agent lacks Astra or all quick models", async () => {
+    const agent = { ...provider, baseUrl: "https://api.b.ai/v1", protocol: "responses" as const, quickModel: TONGPIN_QUICK_AGENT, deepModel: "ignored", webSearchEnabled: true, webSearchQuotaTokens: 100 };
+    await runtime.service.saveProvider(agent);
+    runtime.service.setQuota("verified-member", "admin", { limitTokens: 10_000 });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "hy3" }] }));
+    await runtime.service.testProvider({ target: "chat" });
+    expect(() => runtime.service.preflight("verified-member", { ...chat(), mode: "deep" })).toThrow(expect.objectContaining({ code: "AI_AGENT_ASTRA_UNAVAILABLE" }));
+    expect(() => runtime.service.preflight("verified-member", { ...chat(), webSearchMode: "auto", messages: [{ role: "user", content: "\u4eca\u5929\u6709\u4ec0\u4e48\u65b0\u95fb" }] })).toThrow(expect.objectContaining({ code: "AI_AGENT_ASTRA_UNAVAILABLE" }));
+    expect(runtime.store.pending("verified-member")).toEqual([]);
+    expect(runtime.service.quota("verified-member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
+
+    await runtime.service.saveProvider({ ...agent, apiKey: "" });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "gpt-6-astra" }, { id: "unknown-provider-model" }] }));
+    await runtime.service.testProvider({ target: "chat" });
+    expect(() => runtime.service.preflight("verified-member", chat())).toThrow(expect.objectContaining({ code: "AI_AGENT_QUICK_MODELS_UNAVAILABLE" }));
+    expect(runtime.store.pending("verified-member")).toEqual([]);
+    expect(runtime.service.quota("verified-member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
+    expect(transport).toHaveBeenCalledTimes(2);
   });
   it("discovers models before saving config and never reuses a key on a changed draft origin", async () => {
     const stored = runtime.store.provider();

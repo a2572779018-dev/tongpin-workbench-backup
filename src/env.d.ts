@@ -17,6 +17,7 @@ interface DesktopSessionBridge {
     app: string;
     electron: string;
   };
+  computerUse?: import("../shared/computerUse").ComputerUseBridge;
   session: {
     load(): Promise<string | null>;
     save(payload: string): Promise<void>;
@@ -27,22 +28,13 @@ interface DesktopSessionBridge {
       state: "ready" | "unavailable";
       accounts: Array<{
         email: string;
-        hasPassword: boolean;
         lastUsedAt: string;
       }>;
     }>;
-    load(email: string): Promise<{
-      email: string;
-      password: string | null;
-      rememberPassword: boolean;
-    } | null>;
     save(payload: {
       email: string;
-      password: string;
-      rememberPassword: boolean;
     }): Promise<boolean>;
     remove(email: string): Promise<boolean>;
-    openSystemStorage(): Promise<boolean>;
   };
   relationshipGraph: {
     open(): Promise<{

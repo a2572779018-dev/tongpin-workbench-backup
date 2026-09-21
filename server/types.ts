@@ -39,6 +39,8 @@ import type {
 
 export interface User {
   id: string;
+  /** Server-owned organization boundary for AI data. Missing legacy values resolve to `default`. */
+  tenantId?: string;
   email: string;
   name: string;
   passwordHash: string;

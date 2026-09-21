@@ -1,17 +1,11 @@
-import { ArrowLeft, ArrowUp, Check, Heart, Lightbulb, SlidersHorizontal, X, Zap } from "lucide-react";
+import { ArrowLeft, ArrowUp, Check, Search, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AiPersonaProfile, AiPersonaSnapshot } from "../../../shared/aiPersona";
 import { useAuth } from "../../auth/AuthContext";
 import { ApiRequestError } from "../../lib/api";
 import { TongpinAICharacter } from "./visuals/TongpinAICharacter";
 import { CHARACTER_EXPRESSIONS } from "./visuals/characterExpression";
-
-const PERSONALITIES = [
-  { id: "warm", name: "温暖搭档", description: "亲切耐心，一起把事情想清楚", Icon: Heart },
-  { id: "professional", name: "专业顾问", description: "条理清晰，重视依据与可执行性", Icon: SlidersHorizontal },
-  { id: "concise", name: "高效行动派", description: "先给结论，少说废话", Icon: Zap },
-  { id: "creative", name: "创意伙伴", description: "善于发散，带来不同角度", Icon: Lightbulb },
-] as const;
+import { activePersonaPreset, PERSONA_PRESETS } from "./personaPresets";
 
 export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
   snapshot: AiPersonaSnapshot;
@@ -27,12 +21,17 @@ export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
   const [error, setError] = useState("");
   const [resetConfirm, setResetConfirm] = useState(false);
   const [conflict, setConflict] = useState(false);
+  const [personaQuery, setPersonaQuery] = useState("");
+  const [personaCategory, setPersonaCategory] = useState<"all" | "日常" | "工作" | "思考" | "创作">("all");
   const dialogRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const busyRef = useRef(false);
   const aliveRef = useRef(true);
   const closeRef = useRef(onClose); closeRef.current = onClose;
   const name = profile.name.trim() || "同频 AI";
+  const selectedPreset = activePersonaPreset(profile.tone, profile.customStyle);
+  const visiblePresets = PERSONA_PRESETS.filter(item => (personaCategory === "all" || item.category === personaCategory)
+    && (!personaQuery.trim() || `${item.name}${item.description}${item.category}`.toLocaleLowerCase().includes(personaQuery.trim().toLocaleLowerCase())));
   useEffect(() => {
     aliveRef.current = true;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -101,13 +100,19 @@ export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
               onKeyDown={event => { if (event.key === "Enter" && event.nativeEvent.isComposing) event.preventDefault(); }} />
           </label>}
           {(step === 1 || editing) && <>
+            <div className="tp-ai-persona-library-tools">
+              <label><Search size={15} /><span className="sr-only">搜索性格</span><input type="search" value={personaQuery} placeholder="搜索性格" disabled={saving} onChange={event => setPersonaQuery(event.target.value)} /></label>
+              <div role="group" aria-label="性格分类">{(["all", "日常", "工作", "思考", "创作"] as const).map(item => <button type="button" key={item} className={personaCategory === item ? "is-selected" : ""} aria-pressed={personaCategory === item} onClick={() => setPersonaCategory(item)}>{item === "all" ? "全部" : item}</button>)}</div>
+            </div>
             <div className="tp-ai-personalities" role="group" aria-label="选择 AI 性格">
-              {PERSONALITIES.map(({ id, name: title, description, Icon }) => <button type="button" key={id} disabled={saving}
-                className={profile.tone === id ? "is-selected" : ""} aria-pressed={profile.tone === id}
-                onClick={() => setProfile(current => ({ ...current, tone: id }))}>
-                <Icon size={20} /><strong>{title}</strong><small>{description}</small>{profile.tone === id && <Check size={14} className="tp-ai-personality-check" />}
+              {visiblePresets.map(item => <button type="button" key={item.id} disabled={saving}
+                className={selectedPreset?.id === item.id ? "is-selected" : ""} aria-pressed={selectedPreset?.id === item.id}
+                onClick={() => setProfile(current => ({ ...current, tone: item.tone, customStyle: item.customStyle }))}>
+                <span className="tp-ai-personality-category">{item.category}</span><strong>{item.name}</strong><small>{item.description}</small>{selectedPreset?.id === item.id && <Check size={14} className="tp-ai-personality-check" />}
               </button>)}
             </div>
+            {!visiblePresets.length && <p className="tp-ai-persona-library-empty">没有找到匹配的性格</p>}
+            <p className="tp-ai-persona-library-source">性格库参考 awesome-ai-persona-skills（MIT）并经安全重写；只影响表达方式，不会改变权限或工具审批。</p>
             <label className="tp-ai-persona-field">也可以用自己的话告诉我
               <textarea value={profile.customStyle} maxLength={2000} rows={3} disabled={saving} placeholder="比如：幽默一点，但讨论工作时认真直接。"
                 onChange={event => setProfile(current => ({ ...current, customStyle: event.target.value }))} />
@@ -133,7 +138,7 @@ export function PersonaSetup({ snapshot, accountId, onSaved, onClose }: {
             </div>
           </fieldset>}
           {step === 2 && <p className="tp-ai-persona-memory-note">只保存你在这里确认的内容，随账号同步；可随时修改或清除。</p>}
-          {step === 2 && !editing && <div className="tp-ai-persona-summary"><span>名字：{name}</span><span>性格：{PERSONALITIES.find(item => item.id === profile.tone)?.name}</span>
+          {step === 2 && !editing && <div className="tp-ai-persona-summary"><span>名字：{name}</span><span>性格：{activePersonaPreset(profile.tone, profile.customStyle)?.name ?? "自定义"}</span>
             {profile.customStyle && <p>{profile.customStyle}</p>}
           </div>}
           {error && <p className="tp-ai-persona-error" role="alert">{error}</p>}

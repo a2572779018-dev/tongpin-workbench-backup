@@ -6,17 +6,65 @@ import { createNodeAi } from "./node";
 import { AiVideoService } from "./videoService";
 import { createSecretBox } from "./security";
 import type { AiTransport } from "./provider";
+import type { AiVideoPlanParameters } from "../../shared/ai";
+import type { VideoModelId, VideoResolution } from "../../shared/aiVideoModels";
 
 describe("durable H3 jobs and isolated quotas", () => {
   let dir: string, runtime: Awaited<ReturnType<typeof createNodeAi>>;
   const transport = vi.fn<AiTransport>();
   const task = (status = "queued", progress = 0) => Response.json({ id: "task_fixture_12345678", status, progress });
-  const input = () => ({ requestId: crypto.randomUUID(), prompt: "一只猫", seconds: 15, resolution: "768p", aspectRatio: "16:9" });
+  const saveVideoPlan = (userId: string, prompt: string, videoParameters: AiVideoPlanParameters) => {
+    const requestId = crypto.randomUUID();
+    runtime.store.saveRequest({
+      requestId, userId, hash: "saved-plan", status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "planner", mode: "quick",
+      result: { requestId, content: "已整理，请确认后生成", model: "planner", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false }, toolPlan: { kind: "video", summary: "方案", prompt, videoParameters } },
+    });
+    return requestId;
+  };
+  type VideoInput = {
+    requestId: string;
+    prompt: string;
+    planRequestId: string;
+    model?: VideoModelId;
+    seconds: number;
+    resolution: VideoResolution;
+    aspectRatio: "16:9" | "9:16";
+    referenceIds?: string[];
+    conversationId?: string;
+  };
+  const planParameters = (request: Omit<VideoInput, "planRequestId">): AiVideoPlanParameters => ({
+    model: request.model ?? runtime.service.video.settings().defaultModel ?? "minimax_h3",
+    seconds: request.seconds,
+    resolution: request.resolution,
+    aspectRatio: request.aspectRatio,
+    referenceCount: request.referenceIds?.length ?? 0,
+    referenceFingerprints: request.referenceIds?.map(id => {
+      const row = runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_video_references WHERE id=?", id)[0];
+      const stored = row ? JSON.parse(row.data) as { fingerprint?: unknown } : undefined;
+      return typeof stored?.fingerprint === "string" ? stored.fingerprint : id;
+    }) ?? [],
+  });
+  const input = (userId = "a", prompt = "一只猫", overrides: Partial<Omit<VideoInput, "planRequestId" | "prompt">> = {}): VideoInput => {
+    const request: Omit<VideoInput, "planRequestId"> = { requestId: crypto.randomUUID(), prompt, seconds: 15, resolution: "768p", aspectRatio: "16:9", ...overrides };
+    return { ...request, planRequestId: saveVideoPlan(userId, prompt, planParameters(request)) };
+  };
   const config = { enabled: true, quotaPoints: 1000, apiKey: "sk-video-test-fixture-secret" };
+  const authorize = (...models: VideoModelId[]) => {
+    const row = runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0];
+    const saved = JSON.parse(row.data);
+    runtime.store.sql.exec("UPDATE ai_settings SET data=? WHERE id='video'", JSON.stringify({
+      ...saved,
+      verifiedConfigVersion: saved.configVersion,
+      verifiedKeyVersion: saved.keyVersion,
+      verifiedModels: models,
+    }));
+  };
   beforeEach(async () => {
     dir = await mkdtemp(path.join(os.tmpdir(), "tongpin-video-test-")); transport.mockReset(); transport.mockResolvedValue(task());
     runtime = await createNodeAi(path.join(dir, "test.json"), transport);
     await runtime.service.video.configure(config);
+    authorize("minimax_h3", "minimax_h3_no_audios_1080", "sd-2-c6", "sd-2.0-fast");
     runtime.service.setQuota("a", "admin", { limitTokens: 10000 }); runtime.service.setQuota("b", "admin", { limitTokens: 10000 });
   });
   afterEach(async () => { vi.useRealTimers(); runtime.close(); await rm(dir, { recursive: true }); });
@@ -25,8 +73,43 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect((await readFile(path.join(dir, "test.json.ai.sqlite"))).includes(Buffer.from(config.apiKey))).toBe(false);
     runtime.store.sql.exec("DELETE FROM ai_settings WHERE id='video'");
     const video = new AiVideoService(runtime.store, () => createSecretBox("fixture-with-at-least-thirty-two-characters"), transport, () => "deployment-secret");
-    expect(video.settings()).toEqual({ enabled: false, quotaPoints: 0, apiKeyConfigured: true });
+    expect(video.settings()).toEqual({ enabled: false, quotaPoints: 0, apiKeyConfigured: true, defaultModel: "minimax_h3", availableModels: [], modelsVerified: false });
     await expect(video.submit("a", input())).rejects.toMatchObject({ code: "AI_VIDEO_DISABLED" }); expect(transport).not.toHaveBeenCalled();
+  });
+  it("round-trips a validated default model, uses it for omitted model IDs and repairs a corrupt legacy value", async () => {
+    expect(await runtime.service.video.configure({ ...config, defaultModel: "sd-2-c6" })).toMatchObject({ defaultModel: "sd-2-c6" });
+    authorize("sd-2-c6");
+    const request = input("a", "一只猫", { resolution: "720p" });
+    await runtime.service.video.submit("a", request);
+    expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ model: "sd-2-c6", seconds: "15", resolution: "720p" });
+    const before = runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data;
+    await expect(runtime.service.video.configure({ ...config, defaultModel: "not-a-video-model" })).rejects.toMatchObject({ code: "AI_VIDEO_MODEL_INVALID" });
+    expect(runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data).toBe(before);
+    const legacy = { ...JSON.parse(before), defaultModel: "removed-legacy-model" };
+    runtime.store.sql.exec("UPDATE ai_settings SET data=? WHERE id='video'", JSON.stringify(legacy));
+    expect(runtime.service.video.settings().defaultModel).toBe("minimax_h3");
+    expect(await runtime.service.video.configure({ enabled: true, quotaPoints: 1000 })).toMatchObject({ defaultModel: "minimax_h3" });
+  });
+  it("executes the tier-bound 75API model and key instead of the legacy default", async () => {
+    const route = {
+      providerId: "video-provider", modelId: "minimax_h3", protocol: "chat_completions" as const,
+      maxOutputTokens: 1024, reasoningEffort: "" as const, capabilities: ["chat", "video"] as const,
+      enabled: true, videoProviderId: "video-provider", videoModelId: "sd-2-c6",
+    };
+    await runtime.service.saveHarness({
+      providers: [{ id: "video-provider", name: "75API", baseUrl: "https://www.75api.com/v1", protocol: "chat_completions", apiKey: "harness-video-key", enabled: true }],
+      tiers: { quick: route, standard: route, deep: route, pro: route },
+      policy: { strategy: "plan_execute", maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
+    });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
+    await runtime.service.discoverHarnessProvider("video-provider");
+    transport.mockResolvedValueOnce(task());
+    const request = input("a", "一段品牌视频", { model: "sd-2-c6", seconds: 15, resolution: "720p" });
+    await runtime.service.video.submit("a", request);
+    const [url, init] = transport.mock.calls.at(-1)!;
+    expect(url).toBe("https://www.75api.com/v1/videos");
+    expect(init.headers.Authorization).toBe("Bearer harness-video-key");
+    expect(JSON.parse(init.body!)).toMatchObject({ model: "sd-2-c6", seconds: "15", resolution: "720p" });
   });
   it("requires a positive administrator conversion and valid credentials", async () => {
     await expect(runtime.service.video.configure({ enabled: true, quotaPoints: 0 })).rejects.toMatchObject({ code: "AI_VIDEO_SETTINGS_INVALID" });
@@ -42,17 +125,19 @@ describe("durable H3 jobs and isolated quotas", () => {
     const image = await video.referenceContent(reference.id);
     expect(image.status).toBe(200); expect(image.headers.get("content-type")).toBe("image/jpeg");
     expect(new Uint8Array(await image.arrayBuffer())).toEqual(Uint8Array.from(atob(dataUrl.split(",")[1]), c => c.charCodeAt(0)));
-    const req = { ...input(), referenceIds: [reference.id] };
-    await expect(video.submit("b", req)).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
+    const req = input("a", "一只猫", { referenceIds: [reference.id] });
+    const bRequest = { ...req, planRequestId: saveVideoPlan("b", req.prompt, planParameters(req)) };
+    await expect(video.submit("b", bRequest)).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
     await video.submit("a", req); await video.submit("a", req);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(JSON.parse(transport.mock.calls[0][1].body!).images).toEqual([`https://notify.samhubs.com/api/video-reference/${reference.id}`]);
-    await expect(video.submit("a", { ...req, referenceIds: [] })).rejects.toMatchObject({ code: "AI_VIDEO_REQUEST_CONFLICT" });
+    const changedReferences = { ...req, referenceIds: [] };
+    await expect(video.submit("a", { ...changedReferences, planRequestId: saveVideoPlan("a", req.prompt, planParameters(changedReferences)) })).rejects.toMatchObject({ code: "AI_VIDEO_REQUEST_CONFLICT" });
     expect(video.list("a").jobs.find(job => job.id === req.requestId)?.referenceIds).toEqual([reference.id]);
     expect(JSON.stringify(video.list("b"))).not.toContain(reference.id);
     runtime.store.sql.exec("UPDATE ai_video_references SET expires_at=0 WHERE id=?", reference.id);
     expect((await video.referenceContent(reference.id)).status).toBe(404);
-    await expect(video.submit("a", { ...input(), referenceIds: [reference.id] })).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
+    await expect(video.submit("a", input("a", "一只猫", { referenceIds: [reference.id] }))).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
     await expect(video.uploadReference("zero", { dataUrl })).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
   });
   it("reserves once across concurrent duplicate submissions, with private key snapshots", async () => {
@@ -60,32 +145,206 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(transport).toHaveBeenCalledTimes(1); expect(result.every(j => j.id === req.requestId)).toBe(true);
     expect(runtime.service.quota("a")).toMatchObject({ reservedTokens: 1000, usedTokens: 0, remainingTokens: 9000 });
     expect(JSON.stringify(runtime.service.video.list("a"))).not.toMatch(/encryptedKey|sk-video|providerId/);
-    await expect(runtime.service.video.submit("a", { ...req, prompt: "other" })).rejects.toMatchObject({ code: "AI_VIDEO_REQUEST_CONFLICT" });
+    await expect(runtime.service.video.submit("a", { ...req, prompt: "other", planRequestId: saveVideoPlan("a", "other", planParameters(req)) })).rejects.toMatchObject({ code: "AI_VIDEO_REQUEST_CONFLICT" });
   });
-  it("isolates users, blocks zero quotas, limits simultaneous jobs", async () => {
-    const req = input(); await runtime.service.video.submit("a", req);
+  it("durably writes the request and reservation before the one paid provider POST", async () => {
+    const req = input();
+    transport.mockImplementationOnce(async () => {
+      expect(runtime.service.video.list("a").jobs).toEqual([expect.objectContaining({ id: req.requestId, status: "submitting", reserved: true })]);
+      expect(runtime.service.quota("a")).toMatchObject({ usedTokens: 0, reservedTokens: 1000, remainingTokens: 9000 });
+      return task();
+    });
+
+    await expect(runtime.service.video.submit("a", req)).resolves.toMatchObject({ id: req.requestId, status: "queued", reserved: true });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("allows one video generation per plan while preserving duplicate-request replay", async () => {
+    const req = input();
+    const first = await runtime.service.video.submit("a", req);
+    expect((await runtime.service.video.submit("a", req)).id).toBe(first.id);
+    await expect(runtime.service.video.submit("a", { ...req, requestId: crypto.randomUUID() })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_CONSUMED" });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("rejects an expired video plan before provider access or quota reservation", async () => {
+    const req = input();
+    const stored = runtime.store.request("a", req.planRequestId)!;
+    runtime.store.saveRequest({ ...stored, toolPlanExpiresAt: 0 });
+    const quota = runtime.service.quota("a");
+
+    await expect(runtime.service.video.submit("a", req)).rejects.toMatchObject({ code: "AI_TOOL_PLAN_EXPIRED" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.service.quota("a")).toEqual(quota);
+  });
+  it("isolates users, blocks zero quotas, single-flights a conversation and caps each account at three tasks", async () => {
+    transport.mockImplementation(async () => task());
+    const req = input("a", "一只猫", { conversationId: "conversation-a" }); await runtime.service.video.submit("a", req);
     expect(runtime.service.video.list("b").jobs).toEqual([]);
     await expect(runtime.service.video.refresh("b", req.requestId)).rejects.toMatchObject({ status: 404 });
     await expect(runtime.service.video.content("b", req.requestId)).rejects.toMatchObject({ status: 404 });
-    await expect(runtime.service.video.submit("zero", input())).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
-    await expect(runtime.service.video.submit("a", input())).rejects.toMatchObject({ code: "AI_VIDEO_BUSY" });
-    await runtime.service.video.submit("b", input());
-    runtime.service.setQuota("c", "admin", { limitTokens: 10000 });
-    await expect(runtime.service.video.submit("c", input())).rejects.toMatchObject({ code: "AI_VIDEO_BUSY" });
-    expect(transport).toHaveBeenCalledTimes(2);
+    await expect(runtime.service.video.submit("zero", input("zero"))).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
+    await expect(runtime.service.video.submit("a", input("a", "另一只猫", { conversationId: "conversation-a" }))).rejects.toMatchObject({ code: "AI_REQUEST_IN_PROGRESS" });
+    await runtime.service.video.submit("a", input("a", "第二条", { conversationId: "conversation-b" }));
+    await runtime.service.video.submit("a", input("a", "第三条", { conversationId: "conversation-c" }));
+    await expect(runtime.service.video.submit("a", input("a", "第四条", { conversationId: "conversation-d" }))).rejects.toMatchObject({ code: "AI_REQUEST_IN_PROGRESS" });
+    await runtime.service.video.submit("b", input("b"));
+    expect(transport).toHaveBeenCalledTimes(4);
+  });
+  it("shares video concurrency slots and conversation locks with chat, image and presentation requests", async () => {
+    const savePending = (conversationId: string) => {
+      const requestId = crypto.randomUUID();
+      runtime.store.saveRequest({
+        requestId, userId: "a", hash: requestId, status: "pending", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+        inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "business-tier", mode: "standard", conversationId,
+      });
+    };
+    savePending("shared-conversation");
+    await expect(runtime.service.video.submit("a", input("a", "同一对话", { conversationId: "shared-conversation" }))).rejects.toMatchObject({ code: "AI_REQUEST_IN_PROGRESS" });
+    savePending("second-conversation");
+    await expect(runtime.service.video.submit("a", input("a", "第三条任务", { conversationId: "video-conversation" }))).resolves.toMatchObject({ status: "queued" });
+    await expect(runtime.service.video.submit("a", input("a", "第四条任务", { conversationId: "fourth-conversation" }))).rejects.toMatchObject({ code: "AI_REQUEST_IN_PROGRESS" });
+    expect(transport).toHaveBeenCalledTimes(1);
   });
   it("rejects racing mismatched duplicate input without another paid submission", async () => {
     const req = input();
-    const results = await Promise.allSettled([runtime.service.video.submit("a", req), runtime.service.video.submit("a", { ...req, prompt: "不同内容" })]);
+    const results = await Promise.allSettled([runtime.service.video.submit("a", req), runtime.service.video.submit("a", { ...req, prompt: "不同内容", planRequestId: saveVideoPlan("a", "不同内容", planParameters(req)) })]);
     expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
     expect(results.find(r => r.status === "rejected")).toMatchObject({ reason: { code: "AI_VIDEO_REQUEST_CONFLICT" } });
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.service.quota("a").reservedTokens).toBe(1000);
   });
+  it("fails closed before the video provider when a plan belongs to another account, kind or prompt", async () => {
+    const savePlan = (userId: string, kind: "image" | "video", prompt: string, videoParameters?: AiVideoPlanParameters) => {
+      const requestId = crypto.randomUUID();
+      runtime.store.saveRequest({
+        requestId, userId, hash: "saved-plan", status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+        inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "planner", mode: "quick",
+        result: { requestId, content: "已整理，请确认后生成", model: "planner", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false }, toolPlan: kind === "video" ? { kind, summary: "方案", prompt, videoParameters: videoParameters! } : { kind, summary: "方案", prompt } },
+      });
+      return requestId;
+    };
+    const prompt = "品牌 Logo 缓慢推近";
+    const validInput = input("a", prompt);
+    const videoPlan = savePlan("a", "video", prompt, planParameters(validInput));
+    const imagePlan = savePlan("a", "image", prompt);
+    const calls = transport.mock.calls.length;
+    const quota = runtime.service.quota("a");
+
+    await expect(runtime.service.video.submit("a", { ...input(), prompt, planRequestId: undefined })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_REQUIRED" });
+    await expect(runtime.service.video.submit("b", { ...input(), prompt, planRequestId: videoPlan })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    await expect(runtime.service.video.submit("a", { ...input(), prompt: "篡改后的提示词", planRequestId: videoPlan })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    await expect(runtime.service.video.submit("a", { ...input(), prompt, planRequestId: imagePlan })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    await expect(runtime.service.video.submit("a", { ...input(), prompt, planRequestId: "short" })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_INVALID" });
+    expect(transport).toHaveBeenCalledTimes(calls);
+    expect(runtime.service.video.list("a").jobs).toEqual([]);
+    expect(runtime.service.quota("a")).toEqual(quota);
+
+    const submitted = await runtime.service.video.submit("a", { ...validInput, planRequestId: videoPlan });
+    expect(submitted).toMatchObject({ prompt, planRequestId: videoPlan, status: "queued" });
+    expect(transport).toHaveBeenCalledTimes(calls + 1);
+  });
+  it("rejects every video plan parameter change before provider access or quota reservation", async () => {
+    const request = input();
+    const reference = await runtime.service.video.uploadReference("a", { dataUrl: "data:image/jpeg;base64,/9j/AAAA" });
+    const changes: Array<Partial<VideoInput>> = [
+      { model: "sd-2-c6" },
+      { seconds: 14 },
+      { resolution: "480p" },
+      { aspectRatio: "9:16" },
+      { referenceIds: [reference.id] },
+    ];
+    const quota = runtime.service.quota("a");
+    for (const change of changes) {
+      await expect(runtime.service.video.submit("a", { ...request, ...change })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    }
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.service.video.list("a").jobs).toEqual([]);
+    expect(runtime.service.quota("a")).toEqual(quota);
+  });
+  it("binds a video plan to the exact reference contents and order, not only their count", async () => {
+    const first = await runtime.service.video.uploadReference("a", { dataUrl: "data:image/jpeg;base64,/9j/AAAA" });
+    const second = await runtime.service.video.uploadReference("a", { dataUrl: "data:image/jpeg;base64,/9j/BBBB" });
+    const planned = input("a", "参考图不可替换", { referenceIds: [first.id, second.id] });
+    const quota = runtime.service.quota("a");
+
+    await expect(runtime.service.video.submit("a", { ...planned, referenceIds: [second.id, first.id] })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    await expect(runtime.service.video.submit("a", { ...planned, referenceIds: [first.id, first.id] })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.service.video.list("a").jobs).toEqual([]);
+    expect(runtime.service.quota("a")).toEqual(quota);
+  });
+  it("rejects an unverified non-default model before reading references, reserving quota or calling the provider", async () => {
+    await runtime.service.video.configure({ ...config, defaultModel: "minimax_h3" });
+    const request = input("a", "品牌短片", { model: "sd-2-c6", resolution: "720p", referenceIds: ["0".repeat(64)] });
+    const quota = runtime.service.quota("a");
+
+    await expect(runtime.service.video.submit("a", request)).rejects.toMatchObject({ code: "AI_VIDEO_MODEL_NOT_AUTHORIZED" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.service.video.list("a").jobs).toEqual([]);
+    expect(runtime.service.quota("a")).toEqual(quota);
+  });
+  it("allows only the provider-listed, locally enabled models after verification", async () => {
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "sd-2-c6" }, { id: "sd-2.5-c1" }, { id: "unknown-provider-model" }] }));
+    const check = await runtime.service.video.test();
+    expect(check.availableModels).toEqual(["sd-2-c6", "sd-2.5-c1"]);
+    const memberSettings = runtime.service.video.list("a").settings;
+    expect(memberSettings).toMatchObject({ availableModels: [], modelsVerified: true, profile: { resolutions: ["720p"], maxImages: 9, requiresImage: false } });
+    expect(JSON.stringify(memberSettings)).not.toContain("sd-2-c6");
+
+    transport.mockResolvedValueOnce(task());
+    await runtime.service.video.submit("a", input("a", "品牌短片", { model: "sd-2-c6", resolution: "720p" }));
+    expect(JSON.parse(transport.mock.calls[1][1].body!)).toMatchObject({ model: "sd-2-c6" });
+  });
+  it("fails closed when a successful model check finds no locally enabled model", async () => {
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "unknown-provider-model" }] }));
+    expect((await runtime.service.video.test()).availableModels).toEqual([]);
+    expect(runtime.service.video.list("a").settings).toEqual(expect.objectContaining({ availableModels: [], modelsVerified: false }));
+    expect(runtime.service.video.list("a").settings.defaultModel).toBeUndefined();
+
+    const quota = runtime.service.quota("a");
+    await expect(runtime.service.video.submit("a", input())).rejects.toMatchObject({ code: "AI_VIDEO_MODEL_NOT_AUTHORIZED" });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.service.quota("a")).toEqual(quota);
+  });
+  it("binds verified models to the saved config and key versions, then clears them on either change", async () => {
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
+    await runtime.service.video.test();
+    const verified = JSON.parse(runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data);
+    expect(verified).toMatchObject({ verifiedConfigVersion: verified.configVersion, verifiedKeyVersion: verified.keyVersion, verifiedModels: ["minimax_h3", "sd-2-c6"] });
+
+    await runtime.service.video.configure({ enabled: true, quotaPoints: 1200, defaultModel: "sd-2-c6" });
+    const changedConfig = JSON.parse(runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data);
+    expect(changedConfig.configVersion).not.toBe(verified.configVersion);
+    expect(changedConfig.keyVersion).toBe(verified.keyVersion);
+    expect(changedConfig).not.toHaveProperty("verifiedModels");
+    expect(runtime.service.video.settings()).toMatchObject({ availableModels: [], modelsVerified: false });
+
+    await runtime.service.video.configure({ enabled: true, quotaPoints: 1200, defaultModel: "sd-2-c6", apiKey: "rotated-video-key" });
+    const changedKey = JSON.parse(runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data);
+    expect(changedKey.keyVersion).not.toBe(changedConfig.keyVersion);
+    expect(changedKey).not.toHaveProperty("verifiedModels");
+  });
+  it("does not apply a stale model check after the administrator changes configuration", async () => {
+    let finish!: (response: Response) => void;
+    transport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const checking = runtime.service.video.test();
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await runtime.service.video.configure({ enabled: true, quotaPoints: 1300, defaultModel: "sd-2-c6" });
+    finish(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
+
+    await expect(checking).rejects.toMatchObject({ code: "AI_CONFIG_CHANGED" });
+    expect(runtime.service.video.settings()).toMatchObject({ defaultModel: "sd-2-c6", availableModels: [], modelsVerified: false });
+  });
   it("makes stale jobs visible to admin without resubmitting or releasing money", async () => {
     const req = input(); await runtime.service.video.submit("a", req);
     vi.useFakeTimers(); vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
-    expect(runtime.service.video.adminPending()).toEqual([expect.objectContaining({ id: req.requestId, status: "uncertain", reserved: true, userId: "a" })]);
+    const pending = runtime.service.video.adminPending();
+    expect(pending).toEqual([expect.objectContaining({ id: req.requestId, status: "uncertain", reserved: true, userId: "a" })]);
+    expect(pending[0]).not.toHaveProperty("prompt");
+    expect(pending[0]).not.toHaveProperty("conversationId");
+    expect(pending[0]).not.toHaveProperty("referenceIds");
+    expect(pending[0]).not.toHaveProperty("images");
+    expect(pending[0]).not.toHaveProperty("encryptedKey");
     expect(runtime.service.quota("a").reservedTokens).toBe(1000);
     expect(transport).toHaveBeenCalledTimes(1);
   });
@@ -103,6 +362,9 @@ describe("durable H3 jobs and isolated quotas", () => {
     transport.mockResolvedValue(new Response("denied", { status: 403 }));
     const req = input(); expect(await runtime.service.video.submit("a", req)).toMatchObject({ status: "failed", reserved: false });
     expect(runtime.service.quota("a").remainingTokens).toBe(10000);
+    await expect(runtime.service.video.submit("a", req)).resolves.toMatchObject({ status: "failed", reserved: false });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.store.usage("a").filter(entry => entry.requestId === req.requestId)).toHaveLength(1);
     transport.mockRejectedValue(new Error("private details and unknown submission"));
     const uncertain = input(); expect(await runtime.service.video.submit("a", uncertain)).toMatchObject({ status: "uncertain", reserved: true });
     await runtime.service.video.submit("a", uncertain); expect(transport).toHaveBeenCalledTimes(2);
@@ -132,8 +394,17 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect((await response.arrayBuffer()).byteLength).toBe(4);
   });
   it("GET model test does not submit or reserve quota", async () => {
-    transport.mockResolvedValue(Response.json({ data: [{ id: "minimax_h3" }] }));
-    expect(await runtime.service.video.test()).toMatchObject({ ok: true });
+    transport.mockResolvedValue(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2.5-c1" }, { id: "unrelated" }] }));
+    const check = await runtime.service.video.test();
+    expect(check).toMatchObject({ ok: true, models: [
+      { id: "minimax_h3", listed: true },
+      { id: "minimax_h3_no_audios_1080", listed: false },
+      { id: "sd-2-c6", listed: false },
+      { id: "sd-2.0-fast", listed: false },
+      { id: "sd-2.5-c1", listed: true },
+    ], availableModels: ["minimax_h3", "sd-2.5-c1"] });
+    expect(check.message).toContain("成员端只显示这些模型");
+    expect(runtime.service.video.settings()).toMatchObject({ availableModels: ["minimax_h3", "sd-2.5-c1"], modelsVerified: true });
     expect(transport.mock.calls[0][0]).toBe("https://www.75api.com/v1/models"); expect(transport.mock.calls[0][1].method).toBe("GET");
     expect(runtime.service.quota("a").remainingTokens).toBe(10000);
   });

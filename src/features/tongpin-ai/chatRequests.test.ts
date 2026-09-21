@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { AI_CHAT_CONTEXT_LIMITS, AI_CONTEXT_WINDOW_PREFIX, aiChatTextContextBytes, fitAiChatMessages } from "../../../shared/aiContext";
 import { buildChatRequest, canRecoverChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "./chatRequests";
-import type { TongpinAIConversation } from "./types";
+import type { TongpinAIConversation, TongpinAIMessage } from "./types";
+import type { AiHarnessTrace } from "../../../shared/ai";
 
 const history: TongpinAIConversation[] = [{ id: "a", title: "A", timeLabel: "刚刚", messages: [
   { id: "u", role: "user", content: "你好", time: "12:00" },
@@ -29,6 +31,39 @@ describe("real AI chat request state", () => {
     ]);
     expect(request.messages.map(message => message.content)).toEqual(["你好", "真正的上游回答", "继续"]);
   });
+  it("keeps the current turn and newest useful history inside the request window without changing saved history", () => {
+    const messages: TongpinAIMessage[] = [
+      ...Array.from({ length: 90 }, (_, index) => ({
+        id: `history-${index}`,
+        role: index % 2 ? "assistant" as const : "user" as const,
+        content: `历史-${index}-${"资料".repeat(300)}`,
+        time: "12:00",
+      })),
+      { id: "current", role: "user", content: "继续讨论刚才的产物", time: "12:01" },
+    ];
+    const saved = structuredClone(messages);
+    const request = buildChatRequest("bounded-context-id", "deep", messages);
+    expect(request.messages.length).toBeLessThanOrEqual(AI_CHAT_CONTEXT_LIMITS.requestMessages);
+    expect(aiChatTextContextBytes(request.messages)).toBeLessThanOrEqual(AI_CHAT_CONTEXT_LIMITS.requestTextBytes);
+    expect(request.messages.at(-1)).toEqual({ role: "user", content: "继续讨论刚才的产物" });
+    expect(request.messages.some(message => message.content.includes("历史-89-"))).toBe(true);
+    expect(request.messages.some(message => message.content.includes("历史-0-"))).toBe(false);
+    expect(request.messages[0].content.startsWith(AI_CONTEXT_WINDOW_PREFIX)).toBe(true);
+    expect(fitAiChatMessages(request.messages)).toEqual(request.messages);
+    expect(messages).toEqual(saved);
+  });
+  it("compresses a long old reply by preserving its head and tail rather than blocking the follow-up", () => {
+    const longReply = `头部结论-${"中间资料".repeat(20_000)}-尾部结论`;
+    const result = fitAiChatMessages([
+      { role: "assistant", content: longReply },
+      { role: "user", content: "根据上面结论继续" },
+    ]);
+    expect(result.at(-1)?.content).toBe("根据上面结论继续");
+    expect(result.some(message => message.content.includes("头部结论"))).toBe(true);
+    expect(result.some(message => message.content.includes("尾部结论"))).toBe(true);
+    expect(result.some(message => message.content.includes("较长历史消息已有界压缩"))).toBe(true);
+    expect(result[0].content).toContain("不得推测未提供的历史、视频画面或声音");
+  });
   it("routes late replies to their original conversation without reviving deleted chats", () => {
     const next = replaceChatMessage(history, "a", "t", { content: "回答", status: "ready" });
     expect(next[0].messages[2].content).toBe("回答");
@@ -47,5 +82,16 @@ describe("real AI chat request state", () => {
     expect(completedReply({ requestId: "one-id", content: "已收到", model: "test-model", usage,
       quota: { limitTokens: 1000, usedTokens: 42, remainingTokens: 958, reservedTokens: 0, inputTokens: 30, outputTokens: 12 },
     })).toEqual({ content: "已收到", status: "ready", model: "test-model", usage });
+  });
+  it("preserves the parent planning trace when a PPT execution response carries a different terminal run", () => {
+    const parent: AiHarnessTrace = { runId: "parent-plan", tier: "deep", strategy: "plan_execute", status: "planned",
+      reasoningSummary: "已校验 PPT 方案", nextAction: "resume", toolBudget: { used: 1, max: 3, remaining: 2 }, steps: [] };
+    const execution: AiHarnessTrace = { ...parent, runId: "execution", status: "succeeded", nextAction: "none" };
+    const response = { requestId: "execution", content: "PPT 已生成", model: "test", trace: execution,
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimated: false },
+      quota: { limitTokens: 10, usedTokens: 2, remainingTokens: 8, reservedTokens: 0, inputTokens: 1, outputTokens: 1 } };
+    expect(completedReply(response).trace).toEqual(execution);
+    const merged = { trace: parent, ...completedReply(response, { preserveExistingTrace: true }) };
+    expect(merged.trace).toEqual(parent);
   });
 });

@@ -49,7 +49,6 @@ type EmailVerificationResponse = {
 
 type RememberedAccount = {
   email: string;
-  hasPassword: boolean;
   lastUsedAt: string;
 };
 
@@ -67,7 +66,7 @@ export function AuthPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [rememberPassword, setRememberPassword] = useState(true);
+  const [rememberAccount, setRememberAccount] = useState(true);
   const [rememberedAccounts, setRememberedAccounts] = useState<
     RememberedAccount[]
   >([]);
@@ -158,7 +157,7 @@ export function AuthPage() {
     setNotice("");
     try {
       if (mode === "login") {
-        await login(email, password, rememberPassword);
+        await login(email, password, rememberAccount);
         return;
       }
       if (mode === "register") {
@@ -220,16 +219,12 @@ export function AuthPage() {
         });
         if (window.tongpin?.credentials) {
           try {
-            await window.tongpin.credentials.save({
-              email,
-              password,
-              rememberPassword: true,
-            });
+            await window.tongpin.credentials.save({ email });
           } catch {
-            // 重置成功优先，不将密码降级保存到网页缓存。
+            // 重置成功优先；本机只记录账号，不记录新密码。
           }
         }
-        setRememberPassword(true);
+        setRememberAccount(true);
         setPassword("");
         setCode("");
         setMode("login");
@@ -285,30 +280,13 @@ export function AuthPage() {
     }
   }
 
-  async function selectRememberedAccount(account: RememberedAccount) {
-    if (!window.tongpin?.credentials) return;
-    setAccountBusyEmail(account.email);
+  function selectRememberedAccount(account: RememberedAccount) {
     setError("");
-    try {
-      const saved = await window.tongpin.credentials.load(account.email);
-      if (!saved) {
-        setEmail(account.email);
-        setPassword("");
-        setRememberPassword(false);
-        setAccountMenuOpen(false);
-        setError("该账号的安全密码暂时无法读取，请手动输入。");
-        return;
-      }
-      setEmail(saved.email);
-      setPassword(saved.password ?? "");
-      setRememberPassword(saved.rememberPassword);
-      setShowPassword(false);
-      setAccountMenuOpen(false);
-    } catch {
-      setError("无法读取该账号的安全密码，请手动输入。");
-    } finally {
-      setAccountBusyEmail("");
-    }
+    setEmail(account.email);
+    setPassword("");
+    setRememberAccount(true);
+    setShowPassword(false);
+    setAccountMenuOpen(false);
   }
 
   async function removeRememberedAccount(accountEmail: string) {
@@ -322,7 +300,7 @@ export function AuthPage() {
       );
       if (email.trim().toLowerCase() === accountEmail) {
         setPassword("");
-        setRememberPassword(true);
+        setRememberAccount(true);
       }
     } catch {
       setError("删除登录记录失败，请重试。");
@@ -542,21 +520,9 @@ export function AuthPage() {
                         {credentialListState === "unavailable" && (
                           <div className="account-picker__warning" role="status">
                             <span>
-                              {window.tongpin?.platform === "darwin"
-                                ? "登录钥匙串未解锁，账号记录仍安全保留"
-                                : "系统安全存储暂不可用，账号记录仍安全保留"}
+                              本机账号记录暂时无法安全更新，请检查文件权限后重试
                             </span>
                             <span className="account-picker__warning-actions">
-                              {window.tongpin?.platform === "darwin" && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void window.tongpin?.credentials.openSystemStorage()
-                                  }
-                                >
-                                  打开钥匙串
-                                </button>
-                              )}
                               <button
                                 type="button"
                                 onClick={() => void refreshRememberedAccounts()}
@@ -590,9 +556,7 @@ export function AuthPage() {
                                   email.trim().toLowerCase() === account.email
                                 }
                                 disabled={accountBusyEmail === account.email}
-                                onClick={() =>
-                                  void selectRememberedAccount(account)
-                                }
+                                onClick={() => selectRememberedAccount(account)}
                               >
                                 <span
                                   className="account-picker__avatar"
@@ -602,11 +566,7 @@ export function AuthPage() {
                                 </span>
                                 <span>
                                   <b>{account.email}</b>
-                                  <small>
-                                    {account.hasPassword
-                                      ? "已记住密码"
-                                      : "仅记住账号"}
-                                  </small>
+                                  <small>仅记住账号</small>
                                 </span>
                               </button>
                               <button
@@ -709,15 +669,15 @@ export function AuthPage() {
                   <label className="remember-login">
                     <input
                       type="checkbox"
-                      checked={rememberPassword}
+                      checked={rememberAccount}
                       onChange={(event) =>
-                        setRememberPassword(event.target.checked)
+                        setRememberAccount(event.target.checked)
                       }
                     />
                     <span aria-hidden="true">
-                      {rememberPassword && <Check size={13} />}
+                      {rememberAccount && <Check size={13} />}
                     </span>
-                    <b>记住密码</b>
+                    <b>记住账号（密码每次输入）</b>
                   </label>
                 )}
 

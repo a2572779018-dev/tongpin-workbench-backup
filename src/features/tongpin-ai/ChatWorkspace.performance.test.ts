@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ChatWorkspace } from "./ChatWorkspace";
 import type { TongpinAIMessage } from "./types";
@@ -12,6 +13,20 @@ export const syntheticHistory: TongpinAIMessage[] = Array.from({ length: 1_000 }
 }));
 
 describe("chat rendering performance boundaries", () => {
+  it("keeps draft updates from invalidating every history row", () => {
+    const source = readFileSync(new URL("./ChatWorkspace.tsx", import.meta.url), "utf8");
+    expect(source).toContain("const editVideo = useCallback(");
+    expect(source).toContain("onEditVideo={isVideoArtifact && onSubmitVideo ? editVideo : undefined}");
+    expect(source).toContain("onVideoSettled={isVideoArtifact ? videoSettled : undefined}");
+    expect(source).not.toContain("onEditVideo={onSubmitVideo ? request =>");
+  });
+
+  it("does not queue smooth scrolling for every streamed reply resize", () => {
+    const refinements = readFileSync(new URL("./ai-refinements.css", import.meta.url), "utf8");
+    expect(refinements).toContain(".tp-ai-page .tp-ai-messages { scroll-behavior: auto; }");
+    expect(refinements).not.toContain(".tp-ai-page .tp-ai-messages { scroll-behavior: smooth; }");
+  });
+
   it("bounds the initial message DOM without discarding the earlier history", () => {
     const props = { artifactById: new Map(), composerFocusRequest: 0, draft: "", enabledSkills: [],
       messages: syntheticHistory, mode: "quick" as const, notificationUnread: 0,

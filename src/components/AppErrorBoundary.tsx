@@ -22,6 +22,7 @@ export class AppErrorBoundary extends Component<
   private returnToLogin = async () => {
     try {
       if (window.tongpin) {
+        await window.tongpin.computerUse?.stopSession().catch(() => undefined);
         await window.tongpin.session.clear();
       } else {
         localStorage.removeItem("tongpin.session.v1");
@@ -65,4 +66,3 @@ export class AppErrorBoundary extends Component<
     );
   }
 }
-

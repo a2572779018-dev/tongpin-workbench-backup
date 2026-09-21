@@ -3,10 +3,13 @@ import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
 import { validateImageBase64 } from "./capabilities";
+import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey } from "./tenant";
+import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
 
 export const AI_WORKSPACE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_workspaces (
   user_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}',
   revision INTEGER NOT NULL,
   schema_version INTEGER NOT NULL,
   updated_at TEXT NOT NULL,
@@ -14,6 +17,7 @@ CREATE TABLE IF NOT EXISTS ai_workspaces (
 );
 CREATE TABLE IF NOT EXISTS ai_workspace_mutations (
   user_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}',
   mutation_id TEXT NOT NULL,
   request_hash TEXT NOT NULL,
   revision INTEGER NOT NULL,
@@ -21,6 +25,7 @@ CREATE TABLE IF NOT EXISTS ai_workspace_mutations (
 );
 CREATE TABLE IF NOT EXISTS ai_workspace_chunks (
   user_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}',
   chunk_index INTEGER NOT NULL,
   data TEXT NOT NULL,
   PRIMARY KEY(user_id, chunk_index)
@@ -32,6 +37,20 @@ const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CHUNK_MARKER = "@chunks-v1";
 const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
+const HARNESS_TIERS = new Set(["quick", "standard", "deep", "pro"]);
+const HARNESS_STRATEGIES = new Set(["direct", "react", "plan_execute"]);
+const HARNESS_RUN_STATUSES = new Set(["planned", "running", "waiting_approval", "succeeded", "failed", "cancelled", "uncertain"]);
+const HARNESS_NEXT_ACTIONS = new Set(["none", "poll", "approve_tool", "resume"]);
+const HARNESS_STEP_KINDS = new Set(["strategy", "route", "workflow", "plan", "model", "tool", "approval", "result"]);
+const LEGACY_HARNESS_STEP_KINDS = new Set(["route", "model", "tool", "approval", "result"]);
+const HARNESS_CAPABILITIES = new Set(["chat", "vision", "web_search", "image", "video", "presentation", "computer"]);
+const HARNESS_STEP_STATUSES = new Set(["planned", "waiting_approval", "running", "succeeded", "failed", "cancelled"]);
+const HARNESS_APPROVAL_STATUSES = new Set(["not_required", "waiting", "approved", "consumed", "cancelled"]);
+const HARNESS_STEP_FIELDS = [
+  "id", "kind", "capability", "title", "summary", "status", "createdAt", "updatedAt",
+  "strategy", "maxToolSteps", "workflowId", "workflowVersion", "workflowStepId",
+  "proposalId", "sequence", "requiresApproval", "approvalStatus", "executionRequestId",
+] as const;
 type ObjectValue = Record<string, unknown>;
 
 function invalid(message: string): never { throw new AiError(400, "AI_WORKSPACE_INVALID", message); }
@@ -52,6 +71,18 @@ function id(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || !ID.test(value) || forbiddenKeys.has(value)) invalid(`${label}标识无效`);
 }
 function optionalId(value: unknown, label: string): void { if (value !== undefined) id(value, label); }
+function harnessStepId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length > 160 || (!ID.test(value) && !(value.startsWith("result:") && ID.test(value.slice("result:".length))))) invalid("处理步骤标识无效");
+}
+function boundedInteger(value: unknown, label: string, minimum: number, maximum: number): asserts value is number {
+  if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) > maximum) invalid(`${label}格式不正确`);
+}
+function isoTimestamp(value: unknown, label: string): asserts value is string {
+  string(value, label, 80, true);
+  try {
+    if (new Date(value).toISOString() !== value) invalid(`${label}格式不正确`);
+  } catch { invalid(`${label}格式不正确`); }
+}
 function array(value: unknown, label: string, max: number): unknown[] {
   if (!Array.isArray(value)) invalid(`${label}格式不正确`);
   if (value.length > max) tooLarge(`${label}数量超过上限，原记录未被更改`);
@@ -120,11 +151,84 @@ function usage(value: unknown): void {
   if (Number(item.inputTokens) + Number(item.outputTokens) + Number(item.convertedTokens ?? 0) !== item.totalTokens || typeof item.estimated !== "boolean") invalid("消息用量格式不正确");
   // Display metadata only: quota accounting must exclusively use the server AI ledger.
 }
+function harnessTrace(value: unknown): void {
+  if (value === undefined) return;
+  const trace = record(value, "处理过程", ["runId", "tier", "strategy", "status", "reasoningSummary", "nextAction", "toolBudget", "steps"]);
+  id(trace.runId, "处理过程");
+  if (!HARNESS_TIERS.has(String(trace.tier))) invalid("处理档位无效");
+  if (!HARNESS_RUN_STATUSES.has(String(trace.status))) invalid("处理状态无效");
+  string(trace.reasoningSummary, "处理摘要", 1000, true);
+  const legacy = trace.strategy === undefined && trace.nextAction === undefined && trace.toolBudget === undefined;
+  if (!legacy && (trace.strategy === undefined || trace.nextAction === undefined || trace.toolBudget === undefined)) invalid("处理过程版本不完整，请更新客户端后重试");
+  if (!legacy && !HARNESS_STRATEGIES.has(String(trace.strategy))) invalid("处理策略无效");
+  if (!legacy && !HARNESS_NEXT_ACTIONS.has(String(trace.nextAction))) invalid("处理下一步状态无效");
+  const stepIds = new Set<string>();
+  const steps = array(trace.steps, "处理步骤", LIMITS.harnessStepsPerTrace);
+  let toolSteps = 0;
+  let publicSchemaUsed = false;
+  let strategySteps = 0;
+  let strategyMaxToolSteps: number | undefined;
+  for (const rawStep of steps) {
+    const step = record(rawStep, "处理步骤", HARNESS_STEP_FIELDS);
+    harnessStepId(step.id); unique(step.id, stepIds, "处理步骤");
+    if (!HARNESS_STEP_KINDS.has(String(step.kind))) invalid("处理步骤类型无效");
+    if (!HARNESS_CAPABILITIES.has(String(step.capability))) invalid("处理步骤能力无效");
+    if (!HARNESS_STEP_STATUSES.has(String(step.status))) invalid("处理步骤状态无效");
+    string(step.title, "处理步骤标题", 160, true); string(step.summary, "处理步骤摘要", 500, true);
+    isoTimestamp(step.createdAt, "处理步骤时间"); isoTimestamp(step.updatedAt, "处理步骤时间");
+    if (Date.parse(step.updatedAt) < Date.parse(step.createdAt)) invalid("处理步骤时间顺序无效");
+
+    const hasStrategyFields = step.strategy !== undefined || step.maxToolSteps !== undefined;
+    const hasWorkflowFields = step.workflowId !== undefined || step.workflowVersion !== undefined || step.workflowStepId !== undefined;
+    const hasProposalFields = step.proposalId !== undefined || step.sequence !== undefined || step.requiresApproval !== undefined || step.approvalStatus !== undefined || step.executionRequestId !== undefined;
+    publicSchemaUsed ||= !LEGACY_HARNESS_STEP_KINDS.has(String(step.kind)) || hasStrategyFields || hasWorkflowFields || hasProposalFields;
+
+    if (step.kind === "strategy") {
+      strategySteps += 1;
+      if (!HARNESS_STRATEGIES.has(String(step.strategy))) invalid("处理步骤策略无效");
+      boundedInteger(step.maxToolSteps, "处理步骤工具上限", 1, 8);
+      if (step.strategy === "direct" && step.maxToolSteps !== 1) invalid("直接执行策略只能包含一个工具步骤");
+      strategyMaxToolSteps = step.maxToolSteps;
+    } else if (hasStrategyFields) invalid("仅策略步骤可以包含策略快照");
+
+    if (hasWorkflowFields) {
+      if (step.kind !== "strategy" && step.kind !== "workflow") invalid("处理步骤包含无效的工作流字段");
+      const template = aiWorkflowTemplate(step.workflowId);
+      if (!template || step.workflowVersion !== AI_WORKFLOW_VERSION) invalid("处理步骤工作流无效");
+      if (step.kind === "workflow") {
+        if (typeof step.workflowStepId !== "string" || !template.steps.some(item => item.id === step.workflowStepId)) invalid("处理步骤工作流节点无效");
+      } else if (step.workflowStepId !== undefined) invalid("策略步骤不能包含工作流节点");
+    } else if (step.kind === "workflow") invalid("工作流步骤缺少代码拥有的模板快照");
+
+    if (hasProposalFields) {
+      if (step.kind !== "tool" && step.kind !== "approval" && step.kind !== "result") invalid("处理步骤包含无效的工具提案字段");
+      optionalId(step.proposalId, "工具提案"); optionalId(step.executionRequestId, "工具执行请求");
+      if (step.sequence !== undefined) boundedInteger(step.sequence, "工具步骤序号", 1, 8);
+      if (step.requiresApproval !== undefined && typeof step.requiresApproval !== "boolean") invalid("工具确认要求格式不正确");
+      if (step.approvalStatus !== undefined && !HARNESS_APPROVAL_STATUSES.has(String(step.approvalStatus))) invalid("工具确认状态无效");
+    }
+    if (step.kind === "tool") toolSteps += 1;
+  }
+  if (legacy) {
+    if (publicSchemaUsed) invalid("处理过程版本不完整，请更新客户端后重试");
+    return;
+  }
+  if (strategySteps !== 1 || strategyMaxToolSteps === undefined) invalid("处理过程缺少唯一的策略快照");
+  if (trace.strategy !== (steps.find(raw => (raw as ObjectValue).kind === "strategy") as ObjectValue | undefined)?.strategy) invalid("处理策略与步骤快照不一致");
+  const budget = record(trace.toolBudget, "处理工具预算", ["used", "max", "remaining"]);
+  boundedInteger(budget.used, "处理工具已用步数", 0, 8);
+  boundedInteger(budget.max, "处理工具上限", 1, 8);
+  boundedInteger(budget.remaining, "处理工具剩余步数", 0, 8);
+  if (trace.strategy === "direct" && budget.max !== 1) invalid("直接执行策略只能包含一个工具步骤");
+  if (budget.max !== strategyMaxToolSteps || budget.used !== toolSteps || budget.remaining !== budget.max - budget.used) invalid("处理工具预算不一致");
+  const expectedAction = trace.status === "waiting_approval" ? "approve_tool" : trace.status === "running" ? "poll" : trace.status === "planned" ? "resume" : "none";
+  if (trace.nextAction !== expectedAction) invalid("处理下一步状态与任务状态不一致");
+}
 
 /** Validate the entire snapshot before any write. Unknown fields fail explicitly, never disappear. */
 export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
   const state = record(value, "工作台", ["view", "mode", "conversations", "projects", "artifacts", "drafts", "draftAttachments", "composerTool", "webSearch", "activeConversationId", "activeProjectId", "enabledSkillIds", "sidebarCollapsed"]);
-  if (!["chat", "project", "skills"].includes(String(state.view)) || !["quick", "deep"].includes(String(state.mode))) invalid("工作台页面或模式无效");
+  if (!["chat", "project", "skills"].includes(String(state.view)) || !["quick", "standard", "deep", "pro"].includes(String(state.mode))) invalid("工作台页面或模式无效");
   if (state.sidebarCollapsed !== undefined && typeof state.sidebarCollapsed !== "boolean") invalid("侧栏状态无效");
   if (state.composerTool !== undefined && !["text", "presentation", "image"].includes(String(state.composerTool))) invalid("生成模式无效");
   if (state.webSearch !== undefined && typeof state.webSearch !== "boolean") invalid("联网搜索状态无效");
@@ -154,15 +258,16 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
     totalMessages += messages.length;
     if (totalMessages > LIMITS.totalMessages) tooLarge("消息总数超过上限，原记录未被更改");
     for (const entry of messages) {
-      const message = record(entry, "消息", ["id", "role", "content", "time", "status", "artifactId", "requestId", "model", "usage", "attachments", "sources"]);
+      const message = record(entry, "消息", ["id", "role", "content", "time", "startedAt", "status", "artifactId", "requestId", "harnessPlanRequestId", "model", "usage", "attachments", "sources", "trace"]);
       id(message.id, "消息"); unique(message.id, messageIds, "消息");
       if (message.role !== "user" && message.role !== "assistant") invalid("消息角色无效");
       string(message.content, "消息内容", LIMITS.messageCharacters);
       string(message.time, "消息时间", 80);
+      if (message.startedAt !== undefined && (!Number.isSafeInteger(message.startedAt) || Number(message.startedAt) < 0)) invalid("消息计时格式不正确");
       if (message.status !== undefined && !["thinking", "typing", "ready", "error", "stopped"].includes(String(message.status))) invalid("消息状态无效");
-      optionalId(message.artifactId, "成果"); optionalId(message.requestId, "请求");
+      optionalId(message.artifactId, "成果"); optionalId(message.requestId, "请求"); optionalId(message.harnessPlanRequestId, "工具方案");
       if (message.model !== undefined) string(message.model, "模型名称", 160);
-      usage(message.usage); documents(message.attachments, "消息附件");
+      usage(message.usage); documents(message.attachments, "消息附件"); harnessTrace(message.trace);
       if (message.sources !== undefined) {
         for (const rawSource of array(message.sources, "引用来源", 100)) {
           const source = record(rawSource, "引用来源", ["title", "url"]);
@@ -228,7 +333,7 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
   }
   jsonValue(state);
   const serialized = JSON.stringify(state);
-  if (new TextEncoder().encode(serialized).byteLength > LIMITS.stateBytes) tooLarge("工作台已超过 2 MiB 保存上限，请导出并整理历史记录后重试；原记录未被更改");
+  if (new TextEncoder().encode(serialized).byteLength > LIMITS.stateBytes) tooLarge("云端对话资料已达安全保存上限，请导出并整理历史记录后重试；原记录未被更改");
   // Isolate the validated request from caller mutations during the asynchronous hash.
   return JSON.parse(serialized) as AiWorkspaceState;
 }
@@ -256,26 +361,37 @@ export class AiWorkspaceRepository {
   constructor(readonly sql: AiSql) {}
 
   /** Invoke from the existing Node/DO schema initialization, not during request handling. */
-  initialize(): void { this.sql.exec(AI_WORKSPACE_SCHEMA); }
+  initialize(): void {
+    this.sql.exec(AI_WORKSPACE_SCHEMA);
+    for (const table of ["ai_workspaces", "ai_workspace_mutations", "ai_workspace_chunks"] as const) {
+      const columns = this.sql.all<{ name: string }>(`PRAGMA table_info(${table})`);
+      if (!columns.some(column => column.name === "tenant_id")) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}'`);
+    }
+    this.sql.exec("CREATE INDEX IF NOT EXISTS ai_workspaces_tenant_user ON ai_workspaces(tenant_id,user_id); CREATE INDEX IF NOT EXISTS ai_workspace_mutations_tenant_user ON ai_workspace_mutations(tenant_id,user_id,revision DESC);");
+  }
 
-  read(userId: string): AiWorkspaceSnapshot {
+  read(userId: string, tenantId: string = DEFAULT_AI_TENANT_ID): AiWorkspaceSnapshot {
     id(userId, "账号");
-    new AiStore(this.sql).assertAccess(userId);
-    const row = this.sql.all<{ revision: number; schema_version: number; updated_at: string; data: string }>("SELECT revision,schema_version,updated_at,data FROM ai_workspaces WHERE user_id=?", userId)[0];
+    const tenant = normalizeAiTenantId(tenantId);
+    const storedUserId = tenantStorageKey(tenant, userId);
+    new AiStore(this.sql, tenant).assertAccess(userId);
+    const row = this.sql.all<{ revision: number; schema_version: number; updated_at: string; data: string }>("SELECT revision,schema_version,updated_at,data FROM ai_workspaces WHERE tenant_id=? AND user_id=?", tenant, storedUserId)[0];
     if (!row) return { revision: 0, schemaVersion: 1, updatedAt: null, state: null };
     if (row.schema_version !== 1) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "工作台记录版本已更新，请升级客户端");
     let serialized = row.data;
     if (serialized === CHUNK_MARKER) {
-      const rows = this.sql.all<{ chunk_index: number; data: string }>("SELECT chunk_index,data FROM ai_workspace_chunks WHERE user_id=? ORDER BY chunk_index", userId);
+      const rows = this.sql.all<{ chunk_index: number; data: string }>("SELECT chunk_index,data FROM ai_workspace_chunks WHERE tenant_id=? AND user_id=? ORDER BY chunk_index", tenant, storedUserId);
       if (!rows.length || rows.some((chunk, index) => chunk.chunk_index !== index)) throw new AiError(500, "AI_WORKSPACE_CORRUPT", "工作台记录不完整，请保留当前窗口并联系管理员");
       serialized = rows.map(chunk => chunk.data).join("");
     }
     return { revision: row.revision, schemaVersion: 1, updatedAt: row.updated_at, state: JSON.parse(serialized) as AiWorkspaceState };
   }
 
-  async save(userId: string, value: unknown): Promise<AiWorkspaceSnapshot> {
+  async save(userId: string, value: unknown, tenantId: string = DEFAULT_AI_TENANT_ID): Promise<AiWorkspaceSnapshot> {
     id(userId, "账号");
-    new AiStore(this.sql).assertAccess(userId);
+    const tenant = normalizeAiTenantId(tenantId);
+    const storedUserId = tenantStorageKey(tenant, userId);
+    new AiStore(this.sql, tenant).assertAccess(userId);
     const body = record(value, "保存请求", ["expectedRevision", "mutationId", "state"]);
     if (!Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 || Number(body.expectedRevision) >= Number.MAX_SAFE_INTEGER) invalid("工作台版本无效，请重新同步");
     if (typeof body.mutationId !== "string" || !UUID.test(body.mutationId)) invalid("保存请求标识无效");
@@ -284,8 +400,8 @@ export class AiWorkspaceRepository {
     const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
     // Both adapters execute a synchronous transaction, with no external I/O or await inside.
     return this.sql.transaction(() => {
-      const prior = this.sql.all<{ request_hash: string }>("SELECT request_hash FROM ai_workspace_mutations WHERE user_id=? AND mutation_id=?", userId, request.mutationId)[0];
-      const current = this.read(userId);
+      const prior = this.sql.all<{ request_hash: string }>("SELECT request_hash FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?", tenant, storedUserId, request.mutationId)[0];
+      const current = this.read(userId, tenant);
       if (prior) {
         if (prior.request_hash !== hash) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于不同内容，请重新同步");
         // A delayed retry must not overwrite newer changes from this or another client.
@@ -294,14 +410,14 @@ export class AiWorkspaceRepository {
       if (current.revision !== request.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台已在其他窗口更新，本次未覆盖任何记录，请同步后重试");
       const revision = current.revision + 1;
       const updatedAt = new Date().toISOString();
-      this.sql.exec("INSERT INTO ai_workspaces(user_id,revision,schema_version,updated_at,data) VALUES(?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision,schema_version=excluded.schema_version,updated_at=excluded.updated_at,data=excluded.data", userId, revision, updatedAt, CHUNK_MARKER);
-      this.sql.exec("DELETE FROM ai_workspace_chunks WHERE user_id=?", userId);
+      this.sql.exec("INSERT INTO ai_workspaces(user_id,tenant_id,revision,schema_version,updated_at,data) VALUES(?,?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET tenant_id=excluded.tenant_id,revision=excluded.revision,schema_version=excluded.schema_version,updated_at=excluded.updated_at,data=excluded.data", storedUserId, tenant, revision, updatedAt, CHUNK_MARKER);
+      this.sql.exec("DELETE FROM ai_workspace_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUserId);
       for (const [index, data] of chunks(JSON.stringify(request.state)).entries()) {
-        this.sql.exec("INSERT INTO ai_workspace_chunks(user_id,chunk_index,data) VALUES(?,?,?)", userId, index, data);
+        this.sql.exec("INSERT INTO ai_workspace_chunks(user_id,tenant_id,chunk_index,data) VALUES(?,?,?,?)", storedUserId, tenant, index, data);
       }
-      this.sql.exec("INSERT INTO ai_workspace_mutations(user_id,mutation_id,request_hash,revision) VALUES(?,?,?,?)", userId, request.mutationId, hash, revision);
+      this.sql.exec("INSERT INTO ai_workspace_mutations(user_id,tenant_id,mutation_id,request_hash,revision) VALUES(?,?,?,?,?)", storedUserId, tenant, request.mutationId, hash, revision);
       // Compact receipts, not user records. Older requests still fail CAS and cannot replay writes.
-      this.sql.exec("DELETE FROM ai_workspace_mutations WHERE user_id=? AND revision<=?", userId, Math.max(0, revision - 2048));
+      this.sql.exec("DELETE FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND revision<=?", tenant, storedUserId, Math.max(0, revision - 2048));
       return { revision, schemaVersion: 1, updatedAt, state: request.state };
     });
   }

@@ -4,6 +4,8 @@ import type { AiMember, AiUsageEntry } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
 import { AdminAiProviderSettings } from "./AdminAiProviderSettings";
 import { AdminAiVideoSettings } from "./AdminAiVideoSettings";
+import { AdminAiHarnessSettings } from "./AdminAiHarnessSettings";
+import { AdminAiObservability } from "./AdminAiObservability";
 import { adminAiErrorMessage, calculateAiQuotaLimit } from "./adminAiForms";
 import { aiDiagnosticDescription, aiUsageDescription, aiUsageTotal } from "./usageFormatting";
 import { AI_QUOTA_BILLING_NOTE, formatAiPoints } from "./quotaFormatting";
@@ -192,7 +194,9 @@ export function AdminAiQuotaPanel() {
   return (
     <section className="tp-admin-ai-quota" aria-label="AI 接入与额度管理">
       <AdminAiProviderSettings />
+      <AdminAiHarnessSettings />
       <AdminAiVideoSettings key={session?.user.id} />
+      <AdminAiObservability />
       <section className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>
         <header className="tp-ai-admin-heading">
           <div><h2 id="tp-ai-admin-members-title"><UsersRound size={21} aria-hidden="true" />成员额度</h2>

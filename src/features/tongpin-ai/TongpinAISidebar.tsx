@@ -364,12 +364,12 @@ export function TongpinAISidebar({
           <button
             type="button"
             className={view === "skills" ? "is-active" : ""}
-            title="Skill 市场"
+            title="AI 能力中心"
             aria-current={view === "skills" ? "page" : undefined}
             onClick={() => navigate(onOpenSkills)}
           >
             <Sparkles size={18} />
-            <span>Skill 市场</span>
+            <span>AI 能力中心</span>
             <b>{skillCount}</b>
           </button>
         </nav>

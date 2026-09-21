@@ -69,14 +69,12 @@ describe("cross-platform login recovery", () => {
     );
   });
 
-  it("distinguishes an unreadable credential vault from an empty history", () => {
+  it("keeps remembered accounts password-free and requires explicit password input", () => {
     expect(authPage).toContain('result.state');
-    expect(authPage).toContain("登录钥匙串未解锁，账号记录仍安全保留");
-    expect(authPage).toContain("系统安全存储暂不可用，账号记录仍安全保留");
+    expect(authPage).toContain("本机账号记录暂时无法安全更新");
     expect(authPage).toContain("refreshRememberedAccounts");
-    expect(authPage).toContain("openSystemStorage");
-    expect(electronMain).toContain("credentials:open-system-storage");
-    expect(electronMain).toContain("Keychain Access.app");
-    expect(authPage).toContain("该账号的安全密码暂时无法读取，请手动输入。");
+    expect(authPage).toContain("密码每次输入");
+    expect(authPage).not.toContain("credentials.load");
+    expect(electronMain).not.toContain("credentials:load");
   });
 });

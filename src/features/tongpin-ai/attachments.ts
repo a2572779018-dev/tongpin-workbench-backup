@@ -29,7 +29,7 @@ export class AttachmentError extends Error {
 }
 
 export class WorkspaceCapacityError extends AttachmentError {
-  constructor(readonly phase: "attachment" | "reply") {
+  constructor(readonly phase: "attachment" | "reply" | "video") {
     super(phase === "attachment"
       ? "工作台附件保存空间不足，请先导出备份并整理不再需要的历史对话；本次附件未添加，原记录保持不变"
       : "当前云端对话资料空间不足，无法保存下一条回复。请先导出备份并整理历史对话；草稿已保留，本次未发送、未扣费");
@@ -63,7 +63,7 @@ export function validateAttachments(attachments: readonly AiTextAttachment[]): v
     }
   }
   if (total > MAX_ATTACHMENT_TOTAL_BYTES) throw new AttachmentError("附件文字合计过长，请减少附件或精简内容后再发送");
-  if (frames > AI_MEDIA_LIMITS.requestFrames) throw new AttachmentError("每次最多分析 5 张图片或视频采样帧，请减少附件；历史图片过多时请新建对话");
+  if (frames > AI_MEDIA_LIMITS.requestFrames) throw new AttachmentError("每次最多分析 5 张图片或视频采样帧，请减少本次添加的画面；历史画面会按最近顺序自动选取");
   if (visualBytes > AI_MEDIA_LIMITS.requestBytes) throw new AttachmentError("图片内容合计过大，请减少附件");
 }
 
@@ -228,13 +228,17 @@ export function documentAttachments(documents: readonly AiWorkspaceDocument[]): 
         text: item.media.kind === "video" ? `视频 ${item.name}：第 ${index + 1}/${item.media.frames.length} 个采样画面，时间 ${frame.timeSeconds!.toFixed(2)} 秒，总时长 ${item.media.durationSeconds!.toFixed(2)} 秒。仅分析这些静态画面，不包含音频；未采样部分未知。` : `图片附件：${item.name}` });
     }
   }
-  if (result.length > MAX_ATTACHMENTS) throw new AttachmentError("文档、图片和视频采样帧合计最多 5 份，请减少附件或新建对话");
+  if (result.length > MAX_ATTACHMENTS) throw new AttachmentError("本次文档、图片和视频采样帧合计最多 5 份，请减少本次添加的附件");
   return result;
 }
 
 /** Leave room for a maximum-length text reply and bounded source metadata, not just a short answer. */
-export function ensureAttachmentWorkspaceCapacity(state: unknown, phase: "attachment" | "reply" = "attachment"): void {
-  if (utf8Length(JSON.stringify(state)) > AI_WORKSPACE_LIMITS.stateBytes - 1024 * 1024) {
+export function ensureAttachmentWorkspaceCapacity(state: unknown, phase: "attachment" | "reply" | "video" = "attachment"): void {
+  // Ordinary chat keeps room for the largest accepted text reply. A video
+  // submission persists only IDs and small task metadata, so reserving a full
+  // megabyte there incorrectly blocks a fresh conversation with existing history.
+  const reserve = phase === "video" ? 64 * 1024 : 512 * 1024;
+  if (utf8Length(JSON.stringify(state)) > AI_WORKSPACE_LIMITS.stateBytes - reserve) {
     throw new WorkspaceCapacityError(phase);
   }
 }

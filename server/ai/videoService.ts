@@ -1,21 +1,98 @@
-import type { AiVideoJob, AiVideoList, AiVideoSettings } from "../../shared/aiVideo";
-import { videoModel } from "../../shared/aiVideoModels";
+import type { AiAdminVideoReconciliationJob, AiVideoJob, AiVideoList, AiVideoSettings, AiVideoModelCheck } from "../../shared/aiVideo";
+import type { AiMode } from "../../shared/ai";
+import { VIDEO_MODELS, videoModel, videoSeconds, type VideoModelId } from "../../shared/aiVideoModels";
 import { AiStore } from "./storage";
 import { AiError, type SecretBox } from "./security";
 import { object, readBoundedJson, readProviderHttpError, type AiTransport } from "./provider";
 import { h3VideoContentUrl, parseH3VideoInput, queryH3Video, submitH3Video, type H3VideoTask } from "./videoProvider";
+import { aiVideoReferenceFingerprint, AI_VIDEO_REFERENCE_FINGERPRINT } from "../../shared/aiVideoReferences";
+import { claimToolPlan, validateToolPlan } from "./toolPlans";
+import { validConversationId, type AiHarness } from "./harness";
+import { DEFAULT_AI_TENANT_ID, tenantStorageKey } from "./tenant";
 
 const BASE = "https://www.75api.com/v1";
-interface Settings { enabled: boolean; quotaPoints: number; encryptedKey?: string }
-interface Job extends AiVideoJob { userId: string; providerId?: string; encryptedKey: string; pollAt: number; images?: string[] }
+interface Settings {
+  enabled: boolean;
+  quotaPoints: number;
+  encryptedKey?: string;
+  defaultModel?: unknown;
+  configVersion?: string;
+  keyVersion?: string;
+  verifiedConfigVersion?: string;
+  verifiedKeyVersion?: string;
+  verifiedModels?: unknown;
+}
+interface Job extends AiVideoJob { userId: string; providerId?: string; routingProviderId?: string; encryptedKey: string; pollAt: number; images?: string[]; referenceIds?: string[]; conversationId: string }
 const now = () => new Date().toISOString();
 const validId = (id: unknown): id is string => typeof id === "string" && /^[a-zA-Z0-9_-]{16,100}$/.test(id);
+const randomHexId = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), n => n.toString(16).padStart(2, "0")).join("");
+async function referenceCapabilityId(tenantId: string, id: string): Promise<string> {
+  // Preserve every legacy/default capability URL. Non-default tenants use a
+  // distinct opaque provider-facing capability even when their logical ids collide.
+  if (tenantId === DEFAULT_AI_TENANT_ID) return id;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify({ tenantId, id, kind: "video-reference" })));
+  return Array.from(new Uint8Array(digest), n => n.toString(16).padStart(2, "0")).join("");
+}
+const configuredDefaultModel = (value: unknown): VideoModelId => {
+  const model = typeof value === "string" ? videoModel(value) : undefined;
+  return model?.generationEnabled ? model.id : "minimax_h3";
+};
+const verifiedModels = (settings: Settings): VideoModelId[] | null => {
+  if (!settings.configVersion || !settings.keyVersion || settings.verifiedConfigVersion !== settings.configVersion || settings.verifiedKeyVersion !== settings.keyVersion || !Array.isArray(settings.verifiedModels)) return null;
+  const ids = new Set(settings.verifiedModels.filter((id): id is string => typeof id === "string"));
+  return VIDEO_MODELS.filter(model => model.generationEnabled && ids.has(model.id)).map(model => model.id);
+};
+// A saved key is not proof that its token group can call the selected model.
+// Fail closed until the saved key/config version has completed a read-only
+// model-list check; this prevents a member from discovering a bad mapping via a
+// paid generation attempt.
+const availableModels = (settings: Settings): VideoModelId[] => verifiedModels(settings) ?? [];
 
 /** Durable video jobs are separate from short-lived chat reservations. No automatic paid retries. */
 export class AiVideoService {
-  constructor(private store: AiStore, private box: () => Promise<SecretBox>, private transport: AiTransport, private deploymentKey: () => string = () => "") {}
-  private saved(): Settings { const row = this.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0]; return row ? JSON.parse(row.data) : { enabled: false, quotaPoints: 0 }; }
-  settings(): AiVideoSettings { const s = this.saved(); return { enabled: s.enabled, quotaPoints: s.quotaPoints, apiKeyConfigured: Boolean(s.encryptedKey || this.deploymentKey()) }; }
+  constructor(private store: AiStore, private box: () => Promise<SecretBox>, private transport: AiTransport, private deploymentKey: () => string = () => "", private harness?: AiHarness) {}
+  private userKey(userId: string): string { return tenantStorageKey(this.store.tenantId, userId); }
+  private referenceKey(id: string): string { return tenantStorageKey(this.store.tenantId, id); }
+  private settingKey(): string { return tenantStorageKey(this.store.tenantId, "video"); }
+  private saved(): Settings {
+    const row = this.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE tenant_id=? AND id=?", this.store.tenantId, this.settingKey())[0];
+    return row ? JSON.parse(row.data) : { enabled: false, quotaPoints: 0 };
+  }
+  private harnessVideoConfigured(): boolean {
+    const harness = this.store.harness();
+    return Boolean(harness && Object.values(harness.tiers).some(route => route.enabled && route.capabilities.includes("video") && route.videoProviderId && route.videoModelId && harness.providers.some(provider => provider.id === route.videoProviderId && provider.enabled && provider.encryptedKey)));
+  }
+  private writeSettings(settings: Settings) { this.store.sql.exec("INSERT INTO ai_settings(id,tenant_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET tenant_id=excluded.tenant_id,data=excluded.data", this.settingKey(), this.store.tenantId, JSON.stringify(settings)); }
+  settings(): AiVideoSettings {
+    const s = this.saved(), verified = verifiedModels(s);
+    return { enabled: s.enabled, quotaPoints: s.quotaPoints, apiKeyConfigured: Boolean(s.encryptedKey || this.deploymentKey() || this.harnessVideoConfigured()), defaultModel: configuredDefaultModel(s.defaultModel), availableModels: verified ?? [], modelsVerified: verified !== null };
+  }
+  private memberSettings(tier: AiMode = "quick"): AiVideoSettings {
+    const admin = this.settings();
+    let selected: VideoModelId | undefined;
+    try {
+      const route = this.harness?.resolveMedia(tier, this.store.provider(), "video");
+      const model = route && videoModel(route.modelId);
+      if (model?.generationEnabled) selected = model.id;
+    } catch {
+      return { enabled: admin.enabled, quotaPoints: admin.quotaPoints, apiKeyConfigured: false, availableModels: [], modelsVerified: false };
+    }
+    selected ??= admin.defaultModel && admin.availableModels.includes(admin.defaultModel) ? admin.defaultModel : admin.availableModels[0];
+    const spec = selected ? videoModel(selected) : undefined;
+    return {
+      enabled: admin.enabled,
+      quotaPoints: admin.quotaPoints,
+      apiKeyConfigured: Boolean(spec && (selected === admin.defaultModel ? admin.apiKeyConfigured : true)),
+      availableModels: [],
+      modelsVerified: Boolean(spec),
+      ...(spec ? { profile: {
+        resolutions: [...spec.resolutions],
+        seconds: Object.fromEntries(spec.resolutions.map(resolution => [resolution, videoSeconds(spec.id, resolution)])),
+        maxImages: spec.maxImages,
+        requiresImage: spec.requiresImage,
+      } } : {}),
+    };
+  }
   async uploadReference(userId: string, value: unknown): Promise<{ id: string }> {
     this.store.assertAccess(userId);
     const s = this.settings();
@@ -24,75 +101,148 @@ export class AiVideoService {
     if (typeof p.dataUrl !== "string" || p.dataUrl.length > 400000 || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(p.dataUrl)) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片格式或大小不正确，请重新选择图片");
     const box = await this.box(), chunks: string[] = [];
     for (let i = 0; i < p.dataUrl.length; i += 16000) chunks.push(await box.encrypt(p.dataUrl.slice(i, i + 16000)));
-    const id = Array.from(crypto.getRandomValues(new Uint8Array(32)), n => n.toString(16).padStart(2, "0")).join("");
+    const fingerprint = await aiVideoReferenceFingerprint(p.dataUrl);
+    const id = randomHexId();
+    const publicId = await referenceCapabilityId(this.store.tenantId, id);
+    const storedUserId = this.userKey(userId);
     this.store.sql.transaction(() => {
-      this.store.sql.exec("DELETE FROM ai_video_references WHERE expires_at <= ?", Date.now());
-      const count = this.store.sql.all<{ n: number }>("SELECT COUNT(*) AS n FROM ai_video_references WHERE user_id=?", userId)[0].n;
+      this.store.sql.exec("DELETE FROM ai_video_references WHERE tenant_id=? AND expires_at <= ?", this.store.tenantId, Date.now());
+      const count = this.store.sql.all<{ n: number }>("SELECT COUNT(*) AS n FROM ai_video_references WHERE tenant_id=? AND user_id=?", this.store.tenantId, storedUserId)[0].n;
       if (count >= 32) throw new AiError(429, "AI_VIDEO_IMAGE_LIMIT", "暂存图片已达上限，请稍后再试");
-      this.store.sql.exec("INSERT INTO ai_video_references(id,user_id,expires_at,data) VALUES(?,?,?,?)", id, userId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify(chunks));
+      this.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", this.referenceKey(id), this.store.tenantId, publicId, storedUserId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify({ chunks, fingerprint }));
     });
     return { id };
   }
   /** Unguessable, expiring capability URL for provider retrieval; no member credentials in the URL. */
   async referenceContent(id: string): Promise<Response> {
-    const row = /^[a-f0-9]{64}$/.test(id) ? this.store.sql.all<{ data: string; expires_at: number }>("SELECT data,expires_at FROM ai_video_references WHERE id=?", id)[0] : undefined;
+    const row = /^[a-f0-9]{64}$/.test(id) ? this.store.sql.all<{ data: string; expires_at: number }>("SELECT data,expires_at FROM ai_video_references WHERE public_id=?", id)[0] : undefined;
     if (!row || row.expires_at <= Date.now()) return new Response(null, { status: 404 });
     const box = await this.box();
-    const data = (await Promise.all((JSON.parse(row.data) as string[]).map(chunk => box.decrypt(chunk)))).join("");
+    const stored = JSON.parse(row.data) as string[] | { chunks?: unknown };
+    const chunks = Array.isArray(stored) ? stored : Array.isArray(stored.chunks) ? stored.chunks.filter((chunk): chunk is string => typeof chunk === "string") : [];
+    const data = (await Promise.all(chunks.map(chunk => box.decrypt(chunk)))).join("");
     const bytes = Uint8Array.from(atob(data.slice(data.indexOf(",") + 1)), c => c.charCodeAt(0));
     return new Response(bytes, { headers: { "Content-Type": "image/jpeg", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
   }
-  private references(userId: string, value: unknown): string[] | undefined {
-    if (value === undefined) return undefined;
+  private references(userId: string, value: unknown): { urls?: string[]; fingerprints: string[] } {
+    if (value === undefined) return { fingerprints: [] };
     if (!Array.isArray(value) || value.length > 9 || value.some(id => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "最多上传 9 张参考图片");
-    return value.map(id => {
-      const row = this.store.sql.all<{ expires_at: number }>("SELECT expires_at FROM ai_video_references WHERE id=? AND user_id=?", id, userId)[0];
+    const fingerprints: string[] = [];
+    const urls = value.map(id => {
+      const row = this.store.sql.all<{ expires_at: number; data: string; public_id: string }>("SELECT expires_at,data,public_id FROM ai_video_references WHERE tenant_id=? AND id=? AND user_id=?", this.store.tenantId, this.referenceKey(id), this.userKey(userId))[0];
       if (!row || row.expires_at <= Date.now()) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片已过期，请重新上传");
-      return `https://notify.samhubs.com/api/video-reference/${id}`;
+      const stored = JSON.parse(row.data) as { fingerprint?: unknown } | string[];
+      if (Array.isArray(stored) || typeof stored.fingerprint !== "string" || !AI_VIDEO_REFERENCE_FINGERPRINT.test(stored.fingerprint)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "旧参考图片没有完整校验信息，请重新上传并整理视频任务");
+      fingerprints.push(stored.fingerprint);
+      if (!/^[a-f0-9]{64}$/.test(row.public_id)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "参考图片缺少完整隔离信息，请重新上传并整理视频任务");
+      return `https://notify.samhubs.com/api/video-reference/${row.public_id}`;
     });
+    return { urls, fingerprints };
   }
   async configure(value: unknown): Promise<AiVideoSettings> {
     const p = object(value), existing = this.saved();
+    const defaultModel = p.defaultModel === undefined ? configuredDefaultModel(existing.defaultModel) : p.defaultModel;
+    const defaultSpec = typeof defaultModel === "string" ? videoModel(defaultModel) : undefined;
+    if (!defaultSpec) throw new AiError(400, "AI_VIDEO_MODEL_INVALID", "请选择已接入的视频模型");
+    if (!defaultSpec.generationEnabled) throw new AiError(409, "AI_VIDEO_MODEL_UNAVAILABLE", defaultSpec.unavailableReason);
     if (typeof p.enabled !== "boolean" || !Number.isSafeInteger(p.quotaPoints) || Number(p.quotaPoints) < 0 || Number(p.quotaPoints) > 10_000_000 || (p.enabled && !p.quotaPoints)) throw new AiError(400, "AI_VIDEO_SETTINGS_INVALID", "启用视频前，请设置每段视频的同频点折算值（1–1000 万）");
     if (p.apiKey !== undefined && (typeof p.apiKey !== "string" || p.apiKey.length > 4096 || /[\s\x00-\x1f]/.test(p.apiKey))) throw new AiError(400, "AI_KEY_INVALID", "视频密钥格式不正确");
     const encryptedKey = p.apiKey ? await (await this.box()).encrypt(String(p.apiKey)) : existing.encryptedKey;
-    if (p.enabled && !encryptedKey && !this.deploymentKey()) throw new AiError(400, "AI_VIDEO_KEY_REQUIRED", "请先配置视频专用密钥");
+    if (p.enabled && !encryptedKey && !this.deploymentKey() && !this.harnessVideoConfigured()) throw new AiError(400, "AI_VIDEO_KEY_REQUIRED", "请先在业务档位中配置视频服务密钥，或填写视频专用密钥");
+    const next: Settings = {
+      enabled: p.enabled,
+      quotaPoints: Number(p.quotaPoints),
+      defaultModel,
+      configVersion: crypto.randomUUID(),
+      keyVersion: p.apiKey ? crypto.randomUUID() : existing.keyVersion ?? crypto.randomUUID(),
+      ...(encryptedKey ? { encryptedKey } : {}),
+    };
     this.store.sql.transaction(() => {
       if (!p.apiKey && this.saved().encryptedKey !== existing.encryptedKey) throw new AiError(409, "AI_CONFIG_CHANGED", "配置已被修改，请刷新后重试");
-      this.store.sql.exec("INSERT INTO ai_settings(id,data) VALUES('video',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", JSON.stringify({ enabled: p.enabled, quotaPoints: p.quotaPoints, ...(encryptedKey ? { encryptedKey } : {}) }));
+      this.writeSettings(next);
     });
     return this.settings();
   }
-  private async key(): Promise<string> { const s = this.saved(); const key = s.encryptedKey ? await (await this.box()).decrypt(s.encryptedKey) : this.deploymentKey(); if (!key) throw new AiError(503, "AI_VIDEO_KEY_REQUIRED", "尚未配置视频密钥", true); return key; }
-  async test(): Promise<{ ok: true; message: string }> {
-    const response = await this.transport(`${BASE}/models`, { method: "GET", headers: { Authorization: `Bearer ${await this.key()}`, Accept: "application/json" }, signal: AbortSignal.timeout(20_000), maxResponseBytes: 512000 });
+  private async key(settings: Settings = this.saved()): Promise<string> { const key = settings.encryptedKey ? await (await this.box()).decrypt(settings.encryptedKey) : this.deploymentKey(); if (!key) throw new AiError(503, "AI_VIDEO_KEY_REQUIRED", "尚未配置视频密钥", true); return key; }
+  async test(): Promise<AiVideoModelCheck> {
+    let snapshot = this.saved();
+    if (!snapshot.encryptedKey && !this.deploymentKey()) {
+      const harness = this.store.harness();
+      if (!harness) throw new AiError(503, "AI_VIDEO_KEY_REQUIRED", "尚未配置视频密钥", true);
+      const ids = new Set<string>();
+      for (const tier of Object.values(harness.tiers)) {
+        if (!tier.videoProviderId || !tier.videoModelId) continue;
+        const provider = harness.providers.find(item => item.id === tier.videoProviderId);
+        const verified = provider && provider.verifiedConfigVersion === provider.configVersion && provider.verifiedKeyVersion === provider.keyVersion;
+        if (verified && provider.availableModels.includes(tier.videoModelId)) ids.add(tier.videoModelId);
+      }
+      const available = VIDEO_MODELS.filter(model => model.generationEnabled && ids.has(model.id)).map(model => model.id);
+      return { ok: true, message: "已使用业务档位中绑定的模型列表；未进行生成。", models: VIDEO_MODELS.map(({ id, label }) => ({ id, label, listed: ids.has(id) })), availableModels: available };
+    }
+    if (!snapshot.configVersion || !snapshot.keyVersion) {
+      const migrated: Settings = { ...snapshot, configVersion: crypto.randomUUID(), keyVersion: crypto.randomUUID() };
+      this.store.sql.transaction(() => {
+        if (JSON.stringify(this.saved()) !== JSON.stringify(snapshot)) throw new AiError(409, "AI_CONFIG_CHANGED", "视频配置已修改，请重新检查模型列表");
+        this.writeSettings(migrated);
+      });
+      snapshot = migrated;
+    }
+    const response = await this.transport(`${BASE}/models`, { method: "GET", headers: { Authorization: `Bearer ${await this.key(snapshot)}`, Accept: "application/json" }, signal: AbortSignal.timeout(20_000), maxResponseBytes: 512000 });
     if (!response.ok) throw await readProviderHttpError(response, "models");
     const data = object(await readBoundedJson(response, 512000));
-    if (!Array.isArray(data.data) || !data.data.some(row => videoModel(String(object(row).id)))) throw new AiError(502, "AI_VIDEO_MODEL_UNAVAILABLE", "视频密钥没有可用的视频模型，请检查模型权限");
-    return { ok: true, message: "已验证视频模型权限；未生成视频，未扣成员额度" };
+    if (!Array.isArray(data.data)) throw new AiError(502, "AI_VIDEO_MODEL_UNAVAILABLE", "服务商没有返回模型列表，请检查接入配置");
+    const ids = new Set(data.data.map(row => String(object(row).id)));
+    const verified = VIDEO_MODELS.filter(model => model.generationEnabled && ids.has(model.id)).map(model => model.id);
+    this.store.sql.transaction(() => {
+      const current = this.saved();
+      if (current.configVersion !== snapshot.configVersion || current.keyVersion !== snapshot.keyVersion) throw new AiError(409, "AI_CONFIG_CHANGED", "视频配置已修改，请重新检查模型列表");
+      this.writeSettings({ ...current, verifiedConfigVersion: current.configVersion, verifiedKeyVersion: current.keyVersion, verifiedModels: verified });
+    });
+    return { ok: true, message: "已读取并保存当前密钥可用的已接入模型；成员端只显示这些模型。不代表生成请求一定成功，未生成视频、未扣成员额度。", models: VIDEO_MODELS.map(({ id, label }) => ({ id, label, listed: ids.has(id) })), availableModels: verified };
   }
   private raw(userId: string, id: string): Job {
     if (!validId(id)) throw new AiError(400, "AI_VIDEO_ID_INVALID", "视频任务编号无效");
-    const row = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE user_id=? AND id=?", userId, id)[0];
+    const row = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE tenant_id=? AND user_id=? AND id=?", this.store.tenantId, this.userKey(userId), id)[0];
     if (!row) throw new AiError(404, "AI_VIDEO_NOT_FOUND", "视频任务不存在");
     return JSON.parse(row.data);
   }
-  private write(job: Job) { this.store.sql.exec("INSERT INTO ai_video_jobs(user_id,id,data) VALUES(?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET data=excluded.data", job.userId, job.id, JSON.stringify(job)); }
+  private write(job: Job) { this.store.sql.exec("INSERT INTO ai_video_jobs(user_id,id,tenant_id,data) VALUES(?,?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET tenant_id=excluded.tenant_id,data=excluded.data", this.userKey(job.userId), job.id, this.store.tenantId, JSON.stringify(job)); }
   private public(job: Job): AiVideoJob {
-    return { referenceIds: (job.images ?? []).map(url => url.split("/").at(-1)!).filter(id => /^[a-f0-9]{64}$/.test(id)), id: job.id, prompt: job.prompt, ...(job.model ? { model: job.model } : {}), seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio, status: job.status, progress: job.progress, createdAt: job.createdAt, updatedAt: job.updatedAt, quotaPoints: job.quotaPoints, reserved: job.reserved, ...(job.error ? { error: job.error } : {}), ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) };
+    const referenceIds = job.referenceIds ?? (job.images ?? []).map(url => url.split("/").at(-1)!).filter(id => /^[a-f0-9]{64}$/.test(id));
+    return { referenceIds, id: job.id, prompt: job.prompt, seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio, status: job.status, progress: job.progress, createdAt: job.createdAt, updatedAt: job.updatedAt, quotaPoints: job.quotaPoints, reserved: job.reserved, ...(job.planRequestId ? { planRequestId: job.planRequestId } : {}), ...(job.conversationId ? { conversationId: job.conversationId } : {}), ...(job.error ? { error: job.error } : {}), ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) };
   }
   private recover(userId?: string) {
     this.store.sql.transaction(() => {
-      const query = "SELECT data FROM ai_video_jobs WHERE json_extract(data,'$.reserved')=1";
-      for (const row of this.store.sql.all<{ data: string }>(query + (userId ? " AND user_id=?" : ""), ...(userId ? [userId] : []))) {
+      const query = "SELECT data FROM ai_video_jobs WHERE tenant_id=? AND json_extract(data,'$.reserved')=1";
+      for (const row of this.store.sql.all<{ data: string }>(query + (userId ? " AND user_id=?" : ""), this.store.tenantId, ...(userId ? [this.userKey(userId)] : []))) {
         const job: Job = JSON.parse(row.data);
         const age = Date.now() - Date.parse(job.createdAt);
-        if ((job.status === "submitting" && age > 90_000) || (["queued", "processing"].includes(job.status) && age > 24 * 60 * 60 * 1000)) this.write({ ...job, status: "uncertain", updatedAt: now(), error: "任务结果待核对，请管理员查看服务商任务记录，勿重复生成" });
+        if ((job.status === "submitting" && age > 90_000) || (["queued", "processing"].includes(job.status) && age > 24 * 60 * 60 * 1000)) {
+          this.write({ ...job, status: "uncertain", updatedAt: now(), error: "任务结果待核对，请管理员查看服务商任务记录，勿重复生成" });
+          if (job.planRequestId) this.harness?.finishApprovedTool(job.userId, job.planRequestId, "video", "uncertain");
+        }
       }
     });
   }
-  list(userId: string): AiVideoList { this.store.assertAccess(userId); this.recover(userId); return { settings: this.settings(), quota: this.store.quota(userId), jobs: this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE user_id=? ORDER BY rowid DESC LIMIT 100", userId).map(r => this.public(JSON.parse(r.data))) }; }
-  adminPending() { this.recover(); return this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE json_extract(data,'$.status')='uncertain' ORDER BY rowid DESC LIMIT 100").map(r => { const j: Job = JSON.parse(r.data); return { ...this.public(j), userId: j.userId }; }); }
+  list(userId: string, tier: AiMode = "quick"): AiVideoList { this.store.assertAccess(userId); this.recover(userId); return { settings: this.memberSettings(tier), quota: this.store.quota(userId), jobs: this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE tenant_id=? AND user_id=? ORDER BY rowid DESC LIMIT 100", this.store.tenantId, this.userKey(userId)).map(r => this.public(JSON.parse(r.data))) }; }
+  adminPending(): AiAdminVideoReconciliationJob[] {
+    this.recover();
+    return this.store.sql
+      .all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE tenant_id=? AND json_extract(data,'$.status')='uncertain' ORDER BY rowid DESC LIMIT 100", this.store.tenantId)
+      .map((row) => {
+        const job: Job = JSON.parse(row.data);
+        return {
+          id: job.id,
+          userId: job.userId,
+          ...(job.providerId ? { providerTaskId: job.providerId } : {}),
+          status: "uncertain" as const,
+          createdAt: job.createdAt,
+          updatedAt: job.updatedAt,
+          quotaPoints: job.quotaPoints,
+          reserved: job.reserved,
+        };
+      });
+  }
   private settle(job: Job, points: number, actorId: string | null = null) {
     if (!job.reserved) return;
     const q = this.store.quota(job.userId);
@@ -100,36 +250,76 @@ export class AiVideoService {
     this.store.saveQuota(job.userId, { ...q, reservedTokens: q.reservedTokens - job.quotaPoints, usedTokens: q.usedTokens + points });
     job.reserved = false;
     this.store.addUsage({ id: crypto.randomUUID(), userId: job.userId, requestId: job.id, kind: "video", status: points ? "completed" : "failed", model: job.model ?? "minimax_h3", mode: null, createdAt: now(), reason: actorId ? "管理员按服务商记录核对视频结算" : points ? "视频生成完成" : "服务商拒绝视频请求，已释放预留", limitTokens: null, actorId, inputTokens: 0, outputTokens: 0, totalTokens: points, convertedTokens: points, billingKind: "video_conversion", estimated: false, ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) });
+    const run = job.planRequestId ? this.store.harnessRun(job.userId, job.planRequestId) : null;
+    this.store.addObservability({ userId: job.userId, tier: run?.tier ?? "standard", providerId: job.routingProviderId ?? "video-75api", capability: "video", operation: "execution", success: points > 0, latencyMs: Date.now() - Date.parse(job.createdAt), ...(!points ? { errorCode: job.diagnostic ? `AI_PROVIDER_${job.diagnostic.category.toUpperCase()}` : actorId ? "AI_VIDEO_RECONCILED_RELEASE" : "AI_VIDEO_FAILED" } : {}) });
+    if (job.planRequestId) this.harness?.finishApprovedTool(job.userId, job.planRequestId, "video", points ? "succeeded" : "failed");
   }
   async submit(userId: string, value: unknown): Promise<AiVideoJob> {
     this.store.assertAccess(userId); this.recover(userId);
     const p = object(value);
     if (p.images !== undefined) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "请使用上传的参考图片");
-    const input = parseH3VideoInput({ ...p, images: this.references(userId, p.referenceIds) });
     if (!validId(p.requestId)) throw new AiError(400, "AI_VIDEO_ID_INVALID", "请提供有效视频请求编号");
-    const id = p.requestId;
-    const existing = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE user_id=? AND id=?", userId, id)[0];
-    if (existing) {
-      const job: Job = JSON.parse(existing.data);
-      if (Object.entries({ ...input, model: input.model ?? "minimax_h3", images: input.images }).some(([k, v]) => JSON.stringify(k === "model" ? job.model ?? "minimax_h3" : job[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
-      return this.public(job);
-    }
+    const conversationId = validConversationId(p.conversationId, p.requestId);
+    if (typeof p.planRequestId !== "string") throw new AiError(409, "AI_TOOL_PLAN_REQUIRED", "请先让同频 AI 整理视频任务，再确认生成");
+    if (!validId(p.planRequestId)) throw new AiError(400, "AI_TOOL_PLAN_INVALID", "工具方案标识无效，请重新整理任务");
+    const planned = validateToolPlan(this.store, userId, p.planRequestId, "video", typeof p.prompt === "string" ? p.prompt : "", { consumerRequestId: p.requestId });
+    const planRun = this.store.harnessRun(userId, p.planRequestId);
+    const tier = planRun?.tier ?? "quick";
+    const mediaRoute = this.harness?.resolveMedia(tier, this.store.provider(), "video") ?? null;
+    const plannedParameters = planned.result.toolPlan.videoParameters;
+    const submittedParameters = {
+      model: p.model ?? plannedParameters?.model,
+      seconds: p.seconds,
+      resolution: p.resolution,
+      aspectRatio: p.aspectRatio,
+      referenceCount: Array.isArray(p.referenceIds) ? p.referenceIds.length : p.referenceIds === undefined ? 0 : -1,
+    };
+    if (!plannedParameters) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "视频方案缺少已确认参数，请让同频 AI 重新整理后确认");
+    const { referenceFingerprints: _plannedFingerprints, ...plannedParametersWithoutContent } = plannedParameters;
+    if (JSON.stringify(plannedParametersWithoutContent) !== JSON.stringify(submittedParameters)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "视频模型、时长、清晰度、画幅或参考图已改变，请让同频 AI 重新整理后确认");
     const s = this.saved();
     if (!s.enabled || !s.quotaPoints) throw new AiError(403, "AI_VIDEO_DISABLED", "管理员尚未启用视频生成");
-    const key = await this.key(), encryptedKey = await (await this.box()).encrypt(key);
-    let job: Job = { ...input, userId, id, status: "submitting", progress: 0, createdAt: now(), updatedAt: now(), quotaPoints: s.quotaPoints, reserved: true, encryptedKey, pollAt: 0 };
+    const selectedSpec = videoModel(mediaRoute?.modelId ?? (typeof submittedParameters.model === "string" ? submittedParameters.model : ""));
+    if (!selectedSpec) throw new AiError(400, "AI_VIDEO_MODEL_INVALID", "请选择已接入的视频模型");
+    if (!selectedSpec.generationEnabled) throw new AiError(409, "AI_VIDEO_MODEL_UNAVAILABLE", selectedSpec.unavailableReason);
+    if (mediaRoute && submittedParameters.model !== mediaRoute.modelId) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "管理员已调整此档位的视频模型，请让同频 AI 重新整理后确认");
+    if (!mediaRoute && !availableModels(s).includes(selectedSpec.id)) throw new AiError(403, "AI_VIDEO_MODEL_NOT_AUTHORIZED", "当前视频密钥尚未确认可使用此模型，请联系管理员检查模型列表");
+    const id = p.requestId;
+    const existing = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE tenant_id=? AND user_id=? AND id=?", this.store.tenantId, this.userKey(userId), id)[0];
+    const existingJob: Job | undefined = existing ? JSON.parse(existing.data) : undefined;
+    if (existingJob) {
+      const submittedIds = Array.isArray(p.referenceIds) ? p.referenceIds : [];
+      const storedIds = existingJob.referenceIds ?? (existingJob.images ?? []).map(url => url.split("/").at(-1));
+      const same = existingJob.prompt === p.prompt && (existingJob.model ?? "minimax_h3") === selectedSpec.id
+        && existingJob.seconds === p.seconds && existingJob.resolution === p.resolution && existingJob.aspectRatio === p.aspectRatio
+        && (existingJob.conversationId ?? "legacy") === conversationId
+        && JSON.stringify(storedIds) === JSON.stringify(submittedIds);
+      if (!same) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
+      return this.public(existingJob);
+    }
+    const references = this.references(userId, p.referenceIds);
+    if (JSON.stringify(references.fingerprints) !== JSON.stringify(plannedParameters.referenceFingerprints)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "参考图片与已确认的同频 AI 方案不一致，请重新整理后确认");
+    const input = parseH3VideoInput({ ...p, model: selectedSpec.id, images: references.urls });
+    const key = mediaRoute ? await (await this.box()).decrypt(mediaRoute.encryptedKey) : await this.key(s), encryptedKey = await (await this.box()).encrypt(key);
+    let job: Job = { ...input, userId, id, referenceIds: Array.isArray(p.referenceIds) ? [...p.referenceIds] : [], planRequestId: p.planRequestId, conversationId, status: "submitting", progress: 0, createdAt: now(), updatedAt: now(), quotaPoints: s.quotaPoints, reserved: true, encryptedKey, pollAt: 0, ...(mediaRoute ? { routingProviderId: mediaRoute.providerId } : {}) };
     const reserved = this.store.sql.transaction(() => {
-      if (this.store.sql.all("SELECT id FROM ai_video_jobs WHERE user_id=? AND id=?", userId, id).length) return false;
+      if (this.store.sql.all("SELECT id FROM ai_video_jobs WHERE tenant_id=? AND user_id=? AND id=?", this.store.tenantId, this.userKey(userId), id).length) return false;
+      claimToolPlan(this.store, userId, p.planRequestId as string, "video", input.prompt, id);
+      this.harness?.beginApprovedTool(userId, p.planRequestId as string, "video", id);
       if (JSON.stringify(this.saved()) !== JSON.stringify(s)) throw new AiError(409, "AI_CONFIG_CHANGED", "视频配置已修改，请重试");
-      const active = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE json_extract(data,'$.reserved')=1");
-      if (active.length >= 2 || active.some(r => JSON.parse(r.data).userId === userId)) throw new AiError(409, "AI_VIDEO_BUSY", "已有视频任务正在处理或待核对，请稍后再生成");
+      const active = this.store.activeVideoJobs();
+      const activeForUser = active.filter(item => item.userId === userId);
+      const ordinaryPending = this.store.pending(userId);
+      if (this.store.activeVideoForConversation(userId, conversationId).length || this.store.pendingForConversation(userId, conversationId).length) throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "当前对话已有一条 AI 任务正在处理，请稍候");
+      if (activeForUser.length + ordinaryPending.length >= 3) throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "当前已有 3 条任务并行处理，请等待任意一条完成");
+      if (active.length >= 6) throw new AiError(429, "AI_VIDEO_BUSY", "视频任务较多，请稍后再生成");
       const q = this.store.quota(userId);
       if (q.remainingTokens < s.quotaPoints) throw new AiError(402, "AI_QUOTA_INSUFFICIENT", "同频点不足以生成这段视频，请联系管理员");
       this.store.saveQuota(userId, { ...q, reservedTokens: q.reservedTokens + s.quotaPoints }); this.write(job); return true;
     });
     if (!reserved) {
       const current = this.raw(userId, id);
-      if (Object.entries({ ...input, model: input.model ?? "minimax_h3", images: input.images }).some(([k, v]) => JSON.stringify(k === "model" ? current.model ?? "minimax_h3" : current[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
+      if ((current.conversationId ?? "legacy") !== conversationId || Object.entries({ ...input, model: input.model ?? "minimax_h3", images: input.images }).some(([k, v]) => JSON.stringify(k === "model" ? current.model ?? "minimax_h3" : current[k as keyof Job]) !== JSON.stringify(v))) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
       return this.public(current);
     }
     try {
@@ -142,6 +332,7 @@ export class AiVideoService {
         job.error = error instanceof AiError ? error.message : "视频提交结果待核对，请管理员查看服务商记录；不会自动重试";
         job.diagnostic = error instanceof AiError ? error.diagnostic : undefined; job.updatedAt = now();
         if (job.status === "failed") this.settle(job, 0);
+        else if (job.planRequestId) this.harness?.finishApprovedTool(userId, job.planRequestId, "video", "uncertain");
         this.write(job);
       });
     }
@@ -155,6 +346,7 @@ export class AiVideoService {
       job.status = task.status === "failed" ? "uncertain" : task.status;
       job.error = task.status === "failed" ? "服务商任务失败，费用尚需管理员核对" : undefined;
       if (task.status === "completed") this.settle(job, job.quotaPoints);
+      else if (task.status === "failed" && job.planRequestId) this.harness?.finishApprovedTool(userId, job.planRequestId, "video", "uncertain");
       this.write(job); return job;
     });
   }

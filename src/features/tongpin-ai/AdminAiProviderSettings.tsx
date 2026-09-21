@@ -2,18 +2,15 @@ import { Globe, Image, KeyRound, RefreshCw, Save } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type { AiProviderConfig, AiProviderInput, AiProviderTestResult } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
-import { BAI_QUICK_AUTO, BAI_QUICK_MODELS } from "../../../shared/aiAuto";
+import { BAI_ASTRA_MODEL, BAI_QUICK_MODELS, isTongpinQuickAgent, TONGPIN_QUICK_AGENT } from "../../../shared/aiAuto";
 import { adminAiErrorMessage, normalizeAiBaseUrl, validateAiProviderConnection, validateAiProviderInput } from "./adminAiForms";
 
-const BAI_PRESET_MODELS = [
-  ...BAI_QUICK_MODELS,
-  "gpt-6-astra",
-] as const;
-
-function getProviderModelOptions(baseUrl: string, discoveredModels: string[]): string[] {
+function getProviderModelOptions(baseUrl: string, saved: AiProviderConfig | null, discoveredModels: string[]): string[] {
   const options = new Set(discoveredModels);
   try {
-    if (new URL(baseUrl).hostname === "api.b.ai") BAI_PRESET_MODELS.forEach((model) => options.add(model));
+    if (saved?.modelsVerified && normalizeAiBaseUrl(saved.baseUrl) === normalizeAiBaseUrl(baseUrl)) {
+      saved.availableModels?.forEach((model) => options.add(model));
+    }
   } catch { /* Keep discovered models only when URL is invalid/unset. */ }
   return [...options];
 }
@@ -55,7 +52,9 @@ export function AdminAiProviderSettings() {
   const [notice, setNotice] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [imageModels, setImageModels] = useState<string[]>([]);
-  const modelOptions = getProviderModelOptions(draft.baseUrl, models);
+  const modelOptions = getProviderModelOptions(draft.baseUrl, saved, models);
+  const baiHost = (() => { try { return new URL(draft.baseUrl).hostname === "api.b.ai"; } catch { return false; } })();
+  const agentSelected = isTongpinQuickAgent(draft.quickModel);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -67,6 +66,7 @@ export function AdminAiProviderSettings() {
         if (controller.signal.aborted) return;
         setSaved(provider);
         setDraft(provider ?? EMPTY_PROVIDER);
+        setModels(provider?.availableModels ?? []);
         setApiKey("");
         setImageApiKey("");
         setDirty(false);
@@ -131,7 +131,41 @@ export function AdminAiProviderSettings() {
       setDirty(false);
       setModels([]);
       setImageModels([]);
-      setNotice(provider.enabled ? "接入已保存并启用。" : "接入已保存，当前未启用。");
+      try {
+        // This intentionally omits the draft key and URL. The server may bind
+        // model verification only to the just-saved encrypted credential.
+        const result = await api<AiProviderTestResult>("/api/admin/ai/provider/test", {
+          method: "POST", body: JSON.stringify({ target: "chat" }),
+        }, 30_000);
+        const agent = isTongpinQuickAgent(provider.quickModel);
+        const availableModels = result.availableModels ?? [];
+        const checkedProvider: AiProviderConfig = agent ? {
+          ...provider,
+          modelsVerified: result.modelsVerified === true,
+          availableModels,
+          modelsVerifiedAt: result.modelsVerifiedAt ?? null,
+        } : provider;
+        setSaved(checkedProvider);
+        setDraft(checkedProvider);
+        setModels(agent ? availableModels : result.models);
+        if (!agent) {
+          setNotice(`${provider.enabled ? "接入已保存并启用" : "接入已保存但当前未启用"}，已读取 ${result.models.length} 个模型；未生成内容。`);
+        } else {
+          const quickCount = availableModels.filter(model => BAI_QUICK_MODELS.includes(model as (typeof BAI_QUICK_MODELS)[number])).length;
+          const astraAvailable = availableModels.includes(BAI_ASTRA_MODEL);
+          if (result.modelsVerified !== true) {
+            setError("接入已保存，但当前密钥的 Agent 模型检查没有完成；成员发送前会被阻止，请重新检查模型列表。");
+          } else if (!quickCount) {
+            setError("接入已保存，但当前密钥没有返回同频支持的快速模型；快速 Agent 暂不可用，成员请求不会发给服务商。");
+          } else if (!astraAvailable) {
+            setError(`接入已保存并验证 ${quickCount} 个快速模型，但当前密钥没有 Astra；快速对话可用，深度思考和 Agent 联网搜索会在发送前被阻止。`);
+          } else {
+            setNotice(`接入已保存并完成模型检查：${quickCount} 个快速模型和 Astra 可用；未生成内容。`);
+          }
+        }
+      } catch (caught) {
+        setError(`接入已保存，但模型检查未通过：${adminAiErrorMessage(caught, "无法读取当前密钥的模型列表，请核对服务商权限后重试。")}`);
+      }
     } catch (caught) {
       setError(adminAiErrorMessage(caught, "保存失败，请检查地址、密钥和模型配置后重试。"));
     } finally {
@@ -170,13 +204,23 @@ export function AdminAiProviderSettings() {
     try {
       const result = await api<AiProviderTestResult>("/api/admin/ai/provider/test", {
         method: "POST",
-        body: JSON.stringify({ baseUrl: normalizeAiBaseUrl(draft.baseUrl), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) }),
+        body: JSON.stringify({ target: "chat", baseUrl: normalizeAiBaseUrl(draft.baseUrl), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) }),
       }, 30_000);
-      setModels(result.models);
+      const agent = isTongpinQuickAgent(draft.quickModel);
+      const availableModels = result.availableModels ?? [];
+      setModels(agent ? availableModels : result.models);
       if (result.ok) {
-        setNotice(result.models.length
-          ? `连接成功，获取到 ${result.models.length} 个模型。未生成内容。`
-          : "连接已验证，模型列表不可用，可手动填写模型 ID。未生成内容。");
+        if (agent && result.modelsVerified) {
+          setSaved(current => current ? { ...current, modelsVerified: true, availableModels, modelsVerifiedAt: result.modelsVerifiedAt ?? null } : current);
+          const quickCount = availableModels.filter(model => BAI_QUICK_MODELS.includes(model as (typeof BAI_QUICK_MODELS)[number])).length;
+          setNotice(`已使用保存的密钥验证 Agent：${quickCount} 个快速模型，Astra ${availableModels.includes(BAI_ASTRA_MODEL) ? "可用" : "不可用"}；未生成内容。`);
+        } else if (agent) {
+          setNotice(`已读取当前填写密钥返回的 ${availableModels.length} 个同频支持模型；请保存配置后绑定验证，未生成内容。`);
+        } else {
+          setNotice(result.models.length
+            ? `连接成功，获取到 ${result.models.length} 个模型。未生成内容。`
+            : "连接已验证，模型列表不可用，可手动填写模型 ID。未生成内容。");
+        }
       } else {
         setError("未能读取模型列表，请核对接入信息；若服务不提供列表，可手动填写模型 ID。");
       }
@@ -232,9 +276,19 @@ export function AdminAiProviderSettings() {
               <input id={`${id}-quick`} value={draft.quickModel} required maxLength={160} list={`${id}-models`}
                 placeholder="填写服务商提供的模型 ID" spellCheck={false} onChange={(event) => update("quickModel", event.target.value)} />
             </label>
-            {(() => { try { return new URL(draft.baseUrl).hostname === "api.b.ai"; } catch { return false; } })() ? <button type="button" className="tp-ai-admin-button" onClick={() => setDraft(current => ({ ...current, quickModel: BAI_QUICK_AUTO, deepModel: "gpt-6-astra", protocol: "responses", reasoningEffort: "medium" }))}>快速 Auto · 深度 Astra 6</button> : null}
+            {baiHost ? <div className="tp-ai-admin-inline-test is-wide">
+              <button type="button" className="tp-ai-admin-button" onClick={() => {
+                setDraft(current => ({ ...current, quickModel: TONGPIN_QUICK_AGENT, deepModel: BAI_ASTRA_MODEL, protocol: "responses", reasoningEffort: "medium" }));
+                setDirty(true); setModels([]); setError(""); setNotice("");
+              }}>快速 Agent · 深度 Astra 6</button>
+              {agentSelected ? <span className="tp-ai-admin-hint">{dirty
+                ? "保存后会自动使用已保存密钥检查模型；未验证前不会发送成员请求。"
+                : saved?.modelsVerified
+                  ? `当前密钥已验证 ${saved.availableModels?.length ?? 0} 个同频支持模型。`
+                  : "当前密钥尚未完成 Agent 模型检查，成员请求会在发送前被阻止。"}</span> : null}
+            </div> : null}
             <label className="tp-ai-admin-field" htmlFor={`${id}-deep`}>深度思考 · 模型 ID
-              <input id={`${id}-deep`} value={draft.deepModel} readOnly={draft.quickModel === BAI_QUICK_AUTO} required maxLength={160} list={`${id}-models`}
+              <input id={`${id}-deep`} value={draft.deepModel} readOnly={agentSelected} required maxLength={160} list={`${id}-models`}
                 placeholder="可与快速模式使用相同模型" spellCheck={false} onChange={(event) => update("deepModel", event.target.value)} />
             </label>
             <datalist id={`${id}-models`}>{modelOptions.map((model) => <option key={model} value={model} />)}</datalist>

@@ -1,16 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { isVideoGenerationRequest } from "./videoChat";
+import { isVideoGenerationRequest, persistedVideoChatRequest } from "./videoChat";
 import { withPreparedChatSend } from "./chatPreflight";
 import { validateAiWorkspaceState } from "../../../server/ai/workspace";
 import { hydrateWorkspace, serializeWorkspace } from "./workspaceState";
 import type { AiWorkspaceState } from "../../../shared/aiWorkspace";
 
 describe("video conversations", () => {
+  it("stores retry inputs without duplicating the planning trace in generic artifact JSON", () => {
+    const request = {
+      requestId: "video-request-id-123456", prompt: "品牌宣传", seconds: 10 as const,
+      resolution: "720p" as const, aspectRatio: "16:9" as const,
+      originalPrompt: "用我的 Logo 生成视频", planSummary: "品牌开场", planRequestId: "plan-request-id-123456",
+      planTrace: { runId: "run-plan", tier: "quick" as const, strategy: "plan_execute" as const, status: "planned" as const,
+        reasoningSummary: "安全摘要", nextAction: "resume" as const, toolBudget: { used: 1, max: 3, remaining: 2 }, steps: [] },
+    };
+    const persisted = persistedVideoChatRequest(request);
+    expect(persisted).toMatchObject({ requestId: request.requestId, originalPrompt: request.originalPrompt, planRequestId: request.planRequestId });
+    expect(persisted).not.toHaveProperty("planTrace");
+    expect(JSON.stringify(persisted)).not.toContain("reasoningSummary");
+  });
   it("shows submission failures outside the scrolling video settings", () => {
     const source = readFileSync(new URL("./AiVideoComposer.tsx", import.meta.url), "utf8");
     const fieldsetEnd = source.indexOf("</fieldset>");
-    const alert = source.indexOf('role="alert"');
+    const alert = source.indexOf('className="tp-ai-video-error tp-ai-video-submit-error"');
     expect(fieldsetEnd).toBeGreaterThan(0);
     expect(alert).toBeGreaterThan(fieldsetEnd);
     expect(source).toContain("尚未提交生成任务");
@@ -26,17 +39,24 @@ describe("video conversations", () => {
     const state: AiWorkspaceState = { view: "chat", mode: "quick", conversations: [], projects: [], artifacts: [{ id: "artifact-video", conversationId: "conversation-video", title: "生成的视频", kind: "视频", updatedLabel: "刚刚", summary: "测试", sections: [], data: { videoJobId: "a-valid-video-job-id" } }], drafts: { "new-conversation": "测试视频" }, enabledSkillIds: [], activeConversationId: null, activeProjectId: null };
     const next = withPreparedChatSend(state, { id: "conversation-video", title: "测试", timeLabel: "刚刚", messages: [{ id: "user-video", role: "user", content: "测试视频", time: "12:00" }, { id: "assistant-video", role: "assistant", content: "视频生成任务", time: "12:00", status: "ready", artifactId: "artifact-video" }] }, "new-conversation");
     expect(validateAiWorkspaceState(JSON.parse(JSON.stringify(next)))).toEqual(next);
-    expect(serializeWorkspace(hydrateWorkspace(next))).toEqual(next);
+    const { draftAttachments: _emptyDraftAttachments, ...compacted } = next;
+    expect(serializeWorkspace(hydrateWorkspace(next))).toEqual(compacted);
     expect(next.artifacts[0].data?.videoJobId).toBe("a-valid-video-job-id");
     expect(next.conversations[0].messages[1].requestId).toBeUndefined();
     expect(() => validateAiWorkspaceState({ ...next, artifacts: [{ ...next.artifacts[0], conversationId: "another-conversation" }] })).toThrow();
   });
   it("keeps media retrieval read-only, authenticated and releases media on unmount", () => {
     const source = readFileSync(new URL("./AiVideoReply.tsx", import.meta.url), "utf8");
+    const cache = readFileSync(new URL("./mediaCache.ts", import.meta.url), "utf8");
     expect(source).not.toContain('method: "POST"');
     expect(source).toContain('"X-Tongpin-Account"');
     expect(source).toContain('api<{ job: AiVideoJob }>');
-    expect(source).toContain('URL.revokeObjectURL');
+    expect(source).toContain("videoBlobCache.loadBlob");
+    expect(source).toContain("videoBlobCache.loadJob");
+    expect(source).toContain("videoBlobCache.retain");
+    expect(source).toContain("useState<PlaybackState>(() => cachedPlayback");
+    expect(source).toContain("useState(Boolean(playback.url))");
+    expect(cache).toContain('URL.revokeObjectURL');
     expect(source).toContain('IntersectionObserver');
     expect(source).toContain('controls playsInline');
     expect(source).toContain('controller.abort()');
@@ -45,7 +65,7 @@ describe("video conversations", () => {
     const page = readFileSync(new URL("../../pages/TongpinAIPage.tsx", import.meta.url), "utf8");
     const send = page.slice(page.indexOf("async function sendVideo"), page.indexOf("async function sendMessage"));
     expect(send.indexOf("saveNow(next)")).toBeLessThan(send.indexOf('api("/api/ai/videos"'));
-    expect(send).toContain("if (!saved || pendingCancelledRef.current)");
+    expect(send).toContain("if (!saved || pendingCancelledRef.current.has(conversationId))");
     expect(send).toContain("if (importOnly) return true;");
     const workspace = readFileSync(new URL("./ChatWorkspace.tsx", import.meta.url), "utf8");
     expect(workspace).not.toContain("AiVideoPanel");

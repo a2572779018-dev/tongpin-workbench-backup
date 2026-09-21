@@ -7,17 +7,34 @@ import type { AiTransport } from "../../../server/ai/provider";
 import type { UserRow } from "../platform";
 import { handleAiRequest } from "./routes";
 import { AiPersonaRepository } from "../../../server/ai/persona";
+import { toolPlanContextFingerprint } from "../../../server/ai/toolPlans";
 
 describe("Cloudflare AI route contract with shared transactional service", () => {
   let database: DatabaseSync;
   let store: AiStore;
   let service: AiService;
+  let emptyToolPlanContextFingerprint: string;
   const transport = vi.fn<AiTransport>();
   const user = (id: string, role: UserRow["role"] = "member"): UserRow => ({ id, name: id, role, status: "active", email: `${id}@example.com`, password_hash: "never-return-password", job_title: "", avatar_seed: 1, avatar_version: 0, avatar_data_url: null, email_verified_at: "2026-09-05T00:00:00Z", last_login_at: null, created_at: "2026-09-05T00:00:00Z", updated_at: "2026-09-05T00:00:00Z" });
   const admin = user("admin", "admin"), a = user("a"), b = user("b"), boss = user("boss", "boss");
   const provider = { name: "Test", baseUrl: "https://provider.example.com", apiKey: "private-test-key", protocol: "responses", quickModel: "quick", deepModel: "deep", maxOutputTokens: 1024, reasoningEffort: "", enabled: true };
   const invoke = (path: string, method: string, actor = admin, body?: unknown, headers: Record<string, string> = {}) => handleAiRequest(new Request(`https://tongpin.example.com${path}`, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), service, actor, () => [admin, a, b, boss]);
-  beforeEach(() => {
+  const saveToolPlan = (actor: UserRow, plan: { kind: "image"; prompt: string } | { kind: "video"; prompt: string; videoParameters: { model: string; seconds: number; resolution: string; aspectRatio: "16:9" | "9:16"; referenceCount: number; referenceFingerprints: string[] } }) => {
+    const requestId = crypto.randomUUID();
+    store.saveRequest({
+      requestId, userId: actor.id, hash: `fixture-${requestId}`, status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "quick", mode: "quick",
+      toolPlanContextFingerprint: emptyToolPlanContextFingerprint,
+      result: {
+        requestId, content: `已整理${plan.kind === "video" ? "视频" : "图片"}任务，请确认后生成。`, model: "quick",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false },
+        toolPlan: { ...plan, summary: "测试工具方案" },
+      },
+    });
+    return requestId;
+  };
+  beforeEach(async () => {
+    emptyToolPlanContextFingerprint = await toolPlanContextFingerprint();
     database = new DatabaseSync(":memory:");
     const sql: AiSql = {
       exec(query, ...bindings) { if (bindings.length) database.prepare(query).run(...bindings); else database.exec(query); },
@@ -49,7 +66,12 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     expect((await invoke("/api/admin/ai/video", "PUT", a, settings)).status).toBe(403);
     const saved = await invoke("/api/admin/ai/video", "PUT", admin, settings);
     expect(saved.status).toBe(200); expect(await saved.text()).not.toContain(settings.apiKey);
-    const request = { requestId: crypto.randomUUID(), prompt: "测试视频", seconds: 15, resolution: "768p", aspectRatio: "16:9" };
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3" }] }));
+    const checked = await invoke("/api/admin/ai/video/test", "POST", admin);
+    expect(checked.status).toBe(200);
+    expect(await checked.json()).toMatchObject({ availableModels: ["minimax_h3"] });
+    const videoParameters = { model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9" as const, referenceCount: 0, referenceFingerprints: [] };
+    const request = { requestId: crypto.randomUUID(), prompt: "测试视频", seconds: 15, resolution: "768p", aspectRatio: "16:9", planRequestId: saveToolPlan(a, { kind: "video", prompt: "测试视频", videoParameters }) };
     expect((await invoke("/api/ai/videos", "POST", a, request)).status).toBe(403);
     await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 5000 });
     await invoke("/api/admin/ai/members/b/quota", "PUT", admin, { limitTokens: 5000 });
@@ -62,12 +84,40 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     const content = await invoke(`/api/ai/videos/${request.requestId}/content`, "GET", a);
     expect(content.headers.get("cache-control")).toBe("no-store"); expect(await content.text()).toBe("mp4-fixture");
   });
+  it("derives video scope from the authenticated Worker principal instead of a caller header", async () => {
+    const alphaAdmin = { ...admin, tenant_id: "tenant-alpha" } as UserRow;
+    const betaAdmin = { ...admin, tenant_id: "tenant-beta" } as UserRow;
+    const settings = { enabled: true, quotaPoints: 1111, apiKey: "tenant-alpha-video-key" };
+    const saved = await invoke("/api/admin/ai/video", "PUT", alphaAdmin, settings, { "X-Tongpin-Tenant": "tenant-beta" });
+    expect(saved.status).toBe(200);
+    expect(await (await invoke("/api/admin/ai/video", "GET", alphaAdmin)).json()).toMatchObject({ settings: { enabled: true, quotaPoints: 1111 } });
+    expect(await (await invoke("/api/admin/ai/video", "GET", betaAdmin)).json()).toMatchObject({ settings: { enabled: false, quotaPoints: 0 }, pending: [] });
+    expect(transport).not.toHaveBeenCalled();
+  });
   it("enforces role boundaries before touching AI service", async () => {
     expect((await invoke("/api/admin/ai/provider", "GET", a)).status).toBe(403);
     expect((await invoke("/api/ai/status", "GET", admin)).status).toBe(403);
     expect((await invoke("/api/admin/ai/provider", "GET", boss)).status).toBe(403);
     expect(await (await invoke("/api/ai/status", "GET", boss)).json()).toMatchObject({ accessGranted: false, quota: { limitTokens: 0 } });
     expect(transport).not.toHaveBeenCalled();
+  });
+  it("keeps observability alerts tenant-scoped and acknowledges them without exposing request content", async () => {
+    for (let index = 0; index < 4; index++) store.addObservability({
+      userId: `private-member-${index}`, tier: "deep", providerId: "primary", capability: "presentation", operation: "planning", success: false, latencyMs: 65_000, errorCode: "AI_TOOL_PLAN_INVALID",
+    });
+    expect((await invoke("/api/admin/ai/observability", "GET", a)).status).toBe(403);
+    const dashboardResponse = await invoke("/api/admin/ai/observability", "GET", admin);
+    const dashboard = await dashboardResponse.json() as { alerts: Array<{ id: string; acknowledgedAt: string | null }>; alertHistory: unknown[] };
+    expect(dashboard.alerts.length).toBeGreaterThan(0);
+    expect(JSON.stringify(dashboard)).not.toContain("private-member");
+    const alertId = dashboard.alerts[0].id;
+    const acknowledged = await invoke(`/api/admin/ai/observability/alerts/${encodeURIComponent(alertId)}/acknowledge`, "PATCH", admin);
+    expect(acknowledged.status).toBe(200);
+    expect(await acknowledged.json()).toMatchObject({ alert: { id: alertId, acknowledgedAt: expect.any(String) } });
+
+    const otherTenantAdmin = { ...admin, id: "other-admin", tenant_id: "other-tenant" } as UserRow;
+    const hidden = await invoke(`/api/admin/ai/observability/alerts/${encodeURIComponent(alertId)}/acknowledge`, "PATCH", otherTenantAdmin);
+    expect(hidden.status).toBe(404);
   });
   it("reports ungranted access and rejects forged ownership before generation, independently of provider configuration", async () => {
     expect(await (await invoke("/api/ai/status", "GET", a)).json()).toMatchObject({ accessGranted: false, configured: false });
@@ -106,6 +156,20 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     expect(await reply.json()).toMatchObject({ usage: { totalTokens: 17 }, quota: { usedTokens: 17, remainingTokens: 4983 } });
     expect(await (await invoke("/api/ai/status", "GET", b)).json()).toMatchObject({ quota: { limitTokens: 0, usedTokens: 0 } });
     expect(await (await invoke("/api/ai/usage?userId=a", "GET", b)).json()).toEqual({ entries: [] });
+  });
+  it("returns and safely resumes only the authenticated member's persisted harness run", async () => {
+    await invoke("/api/admin/ai/provider", "PUT", admin, provider);
+    await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 5000 });
+    const requestId = crypto.randomUUID();
+    expect((await invoke("/api/ai/chat", "POST", a, { requestId, conversationId: "resume-route", mode: "quick", messages: [{ role: "user", content: "你好" }] })).status).toBe(200);
+    const calls = transport.mock.calls.length;
+    const trace = await (await invoke(`/api/ai/runs/${requestId}`, "GET", a)).json() as { trace: Record<string, unknown> };
+    const resumed = await (await invoke(`/api/ai/runs/${requestId}/resume`, "POST", a)).json();
+    expect(resumed).toEqual(trace);
+    expect(trace.trace).toMatchObject({ strategy: "direct", status: "succeeded", nextAction: "none", toolBudget: { used: 0, max: 1, remaining: 1 } });
+    expect((await invoke(`/api/ai/runs/${requestId}`, "GET", b)).status).toBe(404);
+    expect((await invoke(`/api/ai/runs/${requestId}/resume`, "POST", admin)).status).toBe(403);
+    expect(transport).toHaveBeenCalledTimes(calls);
   });
   it("bounds JSON bodies even without content-length headers", async () => {
     const response = await invoke("/api/admin/ai/provider", "PUT", admin, { apiKey: "x".repeat(800000) });
@@ -149,7 +213,8 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     await invoke("/api/admin/ai/provider", "PUT", admin, { ...provider, imageModel: "gpt-image-2", imageQuotaTokens: 1000 });
     await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 10000 });
     transport.mockResolvedValueOnce(Response.json({ error: { code: "server_error", message: "private-test-key private-prompt" } }, { status: 502 }));
-    const request = { requestId: crypto.randomUUID(), prompt: "私有图片" };
+    const prompt = "私有图片";
+    const request = { requestId: crypto.randomUUID(), prompt, planRequestId: saveToolPlan(a, { kind: "image", prompt }) };
     const failure = await invoke("/api/ai/images", "POST", a, request);
     expect(failure.status).toBe(502); expect(failure.headers.get("cache-control")).toBe("no-store");
     const body = await failure.text();
@@ -168,7 +233,8 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     await invoke("/api/admin/ai/members/a/quota", "PUT", admin, { limitTokens: 10000 });
     transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
     const requestId = crypto.randomUUID();
-    const response = await invoke("/api/ai/images", "POST", a, { requestId, prompt: "仅属于成员甲的图片", userId: b.id }, { "X-Tongpin-Account": a.id });
+    const prompt = "仅属于成员甲的图片";
+    const response = await invoke("/api/ai/images", "POST", a, { requestId, prompt, planRequestId: saveToolPlan(a, { kind: "image", prompt }), userId: b.id }, { "X-Tongpin-Account": a.id });
     expect(response.status).toBe(200);
     const result = await response.json() as { images: Array<{ assetId: string }>; usage: { totalTokens: number } };
     return { assetId: result.images[0].assetId, requestId, result };

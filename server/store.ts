@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename } from "node:fs/promises";
 import path from "node:path";
 import {
   createEmptyLoraDatabaseFields,
@@ -30,6 +30,12 @@ function seedFromId(id: string): number {
 }
 
 const WINDOWS_RENAME_RETRY_DELAYS = [20, 40, 80, 160, 320, 640];
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+
+async function enforcePrivateMode(target: string, mode: number): Promise<void> {
+  if (process.platform !== "win32") await chmod(target, mode);
+}
 
 function isRetryableRenameError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
@@ -67,9 +73,12 @@ export class JsonStore {
 
   static async open(filePath: string): Promise<JsonStore> {
     const absolutePath = path.resolve(filePath);
-    await mkdir(path.dirname(absolutePath), { recursive: true });
+    const directory = path.dirname(absolutePath);
+    await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    await enforcePrivateMode(directory, PRIVATE_DIRECTORY_MODE);
 
     try {
+      await enforcePrivateMode(absolutePath, PRIVATE_FILE_MODE);
       const raw = await readFile(absolutePath, "utf8");
       const parsed = JSON.parse(raw) as Omit<DatabaseShape, "version"> & {
         version: number;
@@ -334,7 +343,14 @@ export class JsonStore {
 
   private async persist(data: DatabaseShape = this.data): Promise<void> {
     const temporaryPath = `${this.filePath}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify(data, null, 2), "utf8");
+    const handle = await open(temporaryPath, "w", PRIVATE_FILE_MODE);
+    try {
+      if (process.platform !== "win32") await handle.chmod(PRIVATE_FILE_MODE);
+      await handle.writeFile(JSON.stringify(data, null, 2), "utf8");
+    } finally {
+      await handle.close();
+    }
     await replaceFileWithRetry(temporaryPath, this.filePath);
+    await enforcePrivateMode(this.filePath, PRIVATE_FILE_MODE);
   }
 }

@@ -240,7 +240,7 @@ export function createAuthRouter(
     try {
       const body = verifySchema.parse(request.body);
       const email = normalizeEmail(body.email);
-      const user = await store.mutate((database) => {
+      const verificationResult = await store.mutate((database) => {
         const target = database.users.find(
           (candidate) => candidate.email === email,
         );
@@ -248,7 +248,7 @@ export function createAuthRouter(
           throw new ApiError(404, "ACCOUNT_NOT_FOUND", "没有找到该注册账号");
         }
         if (target.emailVerifiedAt) {
-          return target;
+          return { user: target };
         }
         const verification = database.verificationCodes
           .filter(
@@ -265,19 +265,29 @@ export function createAuthRouter(
           throw new ApiError(400, "CODE_EXPIRED", "验证码已过期，请重新发送");
         }
         if (verification.attempts >= 5) {
-          throw new ApiError(429, "CODE_LOCKED", "验证码错误次数过多，请重新发送");
+          return {
+            error: new ApiError(
+              429,
+              "CODE_LOCKED",
+              "验证码错误次数过多，请重新发送",
+            ),
+          };
         }
         if (verification.codeHash !== hashOpaque(body.code)) {
           verification.attempts += 1;
-          throw new ApiError(400, "CODE_INVALID", "验证码不正确");
+          return {
+            error: new ApiError(400, "CODE_INVALID", "验证码不正确"),
+          };
         }
         const now = new Date().toISOString();
         verification.consumedAt = now;
         target.emailVerifiedAt = now;
         target.status = "pending_approval";
         target.updatedAt = now;
-        return target;
+        return { user: target };
       });
+      if ("error" in verificationResult) throw verificationResult.error;
+      const user = verificationResult.user;
       response.json({
         nextStep: "await_approval",
         user: toPublicUser(user),
@@ -467,7 +477,7 @@ export function createAuthRouter(
       const body = resetPasswordSchema.parse(request.body);
       const email = normalizeEmail(body.email);
       const passwordHash = await bcrypt.hash(body.password, 10);
-      await store.mutate((database) => {
+      const verificationError = await store.mutate((database) => {
         const user = database.users.find(
           (candidate) => candidate.email === email,
         );
@@ -486,12 +496,16 @@ export function createAuthRouter(
         ) {
           throw new ApiError(400, "CODE_EXPIRED", "验证码已过期，请重新发送");
         }
-        if (
-          verification.attempts >= 5 ||
-          verification.codeHash !== hashOpaque(body.code)
-        ) {
+        if (verification.attempts >= 5) {
+          return new ApiError(
+            429,
+            "CODE_LOCKED",
+            "验证码错误次数过多，请重新发送",
+          );
+        }
+        if (verification.codeHash !== hashOpaque(body.code)) {
           verification.attempts += 1;
-          throw new ApiError(400, "CODE_INVALID", "验证码不正确");
+          return new ApiError(400, "CODE_INVALID", "验证码不正确");
         }
         const now = new Date().toISOString();
         verification.consumedAt = now;
@@ -500,7 +514,9 @@ export function createAuthRouter(
         database.refreshSessions = database.refreshSessions.filter(
           (session) => session.userId !== user.id,
         );
+        return null;
       });
+      if (verificationError) throw verificationError;
       response.json({ reset: true });
     } catch (error) {
       next(error);

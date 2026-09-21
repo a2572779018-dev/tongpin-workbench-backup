@@ -3,13 +3,19 @@ import type { AiVideoJob } from "../../../shared/aiVideo";
 import { AI_MEDIA_LIMITS } from "../../../shared/aiMedia";
 import type { TongpinAIArtifact, TongpinAIConversation } from "./types";
 import type { ExtractedAttachment } from "./attachments";
+import { videoBlobCache } from "./mediaCache";
 
 type Api = <T>(path: string, init?: RequestInit, timeout?: number, mode?: "json" | "blob") => Promise<T>;
 /** Resolve only artifacts actually referenced by this conversation, never the global latest job. */
 export function generatedMediaForFollowup(conversation: TongpinAIConversation | null, artifacts: TongpinAIArtifact[], text: string) {
   if (!conversation) return undefined;
-  const direct = conversation.messages.at(-1)?.artifactId;
-  if (!direct && !/视频|图片|画面|好看|评价|点评|配色|构图|镜头|节奏|刚才|这个|这张|这段|怎么样|如何|美观|logo|review|critique|video|image/i.test(text)) return undefined;
+  // Discussing a brief or generation settings does not require watching an unfinished result.
+  if (/提示词|脚本|文案|prompt|分镜方案|生成参数/i.test(text) && !/画面|实际|成片|看完|观看/i.test(text)) return undefined;
+  // A generated artifact being the last message is not consent to fetch it on
+  // every later turn. Require an explicit visual/media reference so ordinary
+  // chat (for example “你好” or “写一封邮件”) stays text-only.
+  const asksAboutMedia = /视频|短片|成片|图片|图像|画面|播放|观看|看完|好看|评价|点评|配色|构图|镜头|节奏|这张|这段|这个视频|这个图片|刚才生成|上面生成|生成结果|生成成果|review|critique|\bvideo\b|\bimage\b/i.test(text);
+  if (!asksAboutMedia) return undefined;
   const kind = /视频|这段|video/i.test(text) ? "video" : /图片|这张|image/i.test(text) ? "image" : undefined;
   for (const message of [...conversation.messages].reverse()) {
     if (message.role !== "assistant" || message.status === "error") continue;
@@ -35,13 +41,20 @@ export async function readGeneratedMedia(artifact: TongpinAIArtifact, api: Api, 
     signal.throwIfAborted();
     if (!result.media?.frames.length) throw Error("生成内容没有可读取画面，本次未发送，草稿已保留");
     for (const [index, frame] of result.media.frames.entries()) attachments.push({ name: `生成成果-${artifact.id.slice(0, 60)}-${index + 1}`, mediaType: "image/jpeg", dataUrl: frame.dataUrl,
-      text: result.media.kind === "video" ? `这是当前对话刚生成的视频采样画面 ${index + 1}/${result.media.frames.length}，时间 ${frame.timeSeconds?.toFixed(2)} 秒，总长 ${result.media.durationSeconds?.toFixed(2)} 秒。仅依据这些画面评价，不含音频，不能声称看过未采样部分或听过声音。` : "这是当前对话中生成的图片，请依据实际画面回答追问。" });
+      text: result.media.kind === "video" ? `这是当前对话生成的视频采样画面 ${index + 1}/${result.media.frames.length}，时间 ${frame.timeSeconds?.toFixed(2)} 秒，实际总长 ${result.media.durationSeconds?.toFixed(2)} 秒。结合对话讨论这些内容，不含音频，不能声称看过未采样部分或听过声音。` : "这是当前对话中生成的图片，请依据实际画面回答追问。" });
   };
   if (typeof artifact.data?.videoJobId === "string") {
-    const route = `/api/ai/videos/${encodeURIComponent(artifact.data.videoJobId)}`;
-    const { job } = await api<{ job: AiVideoJob }>(route, init, 30000);
-    if (job.status !== "completed") throw Error("这段视频尚未生成成功，暂时不能评价画面。草稿已保留。");
-    const blob = await api<Blob>(`${route}/content`, init, 130000, "blob");
+    const jobId = artifact.data.videoJobId;
+    const route = `/api/ai/videos/${encodeURIComponent(jobId)}`;
+    const job = await videoBlobCache.loadJob(accountId, jobId, async sharedSignal => {
+      const result = await api<{ job: AiVideoJob }>(route, { ...init, signal: sharedSignal }, 30000);
+      return result.job;
+    }, signal);
+    if (job.status !== "completed") throw Error("视频任务尚未完成，暂不能继续对话");
+    signal.throwIfAborted();
+    const blob = await videoBlobCache.loadBlob(accountId, jobId,
+      sharedSignal => api<Blob>(`${route}/content`, { ...init, signal: sharedSignal }, 130000, "blob"), signal);
+    signal.throwIfAborted();
     if (blob.size > AI_MEDIA_LIMITS.videoFileBytes) throw Error("这段视频超过画面分析大小限制，请截取片段后分析。草稿已保留。");
     await add(new File([blob], "当前对话生成的视频.mp4", { type: "video/mp4" }));
   } else if (Array.isArray(artifact.data?.images)) {

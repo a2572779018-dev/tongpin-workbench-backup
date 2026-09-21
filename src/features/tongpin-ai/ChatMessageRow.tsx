@@ -1,11 +1,14 @@
-import { Check, Copy, FileText, Paperclip } from "lucide-react";
-import { memo } from "react";
+import { Check, CheckCircle2, Circle, Copy, FileText, LoaderCircle, Paperclip, TriangleAlert } from "lucide-react";
+import { memo, useEffect, useRef, useState } from "react";
+import type { AiHarnessTrace } from "../../../shared/ai";
+import { useAuth } from "../../auth/AuthContext";
 import { AiSourceLink } from "./AiSourceLink";
 import { MarkdownReply } from "./MarkdownReply";
 import { ReplyWaiting } from "./ReplyWaiting";
 import { AiVideoReply } from "./AiVideoReply";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
 import type { VideoChatRequest } from "./videoChat";
+import { harnessTraceRefresh, harnessTraceRequestId, sameHarnessTrace } from "./runTracePolling";
 
 interface ChatMessageRowProps {
   message: TongpinAIMessage;
@@ -19,12 +22,57 @@ interface ChatMessageRowProps {
   onRetry: (messageId: string) => void;
   onVideoSettled?: () => void;
   onEditVideo?: (request: VideoChatRequest) => void;
+  onTraceChange?: (messageId: string, trace: AiHarnessTrace) => void;
   videoEditDisabled?: boolean;
+}
+
+/** Fetches application-owned lifecycle state only. The API never returns raw
+ * model reasoning, prompts, provider IDs or credentials. */
+function RunTrace({ requestId, initial, onChange }: { requestId?: string; initial: AiHarnessTrace; onChange?: (trace: AiHarnessTrace) => void }) {
+  const { api } = useAuth();
+  const [trace, setTrace] = useState(initial);
+  const [open, setOpen] = useState(initial.status === "running");
+  const changeRef = useRef(onChange);
+  changeRef.current = onChange;
+
+  useEffect(() => { setTrace(current => sameHarnessTrace(current, initial) ? current : initial); }, [initial]);
+  useEffect(() => {
+    const refreshRequest = harnessTraceRefresh(trace);
+    if (!requestId || !refreshRequest) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      try {
+        const result = await api<{ trace: AiHarnessTrace }>(`/api/ai/runs/${encodeURIComponent(requestId)}${refreshRequest.suffix}`, {
+          signal: controller.signal,
+          ...(refreshRequest.method === "POST" ? { method: "POST" } : {}),
+        });
+        if (!controller.signal.aborted && !sameHarnessTrace(trace, result.trace)) {
+          setTrace(result.trace);
+          changeRef.current?.(result.trace);
+        }
+      } catch {
+        // The chat result remains usable when a background status refresh fails.
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(refresh, 4_000);
+      }
+    };
+    void refresh();
+    return () => { controller.abort(); if (timer) clearTimeout(timer); };
+  }, [api, requestId, trace]);
+
+  return <details className="tp-ai-run-trace" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>处理过程 · {trace.reasoningSummary}</summary>
+    <ol>{trace.steps.map(step => <li key={step.id} className={`is-${step.status}`}>
+      {step.status === "succeeded" ? <CheckCircle2 size={15} aria-hidden="true" /> : step.status === "running" ? <LoaderCircle className="is-spinning" size={15} aria-hidden="true" /> : step.status === "failed" ? <TriangleAlert size={15} aria-hidden="true" /> : <Circle size={15} aria-hidden="true" />}
+      <span><strong>{step.title}</strong><small>{step.summary}</small></span>
+    </li>)}</ol>
+  </details>;
 }
 
 /** Only the current reply owns its playback updates; older messages remain untouched. */
 export const ChatMessageRow = memo(function ChatMessageRow({
-  message, artifact, assistantName, copied, retryable, retryDisabled, onCopy, onOpenArtifact, onRetry, onVideoSettled, onEditVideo, videoEditDisabled,
+  message, artifact, assistantName, copied, retryable, retryDisabled, onCopy, onOpenArtifact, onRetry, onVideoSettled, onEditVideo, onTraceChange, videoEditDisabled,
 }: ChatMessageRowProps) {
   return <article
     className={`tp-ai-message is-${message.role}${message.status === "error" ? " is-error" : ""}`}
@@ -41,11 +89,11 @@ export const ChatMessageRow = memo(function ChatMessageRow({
           </figure>)}</div>{file.media.kind === "video" ? <small>仅分析采样画面，不含音频</small> : null}</> : null}
         </li>)}
       </ul> : null}
-      {message.status === "thinking" ? <ReplyWaiting key={message.id} /> :
+      {message.status === "thinking" ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> :
         message.role === "assistant" && message.status !== "error"
           ? <MarkdownReply content={message.content} typing={message.status === "typing"} />
           : <p>{message.content}</p>}
-      {artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string" ? <AiVideoReply key={artifact.data.videoJobId} jobId={artifact.data.videoJobId} onSettled={onVideoSettled} savedRequest={artifact.data.videoRequest} onEdit={onEditVideo} editDisabled={videoEditDisabled} /> : artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
+      {artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string" ? <AiVideoReply key={artifact.data.videoJobId} jobId={artifact.data.videoJobId} onSettled={onVideoSettled} savedRequest={artifact.data.videoRequest} submissionError={typeof artifact.data.videoSubmitError === "string" ? artifact.data.videoSubmitError : undefined} onEdit={onEditVideo} editDisabled={videoEditDisabled} /> : artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
         <span className="tp-ai-artifact-card__icon"><FileText size={20} /></span>
         <span><small>{artifact.kind}</small><strong>{artifact.title}</strong></span>
         <span className="tp-ai-artifact-card__action">打开</span>
@@ -53,6 +101,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
       {message.sources?.length ? <ul className="tp-ai-message-sources" aria-label="参考来源">
         {message.sources.map((source, index) => <AiSourceLink key={`${source.url}-${index}`} source={source} />)}
       </ul> : null}
+      {message.role === "assistant" && message.trace ? <RunTrace requestId={harnessTraceRequestId(message)} initial={message.trace} onChange={trace => onTraceChange?.(message.id, trace)} /> : null}
       {message.status === "error" && retryable && <div className="tp-ai-message__controls">
         <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id)}>重新获取回复</button>
       </div>}

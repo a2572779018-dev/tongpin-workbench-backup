@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,6 +17,38 @@ afterEach(async () => {
 });
 
 describe("JsonStore 中央服务持久化", () => {
+  it("在 POSIX 上创建并收紧 0700 数据目录和 0600 JSON 文件", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(path.join(os.tmpdir(), "tongpin-store-mode-"));
+    temporaryRoots.push(root);
+    const dataDirectory = path.join(root, "private-data");
+    const dataFile = path.join(dataDirectory, "tongpin.json");
+
+    await JsonStore.open(dataFile);
+    expect((await stat(dataDirectory)).mode & 0o777).toBe(0o700);
+    expect((await stat(dataFile)).mode & 0o777).toBe(0o600);
+
+    await chmod(dataDirectory, 0o777);
+    await chmod(dataFile, 0o666);
+    const reopened = await JsonStore.open(dataFile);
+    expect((await stat(dataDirectory)).mode & 0o777).toBe(0o700);
+    expect((await stat(dataFile)).mode & 0o777).toBe(0o600);
+
+    await reopened.mutate((database) => {
+      database.taskAuditEvents = [...database.taskAuditEvents];
+    });
+    expect((await stat(dataFile)).mode & 0o777).toBe(0o600);
+
+    await rm(dataFile);
+    await mkdir(dataFile);
+    await expect(
+      reopened.mutate((database) => {
+        database.taskAuditEvents = [...database.taskAuditEvents];
+      }),
+    ).rejects.toBeDefined();
+    expect((await stat(`${dataFile}.tmp`)).mode & 0o777).toBe(0o600);
+  });
+
   it("从 0.1.7 的版本 1 数据原位升级且不丢任务", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "tongpin-store-v1-"));
     temporaryRoots.push(root);

@@ -2,6 +2,7 @@ import { AI_PERSONA_LIMITS } from "../../../shared/aiPersona";
 import { AiError } from "../../../server/ai/security";
 import type { AiPersonaRepository } from "../../../server/ai/persona";
 import { json, type UserRow } from "../platform";
+import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
 
 async function parsePersonaJson(request: Request): Promise<unknown> {
   if (!request.body) throw new AiError(400, "INVALID_JSON", "请提交有效 JSON 内容");
@@ -37,8 +38,9 @@ export async function handleAiPersonaRequest(
     const expectedAccount = request.headers.get("X-Tongpin-Account");
     if (expectedAccount !== null && expectedAccount !== user.id) throw new AiError(409, "AI_ACCOUNT_CHANGED", "账号已切换，本次未读取或修改其他账号的专属 AI 设置");
     if (new URL(request.url).pathname !== "/api/ai/persona") throw new AiError(404, "NOT_FOUND", "请求的接口不存在");
-    if (request.method === "GET") return json(repository.read(user.id));
-    if (request.method === "PUT") return json(repository.save(user.id, await parsePersonaJson(request)));
+    const tenantId = aiTenantIdFromPrincipal(user);
+    if (request.method === "GET") return json(repository.read(user.id, tenantId));
+    if (request.method === "PUT") return json(repository.save(user.id, await parsePersonaJson(request), tenantId));
     return json({ error: { code: "METHOD_NOT_ALLOWED", message: "此接口仅支持读取或保存专属 AI 设置" } }, 405, { Allow: "GET, PUT" });
   } catch (error) {
     if (error instanceof AiError) return json({ error: { code: error.code, message: error.message } }, error.status);

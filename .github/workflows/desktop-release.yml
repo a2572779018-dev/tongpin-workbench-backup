@@ -96,11 +96,11 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - run: npm ci
+      - run: npm ci --include=optional
       - run: npm run dist:win
       - name: Verify packaged Electron runtime files
         shell: pwsh
-        run: node scripts/verify-asar-contents.cjs (Resolve-Path "artifacts/win-unpacked/resources/app.asar")
+        run: node scripts/verify-asar-contents.cjs (Resolve-Path "artifacts/win-unpacked/resources/app.asar") --target win32-x64
       - run: npm run release:verify:win
       - name: Upload Windows release files
         env:
@@ -148,7 +148,11 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - run: npm ci
+      - run: npm ci --include=optional
+      - name: Prepare and verify macOS universal Computer Use runtime
+        run: |
+          node scripts/prepare-computer-use-runtime.cjs --target darwin-universal
+          node scripts/verify-computer-use-runtime.cjs --source --target darwin-universal
       - run: npm run build
       - name: Package unsigned universal app
         run: >-
@@ -162,7 +166,7 @@ jobs:
           set -euo pipefail
           app_asar="$(find artifacts -path '*/Contents/Resources/app.asar' -print -quit)"
           [[ -n "$app_asar" ]]
-          node scripts/verify-asar-contents.cjs "$app_asar"
+          node scripts/verify-asar-contents.cjs "$app_asar" --target darwin-universal
       - run: npm run release:verify:mac
       - name: Verify macOS artifacts and architectures
         shell: bash
