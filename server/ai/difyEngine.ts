@@ -1,0 +1,283 @@
+export type DifyEngineEventType =
+  | "run_started"
+  | "answer_delta"
+  | "tool_started"
+  | "tool_progress"
+  | "tool_finished"
+  | "usage_updated"
+  | "run_finished"
+  | "run_failed";
+
+export interface DifyEngineEvent {
+  type: DifyEngineEventType;
+  runId: string;
+  stepId: string;
+  seq: number;
+  timestamp: string;
+  content?: string;
+  toolName?: string;
+  remoteTaskId?: string;
+  remoteMessageId?: string;
+  remoteConversationId?: string;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  errorCode?: string;
+}
+
+export interface DifyEngineRunInput {
+  tenantId: string;
+  userId: string;
+  conversationId: string;
+  runId: string;
+  attemptId: string;
+  query: string;
+  toolAuthorization: string;
+  remoteConversationId?: string;
+  inputs?: Record<string, string | number | boolean>;
+}
+
+export interface DifyEngineRunResult {
+  engine: "dify";
+  status: "completed";
+  answer: string;
+  remoteTaskId: string;
+  remoteMessageId?: string;
+  remoteConversationId: string;
+  events: DifyEngineEvent[];
+}
+
+export interface DifyEngineConfig {
+  baseUrl: string;
+  apiKey: string;
+  timeoutMs?: number;
+  maxEventBytes?: number;
+  maxResponseBytes?: number;
+  fetchImpl?: typeof fetch;
+}
+
+export class DifyEngineError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly outcome: "not_started" | "unknown" | "failed",
+    public readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = "DifyEngineError";
+  }
+}
+
+function bounded(value: unknown, max = 500): string {
+  return typeof value === "string" ? Array.from(value).slice(0, max).join("") : "";
+}
+
+function requiredId(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(normalized)) {
+    throw new DifyEngineError("DIFY_INPUT_INVALID", `${label} 无效`, "not_started", false);
+  }
+  return normalized;
+}
+
+function endpoint(baseUrl: string, path: string): string {
+  const normalized = baseUrl.replace(/\/+$/, "");
+  return `${normalized}${normalized.endsWith("/v1") ? "" : "/v1"}${path}`;
+}
+
+function eventTime(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? new Date(value * 1000).toISOString()
+    : new Date().toISOString();
+}
+
+function usageFrom(value: unknown): DifyEngineEvent["usage"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const usage = value as Record<string, unknown>;
+  const number = (key: string) => typeof usage[key] === "number" && Number.isFinite(usage[key]) ? usage[key] as number : undefined;
+  const result = { inputTokens: number("prompt_tokens"), outputTokens: number("completion_tokens"), totalTokens: number("total_tokens") };
+  return Object.values(result).some(item => item !== undefined) ? result : undefined;
+}
+
+async function* ssePayloads(body: ReadableStream<Uint8Array>, maxEventBytes: number, maxResponseBytes: number) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxResponseBytes) throw new DifyEngineError("DIFY_RESPONSE_TOO_LARGE", "Dify 响应超出安全限制", "unknown", false);
+      buffer += decoder.decode(value, { stream: true });
+      let boundary: number;
+      while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) {
+        const block = buffer.slice(0, boundary);
+        const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)![0];
+        buffer = buffer.slice(boundary + separator.length);
+        const data = block.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n");
+        if (!data || data === "[DONE]") continue;
+        if (new TextEncoder().encode(data).byteLength > maxEventBytes) throw new DifyEngineError("DIFY_EVENT_TOO_LARGE", "Dify 事件超出安全限制", "unknown", false);
+        yield data;
+      }
+    }
+    buffer += decoder.decode();
+    const data = buffer.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n");
+    if (data && data !== "[DONE]") yield data;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * Adapter for a Dify Agent/Chatflow Service API application. It never retries
+ * a run: once a remote task id is observed, a disconnect is an unknown outcome
+ * that must be reconciled by the owning task service.
+ */
+export class DifyEngineAdapter {
+  private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+  private readonly maxEventBytes: number;
+  private readonly maxResponseBytes: number;
+
+  constructor(private readonly config: DifyEngineConfig) {
+    if (!config.apiKey.trim()) throw new DifyEngineError("DIFY_NOT_CONFIGURED", "Dify 应用密钥未配置", "not_started", false);
+    try { new URL(config.baseUrl); } catch { throw new DifyEngineError("DIFY_NOT_CONFIGURED", "Dify 服务地址无效", "not_started", false); }
+    this.fetchImpl = config.fetchImpl ?? fetch;
+    this.timeoutMs = config.timeoutMs ?? 120_000;
+    this.maxEventBytes = config.maxEventBytes ?? 256 * 1024;
+    this.maxResponseBytes = config.maxResponseBytes ?? 8 * 1024 * 1024;
+  }
+
+  async health(signal?: AbortSignal): Promise<{ reachable: true; name?: string; description?: string }> {
+    const response = await this.fetchImpl(endpoint(this.config.baseUrl, "/info"), {
+      headers: { Authorization: `Bearer ${this.config.apiKey}` }, signal,
+    });
+    if (!response.ok) throw new DifyEngineError("DIFY_UNAVAILABLE", `Dify 健康检查失败（HTTP ${response.status}）`, "not_started", response.status >= 500);
+    const data = await response.json() as Record<string, unknown>;
+    return { reachable: true, ...(typeof data.name === "string" ? { name: bounded(data.name, 120) } : {}), ...(typeof data.description === "string" ? { description: bounded(data.description, 240) } : {}) };
+  }
+
+  async run(input: DifyEngineRunInput, onEvent?: (event: DifyEngineEvent) => void, signal?: AbortSignal): Promise<DifyEngineRunResult> {
+    const tenantId = requiredId(input.tenantId, "tenantId");
+    const userId = requiredId(input.userId, "userId");
+    const conversationId = requiredId(input.conversationId, "conversationId");
+    const runId = requiredId(input.runId, "runId");
+    const attemptId = requiredId(input.attemptId, "attemptId");
+    if (!input.query.trim()) throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 任务内容为空", "not_started", false);
+    if (!input.toolAuthorization.trim()) throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 工具授权缺失", "not_started", false);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    const suppliedRemoteConversationId = input.remoteConversationId?.trim() || undefined;
+    let remoteTaskId = "";
+    let remoteMessageId = "";
+    let remoteConversationId = suppliedRemoteConversationId ?? "";
+    let answer = "";
+    let terminal = false;
+    let seq = 0;
+    const startedTools = new Set<string>();
+    const finishedTools = new Set<string>();
+    const events: DifyEngineEvent[] = [];
+    const emit = (event: Omit<DifyEngineEvent, "runId" | "seq">) => {
+      const next = { ...event, runId, seq: ++seq };
+      events.push(next); onEvent?.(next);
+    };
+    const customInputs = input.inputs ?? {};
+    for (const [key, value] of Object.entries(customInputs)) {
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key) || typeof value === "string" && value.length > 16_000) {
+        clearTimeout(timeout); throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 输入变量无效", "not_started", false);
+      }
+    }
+    const payload = {
+      inputs: {
+        ...customInputs,
+        tongpin_tenant_id: tenantId,
+        tongpin_user_id: userId,
+        tongpin_conversation_id: conversationId,
+        tongpin_run_id: runId,
+        tongpin_attempt_id: attemptId,
+        tongpin_tool_authorization: input.toolAuthorization,
+      },
+      query: input.query,
+      response_mode: "streaming",
+      conversation_id: suppliedRemoteConversationId ?? "",
+      user: `${tenantId}:${userId}`,
+    };
+    try {
+      const response = await this.fetchImpl(endpoint(this.config.baseUrl, "/chat-messages"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.config.apiKey}`, "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const message = bounded(await response.text(), 300);
+        throw new DifyEngineError("DIFY_REQUEST_REJECTED", `Dify 拒绝任务（HTTP ${response.status}）${message ? `：${message}` : ""}`, "not_started", response.status >= 500 || response.status === 429);
+      }
+      if (!response.body) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 未返回事件流", "unknown", false);
+      for await (const raw of ssePayloads(response.body, this.maxEventBytes, this.maxResponseBytes)) {
+        let item: Record<string, unknown>;
+        try { item = JSON.parse(raw) as Record<string, unknown>; }
+        catch { throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 返回了无效事件", remoteTaskId ? "unknown" : "not_started", false); }
+        const event = bounded(item.event, 80);
+        remoteTaskId ||= bounded(item.task_id, 200);
+        remoteMessageId ||= bounded(item.message_id, 200);
+        remoteConversationId ||= bounded(item.conversation_id, 200);
+        const common = { timestamp: eventTime(item.created_at), remoteTaskId: remoteTaskId || undefined, remoteMessageId: remoteMessageId || undefined, remoteConversationId: remoteConversationId || undefined };
+        if (events.length === 0) emit({ type: "run_started", stepId: `dify:${attemptId}`, ...common });
+        if (event === "message" || event === "agent_message") {
+          const delta = bounded(item.answer, 128_000);
+          if (delta) { answer += delta; emit({ type: "answer_delta", stepId: remoteMessageId || `dify:${attemptId}`, content: delta, ...common }); }
+        } else if (event === "agent_thought") {
+          const toolName = bounded(item.tool, 120);
+          const observation = bounded(item.observation, 1);
+          if (toolName) {
+            const stepId = bounded(item.id, 200) || `dify-tool:${seq + 1}`;
+            if (!startedTools.has(stepId)) {
+              startedTools.add(stepId);
+              emit({ type: "tool_started", stepId, toolName, ...common });
+            }
+            if (observation) {
+              if (!finishedTools.has(stepId)) { finishedTools.add(stepId); emit({ type: "tool_finished", stepId, toolName, ...common }); }
+            } else emit({ type: "tool_progress", stepId, toolName, ...common });
+          }
+        } else if (event === "message_end") {
+          const metadata = item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata as Record<string, unknown> : {};
+          const usage = usageFrom(metadata.usage);
+          if (usage) emit({ type: "usage_updated", stepId: remoteMessageId || `dify:${attemptId}`, usage, ...common });
+          terminal = true;
+          emit({ type: "run_finished", stepId: remoteMessageId || `dify:${attemptId}`, ...common });
+        } else if (event === "error") {
+          terminal = true;
+          const errorCode = bounded(item.code, 120) || "DIFY_REMOTE_ERROR";
+          emit({ type: "run_failed", stepId: remoteMessageId || `dify:${attemptId}`, content: bounded(item.message, 500), errorCode, ...common });
+          throw new DifyEngineError(errorCode, bounded(item.message, 500) || "Dify 任务失败", "failed", false);
+        }
+      }
+      if (!terminal || !remoteTaskId || !remoteConversationId) {
+        throw new DifyEngineError("DIFY_OUTCOME_UNKNOWN", "Dify 事件流在终态前结束，不会自动切换引擎或重复执行", remoteTaskId ? "unknown" : "not_started", false);
+      }
+      return { engine: "dify", status: "completed", answer, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId, events };
+    } catch (error) {
+      if (error instanceof DifyEngineError) throw error;
+      const timedOut = controller.signal.aborted;
+      throw new DifyEngineError(timedOut ? "DIFY_TIMEOUT" : "DIFY_UNAVAILABLE", timedOut ? "Dify 任务超时，未知是否已在远程执行" : "无法连接 Dify 运行环境", remoteTaskId ? "unknown" : "not_started", !remoteTaskId);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  async stop(remoteTaskId: string, tenantId: string, userId: string): Promise<void> {
+    requiredId(remoteTaskId, "remoteTaskId");
+    const user = `${requiredId(tenantId, "tenantId")}:${requiredId(userId, "userId")}`;
+    const response = await this.fetchImpl(endpoint(this.config.baseUrl, `/chat-messages/${encodeURIComponent(remoteTaskId)}/stop`), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.config.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ user }),
+    });
+    if (!response.ok) throw new DifyEngineError("DIFY_STOP_FAILED", `Dify 停止请求失败（HTTP ${response.status}）`, "unknown", response.status >= 500);
+  }
+}
