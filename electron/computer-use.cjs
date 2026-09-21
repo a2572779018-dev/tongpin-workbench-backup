@@ -15,6 +15,20 @@ const MAX_SCREENSHOT_BASE64_LENGTH = 8 * 1024 * 1024;
 const SNAPSHOT_MAX_ELEMENTS = 160;
 const SNAPSHOT_MAX_DEPTH = 12;
 const SNAPSHOT_MAX_DIMENSION = 1280;
+
+function computerUseSystemVersion() {
+  if (!process.versions.electron) {
+    // Ordinary Node tests/tools do not know the macOS product version. In
+    // particular os.release() is Darwin's kernel version, not macOS. Returning
+    // unknown fails the macOS capability gate closed; callers that test the
+    // controller directly must provide an explicit product-version fixture.
+    return "";
+  }
+  if (typeof process.getSystemVersion !== "function") {
+    throw new Error("当前 Electron 运行时无法读取系统版本，请重新启动同频后重试");
+  }
+  return process.getSystemVersion();
+}
 const MAX_WINDOW_ID = (1n << 64n) - 1n;
 const EDITABLE_ELEMENT_ROLES = new Set([
   "axsearchfield",
@@ -1197,6 +1211,7 @@ module.exports = {
   APPROVAL_TTL_MS,
   CUA_DRIVER_VERSION,
   SNAPSHOT_TTL_MS,
+  computerUseSystemVersion,
   createComputerUseController,
   normalizeAction,
   probePlatform,

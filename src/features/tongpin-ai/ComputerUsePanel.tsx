@@ -72,31 +72,42 @@ export function ComputerUsePanel({
   const editableElements = useMemo(() => state ? editableComputerElements(state) : [], [state]);
   const plan = useMemo(() => state ? buildComputerUsePlan(state, draft) : null, [state, draft]);
 
-  useEffect(() => {
-    mountedRef.current = true;
+  async function checkCapability() {
     const operation = ++operationRef.current;
+    setBusy("probe");
+    setProbe(null);
+    setError("");
+    setNotice("正在检查本机能力…");
     if (!bridge) {
       setBusy(null);
+      setNotice("");
       setError("电脑控制只在安装版同频桌面端中提供；当前环境不会降级为网页模拟。");
-      return () => { mountedRef.current = false; };
+      return;
     }
-    void bridge.probe().then((result) => {
+    try {
+      const result = await bridge.probe();
       if (!mountedRef.current || operation !== operationRef.current) return;
       setProbe(result);
       setBusy(null);
       setNotice(result.available ? "能力检查通过。开始会话前，系统会再次向你确认。" : result.message);
-    }).catch((reason) => {
+    } catch (reason) {
       if (!mountedRef.current || operation !== operationRef.current) return;
       setBusy(null);
+      setNotice("");
       setError(errorMessage(reason, "无法检查本机电脑控制能力"));
-    });
+    }
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    void checkCapability();
     return () => {
       mountedRef.current = false;
       operationRef.current += 1;
       sessionStartedRef.current = false;
       // stopSession waits for an in-flight start, so this also closes a native
       // session whose consent dialog resolves after the panel was unmounted.
-      void bridge.stopSession();
+      void bridge?.stopSession().catch(() => undefined);
     };
   }, [bridge, requestId]);
 
@@ -276,13 +287,17 @@ export function ComputerUsePanel({
       {error ? <p className="tp-ai-computer__error" role="alert">{error}</p> : null}
 
       {!bridge ? null : !probe ? (
-        <div className="tp-ai-computer__loading"><LoaderCircle size={17} className="is-spinning" />检查能力</div>
+        busy === "probe" ? <div className="tp-ai-computer__loading"><LoaderCircle size={17} className="is-spinning" />检查能力</div>
+          : <button type="button" onClick={() => void checkCapability()}><RefreshCw size={16} />重新检查</button>
       ) : !probe.available ? (
+        <>
         <dl className="tp-ai-computer__probe">
           <div><dt>系统</dt><dd>{probe.platform} / {probe.arch} / {probe.osVersion}</dd></div>
           <div><dt>辅助功能</dt><dd>{probe.permissions.accessibility}</dd></div>
           <div><dt>屏幕录制</dt><dd>{probe.permissions.screenRecording}</dd></div>
         </dl>
+        <button type="button" onClick={() => void checkCapability()} disabled={Boolean(busy)}><RefreshCw size={16} />重新检查</button>
+        </>
       ) : !sessionStartedRef.current ? (
         <button type="button" className="tp-ai-computer__primary" onClick={() => void startSession()} disabled={Boolean(busy)}>
           {busy === "start" ? <LoaderCircle size={17} className="is-spinning" /> : <MonitorUp size={17} />}

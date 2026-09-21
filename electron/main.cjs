@@ -76,6 +76,7 @@ const {
 } = require("./secure-session-binding-store.cjs");
 const {
   createComputerUseController,
+  computerUseSystemVersion,
 } = require("./computer-use.cjs");
 
 autoUpdater.logger = null;
@@ -934,7 +935,7 @@ function getComputerUseController() {
   computerUseController = createComputerUseController({
     platform: process.platform,
     arch: process.arch,
-    osVersion: app.getSystemVersion(),
+    osVersion: computerUseSystemVersion(),
     hostPid: process.pid,
     confirmSession: async () => {
       if (!mainWindow || mainWindow.isDestroyed()) return false;
