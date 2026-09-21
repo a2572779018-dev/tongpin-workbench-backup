@@ -7,7 +7,7 @@ import { object, readBoundedJson, readProviderHttpError, type AiTransport } from
 import { h3VideoContentUrl, parseH3VideoInput, queryH3Video, submitH3Video, type H3VideoTask } from "./videoProvider";
 import { aiVideoReferenceFingerprint, AI_VIDEO_REFERENCE_FINGERPRINT } from "../../shared/aiVideoReferences";
 import { claimToolPlan, validateToolPlan } from "./toolPlans";
-import { validConversationId, type AiHarness } from "./harness";
+import { validConversationId, type AiHarness, type ResolvedHarnessMediaRoute } from "./harness";
 import { DEFAULT_AI_TENANT_ID, tenantStorageKey } from "./tenant";
 
 const BASE = "https://www.75api.com/v1";
@@ -62,6 +62,33 @@ export class AiVideoService {
     const harness = this.store.harness();
     return Boolean(harness && Object.values(harness.tiers).some(route => route.enabled && route.capabilities.includes("video") && route.videoProviderId && route.videoModelId && harness.providers.some(provider => provider.id === route.videoProviderId && provider.enabled && provider.encryptedKey)));
   }
+  private harnessVideoAccess(tier: AiMode): { route: ResolvedHarnessMediaRoute; models: VideoModelId[] } | null {
+    const route = this.harness?.resolveMedia(tier, this.store.provider(), "video") ?? null;
+    if (!route) return null;
+    const configured = this.store.harness();
+    const provider = configured?.providers.find(item => item.id === route.providerId);
+    const providerModels = provider?.availableModels ?? [route.modelId];
+    const models = VIDEO_MODELS.filter(model => model.generationEnabled && providerModels.includes(model.id)).map(model => model.id);
+    if (!models.length) throw new AiError(503, "AI_HARNESS_MODEL_UNVERIFIED", "该业务档位的视频服务没有已验证的可用模型，请管理员重新获取模型列表", true);
+    return { route, models };
+  }
+  private mediaRouteForModel(tier: AiMode, modelId: string): ResolvedHarnessMediaRoute | null {
+    const access = this.harnessVideoAccess(tier);
+    if (!access) return null;
+    if (!access.models.includes(modelId as VideoModelId)) throw new AiError(403, "AI_VIDEO_MODEL_NOT_AUTHORIZED", "当前业务档位的视频服务未验证此模型，请重新选择");
+    return { ...access.route, modelId };
+  }
+  /** Bind a member's explicit selection to the currently verified tier provider. */
+  bindPlanModel(tier: AiMode, requested: unknown): VideoModelId {
+    const access = this.harnessVideoAccess(tier);
+    const legacy = this.saved();
+    const allowed = access?.models ?? availableModels(legacy);
+    const fallback = access?.route.modelId ?? configuredDefaultModel(legacy.defaultModel);
+    const candidate = typeof requested === "string" && requested ? requested : fallback;
+    const spec = videoModel(candidate);
+    if (!spec?.generationEnabled || !allowed.includes(spec.id)) throw new AiError(403, "AI_VIDEO_MODEL_NOT_AUTHORIZED", "当前视频服务未验证此模型，请重新选择");
+    return spec.id;
+  }
   private writeSettings(settings: Settings) { this.store.sql.exec("INSERT INTO ai_settings(id,tenant_id,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET tenant_id=excluded.tenant_id,data=excluded.data", this.settingKey(), this.store.tenantId, JSON.stringify(settings)); }
   settings(): AiVideoSettings {
     const s = this.saved(), verified = verifiedModels(s);
@@ -69,22 +96,23 @@ export class AiVideoService {
   }
   private memberSettings(tier: AiMode = "quick"): AiVideoSettings {
     const admin = this.settings();
-    let selected: VideoModelId | undefined;
+    let access: ReturnType<AiVideoService["harnessVideoAccess"]> = null;
     try {
-      const route = this.harness?.resolveMedia(tier, this.store.provider(), "video");
-      const model = route && videoModel(route.modelId);
-      if (model?.generationEnabled) selected = model.id;
+      access = this.harnessVideoAccess(tier);
     } catch {
       return { enabled: admin.enabled, quotaPoints: admin.quotaPoints, apiKeyConfigured: false, availableModels: [], modelsVerified: false };
     }
-    selected ??= admin.defaultModel && admin.availableModels.includes(admin.defaultModel) ? admin.defaultModel : admin.availableModels[0];
+    const models = access?.models ?? admin.availableModels;
+    const selected = (access?.route.modelId && models.includes(access.route.modelId as VideoModelId) ? access.route.modelId as VideoModelId : undefined)
+      ?? (admin.defaultModel && models.includes(admin.defaultModel) ? admin.defaultModel : models[0]);
     const spec = selected ? videoModel(selected) : undefined;
     return {
       enabled: admin.enabled,
       quotaPoints: admin.quotaPoints,
-      apiKeyConfigured: Boolean(spec && (selected === admin.defaultModel ? admin.apiKeyConfigured : true)),
-      availableModels: [],
+      apiKeyConfigured: Boolean(spec && (access || admin.apiKeyConfigured)),
+      availableModels: models,
       modelsVerified: Boolean(spec),
+      ...(selected ? { defaultModel: selected } : {}),
       ...(spec ? { profile: {
         resolutions: [...spec.resolutions],
         seconds: Object.fromEntries(spec.resolutions.map(resolution => [resolution, videoSeconds(spec.id, resolution)])),
@@ -245,14 +273,15 @@ export class AiVideoService {
   }
   private settle(job: Job, points: number, actorId: string | null = null) {
     if (!job.reserved) return;
+    const succeeded = job.status === "completed";
     const q = this.store.quota(job.userId);
     if (q.reservedTokens < job.quotaPoints) throw new AiError(409, "AI_VIDEO_QUOTA_CONFLICT", "视频预留额度异常，请管理员核查");
     this.store.saveQuota(job.userId, { ...q, reservedTokens: q.reservedTokens - job.quotaPoints, usedTokens: q.usedTokens + points });
     job.reserved = false;
-    this.store.addUsage({ id: crypto.randomUUID(), userId: job.userId, requestId: job.id, kind: "video", status: points ? "completed" : "failed", model: job.model ?? "minimax_h3", mode: null, createdAt: now(), reason: actorId ? "管理员按服务商记录核对视频结算" : points ? "视频生成完成" : "服务商拒绝视频请求，已释放预留", limitTokens: null, actorId, inputTokens: 0, outputTokens: 0, totalTokens: points, convertedTokens: points, billingKind: "video_conversion", estimated: false, ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) });
+    this.store.addUsage({ id: crypto.randomUUID(), userId: job.userId, requestId: job.id, kind: "video", status: succeeded ? "completed" : "failed", model: job.model ?? "minimax_h3", mode: null, createdAt: now(), reason: actorId ? points ? "管理员按服务商记录确认扣额，任务结果仍未验证" : "管理员已释放未知任务的预留额度" : succeeded ? "视频生成完成" : "服务商拒绝视频请求，已释放预留", limitTokens: null, actorId, inputTokens: 0, outputTokens: 0, totalTokens: points, convertedTokens: points, billingKind: "video_conversion", estimated: false, ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) });
     const run = job.planRequestId ? this.store.harnessRun(job.userId, job.planRequestId) : null;
-    this.store.addObservability({ userId: job.userId, tier: run?.tier ?? "standard", providerId: job.routingProviderId ?? "video-75api", capability: "video", operation: "execution", success: points > 0, latencyMs: Date.now() - Date.parse(job.createdAt), ...(!points ? { errorCode: job.diagnostic ? `AI_PROVIDER_${job.diagnostic.category.toUpperCase()}` : actorId ? "AI_VIDEO_RECONCILED_RELEASE" : "AI_VIDEO_FAILED" } : {}) });
-    if (job.planRequestId) this.harness?.finishApprovedTool(job.userId, job.planRequestId, "video", points ? "succeeded" : "failed");
+    this.store.addObservability({ userId: job.userId, tier: run?.tier ?? "standard", providerId: job.routingProviderId ?? "video-75api", capability: "video", operation: "execution", success: succeeded, latencyMs: Date.now() - Date.parse(job.createdAt), ...(!succeeded ? { errorCode: job.diagnostic ? `AI_PROVIDER_${job.diagnostic.category.toUpperCase()}` : actorId ? points ? "AI_VIDEO_RECONCILED_CHARGE_UNVERIFIED" : "AI_VIDEO_RECONCILED_RELEASE" : "AI_VIDEO_FAILED" } : {}) });
+    if (job.planRequestId) this.harness?.finishApprovedTool(job.userId, job.planRequestId, "video", succeeded ? "succeeded" : actorId && points ? "uncertain" : "failed");
   }
   async submit(userId: string, value: unknown): Promise<AiVideoJob> {
     this.store.assertAccess(userId); this.recover(userId);
@@ -265,7 +294,6 @@ export class AiVideoService {
     const planned = validateToolPlan(this.store, userId, p.planRequestId, "video", typeof p.prompt === "string" ? p.prompt : "", { consumerRequestId: p.requestId });
     const planRun = this.store.harnessRun(userId, p.planRequestId);
     const tier = planRun?.tier ?? "quick";
-    const mediaRoute = this.harness?.resolveMedia(tier, this.store.provider(), "video") ?? null;
     const plannedParameters = planned.result.toolPlan.videoParameters;
     const submittedParameters = {
       model: p.model ?? plannedParameters?.model,
@@ -279,10 +307,10 @@ export class AiVideoService {
     if (JSON.stringify(plannedParametersWithoutContent) !== JSON.stringify(submittedParameters)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "视频模型、时长、清晰度、画幅或参考图已改变，请让同频 AI 重新整理后确认");
     const s = this.saved();
     if (!s.enabled || !s.quotaPoints) throw new AiError(403, "AI_VIDEO_DISABLED", "管理员尚未启用视频生成");
-    const selectedSpec = videoModel(mediaRoute?.modelId ?? (typeof submittedParameters.model === "string" ? submittedParameters.model : ""));
+    const selectedSpec = videoModel(typeof submittedParameters.model === "string" ? submittedParameters.model : "");
     if (!selectedSpec) throw new AiError(400, "AI_VIDEO_MODEL_INVALID", "请选择已接入的视频模型");
     if (!selectedSpec.generationEnabled) throw new AiError(409, "AI_VIDEO_MODEL_UNAVAILABLE", selectedSpec.unavailableReason);
-    if (mediaRoute && submittedParameters.model !== mediaRoute.modelId) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "管理员已调整此档位的视频模型，请让同频 AI 重新整理后确认");
+    const mediaRoute = this.mediaRouteForModel(tier, selectedSpec.id);
     if (!mediaRoute && !availableModels(s).includes(selectedSpec.id)) throw new AiError(403, "AI_VIDEO_MODEL_NOT_AUTHORIZED", "当前视频密钥尚未确认可使用此模型，请联系管理员检查模型列表");
     const id = p.requestId;
     const existing = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE tenant_id=? AND user_id=? AND id=?", this.store.tenantId, this.userKey(userId), id)[0];

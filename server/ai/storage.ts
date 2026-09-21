@@ -1,6 +1,7 @@
 import type { AiChatResponse, AiHarnessCapability, AiHarnessConfig, AiHarnessRunStatus, AiHarnessStep, AiImageAsset, AiImageMimeType, AiImageResponse, AiMode, AiObservabilityAlert, AiObservabilityDashboard, AiObservabilitySlice, AiProviderConfig, AiQuota, AiRequestResult, AiUsageEntry } from "../../shared/ai";
 import { AiError } from "./security";
-import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey } from "./tenant";
+import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey, tenantStorageValue } from "./tenant";
+import { aiLatencyThresholds } from "./observabilityThresholds";
 
 export interface AiSql {
   exec(query: string, ...bindings: Array<string | number | null>): void;
@@ -13,7 +14,7 @@ CREATE TABLE IF NOT EXISTS ai_video_jobs (user_id TEXT NOT NULL, id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS ai_video_references (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', public_id TEXT, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_quotas (user_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_requests (user_id TEXT NOT NULL, request_id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', data TEXT NOT NULL, PRIMARY KEY(user_id, request_id));
-CREATE TABLE IF NOT EXISTS ai_harness_runs (user_id TEXT NOT NULL, id TEXT NOT NULL, request_id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', conversation_id TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, goal_kind TEXT NOT NULL, goal_summary TEXT NOT NULL, status TEXT NOT NULL, reasoning_summary TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(user_id,id), UNIQUE(user_id,request_id));
+CREATE TABLE IF NOT EXISTS ai_harness_runs (user_id TEXT NOT NULL, id TEXT NOT NULL, request_id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', conversation_id TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, goal_kind TEXT NOT NULL, goal_summary TEXT NOT NULL, background_capable INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, reasoning_summary TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(user_id,id), UNIQUE(user_id,request_id));
 CREATE INDEX IF NOT EXISTS ai_harness_runs_user_time ON ai_harness_runs(user_id, started_at DESC);
 CREATE TABLE IF NOT EXISTS ai_harness_steps (user_id TEXT NOT NULL, run_id TEXT NOT NULL, id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', data TEXT NOT NULL, PRIMARY KEY(user_id,run_id,id));
 CREATE INDEX IF NOT EXISTS ai_harness_steps_run ON ai_harness_steps(user_id,run_id);
@@ -62,10 +63,18 @@ export interface StoredHarnessRun {
    * into member traces or observability records. */
   goalKind: AiHarnessCapability;
   goalSummary: string;
+  /** Only runs created by a background-aware application version may be
+   * discovered by maintenance. Legacy rows migrate to false. */
+  backgroundCapable?: boolean;
   status: AiHarnessRunStatus;
   reasoningSummary: string;
   startedAt: number;
   updatedAt: number;
+}
+export interface AiBackgroundHarnessCandidate {
+  tenantId: string;
+  userId: string;
+  requestId: string;
 }
 export interface StoredRequest {
   requestId: string;
@@ -127,6 +136,8 @@ export class AiStore {
     const harnessRunColumns = this.sql.all<{ name: string }>("PRAGMA table_info(ai_harness_runs)");
     if (!harnessRunColumns.some(column => column.name === "goal_kind")) this.sql.exec("ALTER TABLE ai_harness_runs ADD COLUMN goal_kind TEXT NOT NULL DEFAULT 'chat'");
     if (!harnessRunColumns.some(column => column.name === "goal_summary")) this.sql.exec("ALTER TABLE ai_harness_runs ADD COLUMN goal_summary TEXT NOT NULL DEFAULT '完成当前对话任务，并根据已校验结果判断下一步。'");
+    // Never opt historical/abandoned runs into paid background continuation.
+    if (!harnessRunColumns.some(column => column.name === "background_capable")) this.sql.exec("ALTER TABLE ai_harness_runs ADD COLUMN background_capable INTEGER NOT NULL DEFAULT 0");
     this.sql.exec("CREATE INDEX IF NOT EXISTS ai_usage_tenant_user_time ON ai_usage(tenant_id,user_id,created_at DESC); CREATE INDEX IF NOT EXISTS ai_harness_runs_tenant_user ON ai_harness_runs(tenant_id,user_id,request_id); CREATE INDEX IF NOT EXISTS ai_observability_tenant_time ON ai_observability_events(tenant_id,created_at DESC); CREATE INDEX IF NOT EXISTS ai_observability_alerts_tenant_time ON ai_observability_alerts(tenant_id,last_seen_at DESC); CREATE INDEX IF NOT EXISTS ai_video_jobs_tenant_user ON ai_video_jobs(tenant_id,user_id,id); CREATE INDEX IF NOT EXISTS ai_video_references_tenant_user ON ai_video_references(tenant_id,user_id,id); CREATE UNIQUE INDEX IF NOT EXISTS ai_video_references_public ON ai_video_references(public_id) WHERE public_id IS NOT NULL;");
   }
   provider(): StoredProvider | null {
@@ -242,8 +253,8 @@ export class AiStore {
   createHarnessRun(value: StoredHarnessRun, steps: AiHarnessStep[]): void {
     const storedUserId = this.userKey(value.userId);
     this.sql.exec(
-      "INSERT INTO ai_harness_runs(user_id,id,request_id,tenant_id,conversation_id,tier,provider_id,capability,goal_kind,goal_summary,status,reasoning_summary,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      storedUserId, value.id, value.requestId, this.tenantId, value.conversationId, value.tier, value.providerId, value.capability, value.goalKind, value.goalSummary, value.status, value.reasoningSummary, value.startedAt, value.updatedAt,
+      "INSERT INTO ai_harness_runs(user_id,id,request_id,tenant_id,conversation_id,tier,provider_id,capability,goal_kind,goal_summary,background_capable,status,reasoning_summary,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      storedUserId, value.id, value.requestId, this.tenantId, value.conversationId, value.tier, value.providerId, value.capability, value.goalKind, value.goalSummary, value.backgroundCapable === true ? 1 : 0, value.status, value.reasoningSummary, value.startedAt, value.updatedAt,
     );
     for (const step of steps) this.saveHarnessStep(value.userId, value.id, step);
   }
@@ -258,8 +269,35 @@ export class AiStore {
       id: String(row.id), requestId: String(row.request_id), userId, conversationId: String(row.conversation_id),
       tier: String(row.tier) as AiMode, providerId: String(row.provider_id), capability: String(row.capability) as AiHarnessCapability,
       goalKind, goalSummary,
+      backgroundCapable: Number(row.background_capable) === 1,
       status: String(row.status) as AiHarnessRunStatus, reasoningSummary: String(row.reasoning_summary), startedAt: Number(row.started_at), updatedAt: Number(row.updated_at),
     };
+  }
+  /** System-only cross-tenant maintenance view. Callers must immediately scope
+   * the service back to candidate.tenantId before reading or changing a run. */
+  backgroundHarnessCandidates(limit = 4): AiBackgroundHarnessCandidate[] {
+    const bounded = Number.isInteger(limit) ? Math.max(1, Math.min(8, limit)) : 4;
+    const rows = this.sql.all<{ tenant_id: string; user_id: string; request_id: string }>(
+      `SELECT r.tenant_id,r.user_id,r.request_id FROM ai_harness_runs r
+       WHERE r.background_capable=1 AND (r.status='planned' OR (r.status='running' AND EXISTS (
+         SELECT 1 FROM ai_harness_steps s WHERE s.tenant_id=r.tenant_id AND s.user_id=r.user_id AND s.run_id=r.id
+         AND json_extract(s.data,'$.kind')='model' AND json_extract(s.data,'$.continuationRequestId') IS NOT NULL
+       ))) ORDER BY r.updated_at ASC LIMIT ?`,
+      bounded * 4,
+    );
+    const result: AiBackgroundHarnessCandidate[] = [];
+    for (const row of rows) {
+      try {
+        const tenantId = normalizeAiTenantId(row.tenant_id);
+        result.push({ tenantId, userId: tenantStorageValue(tenantId, row.user_id), requestId: row.request_id });
+      } catch {
+        // A corrupt row must not widen tenant scope or stop other valid runs.
+      }
+    }
+    return result;
+  }
+  disableHarnessBackground(userId: string, requestId: string): void {
+    this.sql.exec("UPDATE ai_harness_runs SET background_capable=0,updated_at=? WHERE tenant_id=? AND user_id=? AND request_id=?", Date.now(), this.tenantId, this.userKey(userId), requestId);
   }
   updateHarnessRun(userId: string, requestId: string, status: AiHarnessRunStatus, reasoningSummary: string): void {
     this.sql.exec("UPDATE ai_harness_runs SET status=?,reasoning_summary=?,updated_at=? WHERE tenant_id=? AND user_id=? AND request_id=?", status, reasoningSummary, Date.now(), this.tenantId, this.userKey(userId), requestId);
@@ -310,9 +348,10 @@ export class AiStore {
   private thresholdAlerts(slices: AiObservabilitySlice[]): Array<Omit<AiObservabilityAlert, "id" | "firstSeenAt" | "lastSeenAt" | "occurrences" | "acknowledgedAt" | "resolvedAt"> & { fingerprint: string }> {
     return slices.flatMap(item => {
       const suffix = `${item.tier}:${item.provider}:${item.capability}:${item.operation}`;
+      const latency = aiLatencyThresholds(item.capability, item.operation);
       const result: Array<Omit<AiObservabilityAlert, "id" | "firstSeenAt" | "lastSeenAt" | "occurrences" | "acknowledgedAt" | "resolvedAt"> & { fingerprint: string }> = [];
       if (item.requests >= 4 && item.errorRate >= 0.5) result.push({ fingerprint: `errors:${suffix}`, severity: item.errorRate >= 0.8 ? "critical" : "warning", code: "HIGH_ERROR_RATE", message: `${item.tier} · ${item.capability} 错误率 ${(item.errorRate * 100).toFixed(0)}%`, tier: item.tier, provider: item.provider, capability: item.capability });
-      if (item.requests >= 3 && item.maxLatencyMs >= 60_000) result.push({ fingerprint: `latency:${suffix}`, severity: item.maxLatencyMs >= 120_000 ? "critical" : "warning", code: "HIGH_LATENCY", message: `${item.tier} · ${item.capability} 最大响应 ${Math.round(item.maxLatencyMs / 1000)} 秒`, tier: item.tier, provider: item.provider, capability: item.capability });
+      if (item.requests >= 3 && item.maxLatencyMs >= latency.warningMs) result.push({ fingerprint: `latency:${suffix}`, severity: item.maxLatencyMs >= latency.criticalMs ? "critical" : "warning", code: "HIGH_LATENCY", message: `${item.tier} · ${item.capability} 最大响应 ${Math.round(item.maxLatencyMs / 1000)} 秒`, tier: item.tier, provider: item.provider, capability: item.capability });
       if (item.requests >= 3 && item.successes === 0) result.push({ fingerprint: `down:${suffix}`, severity: "critical", code: "PROVIDER_UNAVAILABLE", message: `${item.tier} · ${item.capability} 最近请求全部失败`, tier: item.tier, provider: item.provider, capability: item.capability });
       return result;
     });
@@ -330,7 +369,7 @@ export class AiStore {
         const suffix = trigger ? `${trigger.tier}:${trigger.provider}:${trigger.capability}:${trigger.operation}` : "";
         const prefix = alert.code === "HIGH_ERROR_RATE" ? "errors" : alert.code === "HIGH_LATENCY" ? "latency" : "down";
         const matchingSample = trigger && alert.fingerprint === `${prefix}:${suffix}`
-          && (alert.code === "HIGH_LATENCY" ? trigger.latencyMs >= 60_000 : !trigger.success);
+          && (alert.code === "HIGH_LATENCY" ? trigger.latencyMs >= aiLatencyThresholds(trigger.capability, trigger.operation).warningMs : !trigger.success);
         this.sql.exec("UPDATE ai_observability_alerts SET severity=?,message=?,last_seen_at=?,occurrence_count=occurrence_count+? WHERE tenant_id=? AND id=? AND resolved_at IS NULL", alert.severity, alert.message, now, matchingSample ? 1 : 0, this.tenantId, existing.id);
       } else {
         const id = crypto.randomUUID();

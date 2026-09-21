@@ -98,6 +98,46 @@ describe("AI durable member workspace", () => {
     expect(first.state).toEqual(request.state);
     expect(first.updatedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
   });
+  it("persists video clarification preferences without executable approval fields", async () => {
+    const state = fixture();
+    state.videoDraftSettings = { "chat-a": { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" } };
+    await repository.save("member-a", saveRequest(state));
+    expect(repository.read("member-a").state!.videoDraftSettings).toEqual(state.videoDraftSettings);
+    for (const [key, value] of Object.entries({ planRequestId: "forged-approval", referenceImages: [], planTrace: {} })) {
+      const bad = structuredClone(state) as any;
+      bad.videoDraftSettings["chat-a"][key] = value;
+      expect(() => validateAiWorkspaceState(bad)).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_INVALID" }));
+    }
+    const orphan = structuredClone(state);
+    orphan.videoDraftSettings = { missing: state.videoDraftSettings["chat-a"] };
+    expect(() => validateAiWorkspaceState(orphan)).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_INVALID" }));
+  });
+  it("keeps video preferences on old-client writes while honoring explicit clears and conversation deletion", async () => {
+    const state = fixture();
+    const preferences = { model: "sd-2.5-c1" as const, seconds: 30, resolution: "720p" as const, aspectRatio: "16:9" as const };
+    state.videoDraftSettings = { "chat-a": preferences, "new-conversation": preferences };
+    await repository.save("member-a", saveRequest(state));
+    const oldWrite = saveRequest(fixture(), 1);
+    const saved = await repository.save("member-a", oldWrite);
+    expect(saved.state!.videoDraftSettings).toEqual(state.videoDraftSettings);
+    expect(await repository.save("member-a", oldWrite)).toEqual(saved);
+    const deleted = fixture();
+    deleted.conversations = []; deleted.artifacts = []; deleted.activeConversationId = null;
+    delete deleted.drafts["chat-a"];
+    const cleaned = await repository.save("member-a", saveRequest(deleted, 2));
+    expect(cleaned.state!.videoDraftSettings).toEqual({ "new-conversation": preferences });
+    const cleared = { ...deleted, videoDraftSettings: {} };
+    expect((await repository.save("member-a", saveRequest(cleared, 3))).state!.videoDraftSettings).toEqual({});
+  });
+  it("round-trips a bounded public analysis summary as inert message data", async () => {
+    const state = fixture();
+    state.conversations[0].messages[1].analysisSummary = "依据当前项目资料，先核对交付时间。";
+    const saved = await repository.save("member-a", saveRequest(state));
+    expect(saved.state!.conversations[0].messages[1].analysisSummary).toBe("依据当前项目资料，先核对交付时间。");
+    const invalid = fixture();
+    invalid.conversations[0].messages[1].analysisSummary = "析".repeat(1001);
+    await expect(repository.save("member-a", saveRequest(invalid, 1))).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+  });
   it("round-trips the latest public Harness trace without leaking internal continuation state", async () => {
     const state = fixture();
     state.conversations[0].messages[1].trace = harnessTrace();

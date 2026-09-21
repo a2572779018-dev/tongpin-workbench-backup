@@ -7,7 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "./security";
 import { AiStore, type AiSql } from "./storage";
-import { AiService } from "./service";
+import { AiService, type AiBackgroundPrincipalCheck } from "./service";
 import { AiPersonaRepository } from "./persona";
 import type { AiTransport } from "./provider";
 
@@ -64,7 +64,7 @@ async function localSecret(file: string): Promise<string> {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   return (await readFile(file, "utf8")).trim();
 }
-export async function createNodeAi(dataFile: string, transport: AiTransport = nodeAiTransport) {
+export async function createNodeAi(dataFile: string, transport: AiTransport = nodeAiTransport, isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
   await mkdir(path.dirname(dataFile), { recursive: true });
   const file = `${dataFile}.ai.sqlite`;
   const database = new DatabaseSync(file);
@@ -86,7 +86,7 @@ export async function createNodeAi(dataFile: string, transport: AiTransport = no
     secret ??= localSecret(`${dataFile}.ai-key`).then(value => createSecretBox(value));
     return await secret;
   };
-  const service = new AiService(store, box, transport, () => process.env.TONGPIN_H3_API_KEY ?? "");
+  const service = new AiService(store, box, transport, () => process.env.TONGPIN_H3_API_KEY ?? "", isBackgroundPrincipalActive);
   let closed = false;
   return { service, store, close: () => { if (!closed) { closed = true; database.close(); } } };
 }

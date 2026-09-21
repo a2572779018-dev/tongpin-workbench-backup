@@ -67,6 +67,77 @@ describe("AI transactional service", () => {
     expect(transport).not.toHaveBeenCalled();
     expect(runtime.store.usage("member-a")).toEqual([]);
   });
+  it("returns and persists an image clarification instead of failing or authorizing generation", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 30000 });
+    transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: '{"kind":"clarification","question":"你希望生成什么主题的图片？"}' } }], usage: { prompt_tokens: 20, completion_tokens: 15, total_tokens: 35 } }));
+    const request = { ...chat(), outputFormat: "image_plan", messages: [{ role: "user", content: "帮我生成一张图片" }] };
+    const response = await runtime.service.chat("member-a", request);
+    expect(response.toolClarification).toBe("你希望生成什么主题的图片？");
+    expect(response.content).toBe(response.toolClarification);
+    expect(response.toolPlan).toBeUndefined();
+    expect(runtime.store.request("member-a", request.requestId)?.status).toBe("completed");
+    expect(runtime.store.request("member-a", request.requestId)?.toolPlanExpiresAt).toBeUndefined();
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0][0]).toContain("chat/completions");
+    await expect(runtime.service.generateImage("member-a", { requestId: crypto.randomUUID(), prompt: response.content, planRequestId: request.requestId })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("persists a model-authored public analysis summary separately and never invents one", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 10000 });
+    transport.mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: "<analysis_summary>依据已提供的交付约束，方案 B 风险更低。</analysis_summary>\n\n建议选择方案 B。" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 },
+    }));
+    const summarizedRequest = chat();
+    const summarized = await runtime.service.chat("member-a", summarizedRequest);
+    expect(summarized).toMatchObject({
+      content: "建议选择方案 B。",
+      analysisSummary: "依据已提供的交付约束，方案 B 风险更低。",
+    });
+    expect(runtime.service.getRequestResult("member-a", summarizedRequest.requestId).result).toMatchObject({
+      content: "建议选择方案 B。",
+      analysisSummary: "依据已提供的交付约束，方案 B 风险更低。",
+    });
+    const outbound = JSON.parse(transport.mock.calls[0][1].body!);
+    expect(outbound.messages[0].content).toContain("analysis_summary");
+    expect(JSON.stringify(outbound.messages.slice(1))).not.toContain("analysis_summary");
+
+    transport.mockResolvedValueOnce(complete());
+    const plain = await runtime.service.chat("member-a", chat());
+    expect(plain.content).toBe("你好！");
+    expect(plain.analysisSummary).toBeUndefined();
+  });
+  it("uses the existing chat quota and idempotency path for a server-side text dispatch", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 30_000 });
+    const markdown = "可以。\n\n| 项目 | 状态 |\n| --- | --- |\n| 同频 | 正常 |";
+    const analysisSummary = "根据当前状态与风险进行比较。";
+    transport.mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: JSON.stringify({ kind: "text", content: markdown, analysisSummary }) } }],
+      usage: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 },
+    }));
+    const request = { ...chat(), outputFormat: "dispatch" as const, messages: [{ role: "user" as const, content: "帮我分析当前情况" }] };
+    const first = await runtime.service.chat("member-a", request);
+    expect(first).toMatchObject({ content: markdown, analysisSummary, dispatch: { kind: "text", content: markdown, analysisSummary }, usage: { totalTokens: 32 } });
+    expect(runtime.store.request("member-a", request.requestId)?.result?.dispatch).toEqual({ kind: "text", content: markdown, analysisSummary });
+    expect(JSON.parse(transport.mock.calls[0][1].body!).messages[0].content).toContain("服务端任务分派器");
+    await expect(runtime.service.chat("member-a", request)).resolves.toMatchObject({ dispatch: { kind: "text" } });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("returns a tool dispatch as a proposal without creating or executing a tool step", async () => {
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 30_000 });
+    transport.mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: JSON.stringify({ kind: "image", prompt: "制作一张蓝色科技海报" }) } }],
+      usage: { prompt_tokens: 18, completion_tokens: 8, total_tokens: 26 },
+    }));
+    const request = { ...chat(), outputFormat: "dispatch" as const, messages: [{ role: "user" as const, content: "帮我生成一张蓝色科技海报" }] };
+    const response = await runtime.service.chat("member-a", request);
+    expect(response).toMatchObject({ content: "", dispatch: { kind: "image", prompt: "制作一张蓝色科技海报" } });
+    expect(response.toolPlan).toBeUndefined();
+    expect(response.trace?.steps.some(step => step.kind === "tool" || step.kind === "approval")).toBe(false);
+    expect(runtime.store.usage("member-a").filter(entry => entry.requestId === request.requestId)).toHaveLength(1);
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("checks availability only after account permission, configuration and quota checks", async () => {
     expect((await runtime.service.availability("member-a")).check.code).toBe("AI_ACCESS_NOT_GRANTED");
     runtime.service.setQuota("member-a", "admin", { limitTokens: 1000 });

@@ -495,12 +495,18 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   });
 
   it("does not let impossible provider usage exceed the reserved hard member cap", async () => {
-    await setLimit(memberA, 8_000);
+    // Earlier scenarios deliberately settle uncertain usage. Give this case
+    // fresh headroom so it exercises provider-overreport handling, not a local
+    // quota rejection whose outcome depends on prompt overhead.
+    const starting = await status(memberA);
+    await setLimit(memberA, starting.quota.usedTokens + 8_000);
+    const callsBefore = chatCalls;
     excessiveUsage = true;
     try {
       const response = await request(runtime.server).post("/api/ai/chat")
         .set(authenticated(memberA.token)).send(chatBody("excessive-provider-usage"));
       assertNoProviderKey(response.body);
+      expect(chatCalls).toBe(callsBefore + 1);
       const current = await status(memberA);
       expect(current.quota.usedTokens).toBeLessThanOrEqual(current.quota.limitTokens);
       expect(current.quota.reservedTokens).toBe(0);

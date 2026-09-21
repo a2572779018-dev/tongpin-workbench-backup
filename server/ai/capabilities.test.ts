@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatRequest, AiProviderInput } from "../../shared/ai";
 import { createNodeAi } from "./node";
 import { type AiTransport, parseProviderResult } from "./provider";
-import { chatInputReserve, parseChatCapabilities, parsePresentation, parseToolPlan, safeSource, validateImageBase64 } from "./capabilities";
+import { chatInputReserve, parseChatCapabilities, parsePresentation, parseToolPlan, parseToolClarification, safeSource, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
 import { AI_CHAT_CONTEXT_LIMITS, AI_CONTEXT_WINDOW_PREFIX } from "../../shared/aiContext";
 import { toolPlanContextFingerprint } from "./toolPlans";
@@ -53,6 +53,17 @@ describe("Reviewed AI capabilities through transactional service", () => {
   const imageRequest = (userId = "member", prompt = "图片", extra: Record<string, unknown> = {}) => ({
     ...extra, requestId: crypto.randomUUID(), prompt, planRequestId: saveImagePlan(userId, prompt),
   });
+  const authorizeVideoPlanning = async () => {
+    await runtime.service.video.configure({ enabled: true, quotaPoints: 1000, apiKey: "video-test-key-not-real" });
+    const row = runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0];
+    const saved = JSON.parse(row.data);
+    runtime.store.sql.exec("UPDATE ai_settings SET data=? WHERE id='video'", JSON.stringify({
+      ...saved,
+      verifiedConfigVersion: saved.configVersion,
+      verifiedKeyVersion: saved.keyVersion,
+      verifiedModels: ["minimax_h3"],
+    }));
+  };
   beforeEach(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-ai-capabilities-"));
     transport.mockReset(); transport.mockImplementation(async () => reply());
@@ -201,12 +212,11 @@ describe("Reviewed AI capabilities through transactional service", () => {
   it.each(["image", "video"] as const)("returns a validated %s tool plan without invoking the generation provider", async kind => {
     const plan = { kind, summary: `整理${kind}任务`, prompt: `${kind} provider prompt` };
     if (kind === "image") await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
-    else await runtime.service.video.configure({ enabled: true, quotaPoints: 1000, apiKey: "video-test-key-not-real" });
+    else await authorizeVideoPlanning();
     transport.mockResolvedValueOnce(reply(JSON.stringify(plan)));
     const request = chat({ outputFormat: kind === "image" ? "image_plan" : "video_plan", ...(kind === "video" ? { videoParameters } : {}) });
     const result = await runtime.service.chat("member", request);
-    const { model: _internalVideoModel, ...memberVideoParameters } = videoParameters;
-    expect(result.toolPlan).toEqual(kind === "video" ? { ...plan, videoParameters: memberVideoParameters } : plan);
+    expect(result.toolPlan).toEqual(kind === "video" ? { ...plan, videoParameters } : plan);
     if (kind === "video") expect(runtime.store.request("member", request.requestId)?.result?.toolPlan?.videoParameters).toEqual(videoParameters);
     expect(result.content).toContain("请确认后生成");
     const body = JSON.parse(transport.mock.calls[0][1].body!);
@@ -219,6 +229,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
     expect(kind === "video" ? runtime.service.video.list("member").jobs : []).toEqual([]);
   });
   it("rejects a mismatched or malformed tool plan once and never treats it as a completed tool", async () => {
+    await authorizeVideoPlanning();
     transport.mockResolvedValueOnce(reply(JSON.stringify({ kind: "image", summary: "错", prompt: "错" })));
     const request = chat({ outputFormat: "video_plan", videoParameters });
     await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_TOOL_PLAN_INVALID" });
@@ -238,6 +249,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
     await expect(generate("member", planned.requestId, "被篡改的生成提示词")).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
 
     const videoPlan = { kind: "video" as const, summary: "视频方案", prompt: "缓慢推镜" };
+    await authorizeVideoPlanning();
     transport.mockResolvedValueOnce(reply(JSON.stringify(videoPlan)));
     const wrongKind = await runtime.service.chat("member", chat({ outputFormat: "video_plan", videoParameters }));
     const afterPlans = transport.mock.calls.length;
@@ -622,7 +634,19 @@ describe("Capability input and provider output limits", () => {
   it("strictly validates model-authored tool plans", () => {
     expect(parseToolPlan('{"kind":"video","summary":"镜头方案","prompt":"缓慢推进"}', "video")).toEqual({ kind: "video", summary: "镜头方案", prompt: "缓慢推进" });
     expect(() => parseToolPlan('{"kind":"image","summary":"错","prompt":"错"}', "video")).toThrow();
-    expect(() => parseToolPlan('{"kind":"video","summary":"","prompt":"半截"}', "video")).toThrow();
+    expect(parseToolPlan('{"kind":"video","summary":"","prompt":"缓慢推进"}', "video").summary).toBe("缓慢推进");
+    expect(() => parseToolPlan('{"kind":"video","summary":"缺少内容","prompt":""}', "video")).toThrow();
+  });
+  it("accepts bounded clarification questions without creating executable plans", () => {
+    expect(parseToolClarification('{"kind":"clarification","question":"想生成什么主题的图片？"}')).toBe("想生成什么主题的图片？");
+    expect(parseToolClarification('{"kind":"image","summary":"想生成什么主题？","prompt":""}')).toBe("想生成什么主题？");
+    expect(parseToolClarification("你希望画面里有什么？")).toBe("你希望画面里有什么？");
+    expect(parseToolClarification('{"kind":"image","summary":"准备好了吗？","prompt":"一只橘猫"}')).toBeUndefined();
+    expect(parseToolClarification('{"kind":"clarification","question":"删除全部？","execute":true}')).toBeUndefined();
+    expect(parseToolClarification("已生成图片")).toBeUndefined();
+    expect(() => parseToolPlan('{"kind":"clarification","question":"主题？"}', "image")).toThrow();
+    const parsed = parseToolPlan(JSON.stringify({ kind: "image", summary: "说明".repeat(200), prompt: "阳光下的橘猫" }), "image");
+    expect(parsed.summary.length).toBe(240); expect(parsed.prompt).toBe("阳光下的橘猫");
   });
   it("does not accept a truncated Chat Completions response as a complete answer", () => {
     expect(parseProviderResult({ choices: [{ message: { content: "半句话" }, finish_reason: "length" }] }, "chat_completions").status).toBe("incomplete");

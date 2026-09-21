@@ -5,6 +5,7 @@ import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
 import { validateImageBase64 } from "./capabilities";
 import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey } from "./tenant";
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
+import { videoModel } from "../../shared/aiVideoModels";
 
 export const AI_WORKSPACE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_workspaces (
@@ -227,7 +228,7 @@ function harnessTrace(value: unknown): void {
 
 /** Validate the entire snapshot before any write. Unknown fields fail explicitly, never disappear. */
 export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
-  const state = record(value, "工作台", ["view", "mode", "conversations", "projects", "artifacts", "drafts", "draftAttachments", "composerTool", "webSearch", "activeConversationId", "activeProjectId", "enabledSkillIds", "sidebarCollapsed"]);
+  const state = record(value, "工作台", ["view", "mode", "conversations", "projects", "artifacts", "drafts", "draftAttachments", "videoDraftSettings", "composerTool", "webSearch", "activeConversationId", "activeProjectId", "enabledSkillIds", "sidebarCollapsed"]);
   if (!["chat", "project", "skills"].includes(String(state.view)) || !["quick", "standard", "deep", "pro"].includes(String(state.mode))) invalid("工作台页面或模式无效");
   if (state.sidebarCollapsed !== undefined && typeof state.sidebarCollapsed !== "boolean") invalid("侧栏状态无效");
   if (state.composerTool !== undefined && !["text", "presentation", "image"].includes(String(state.composerTool))) invalid("生成模式无效");
@@ -258,10 +259,11 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
     totalMessages += messages.length;
     if (totalMessages > LIMITS.totalMessages) tooLarge("消息总数超过上限，原记录未被更改");
     for (const entry of messages) {
-      const message = record(entry, "消息", ["id", "role", "content", "time", "startedAt", "status", "artifactId", "requestId", "harnessPlanRequestId", "model", "usage", "attachments", "sources", "trace"]);
+      const message = record(entry, "消息", ["id", "role", "content", "analysisSummary", "time", "startedAt", "status", "artifactId", "requestId", "harnessPlanRequestId", "model", "usage", "attachments", "sources", "trace"]);
       id(message.id, "消息"); unique(message.id, messageIds, "消息");
       if (message.role !== "user" && message.role !== "assistant") invalid("消息角色无效");
       string(message.content, "消息内容", LIMITS.messageCharacters);
+      if (message.analysisSummary !== undefined) string(message.analysisSummary, "分析摘要", 1000, true);
       string(message.time, "消息时间", 80);
       if (message.startedAt !== undefined && (!Number.isSafeInteger(message.startedAt) || Number(message.startedAt) < 0)) invalid("消息计时格式不正确");
       if (message.status !== undefined && !["thinking", "typing", "ready", "error", "stopped"].includes(String(message.status))) invalid("消息状态无效");
@@ -325,6 +327,18 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
     for (const [key, value] of Object.entries(attachments)) {
       if (key !== "new-conversation" && !conversationIds.has(key) && !(key.startsWith("new-project-conversation:") && projectIds.has(key.slice("new-project-conversation:".length)))) invalid("草稿附件所属对话或项目不存在");
       documents(value, "草稿附件");
+    }
+  }
+  if (state.videoDraftSettings !== undefined) {
+    const settings = record(state.videoDraftSettings, "视频草稿参数");
+    if (Object.keys(settings).length > LIMITS.conversations + LIMITS.projects + 1) tooLarge("视频草稿数量超过上限");
+    for (const [key, value] of Object.entries(settings)) {
+      if (key !== "new-conversation" && !conversationIds.has(key) && !(key.startsWith("new-project-conversation:") && projectIds.has(key.slice("new-project-conversation:".length)))) invalid("视频草稿所属对话或项目不存在");
+      const draft = record(value, "视频草稿参数", ["model", "seconds", "resolution", "aspectRatio"]);
+      if (draft.model !== undefined && (typeof draft.model !== "string" || !videoModel(draft.model))) invalid("视频草稿模型无效");
+      boundedInteger(draft.seconds, "视频草稿时长", 1, 30);
+      if (!["480p", "720p", "768p", "1080p"].includes(String(draft.resolution))) invalid("视频草稿清晰度无效");
+      if (!["16:9", "9:16", "1:1"].includes(String(draft.aspectRatio))) invalid("视频草稿画幅无效");
     }
   }
   const skillIds = new Set<string>();
@@ -408,17 +422,31 @@ export class AiWorkspaceRepository {
         return current;
       }
       if (current.revision !== request.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台已在其他窗口更新，本次未覆盖任何记录，请同步后重试");
+      // Older clients do not know this optional draft field. Preserve it on
+      // absent-field writes, but honor an explicit {} from newer clients and
+      // remove keys whose conversation/project was intentionally deleted.
+      let stateToSave = request.state;
+      if (request.state.videoDraftSettings === undefined && current.state?.videoDraftSettings) {
+        const allowed = new Set([
+          "new-conversation",
+          ...request.state.conversations.map(conversation => conversation.id),
+          ...request.state.projects.map(project => `new-project-conversation:${project.id}`),
+        ]);
+        stateToSave = validateAiWorkspaceState({ ...request.state, videoDraftSettings: Object.fromEntries(
+          Object.entries(current.state.videoDraftSettings).filter(([key]) => allowed.has(key)),
+        ) });
+      }
       const revision = current.revision + 1;
       const updatedAt = new Date().toISOString();
       this.sql.exec("INSERT INTO ai_workspaces(user_id,tenant_id,revision,schema_version,updated_at,data) VALUES(?,?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET tenant_id=excluded.tenant_id,revision=excluded.revision,schema_version=excluded.schema_version,updated_at=excluded.updated_at,data=excluded.data", storedUserId, tenant, revision, updatedAt, CHUNK_MARKER);
       this.sql.exec("DELETE FROM ai_workspace_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUserId);
-      for (const [index, data] of chunks(JSON.stringify(request.state)).entries()) {
+      for (const [index, data] of chunks(JSON.stringify(stateToSave)).entries()) {
         this.sql.exec("INSERT INTO ai_workspace_chunks(user_id,tenant_id,chunk_index,data) VALUES(?,?,?,?)", storedUserId, tenant, index, data);
       }
       this.sql.exec("INSERT INTO ai_workspace_mutations(user_id,tenant_id,mutation_id,request_hash,revision) VALUES(?,?,?,?,?)", storedUserId, tenant, request.mutationId, hash, revision);
       // Compact receipts, not user records. Older requests still fail CAS and cannot replay writes.
       this.sql.exec("DELETE FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND revision<=?", tenant, storedUserId, Math.max(0, revision - 2048));
-      return { revision, schemaVersion: 1, updatedAt, state: request.state };
+      return { revision, schemaVersion: 1, updatedAt, state: stateToSave };
     });
   }
 }

@@ -146,6 +146,7 @@ import {
 
 const LORA_RAW_COLLECTION_PAUSED = true;
 export const LORA_INTERNAL_COLLECT_PATH = "/_internal/lora-chain/collect";
+export const AI_INTERNAL_AGENT_TICK_PATH = "/_internal/ai/agent-tick";
 
 interface RefreshRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -577,7 +578,17 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.ai = createWorkerAi(ctx.storage, () => env.JWT_SECRET, env.AI_ALLOWED_HOSTS, () => env.TONGPIN_H3_API_KEY ?? "");
+    this.ai = createWorkerAi(
+      ctx.storage,
+      () => env.JWT_SECRET,
+      env.AI_ALLOWED_HOSTS,
+      () => env.TONGPIN_H3_API_KEY ?? "",
+      (tenantId, userId) => this.sql.exec<{ id: string }>(
+        "SELECT id FROM users WHERE tenant_id = ? AND id = ? AND status = 'active' LIMIT 1",
+        tenantId,
+        userId,
+      ).toArray().length === 1,
+    );
     this.aiWorkspace = new AiWorkspaceRepository(this.ai.store.sql);
     this.aiPersona = new AiPersonaRepository(this.ai.store.sql);
     this.loraSource = new ExplorerLoraChainDataSource(
@@ -846,6 +857,12 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
         if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);
         return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray());
+      }
+
+      if (path === AI_INTERNAL_AGENT_TICK_PATH) {
+        if (method !== "POST") throw new ApiError(405, "METHOD_NOT_ALLOWED", "请求方法不允许");
+        this.ensureAiSchemaReady();
+        return json(await this.ai.service.runBackgroundAgentCycle(4));
       }
 
       if (path === LORA_INTERNAL_COLLECT_PATH) {

@@ -2,6 +2,7 @@ import { AiStore, type AiSql } from "../../../server/ai/storage";
 import { AiService } from "../../../server/ai/service";
 import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "../../../server/ai/security";
 import { object, readBoundedJson, type AiTransport } from "../../../server/ai/provider";
+import type { AiBackgroundPrincipalCheck } from "../../../server/ai/service";
 
 const DEFAULT_AI_HOSTS = ["api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com", "api.moonshot.cn", "api.siliconflow.cn", "open.bigmodel.cn"] as const;
 /** Exact deployment-owned domains close the DNS-rebinding gap: Worker fetch cannot pin IPs.
@@ -34,7 +35,7 @@ export function createWorkerAiTransport(allowedHosts?: string | readonly string[
 }
 export const workerAiTransport: AiTransport = createWorkerAiTransport();
 
-export function createWorkerAi(storage: DurableObjectStorage, secret: () => string, allowedHosts?: string | readonly string[], videoKey?: () => string) {
+export function createWorkerAi(storage: DurableObjectStorage, secret: () => string, allowedHosts?: string | readonly string[], videoKey?: () => string, isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
   const sql: AiSql = {
     exec(query, ...bindings) { storage.sql.exec(query, ...bindings); },
     all<T>(query: string, ...bindings: Array<string | number | null>): T[] {
@@ -43,6 +44,6 @@ export function createWorkerAi(storage: DurableObjectStorage, secret: () => stri
     transaction<T>(action: () => T): T { return storage.transactionSync(action); },
   };
   const store = new AiStore(sql);
-  const service = new AiService(store, () => createSecretBox(secret()), createWorkerAiTransport(allowedHosts), videoKey);
+  const service = new AiService(store, () => createSecretBox(secret()), createWorkerAiTransport(allowedHosts), videoKey, isBackgroundPrincipalActive);
   return { store, service };
 }

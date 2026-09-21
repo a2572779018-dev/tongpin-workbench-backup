@@ -7,7 +7,7 @@ import { createNodeAi } from "./node";
 import { parseHarnessContinuationDecision } from "./harness";
 import type { AiTransport } from "./provider";
 
-const MODELS = ["q-fast", "s-standard", "d-deep", "p-pro", "image-model", "minimax_h3"];
+const MODELS = ["q-fast", "s-standard", "d-deep", "p-pro", "image-model", "minimax_h3", "sd-2-c6"];
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function harnessInput(apiKey = "harness-secret-never-return-me", strategy: AiHarnessInput["policy"]["strategy"] = "plan_execute", maxToolSteps = 3): AiHarnessInput {
@@ -44,15 +44,19 @@ const complete = (content = "完成") => Response.json({
 describe("AI Harness", () => {
   let directory: string;
   let runtime: Awaited<ReturnType<typeof createNodeAi>>;
+  let backgroundPrincipalActive: boolean;
   const transport = vi.fn<AiTransport>();
 
   beforeEach(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-harness-"));
+    backgroundPrincipalActive = true;
     transport.mockReset();
     transport.mockImplementation(async target => target.endsWith("/models")
       ? Response.json({ data: MODELS.map(id => ({ id })) })
       : complete());
-    runtime = await createNodeAi(path.join(directory, "test.json"), transport);
+    runtime = await createNodeAi(path.join(directory, "test.json"), transport, (tenantId, userId) =>
+      backgroundPrincipalActive && tenantId === "tenant-background" && userId === "member",
+    );
   });
 
   afterEach(async () => {
@@ -116,7 +120,7 @@ describe("AI Harness", () => {
     expect(JSON.stringify(runtime.service.status("member"))).not.toMatch(/image-model|minimax_h3|gateway\.example/);
   });
 
-  it("keeps a tier-selected video model server-side across initial, replay and recovery responses", async () => {
+  it("returns the server-authorized video model consistently across initial, replay and recovery responses", async () => {
     const input = harnessInput();
     input.providers[0].baseUrl = "https://www.75api.com/v1";
     await runtime.service.saveHarness(input);
@@ -130,15 +134,33 @@ describe("AI Harness", () => {
     };
 
     const first = await runtime.service.chat("member", request);
-    expect(first.toolPlan?.videoParameters).not.toHaveProperty("model");
-    expect(JSON.stringify(first)).not.toContain("minimax_h3");
+    expect(first.toolPlan?.videoParameters?.model).toBe("minimax_h3");
     expect(runtime.store.request("member", request.requestId)?.result?.toolPlan?.videoParameters?.model).toBe("minimax_h3");
 
     const replay = await runtime.service.chat("member", request);
     const recovered = runtime.service.getRequestResult("member", request.requestId);
-    expect(replay.toolPlan?.videoParameters).not.toHaveProperty("model");
-    expect(recovered.result?.toolPlan?.videoParameters).not.toHaveProperty("model");
-    expect(JSON.stringify([replay, recovered])).not.toContain("minimax_h3");
+    expect(replay.toolPlan?.videoParameters?.model).toBe("minimax_h3");
+    expect(recovered.result?.toolPlan?.videoParameters?.model).toBe("minimax_h3");
+  });
+
+  it("accepts an explicit local video model only when the selected tier provider verified it", async () => {
+    const input = harnessInput();
+    input.providers[0].baseUrl = "https://www.75api.com/v1";
+    await runtime.service.saveHarness(input);
+    await runtime.service.discoverHarnessProvider("primary");
+    runtime.service.setQuota("member", "admin", { limitTokens: 20_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "video", summary: "SD 2.0 短片", prompt: "蓝色科技短片" })));
+    const selected = {
+      requestId: crypto.randomUUID(), conversationId: "media-route-video-selected", mode: "standard" as const, outputFormat: "video_plan" as const,
+      messages: [{ role: "user" as const, content: "生成 SD 2.0 短片" }],
+      videoParameters: { model: "sd-2-c6" as const, seconds: 15, resolution: "720p" as const, aspectRatio: "16:9" as const, referenceCount: 0, referenceFingerprints: [] },
+    };
+    expect((await runtime.service.chat("member", selected)).toolPlan?.videoParameters?.model).toBe("sd-2-c6");
+
+    const unverified = { ...selected, requestId: crypto.randomUUID(), videoParameters: { ...selected.videoParameters, model: "sd-2.5-c1" as const, seconds: 30 } };
+    const calls = transport.mock.calls.length;
+    await expect(runtime.service.chat("member", unverified)).rejects.toMatchObject({ code: "AI_VIDEO_MODEL_NOT_AUTHORIZED" });
+    expect(transport).toHaveBeenCalledTimes(calls);
   });
 
   it("executes image generation through the approved business-tier media binding", async () => {
@@ -352,6 +374,102 @@ describe("AI Harness", () => {
 
     expect(await runtime.service.resumeHarnessRun("member", requestId)).toEqual(resumed);
     expect(transport).toHaveBeenCalledTimes(calls + 1);
+  });
+
+  it("continues a planned tenant run from the server background cycle without executing the next tool", async () => {
+    const tenantService = runtime.service.forTenant("tenant-background");
+    await tenantService.saveHarness(harnessInput());
+    await tenantService.discoverHarnessProvider("primary");
+    tenantService.setQuota("member", "admin", { limitTokens: 50_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "image", summary: "生成视觉草图", prompt: "private image prompt" })));
+    const requestId = crypto.randomUUID();
+    await tenantService.chat("member", {
+      requestId, conversationId: "background-resume", mode: "quick", outputFormat: "image_plan",
+      messages: [{ role: "user", content: "生成一张视觉草图" }],
+    });
+    tenantService.harness.beginApprovedTool("member", requestId, "image", crypto.randomUUID());
+    tenantService.harness.finishApprovedTool("member", requestId, "image", "succeeded");
+    expect(tenantService.harnessTrace("member", requestId)).toMatchObject({ status: "planned", nextAction: "resume" });
+
+    transport.mockResolvedValueOnce(complete('{"action":"tool","capability":"video","summary":"建议制作一段短视频"}'));
+    const cycle = await runtime.service.runBackgroundAgentCycle(4);
+    expect(cycle).toMatchObject({ scanned: 1, resumed: 1, completed: 0, waitingApproval: 1, failed: 0 });
+    const trace = tenantService.harnessTrace("member", requestId);
+    expect(trace).toMatchObject({ status: "waiting_approval", nextAction: "approve_tool" });
+    expect(trace.steps.filter(step => step.kind === "tool").at(-1)).toMatchObject({ capability: "video", status: "waiting_approval", requiresApproval: true });
+    expect(transport.mock.calls.some(([url]) => /\/videos(?:\/|$)/.test(url))).toBe(false);
+    expect((await runtime.service.runBackgroundAgentCycle(4)).scanned).toBe(0);
+  });
+
+  it("does not background-resume a disabled or deleted principal", async () => {
+    const tenantService = runtime.service.forTenant("tenant-background");
+    await tenantService.saveHarness(harnessInput());
+    await tenantService.discoverHarnessProvider("primary");
+    tenantService.setQuota("member", "admin", { limitTokens: 50_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "image", summary: "生成视觉草图", prompt: "private image prompt" })));
+    const requestId = crypto.randomUUID();
+    await tenantService.chat("member", {
+      requestId, conversationId: "inactive-background", mode: "quick", outputFormat: "image_plan",
+      messages: [{ role: "user", content: "生成一张视觉草图" }],
+    });
+    tenantService.harness.beginApprovedTool("member", requestId, "image", crypto.randomUUID());
+    tenantService.harness.finishApprovedTool("member", requestId, "image", "succeeded");
+    backgroundPrincipalActive = false;
+
+    const calls = transport.mock.calls.length;
+    expect(await runtime.service.runBackgroundAgentCycle(4)).toMatchObject({ scanned: 1, resumed: 0, skippedInactive: 1, failed: 0 });
+    expect(transport).toHaveBeenCalledTimes(calls);
+    expect(tenantService.harnessTrace("member", requestId)).toMatchObject({ status: "planned", nextAction: "resume" });
+    expect(runtime.store.backgroundHarnessCandidates(4)).toEqual([]);
+  });
+
+  it("skips and retires inactive oldest rows without starving an active run in the same bounded cycle", async () => {
+    const tenantService = runtime.service.forTenant("tenant-background");
+    await tenantService.saveHarness(harnessInput());
+    await tenantService.discoverHarnessProvider("primary");
+    tenantService.setQuota("member", "admin", { limitTokens: 50_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "image", summary: "生成视觉草图", prompt: "private image prompt" })));
+    const requestId = crypto.randomUUID();
+    await tenantService.chat("member", {
+      requestId, conversationId: "active-after-inactive", mode: "quick", outputFormat: "image_plan",
+      messages: [{ role: "user", content: "生成一张视觉草图" }],
+    });
+    tenantService.harness.beginApprovedTool("member", requestId, "image", crypto.randomUUID());
+    tenantService.harness.finishApprovedTool("member", requestId, "image", "succeeded");
+    for (let index = 0; index < 4; index += 1) {
+      tenantService.store.createHarnessRun({
+        id: `inactive-run-${index}`, requestId: `inactive-request-${index}`, userId: `inactive-${index}`,
+        conversationId: `inactive-conversation-${index}`, tier: "quick", providerId: "primary", capability: "chat",
+        goalKind: "chat", goalSummary: "历史未完成任务", backgroundCapable: true, status: "planned",
+        reasoningSummary: "waiting", startedAt: index + 1, updatedAt: index + 1,
+      }, []);
+    }
+    transport.mockResolvedValueOnce(complete('{"action":"complete","summary":"已完成受限任务"}'));
+
+    expect(await runtime.service.runBackgroundAgentCycle(4)).toMatchObject({ scanned: 5, skippedInactive: 4, resumed: 1, completed: 1, failed: 0 });
+    expect(tenantService.harnessTrace("member", requestId)).toMatchObject({ status: "succeeded", nextAction: "none" });
+    expect(tenantService.store.backgroundHarnessCandidates(4)).toEqual([]);
+  });
+
+  it("does not opt historical runs into background continuation after schema migration", async () => {
+    const tenantService = runtime.service.forTenant("tenant-background");
+    await tenantService.saveHarness(harnessInput());
+    await tenantService.discoverHarnessProvider("primary");
+    tenantService.setQuota("member", "admin", { limitTokens: 50_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "image", summary: "生成视觉草图", prompt: "private image prompt" })));
+    const requestId = crypto.randomUUID();
+    await tenantService.chat("member", {
+      requestId, conversationId: "legacy-background", mode: "quick", outputFormat: "image_plan",
+      messages: [{ role: "user", content: "生成一张视觉草图" }],
+    });
+    tenantService.harness.beginApprovedTool("member", requestId, "image", crypto.randomUUID());
+    tenantService.harness.finishApprovedTool("member", requestId, "image", "succeeded");
+    runtime.store.sql.exec("UPDATE ai_harness_runs SET background_capable=0 WHERE tenant_id=? AND request_id=?", "tenant-background", requestId);
+
+    const calls = transport.mock.calls.length;
+    expect(await runtime.service.runBackgroundAgentCycle(4)).toMatchObject({ scanned: 0, resumed: 0 });
+    expect(transport).toHaveBeenCalledTimes(calls);
+    expect(tenantService.harnessTrace("member", requestId)).toMatchObject({ status: "planned", nextAction: "resume" });
   });
 
   it("single-flights concurrent continuation claims so only one child request is sent", async () => {

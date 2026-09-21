@@ -2,7 +2,7 @@ import { AI_BUSINESS_TIER_LABELS, AI_BUSINESS_TIERS, type AiChatBudget, type AiC
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import { AiStore, type StoredProvider, type StoredRequest } from "./storage";
 import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, providerBody, readProviderHttpError, readBoundedJson, readProviderResponse, type AiTransport } from "./provider";
-import { chatInputReserve, parseChatCapabilities, parseComputerPlan, parsePresentation, parseToolPlan, validateImageBase64 } from "./capabilities";
+import { chatInputReserve, parseChatCapabilities, parseComputerPlan, parsePresentation, parseToolPlan, parseToolClarification, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { imageProviderBody, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse } from "./imageProvider";
@@ -16,6 +16,8 @@ import { AI_CHAT_CONTEXT_LIMITS, AiCurrentContextTooLongError, fitAiChatMessages
 import { claimToolPlan, toolPlanContextFingerprint, toolPlanExpiry, validateToolPlan } from "./toolPlans";
 import { verifiedBaiAgentModels } from "./modelVerification";
 import { AiHarness, parseHarnessContinuationDecision, requestCapability, validConversationId, type ResolvedHarnessRoute } from "./harness";
+import { parsePublicExplanation, supportsPublicExplanation } from "./publicExplanation";
+import { parseAiDispatchDecision } from "./dispatch";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -24,6 +26,18 @@ const MAX_TOKEN_LIMIT = 1_000_000_000;
 const SEARCH_INPUT_RESERVE = 32768;
 const MIN_OUTPUT_TOKENS = 16;
 const CONTINUATION_TOOLS = new Set<AiHarnessCapability>(["web_search", "image", "video", "presentation", "computer"]);
+
+export interface AiBackgroundAgentCycle {
+  scanned: number;
+  resumed: number;
+  completed: number;
+  waitingApproval: number;
+  pending: number;
+  skippedInactive: number;
+  failed: number;
+}
+
+export type AiBackgroundPrincipalCheck = (tenantId: string, userId: string) => boolean | Promise<boolean>;
 
 function continuationPrompt(
   trace: AiHarnessTrace,
@@ -73,7 +87,7 @@ function text(value: unknown, name: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new AiError(400, "AI_INPUT_INVALID", `${name}格式不正确`);
   return value.trim();
 }
-function parseProvider(value: unknown, existing: StoredProvider | null): AiProviderInput {
+function parseProvider(value: unknown, existing: StoredProvider | null, harnessSearchConfigured = false): AiProviderInput {
   const p = object(value);
   if (p.apiKey !== undefined && typeof p.apiKey !== "string") throw new AiError(400, "AI_INPUT_INVALID", "API 密钥格式不正确");
   const protocol = p.protocol;
@@ -99,7 +113,7 @@ function parseProvider(value: unknown, existing: StoredProvider | null): AiProvi
   const imageStream = p.imageStream ?? existing?.imageStream ?? false;
   if (typeof webSearchEnabled !== "boolean" || typeof visionEnabled !== "boolean" || typeof imageStream !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "AI 能力开关格式不正确");
   if (imageModel && !imageQuotaTokens) throw new AiError(400, "AI_IMAGE_QUOTA_REQUIRED", "启用图片模型前，请设置每张图片的折算额度");
-  if (webSearchEnabled && (protocol !== "responses" || !webSearchQuotaTokens)) throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "联网搜索需使用 Responses 协议，并设置每次搜索的折算额度");
+  if (webSearchEnabled && ((!harnessSearchConfigured && protocol !== "responses") || !webSearchQuotaTokens)) throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "联网搜索需使用 Responses 协议，并设置每次搜索的折算额度");
   if (!imageBaseUrl && typeof p.imageApiKey === "string" && p.imageApiKey.trim()) throw new AiError(400, "AI_INPUT_INVALID", "填写独立图片密钥时，还需填写图片 API 地址");
   const quickModel = text(p.quickModel, "快速模型", 160);
   const quickAgent = isTongpinQuickAgent(quickModel);
@@ -162,17 +176,11 @@ function conservativeUsage(request: StoredRequest): AiUsage {
   };
 }
 
-/**
- * Tool plans are persisted with the server-selected media model so execution
- * can be bound to the exact approved route.  The member contract deliberately
- * removes that internal model ID: members choose only a business tier, while
- * the stored plan remains authoritative for the paid tool call.
- */
 function memberChatResult(result: Omit<AiChatResponse, "quota">): Omit<AiChatResponse, "quota"> {
-  const plan = result.toolPlan;
-  if (!plan?.videoParameters?.model) return result;
-  const { model: _internalModel, ...videoParameters } = plan.videoParameters;
-  return { ...result, toolPlan: { ...plan, videoParameters } };
+  // Video model selection is an explicit member input. The server has already
+  // rebound it to the selected tier's verified provider before persisting the
+  // plan, so returning it lets the one-click composer execute that exact plan.
+  return result;
 }
 async function requestHash(value: unknown): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
@@ -185,14 +193,30 @@ export class AiService {
   readonly video: AiVideoService;
   readonly harness: AiHarness;
   private readonly availabilityProbe: AvailabilityProbe;
-  constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "") {
+  constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "", private readonly isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
     this.harness = new AiHarness(store, box, transport);
     this.video = new AiVideoService(store, box, transport, videoKey, this.harness);
     this.availabilityProbe = new AvailabilityProbe(transport, box);
   }
   forTenant(tenantId: string): AiService {
     const scoped = this.store.forTenant(tenantId);
-    return scoped === this.store ? this : new AiService(scoped, this.box, this.transport, this.videoKey);
+    return scoped === this.store ? this : new AiService(scoped, this.box, this.transport, this.videoKey, this.isBackgroundPrincipalActive);
+  }
+  /** Compatibility pricing/settings for a harness-only installation. Reading
+   * this draft never writes settings or changes the authoritative tier routes. */
+  private providerBaseline(): StoredProvider | null {
+    const saved = this.store.provider();
+    if (saved) return saved;
+    const harness = this.store.harness();
+    if (!harness) return null;
+    const tier = AI_BUSINESS_TIERS.find(item => harness.tiers[item].enabled) ?? "quick";
+    const route = harness.tiers[tier];
+    const connection = harness.providers.find(item => item.id === route.providerId);
+    if (!connection) return null;
+    return this.harness.asProvider({ tier, providerId: connection.id, providerName: connection.name,
+      baseUrl: connection.baseUrl, encryptedKey: connection.encryptedKey, modelId: route.modelId,
+      protocol: route.protocol, maxOutputTokens: route.maxOutputTokens, reasoningEffort: route.reasoningEffort,
+      capabilities: route.capabilities, policy: harness.policy, legacy: false }, null);
   }
   async availability(userId: string, target: string = "chat"): Promise<AiAvailability> {
     if (target !== "chat" && target !== "image") throw new AiError(400, "AI_INPUT_INVALID", "检测目标不正确");
@@ -205,10 +229,18 @@ export class AiService {
     if (target === "image" && status.quota.remainingTokens < (status.imageQuotaTokens ?? 0)) return unavailable("AI_QUOTA_EXHAUSTED", "可用额度不足以生成一张图片，请联系管理员；仍可切换文字对话。");
     const provider = this.store.provider();
     const harnessSnapshot = JSON.stringify(this.store.harness());
-    const quickRoute = target === "chat" ? this.harness.resolve("quick", provider, "chat") : undefined;
-    if (target === "image" && (!provider?.enabled || !provider.imageModel)) return unavailable("AI_IMAGE_DISABLED", "管理员尚未启用图片生成，请切换文字对话或联系管理员。");
-    const baseUrl = target === "image" && provider?.imageBaseUrl ? provider.imageBaseUrl : quickRoute?.baseUrl ?? provider?.baseUrl;
-    const key = target === "image" && provider?.imageBaseUrl ? provider.encryptedImageKey : quickRoute?.encryptedKey ?? provider?.encryptedKey;
+    const tier = status.availableTiers?.[0] ?? "quick";
+    const quickRoute = target === "chat" ? this.harness.resolve(tier, provider, "chat") : undefined;
+    const publicHarness = this.harness.settings();
+    const imageTier = this.store.harness() && AI_BUSINESS_TIERS.find(item => {
+      const route = publicHarness!.tiers[item];
+      const connection = publicHarness!.providers.find(provider => provider.id === route.imageProviderId);
+      return route.enabled && route.capabilities.includes("image") && route.imageModelId && connection?.enabled && connection.apiKeyConfigured && connection.modelsVerified && connection.availableModels.includes(route.imageModelId);
+    });
+    const imageRoute = target === "image" ? this.harness.resolveMedia(imageTier || tier, provider, "image") : undefined;
+    if (target === "image" && !imageRoute && (!provider?.enabled || !provider.imageModel)) return unavailable("AI_IMAGE_DISABLED", "管理员尚未启用图片生成，请切换文字对话或联系管理员。");
+    const baseUrl = imageRoute?.baseUrl ?? (target === "image" && provider?.imageBaseUrl ? provider.imageBaseUrl : quickRoute?.baseUrl ?? provider?.baseUrl);
+    const key = imageRoute?.encryptedKey ?? (target === "image" && provider?.imageBaseUrl ? provider.encryptedImageKey : quickRoute?.encryptedKey ?? provider?.encryptedKey);
     if (!baseUrl || !key) return unavailable("AI_NOT_CONFIGURED", "管理员尚未完成当前业务档位的服务配置。");
     const check = await this.availabilityProbe.check(target, baseUrl, key);
     if (JSON.stringify(provider) !== JSON.stringify(this.store.provider()) || harnessSnapshot !== JSON.stringify(this.store.harness())) throw new AiError(409, "AI_CONFIG_CHANGED", "服务配置已更改，请重新检测。");
@@ -218,7 +250,7 @@ export class AiService {
     return { status: current, check };
   }
   provider(): AiProviderConfig | null {
-    const p = this.store.provider();
+    const p = this.providerBaseline();
     if (!p) return null;
     const verified = isTongpinQuickAgent(p.quickModel) ? verifiedBaiAgentModels(p) : null;
     const {
@@ -236,8 +268,10 @@ export class AiService {
     };
   }
   async saveProvider(value: unknown): Promise<AiProviderConfig> {
-    const existing = this.store.provider();
-    const parsed = parseProvider(value, existing);
+    const existing = this.providerBaseline();
+    const harness = this.store.harness();
+    const harnessSearchConfigured = Boolean(harness && AI_BUSINESS_TIERS.some(tier => harness.tiers[tier].enabled && harness.tiers[tier].protocol === "responses" && harness.tiers[tier].capabilities.includes("web_search")));
+    const parsed = parseProvider(value, existing, harnessSearchConfigured);
     if (!parsed.apiKey && (!existing?.encryptedKey || existing.baseUrl !== parsed.baseUrl)) throw new AiError(400, "AI_KEY_REQUIRED", "首次接入或更换 API 地址时，请重新填写 API 密钥");
     if (parsed.imageBaseUrl && !parsed.imageApiKey && (!existing?.encryptedImageKey || existing.imageBaseUrl !== parsed.imageBaseUrl)) throw new AiError(400, "AI_IMAGE_KEY_REQUIRED", "首次接入或更换图片 API 地址时，请重新填写图片密钥");
     const { apiKey, imageApiKey, ...config } = parsed;
@@ -245,7 +279,7 @@ export class AiService {
     const encryptedImageKey = config.imageBaseUrl ? imageApiKey ? await (await this.box()).encrypt(imageApiKey) : existing!.encryptedImageKey : undefined;
     // Do not let concurrent configuration saves pair a different host with an old key.
     this.store.sql.transaction(() => {
-      const current = this.store.provider();
+      const current = this.providerBaseline();
       if (!apiKey && (current?.baseUrl !== config.baseUrl || current?.encryptedKey !== existing?.encryptedKey)) throw new AiError(409, "AI_CONFIG_CHANGED", "配置刚刚被修改，请重新填写密钥后保存");
       if (config.imageBaseUrl && !imageApiKey && (current?.imageBaseUrl !== config.imageBaseUrl || current?.encryptedImageKey !== existing?.encryptedImageKey)) throw new AiError(409, "AI_CONFIG_CHANGED", "图片配置刚刚被修改，请重新填写图片密钥后保存");
       this.store.saveProvider({
@@ -260,7 +294,7 @@ export class AiService {
     return this.provider()!;
   }
   async testProvider(value?: unknown): Promise<AiProviderTestResult> {
-    let provider = this.store.provider();
+    let provider = this.providerBaseline();
     const draft = object(value);
     if (draft.target !== undefined && draft.target !== "chat" && draft.target !== "image") throw new AiError(400, "AI_INPUT_INVALID", "接口测试目标不正确");
     const target = draft.target === "image" ? "image" : "chat";
@@ -289,6 +323,7 @@ export class AiService {
     catch (error) { if (error instanceof AiError) throw error; throw new AiError(502, "AI_CONNECTION_FAILED", "无法连接 AI 服务，请检查公网 API 地址和网络"); }
     if (!response.ok) throw await readProviderHttpError(response, "models");
     const root = object(await readBoundedJson(response, 512000));
+    if (!draftKey && JSON.stringify(provider) !== JSON.stringify(this.providerBaseline())) throw new AiError(409, "AI_CONFIG_CHANGED", "接入配置已修改，请重新检查模型列表");
     if (!Array.isArray(root.data)) throw new AiError(502, "AI_MODELS_UNAVAILABLE", "服务商未返回模型列表，可核对文档后手动填写模型名称");
     const models = root.data.map(row => object(row).id).filter((id): id is string => typeof id === "string" && id.length < 160).slice(0, 500);
     const baiModels = new URL(baseUrl).hostname === "api.b.ai" ? filterBaiAgentModels(models) : undefined;
@@ -388,6 +423,40 @@ export class AiService {
       });
     }
   }
+  /** Continue only persisted, server-planned model decisions. This never
+   * executes a proposed tool: every paid or state-changing next step remains
+   * waiting for the existing one-time approval flow. */
+  async runBackgroundAgentCycle(limit = 4): Promise<AiBackgroundAgentCycle> {
+    const bounded = Number.isInteger(limit) ? Math.max(1, Math.min(8, limit)) : 4;
+    const candidates = this.store.backgroundHarnessCandidates(bounded);
+    const result: AiBackgroundAgentCycle = { scanned: 0, resumed: 0, completed: 0, waitingApproval: 0, pending: 0, skippedInactive: 0, failed: 0 };
+    let providerAttempts = 0;
+    for (const candidate of candidates) {
+      if (providerAttempts >= bounded) break;
+      result.scanned += 1;
+      try {
+        // Re-authorize at every tick. A disabled/deleted/moved account must not
+        // incur another provider call merely because an earlier session was valid.
+        if (!await this.isBackgroundPrincipalActive(candidate.tenantId, candidate.userId)) {
+          // Do not let an inactive oldest row starve active work every tick.
+          // Re-enabled users can still resume it explicitly from the client.
+          this.forTenant(candidate.tenantId).store.disableHarnessBackground(candidate.userId, candidate.requestId);
+          result.skippedInactive += 1;
+          continue;
+        }
+        providerAttempts += 1;
+        const trace = await this.forTenant(candidate.tenantId).resumeHarnessRun(candidate.userId, candidate.requestId);
+        result.resumed += 1;
+        if (trace.status === "succeeded") result.completed += 1;
+        else if (trace.status === "waiting_approval") result.waitingApproval += 1;
+        else result.pending += 1;
+      } catch {
+        // One corrupt/configuration-failed tenant run cannot stop other tenants.
+        result.failed += 1;
+      }
+    }
+    return result;
+  }
   cancelHarnessRun(userId: string, requestId: string): AiHarnessTrace { return this.harness.cancelWaitingRun(userId, requestId); }
   quota(userId: string): AiQuota { this.recover(userId); return this.store.quota(userId); }
   status(userId: string): AiStatus {
@@ -404,8 +473,9 @@ export class AiService {
     const quota = this.quota(userId);
     return { accessGranted: this.store.hasAccess(userId), configured, quickModel: "quick", deepModel: "deep", maxOutputTokens: harness?.tiers.quick.maxOutputTokens ?? p?.maxOutputTokens ?? 0, quota,
       availableTiers: harness ? AI_BUSINESS_TIERS.filter(tier => harness.tiers[tier].enabled) : ["quick", "deep"], quickAgent: Boolean(p && isTongpinQuickAgent(p.quickModel)),
-      imageEnabled: Boolean(configured && p?.imageQuotaTokens && (harnessImageConfigured || (p.imageModel && p.imageApiKeyConfigured))), imageQuotaTokens: p?.imageQuotaTokens ?? 0,
-      visionEnabled: Boolean(configured && p?.visionEnabled), webSearchEnabled: Boolean(configured && p?.protocol === "responses" && p.webSearchEnabled && p.webSearchQuotaTokens), webSearchQuotaTokens: p?.webSearchQuotaTokens ?? 0 };
+      imageEnabled: Boolean(configured && p?.imageQuotaTokens && (this.store.harness() ? harnessImageConfigured : p.imageModel && p.imageApiKeyConfigured)), imageQuotaTokens: p?.imageQuotaTokens ?? 0,
+      visionEnabled: Boolean(configured && (this.store.harness() ? AI_BUSINESS_TIERS.some(tier => harness!.tiers[tier].enabled && harness!.tiers[tier].capabilities.includes("vision")) : p?.visionEnabled)),
+      webSearchEnabled: Boolean(configured && p?.webSearchEnabled && p.webSearchQuotaTokens && (this.store.harness() ? AI_BUSINESS_TIERS.some(tier => harness!.tiers[tier].enabled && harness!.tiers[tier].protocol === "responses" && harness!.tiers[tier].capabilities.includes("web_search")) : p.protocol === "responses")), webSearchQuotaTokens: p?.webSearchQuotaTokens ?? 0 };
   }
   members(users: MemberIdentity[]): AiMember[] { return users.map(user => ({ ...user, quota: this.quota(user.id) })); }
   memberUsage(userId: string) {
@@ -431,9 +501,7 @@ export class AiService {
   }
   private bindVideoTierParameters(request: AiChatRequest): void {
     if (request.outputFormat !== "video_plan" || !request.videoParameters) return;
-    const media = this.harness.resolveMedia(request.mode, this.store.provider(), "video");
-    const model = media?.modelId ?? this.video.settings().defaultModel;
-    if (!model) throw new AiError(503, "AI_VIDEO_DISABLED", "管理员尚未为此业务档位配置视频模型");
+    const model = this.video.bindPlanModel(request.mode, request.videoParameters.model);
     const parsed = parseChatCapabilities({ outputFormat: "video_plan", videoParameters: { ...request.videoParameters, model } });
     request.videoParameters = parsed.videoParameters!;
   }
@@ -509,7 +577,7 @@ export class AiService {
       }
     });
   }
-  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "presentation" | "toolPlan" | "computerPlan" | "sources" | "trace">, images?: AiImageResponse["images"]): boolean {
+  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "trace">, images?: AiImageResponse["images"]): boolean {
     if (this.store.request(request.userId, request.requestId)?.status !== "pending") return false;
     if (!extras?.trace && this.store.harnessRun(request.userId, request.requestId)?.status === "running") {
       const trace = this.harness.finishRun(request.userId, request.requestId, status === "completed" ? "succeeded" : status);
@@ -591,10 +659,13 @@ export class AiService {
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "chat"); }
       const maxSearchCalls = request.webSearch ? searchCallLimit(provider) : 0;
       const result = parseProviderResult(await readProviderResponse(response, { maxSearchCalls }), provider.protocol);
+      const publicExplanation = supportsPublicExplanation(request)
+        ? parsePublicExplanation(result.content, request.mode)
+        : { content: result.content };
       const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= maxSearchCalls);
       const convertedTokens = request.webSearch ? provider.webSearchQuotaTokens! * result.searchCalls : 0;
       const usage: AiUsage = validUsage ? { ...result.usage!, ...(request.webSearch ? { searchCalls: result.searchCalls, tokenUsageEstimated: false } : {}), ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind: "tokens_with_search" } : {}) } : conservativeUsage(reserved);
-      if (!result.content.trim() || (result.status !== undefined && result.status !== "completed")) {
+      if (!publicExplanation.content.trim() || (result.status !== undefined && result.status !== "completed")) {
         const error = result.status === "incomplete"
           ? new AiError(502, "AI_RESPONSE_INCOMPLETE", "AI 未能完成回复，可能达到输出上限，请管理员调整模型或单次输出上限")
           : new AiError(502, "AI_EMPTY_RESPONSE", "AI 未返回完整可显示的文字，请检查模型及输出上限");
@@ -614,9 +685,18 @@ export class AiService {
       }
       let presentation: AiChatResponse["presentation"];
       let toolPlan: AiChatResponse["toolPlan"];
+      let toolClarification: string | undefined;
+      let dispatch: AiChatResponse["dispatch"];
       let computerPlan: AiChatResponse["computerPlan"];
-      if (request.outputFormat === "presentation") {
-        try { presentation = parsePresentation(result.content); }
+      if (request.outputFormat === "dispatch") {
+        try { dispatch = parseAiDispatchDecision(publicExplanation.content, request.mode); }
+        catch (error) {
+          const safe = error instanceof AiError ? error : new AiError(502, "AI_DISPATCH_INVALID", "同频 AI 返回的任务类型不正确");
+          this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "任务分派结果未通过应用校验，已记录模型生成用量", undefined, safe));
+          throw safe;
+        }
+      } else if (request.outputFormat === "presentation") {
+        try { presentation = parsePresentation(publicExplanation.content); }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_PRESENTATION_INVALID", "演示文稿结构不正确");
           this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "演示文稿格式未通过验证，已记录服务商生成用量", undefined, safe));
@@ -624,8 +704,9 @@ export class AiService {
         }
       } else if (request.outputFormat === "image_plan" || request.outputFormat === "video_plan" || request.outputFormat === "presentation_plan") {
         try {
-          toolPlan = {
-            ...parseToolPlan(result.content, request.outputFormat === "image_plan" ? "image" : request.outputFormat === "video_plan" ? "video" : "presentation"),
+          toolClarification = parseToolClarification(publicExplanation.content);
+          if (!toolClarification) toolPlan = {
+            ...parseToolPlan(publicExplanation.content, request.outputFormat === "image_plan" ? "image" : request.outputFormat === "video_plan" ? "video" : "presentation"),
             ...(request.outputFormat === "video_plan" ? { videoParameters: request.videoParameters! } : {}),
           };
         }
@@ -635,17 +716,20 @@ export class AiService {
           throw safe;
         }
       } else if (request.outputFormat === "computer_plan") {
-        try { computerPlan = parseComputerPlan(result.content); }
+        try { computerPlan = parseComputerPlan(publicExplanation.content); }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_COMPUTER_PLAN_INVALID", "同频 AI 返回的本机操作方案不正确");
           this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "本机操作方案未通过应用校验，已记录模型生成用量", undefined, safe));
           throw safe;
         }
       }
-      const content = presentation ? `已生成《${presentation.title}》，共 ${presentation.slides.length} 页。` : toolPlan ? `已整理${toolPlan.kind === "video" ? "视频" : toolPlan.kind === "image" ? "图片" : "PPT"}任务，请确认后生成。` : computerPlan ? "已整理一个本机操作，请在系统确认框中核对。" : result.content;
+      const content = dispatch
+        ? dispatch.kind === "text" ? dispatch.content : dispatch.clarification ?? ""
+        : toolClarification ?? (presentation ? `已生成《${presentation.title}》，共 ${presentation.slides.length} 页。` : toolPlan ? `已整理${toolPlan.kind === "video" ? "视频" : toolPlan.kind === "image" ? "图片" : "PPT"}任务，请确认后生成。` : computerPlan ? "已整理一个本机操作，请在系统确认框中核对。" : publicExplanation.content);
       const toolCapability = toolPlan ? toolPlan.kind === "image" ? "image" : toolPlan.kind === "video" ? "video" : "presentation" : computerPlan ? "computer" : undefined;
       const toolSummary = toolPlan?.summary ?? computerPlan?.summary;
-      const extras: Pick<AiChatResponse, "presentation" | "toolPlan" | "computerPlan" | "sources" | "trace"> = { ...(presentation ? { presentation } : {}), ...(toolPlan ? { toolPlan } : {}), ...(computerPlan ? { computerPlan } : {}), ...(result.sources.length ? { sources: result.sources } : {}) };
+      const dispatchSummary = dispatch?.kind === "text" ? dispatch.analysisSummary : undefined;
+      const extras: Pick<AiChatResponse, "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "trace"> = { ...(toolClarification ? { toolClarification } : {}), ...(dispatch ? { dispatch } : {}), ...(dispatchSummary || publicExplanation.analysisSummary ? { analysisSummary: dispatchSummary ?? publicExplanation.analysisSummary } : {}), ...(presentation ? { presentation } : {}), ...(toolPlan ? { toolPlan } : {}), ...(computerPlan ? { computerPlan } : {}), ...(result.sources.length ? { sources: result.sources } : {}) };
       const settled = this.store.sql.transaction(() => {
         const trace = this.harness.finishRun(userId, request.requestId, validUsage ? "succeeded" : "uncertain", toolCapability ? { capability: toolCapability, summary: toolSummary } : undefined);
         if (trace) extras.trace = trace;

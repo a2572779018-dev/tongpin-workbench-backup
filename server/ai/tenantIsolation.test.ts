@@ -6,7 +6,7 @@ import { AiPersonaRepository } from "./persona";
 import { providerIdempotencyKey } from "./service";
 import { createSecretBox } from "./security";
 import { AiStore, emptyQuota, type AiSql, type StoredHarnessConfig } from "./storage";
-import { aiTenantIdFromPrincipal, DEFAULT_AI_TENANT_ID, tenantStorageKey } from "./tenant";
+import { aiTenantIdFromPrincipal, DEFAULT_AI_TENANT_ID, tenantStorageKey, tenantStorageValue } from "./tenant";
 import { AiVideoService } from "./videoService";
 import { AiWorkspaceRepository } from "./workspace";
 
@@ -57,6 +57,21 @@ describe("AI tenant isolation foundation", () => {
     expect(store.quota("legacy-user").limitTokens).toBe(50);
     expect(store.usage("legacy-user")).toEqual([legacyUsage]);
     expect(database.prepare("SELECT DISTINCT tenant_id FROM ai_usage").all()).toEqual([{ tenant_id: DEFAULT_AI_TENANT_ID }]);
+  });
+
+  it("migrates historical harness runs as background-ineligible", () => {
+    database = new DatabaseSync(":memory:");
+    database.exec("CREATE TABLE ai_harness_runs (user_id TEXT NOT NULL, id TEXT NOT NULL, request_id TEXT NOT NULL, conversation_id TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, goal_kind TEXT NOT NULL, goal_summary TEXT NOT NULL, status TEXT NOT NULL, reasoning_summary TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(user_id,id), UNIQUE(user_id,request_id))");
+    database.prepare("INSERT INTO ai_harness_runs(user_id,id,request_id,conversation_id,tier,provider_id,capability,goal_kind,goal_summary,status,reasoning_summary,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+      "legacy-user", "legacy-run", "legacy-request", "conversation", "quick", "provider", "chat", "chat", "历史任务", "planned", "waiting", 1, 1,
+    );
+    const store = new AiStore(adapter(database));
+    store.initialize();
+    expect(database.prepare("SELECT tenant_id,background_capable FROM ai_harness_runs WHERE request_id='legacy-request'").get()).toEqual({
+      tenant_id: DEFAULT_AI_TENANT_ID,
+      background_capable: 0,
+    });
+    expect(store.backgroundHarnessCandidates(4)).toEqual([]);
   });
 
   it("preserves legacy default video rows and capability URLs during the additive migration", async () => {
@@ -194,6 +209,13 @@ describe("AI tenant isolation foundation", () => {
     expect(aiTenantIdFromPrincipal({ tenantId: "tenant-a", headers: { "X-Tongpin-Tenant": "tenant-b" } })).toBe("tenant-a");
     expect(() => aiTenantIdFromPrincipal({ tenantId: "tenant-a", org_id: "tenant-b" })).toThrow(expect.objectContaining({ code: "AI_TENANT_AMBIGUOUS" }));
     expect(() => aiTenantIdFromPrincipal({ tenantId: "../escape" })).toThrow(expect.objectContaining({ code: "AI_TENANT_INVALID" }));
+  });
+
+  it("reverses only a matching tenant storage prefix for background maintenance", () => {
+    expect(tenantStorageValue(DEFAULT_AI_TENANT_ID, "same-user")).toBe("same-user");
+    const stored = tenantStorageKey("tenant-a", "same-user");
+    expect(tenantStorageValue("tenant-a", stored)).toBe("same-user");
+    expect(() => tenantStorageValue("tenant-b", stored)).toThrow(expect.objectContaining({ code: "AI_TENANT_STORAGE_INVALID" }));
   });
 
   it("partitions provider idempotency across tenant and operation boundaries", async () => {

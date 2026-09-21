@@ -4,6 +4,7 @@ import { AiError } from "./security";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { VIDEO_MODELS, videoModel, videoSeconds } from "../../shared/aiVideoModels";
 import { aiWorkflowInstruction, aiWorkflowTemplate } from "../../shared/aiWorkflows";
+import { AI_PUBLIC_ANALYSIS_LIMITS, publicExplanationInstruction } from "./publicExplanation";
 
 /** Only reviewed, code-owned instructions can acquire system-message priority. */
 export const AI_SKILL_INSTRUCTIONS: Readonly<Record<string, string>> = Object.freeze({
@@ -28,6 +29,11 @@ const TOOL_PLAN: Record<AiToolPlanKind, string> = {
   video: '你正在为同频的视频生成工具整理任务，不是在生成视频。只输出一个 JSON 对象，不使用 Markdown 代码块：{"kind":"video","summary":"给用户确认的一句话摘要","prompt":"交给视频生成服务的完整提示词"}。保留用户明确的时长、画幅、镜头、品牌、文字和禁用项；参考图只作为视觉参考，不臆造不可见内容；不声称已经生成。summary 最多 240 字，prompt 最多 4000 字。',
   presentation: '你正在为同频的 PPT 生成器整理任务，不是在生成或导出 PPT。只输出一个 JSON 对象，不使用 Markdown 代码块：{"kind":"presentation","summary":"给用户确认的一句话摘要","prompt":"交给演示文稿生成步骤的完整要求"}。保留用户明确的主题、受众、用途、页数、结构、语言与禁用项；不虚构事实，不声称已经生成或导出。summary 最多 240 字，prompt 最多 12000 字。',
 };
+const TOOL_CLARIFICATION = '如果本次提供的历史和当前请求中都缺少要生成的具体主题（例如仅说“帮我生成一张图片”），不要擅自选主题，不输出空 prompt 或半成品方案。改为只输出 {"kind":"clarification","question":"需要向用户补问的一个简短问题"}。用户已给出具体主题时，合理补充非关键默认值，正常输出工具方案，不为了流程反复确认。question 最多 500 字。';
+function dispatchInstruction(request: AiChatRequest): string {
+  const limit = AI_PUBLIC_ANALYSIS_LIMITS[request.mode];
+  return `你是同频 AI 的服务端任务分派器，这次只做一次归类并返回公开结果，不是内部思维过程，也不执行任何工具。只输出一个 JSON 对象，不使用 Markdown 代码块或额外字段。普通问答、写作、分析、讨论生成功能、排错、询价，以及“帮我写图片/视频/PPT 提示词”都返回 {"kind":"text","content":"直接给用户的完整答复，可在确有必要时使用标准 Markdown"}。只在确实能帮助用户核对依据、关键取舍或不确定性时，文字对象可额外加入 "analysisSummary":"结论依据的公开摘要"，最多 ${limit} 个字符；这不是逐步思维链，简单寒暄或无可核对依据时必须省略。只有用户明确要求创建产物或操作电脑时，才返回 {"kind":"image|video|presentation|computer","prompt":"保留用户原意的完整任务"}。如缺少不可推断的核心信息，在工具对象中额外加入 "clarification":"只问一个必要问题"。不得声称已执行、已生成、已控制电脑；不得输出工具参数、隐藏推理或第二步工具。`;
+}
 export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRequest, "skillIds" | "workflowId" | "projectContext" | "attachments" | "outputFormat" | "toolPlanRequestId" | "videoParameters" | "webSearch" | "webSearchMode"> {
   if (p.webSearchMode !== undefined && p.webSearchMode !== "auto") throw new AiError(400, "AI_INPUT_INVALID", "搜索模式不正确");
   if (p.skillIds !== undefined && (!Array.isArray(p.skillIds) || p.skillIds.length > 3 || p.skillIds.some(id => typeof id !== "string" || !Object.hasOwn(AI_SKILL_INSTRUCTIONS, id)))) throw new AiError(400, "AI_SKILL_INVALID", "请选择已上架的 Skill，每次最多三个");
@@ -39,7 +45,7 @@ export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRe
     if (requested.length !== expected.length || requested.some((id, index) => id !== expected[index])) throw new AiError(400, "AI_WORKFLOW_SKILLS_MISMATCH", "Hub 工作流的 Skill 组合已被修改，请重新选择");
   }
   if (p.projectContext !== undefined && (typeof p.projectContext !== "string" || p.projectContext.length > 12000)) throw new AiError(400, "AI_CONTEXT_TOO_LONG", "项目说明不能超过 12000 字");
-  if (p.outputFormat !== undefined && !["text", "presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan"].includes(String(p.outputFormat))) throw new AiError(400, "AI_INPUT_INVALID", "不支持的输出格式");
+  if (p.outputFormat !== undefined && !["text", "dispatch", "presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan"].includes(String(p.outputFormat))) throw new AiError(400, "AI_INPUT_INVALID", "不支持的输出格式");
   if (p.toolPlanRequestId !== undefined && (p.outputFormat !== "presentation" || typeof p.toolPlanRequestId !== "string" || !/^[a-zA-Z0-9_-]{16,100}$/.test(p.toolPlanRequestId))) throw new AiError(400, "AI_TOOL_PLAN_INVALID", "PPT 方案标识无效，请重新整理任务");
   if (p.outputFormat === "presentation" && p.toolPlanRequestId === undefined) throw new AiError(409, "AI_TOOL_PLAN_REQUIRED", "请先让同频 AI 整理 PPT 任务，再确认生成");
   if (p.webSearch !== undefined && typeof p.webSearch !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "联网搜索设置不正确");
@@ -84,7 +90,7 @@ export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRe
     ...(workflow ? { workflowId: workflow.id, skillIds: [...workflow.skillIds] } : Array.isArray(p.skillIds) && p.skillIds.length ? { skillIds: [...new Set(p.skillIds as string[])] } : {}),
     ...(typeof p.projectContext === "string" && p.projectContext.trim() ? { projectContext: p.projectContext.trim() } : {}),
     ...(attachments.length ? { attachments } : {}),
-    ...(["presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan"].includes(String(p.outputFormat)) ? { outputFormat: p.outputFormat as "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan" } : {}),
+    ...(["dispatch", "presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan"].includes(String(p.outputFormat)) ? { outputFormat: p.outputFormat as "dispatch" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan" } : {}),
     ...(typeof p.toolPlanRequestId === "string" ? { toolPlanRequestId: p.toolPlanRequestId } : {}),
     ...(videoParameters ? { videoParameters } : {}),
     ...(p.webSearch === true ? { webSearch: true } : {}),
@@ -104,9 +110,9 @@ export function chatInstructions(request: AiChatRequest, persona?: AiPersonaProf
     const base = chatInstructions({ ...request, webSearch: false, webSearchMode: undefined }, persona, model);
     return base.replace("未开启联网搜索，不声称获得了实时检索结果。", "按问题需要自行调用联网工具：需要最新事实、核验来源时搜索，普通聊天、改写和已提供资料的总结不搜索。仅引用实际搜索结果，失败时如实说明，不编造来源。");
   }
-  const toolPlan = request.outputFormat === "image_plan" ? TOOL_PLAN.image : request.outputFormat === "video_plan" ? TOOL_PLAN.video : request.outputFormat === "presentation_plan" ? TOOL_PLAN.presentation : request.outputFormat === "computer_plan" ? COMPUTER_PLAN : "";
+  const toolPlan = request.outputFormat === "dispatch" ? dispatchInstruction(request) : request.outputFormat === "image_plan" ? TOOL_PLAN.image + TOOL_CLARIFICATION : request.outputFormat === "video_plan" ? TOOL_PLAN.video + TOOL_CLARIFICATION : request.outputFormat === "presentation_plan" ? TOOL_PLAN.presentation + TOOL_CLARIFICATION : request.outputFormat === "computer_plan" ? COMPUTER_PLAN : "";
   const workflow = request.workflowId ? aiWorkflowInstruction(request.workflowId) : "";
-  return [SAFETY, request.outputFormat ? "" : RESPONSE_STYLE, identity, preferences, workflow, ...(request.skillIds ?? []).map(id => AI_SKILL_INSTRUCTIONS[id]), request.outputFormat === "presentation" ? PRESENTATION : toolPlan, request.webSearch ? "此次用户要求联网查询。使用已提供的联网工具，并在回答中以实际返回的来源支持时效性信息；搜索失败时如实说明，不编造来源。" : "未开启联网搜索，不声称获得了实时检索结果。"].filter(Boolean).join("\n\n");
+  return [SAFETY, request.outputFormat ? "" : RESPONSE_STYLE, publicExplanationInstruction(request), identity, preferences, workflow, ...(request.skillIds ?? []).map(id => AI_SKILL_INSTRUCTIONS[id]), request.outputFormat === "presentation" ? PRESENTATION : toolPlan, request.webSearch ? "此次用户要求联网查询。使用已提供的联网工具，并在回答中以实际返回的来源支持时效性信息；搜索失败时如实说明，不编造来源。" : "未开启联网搜索，不声称获得了实时检索结果。"].filter(Boolean).join("\n\n");
 }
 /** Project and attachment content never enter the trusted instructions string. */
 export function chatMessages(request: AiChatRequest): AiChatRequest["messages"] {
@@ -161,7 +167,25 @@ export function parseToolPlan(content: string, expected: AiToolPlanKind): AiTool
     if (typeof raw !== "string" || !raw.trim() || raw.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(raw)) throw new AiError(502, "AI_TOOL_PLAN_INVALID", "同频 AI 返回的工具方案不完整或过长，请重新整理任务");
     return raw.trim();
   };
-  return { kind: expected, summary: read("summary", 240), prompt: read("prompt", expected === "video" ? 4000 : 12000) };
+  const prompt = read("prompt", expected === "video" ? 4000 : 12000);
+  // Summary is presentation-only; never reject a valid bounded tool prompt
+  // solely because a provider omitted or over-expanded the display caption.
+  const summary = typeof root.summary === "string" && root.summary.trim() ? read("summary", 4000).slice(0, 240) : prompt.slice(0, 120);
+  return { kind: expected, summary, prompt };
+}
+export function parseToolClarification(content: string): string | undefined {
+  const text = content.replace(/^\s*```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+  const safeQuestion = (value: unknown): string | undefined => typeof value === "string" && value.trim() && value.length <= 500 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value) ? value.trim() : undefined;
+  try {
+    const value = record(JSON.parse(text));
+    if (value.kind === "clarification" && Object.keys(value).every(key => key === "kind" || key === "question")) return safeQuestion(value.question);
+    // Some compatible providers retain the requested tool kind while asking
+    // a question. Only accept this when no executable prompt was supplied.
+    if (["image", "video", "presentation"].includes(String(value.kind)) && Object.keys(value).every(key => ["kind", "summary", "question", "prompt"].includes(key)) && !value.prompt && /[?？]$/.test(String(value.question ?? value.summary ?? ""))) return safeQuestion(value.question ?? value.summary);
+  } catch {
+    if (!/[{}<>]/.test(text) && /[?？]$/.test(text)) return safeQuestion(text);
+  }
+  return undefined;
 }
 export function parseComputerPlan(content: string): AiComputerPlan {
   let value: unknown;

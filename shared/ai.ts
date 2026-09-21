@@ -297,6 +297,12 @@ export interface AiToolPlan {
   /** Public application-owned execution progress attached after plan validation. */
   trace?: AiHarnessTrace;
 }
+/** A first-turn server decision only. Tool decisions never authorize or execute
+ * a paid/state-changing action; the client must enter the existing plan and
+ * explicit-confirmation flow. */
+export type AiDispatchDecision =
+  | { kind: "text"; content: string; /** Optional public evidence summary, never hidden reasoning. */ analysisSummary?: string }
+  | { kind: "image" | "video" | "presentation" | "computer"; prompt: string; clarification?: string };
 export interface AiSource { title: string; url: string }
 export interface AiChatRequest {
   requestId: string;
@@ -309,7 +315,7 @@ export interface AiChatRequest {
   workflowId?: AiWorkflowId;
   projectContext?: string;
   attachments?: AiAttachment[];
-  outputFormat?: "text" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan";
+  outputFormat?: "text" | "dispatch" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan";
   /** Required when executing a presentation plan; the server binds it to the
    * exact model-authored prompt before asking the model for slide data. */
   toolPlanRequestId?: string;
@@ -342,11 +348,19 @@ export interface AiChatPreflight {
 export interface AiChatResponse {
   requestId: string;
   content: string;
+  /** Optional model-authored public explanation extracted from an explicit
+   * <analysis_summary> block. Never populated from hidden reasoning fields. */
+  analysisSummary?: string;
   model: string;
   usage: AiUsage;
   quota: AiQuota;
   presentation?: AiPresentation;
   toolPlan?: AiToolPlan;
+  /** A question is not a tool plan and never authorizes generation. */
+  toolClarification?: string;
+  /** Server-model routing decision. A tool value is only a proposal and has
+   * not called the corresponding tool. */
+  dispatch?: AiDispatchDecision;
   computerPlan?: AiComputerPlan;
   sources?: AiSource[];
   trace?: AiHarnessTrace;

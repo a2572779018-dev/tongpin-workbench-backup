@@ -90,7 +90,7 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(runtime.service.video.settings().defaultModel).toBe("minimax_h3");
     expect(await runtime.service.video.configure({ enabled: true, quotaPoints: 1000 })).toMatchObject({ defaultModel: "minimax_h3" });
   });
-  it("executes the tier-bound 75API model and key instead of the legacy default", async () => {
+  it("executes an explicit verified model through the tier-bound 75API provider and key", async () => {
     const route = {
       providerId: "video-provider", modelId: "minimax_h3", protocol: "chat_completions" as const,
       maxOutputTokens: 1024, reasoningEffort: "" as const, capabilities: ["chat", "video"] as const,
@@ -103,13 +103,14 @@ describe("durable H3 jobs and isolated quotas", () => {
     });
     transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
     await runtime.service.discoverHarnessProvider("video-provider");
+    expect(runtime.service.video.list("a").settings).toMatchObject({ availableModels: ["minimax_h3", "sd-2-c6"], defaultModel: "sd-2-c6" });
     transport.mockResolvedValueOnce(task());
-    const request = input("a", "一段品牌视频", { model: "sd-2-c6", seconds: 15, resolution: "720p" });
+    const request = input("a", "一段品牌视频", { model: "minimax_h3", seconds: 15, resolution: "768p" });
     await runtime.service.video.submit("a", request);
     const [url, init] = transport.mock.calls.at(-1)!;
     expect(url).toBe("https://www.75api.com/v1/videos");
     expect(init.headers.Authorization).toBe("Bearer harness-video-key");
-    expect(JSON.parse(init.body!)).toMatchObject({ model: "sd-2-c6", seconds: "15", resolution: "720p" });
+    expect(JSON.parse(init.body!)).toMatchObject({ model: "minimax_h3", seconds: "15", resolution: "768p" });
   });
   it("requires a positive administrator conversion and valid credentials", async () => {
     await expect(runtime.service.video.configure({ enabled: true, quotaPoints: 0 })).rejects.toMatchObject({ code: "AI_VIDEO_SETTINGS_INVALID" });
@@ -288,8 +289,7 @@ describe("durable H3 jobs and isolated quotas", () => {
     const check = await runtime.service.video.test();
     expect(check.availableModels).toEqual(["sd-2-c6", "sd-2.5-c1"]);
     const memberSettings = runtime.service.video.list("a").settings;
-    expect(memberSettings).toMatchObject({ availableModels: [], modelsVerified: true, profile: { resolutions: ["720p"], maxImages: 9, requiresImage: false } });
-    expect(JSON.stringify(memberSettings)).not.toContain("sd-2-c6");
+    expect(memberSettings).toMatchObject({ availableModels: ["sd-2-c6", "sd-2.5-c1"], defaultModel: "sd-2-c6", modelsVerified: true, profile: { resolutions: ["720p"], maxImages: 9, requiresImage: false } });
 
     transport.mockResolvedValueOnce(task());
     await runtime.service.video.submit("a", input("a", "品牌短片", { model: "sd-2-c6", resolution: "720p" }));
@@ -373,6 +373,13 @@ describe("durable H3 jobs and isolated quotas", () => {
     await expect(runtime.service.video.submit("a", uncertain)).resolves.toMatchObject({ status: "failed" });
     expect(runtime.service.quota("a").remainingTokens).toBe(10000);
     expect(() => runtime.service.video.reconcile("a", uncertain.requestId, "admin", { action: "charge" })).toThrow();
+
+    const chargedUnknown = input();
+    expect(await runtime.service.video.submit("a", chargedUnknown)).toMatchObject({ status: "uncertain", reserved: true });
+    expect(runtime.service.video.reconcile("a", chargedUnknown.requestId, "admin", { action: "charge" })).toMatchObject({ status: "failed", reserved: false });
+    expect(runtime.service.quota("a")).toMatchObject({ usedTokens: 1000, reservedTokens: 0, remainingTokens: 9000 });
+    expect(runtime.store.usage("a").find(entry => entry.requestId === chargedUnknown.requestId)).toMatchObject({ status: "failed", totalTokens: 1000, reason: expect.stringContaining("任务结果仍未验证") });
+    expect(runtime.store.sql.all<{ success: number; error_code: string }>("SELECT success,error_code FROM ai_observability_events WHERE tenant_id=? ORDER BY rowid DESC LIMIT 1", runtime.store.tenantId)[0]).toEqual({ success: 0, error_code: "AI_VIDEO_RECONCILED_CHARGE_UNVERIFIED" });
   });
   it("keeps pending jobs on restart without chat recovery stealing their reservation", async () => {
     const req = input(); await runtime.service.video.submit("a", req); runtime.close();

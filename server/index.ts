@@ -4,6 +4,7 @@ import { createRuntime } from "./app";
 const config = loadConfig();
 const runtime = await createRuntime(config, {
   startLoraCollector: true,
+  startAiAgentScheduler: true,
 });
 const { server } = runtime;
 

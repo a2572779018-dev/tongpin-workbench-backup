@@ -16,4 +16,19 @@ describe("Provider content fits the workspace message contract", () => {
   it("rejects null characters that the workspace contract cannot persist, without silently changing content", () => {
     expect(() => parseProviderResult({ output_text: "before\u0000after" }, "responses")).toThrow(expect.objectContaining({ code: "AI_PROVIDER_RESPONSE" }));
   });
+  it("never reads a chat-completions hidden reasoning field as user-visible content", () => {
+    const result = parseProviderResult({
+      choices: [{ message: { content: "可见回答", reasoning_content: "private chain must not surface" } }],
+    }, "chat_completions");
+    expect(result.content).toBe("可见回答");
+    expect(JSON.stringify(result)).not.toContain("private chain must not surface");
+  });
+  it("never reads Responses reasoning items as user-visible content", () => {
+    const result = parseProviderResult({ output: [
+      { type: "reasoning", summary: [{ type: "summary_text", text: "private response reasoning" }] },
+      { type: "message", content: [{ type: "output_text", text: "可见回答" }] },
+    ] }, "responses");
+    expect(result.content).toBe("可见回答");
+    expect(JSON.stringify(result)).not.toContain("private response reasoning");
+  });
 });

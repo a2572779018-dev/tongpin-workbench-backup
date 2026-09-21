@@ -33,12 +33,15 @@ import { AiWorkspaceRepository } from "./ai/workspace";
 import { createAiWorkspaceRouter } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "./ai/persona";
 import { createAiPersonaRouter } from "./ai/personaRoutes";
+import { createAiAgentScheduler, type AiAgentScheduler } from "./ai/backgroundAgent";
+import { aiTenantIdFromPrincipal } from "./ai/tenant";
 
 export interface AppRuntime {
   app: express.Express;
   server: HttpServer;
   store: JsonStore;
   loraCollector: LoraChainCollector;
+  aiAgentScheduler: AiAgentScheduler;
   aiStore: AiStore;
   closeAi: () => void;
   /** Stop background work and HTTP requests before releasing the AI database. Safe before listen and on repeated calls. */
@@ -83,12 +86,15 @@ export async function createRuntime(
     attachSockets?: boolean;
     loraSource?: LoraChainDataSource;
     startLoraCollector?: boolean;
+    startAiAgentScheduler?: boolean;
     aiTransport?: AiTransport;
   } = {},
 ): Promise<AppRuntime> {
   const store = await JsonStore.open(config.dataFile);
   await ensureBootstrapAdmin(store, config);
-  const ai = await createNodeAi(config.dataFile, options.aiTransport);
+  const ai = await createNodeAi(config.dataFile, options.aiTransport, (tenantId, userId) => store.read(database => database.users.some(user =>
+    user.id === userId && user.status === "active" && aiTenantIdFromPrincipal(user) === tenantId,
+  )));
   const aiWorkspace = new AiWorkspaceRepository(ai.store.sql);
   aiWorkspace.initialize();
   const aiPersona = new AiPersonaRepository(ai.store.sql);
@@ -96,7 +102,8 @@ export async function createRuntime(
 
   const app = express();
   const server = createServer(app);
-  server.once("close", ai.close);
+  const aiAgentScheduler = createAiAgentScheduler(ai.service);
+  server.once("close", () => { void aiAgentScheduler.stop().finally(ai.close); });
   const realtime =
     options.attachSockets === false
       ? silentRealtimeHub
@@ -184,10 +191,12 @@ export async function createRuntime(
   app.use(errorHandler);
 
   if (options.startLoraCollector) loraCollector.start();
+  if (options.startAiAgentScheduler) aiAgentScheduler.start();
 
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => closing ??= (async () => {
     try {
+      await aiAgentScheduler.stop();
       await loraCollector.stop();
       await new Promise<void>((resolve, reject) => {
         server.close(error => {
@@ -201,5 +210,5 @@ export async function createRuntime(
       ai.close();
     }
   })();
-  return { app, server, store, loraCollector, aiStore: ai.store, closeAi: ai.close, close };
+  return { app, server, store, loraCollector, aiAgentScheduler, aiStore: ai.store, closeAi: ai.close, close };
 }

@@ -1,4 +1,4 @@
-import { LORA_INTERNAL_COLLECT_PATH, TongpinCore } from "./core";
+import { AI_INTERNAL_AGENT_TICK_PATH, LORA_INTERNAL_COLLECT_PATH, TongpinCore } from "./core";
 import type { WorkerEnv } from "./platform";
 import { AI_WORKSPACE_LIMITS } from "../../shared/aiWorkspace";
 
@@ -376,7 +376,7 @@ export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === LORA_INTERNAL_COLLECT_PATH) {
+    if (url.pathname === LORA_INTERNAL_COLLECT_PATH || url.pathname === AI_INTERNAL_AGENT_TICK_PATH) {
       return new Response(null, { status: 404 });
     }
 
@@ -449,21 +449,15 @@ export default {
   scheduled(_controller, env, ctx) {
     const id = env.TONGPIN_CORE.idFromName("primary");
     const stub = env.TONGPIN_CORE.get(id);
-    ctx.waitUntil(
-      stub
-        .fetch(
-          new Request(`https://tongpin.internal${LORA_INTERNAL_COLLECT_PATH}`, {
-            method: "POST",
-          }),
-        )
-        .then(async (response) => {
-          if (!response.ok) {
-            const detail = await response.text();
-            throw new Error(
-              `LORA scheduled aggregate failed (${response.status}): ${detail}`,
-            );
-          }
-        }),
-    );
+    const invoke = (path: string, label: string) => stub
+      .fetch(new Request(`https://tongpin.internal${path}`, { method: "POST" }))
+      .then(async (response) => {
+        if (!response.ok) {
+          const detail = await response.text();
+          throw new Error(`${label} scheduled task failed (${response.status}): ${detail}`);
+        }
+      });
+    ctx.waitUntil(invoke(LORA_INTERNAL_COLLECT_PATH, "LORA aggregate"));
+    ctx.waitUntil(invoke(AI_INTERNAL_AGENT_TICK_PATH, "AI agent"));
   },
 } satisfies ExportedHandler<WorkerEnv>;

@@ -39,3 +39,16 @@ export function tenantStorageKey(tenantId: string, value: string): string {
   const normalized = normalizeAiTenantId(tenantId);
   return normalized === DEFAULT_AI_TENANT_ID ? value : `@${normalized.length}:${normalized}:${value}`;
 }
+
+/** Reverse only keys produced by tenantStorageKey(). Background maintenance
+ * uses this to recover an authenticated user id from a persisted run while
+ * retaining the tenant boundary selected by the row itself. */
+export function tenantStorageValue(tenantId: string, stored: string): string {
+  const normalized = normalizeAiTenantId(tenantId);
+  if (normalized === DEFAULT_AI_TENANT_ID) return stored;
+  const prefix = `@${normalized.length}:${normalized}:`;
+  if (!stored.startsWith(prefix) || stored.length === prefix.length) {
+    throw new AiError(500, "AI_TENANT_STORAGE_INVALID", "AI 组织数据索引无效，已停止后台续跑");
+  }
+  return stored.slice(prefix.length);
+}

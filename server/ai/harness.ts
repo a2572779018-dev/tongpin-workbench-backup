@@ -19,6 +19,7 @@ import { object, readBoundedJson, readProviderHttpError, type AiTransport } from
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import type { AiStore, StoredHarnessConfig, StoredHarnessProvider, StoredProvider } from "./storage";
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
+import { legacyHarnessDraft } from "./harnessMigration";
 
 const CAPABILITIES = new Set<AiHarnessCapability>(["chat", "vision", "web_search", "image", "video", "presentation", "computer"]);
 const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]{1,47}$/;
@@ -166,10 +167,8 @@ export class AiHarness {
   constructor(private readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport) {}
 
   settings(): AiHarnessConfig | null {
-    const value = this.store.harness();
-    if (value) return publicHarness(value);
-    const legacy = this.store.provider();
-    return legacy ? legacyHarness(legacy) : null;
+    const value = this.store.harness() ?? legacyHarnessDraft(this.store);
+    return value ? publicHarness(value) : null;
   }
 
   private parseTier(value: unknown, providers: Set<string>): AiHarnessTierRoute {
@@ -206,7 +205,7 @@ export class AiHarness {
   async save(value: unknown): Promise<AiHarnessConfig> {
     const input = object(value) as unknown as AiHarnessInput;
     if (!Array.isArray(input.providers) || !input.providers.length || input.providers.length > 8) throw new AiError(400, "AI_HARNESS_INVALID", "请配置 1 到 8 个模型服务连接");
-    const existing = this.store.harness();
+    const existing = this.store.harness() ?? legacyHarnessDraft(this.store);
     const ids = new Set<string>();
     const prepared: StoredHarnessProvider[] = [];
     for (const raw of input.providers as AiHarnessProviderInput[]) {
@@ -251,7 +250,7 @@ export class AiHarness {
   }
 
   async discover(providerId: string): Promise<{ provider: AiHarnessProviderConfig; models: string[] }> {
-    const stored = this.store.harness();
+    const stored = this.store.harness() ?? legacyHarnessDraft(this.store);
     const snapshot = stored?.providers.find(provider => provider.id === providerId);
     if (!stored || !snapshot) throw new AiError(404, "AI_HARNESS_PROVIDER_NOT_FOUND", "没有找到该模型服务连接");
     const key = await (await this.box()).decrypt(snapshot.encryptedKey);
@@ -268,7 +267,8 @@ export class AiHarness {
     const models = [...new Set(root.data.map(item => object(item).id).filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 160))].sort().slice(0, 1000);
     const verifiedAt = new Date().toISOString();
     this.store.sql.transaction(() => {
-      const current = this.store.harness();
+      const persisted = this.store.harness();
+      const current = persisted ?? legacyHarnessDraft(this.store);
       const target = current?.providers.find(provider => provider.id === providerId);
       if (!current || !target || target.configVersion !== snapshot.configVersion || target.keyVersion !== snapshot.keyVersion || target.encryptedKey !== snapshot.encryptedKey) {
         throw new AiError(409, "AI_CONFIG_CHANGED", "服务连接已修改，请重新获取模型列表");
@@ -277,7 +277,8 @@ export class AiHarness {
       target.modelsVerifiedAt = verifiedAt;
       target.verifiedConfigVersion = target.configVersion;
       target.verifiedKeyVersion = target.keyVersion;
-      this.store.saveHarness(current);
+      // Reading models must not activate the migration or change live routing.
+      if (persisted) this.store.saveHarness(current);
     });
     return { provider: publicProvider({ ...snapshot, availableModels: models, modelsVerifiedAt: verifiedAt, verifiedConfigVersion: snapshot.configVersion, verifiedKeyVersion: snapshot.keyVersion }), models };
   }
@@ -403,6 +404,7 @@ export class AiHarness {
       conversationId: validConversationId(request.conversationId, request.requestId),
       tier: request.mode, providerId: route.providerId, capability,
       goalKind: capability, goalSummary: safeTaskGoal(request, capability),
+      backgroundCapable: true,
       status: "running",
       reasoningSummary: workflow ? `正在执行 ${workflow.name}。` : strategy === "plan_execute" ? "正在整理有界执行计划。" : "已完成安全路由，正在处理这条消息。",
       startedAt: Date.now(), updatedAt: Date.now(),

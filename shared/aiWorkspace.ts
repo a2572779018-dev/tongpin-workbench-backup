@@ -1,4 +1,5 @@
 import type { AiHarnessTrace, AiMode, AiSource, AiUsage } from "./ai";
+import type { VideoModelId, VideoResolution } from "./aiVideoModels";
 
 /** JSON-only workspace payload. Provider credentials and executable code never belong here. */
 export type AiWorkspaceJson = null | boolean | number | string | AiWorkspaceJson[] | { [key: string]: AiWorkspaceJson };
@@ -23,6 +24,8 @@ export interface AiWorkspaceMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Concise model-authored public explanation, separate from the answer. */
+  analysisSummary?: string;
   time: string;
   /** Epoch milliseconds for a durable in-flight timer. UI remounts must not restart it. */
   startedAt?: number;
@@ -67,6 +70,14 @@ export interface AiWorkspaceArtifact {
   data?: { [key: string]: AiWorkspaceJson };
 }
 
+/** Draft preferences only; never an executable plan or a permission grant. */
+export interface AiWorkspaceVideoDraftSettings {
+  model?: VideoModelId;
+  seconds: number;
+  resolution: VideoResolution;
+  aspectRatio: "16:9" | "9:16" | "1:1";
+}
+
 export interface AiWorkspaceState {
   view: "chat" | "project" | "skills";
   mode: AiMode;
@@ -75,6 +86,7 @@ export interface AiWorkspaceState {
   artifacts: AiWorkspaceArtifact[];
   drafts: Record<string, string>;
   draftAttachments?: Record<string, AiWorkspaceDocument[]>;
+  videoDraftSettings?: Record<string, AiWorkspaceVideoDraftSettings>;
   composerTool?: "text" | "presentation" | "image";
   webSearch?: boolean;
   activeConversationId: string | null;
