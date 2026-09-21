@@ -9,6 +9,7 @@ import { aiVideoReferenceFingerprint, AI_VIDEO_REFERENCE_FINGERPRINT } from "../
 import { claimToolPlan, validateToolPlan } from "./toolPlans";
 import { validConversationId, type AiHarness, type ResolvedHarnessMediaRoute } from "./harness";
 import { DEFAULT_AI_TENANT_ID, tenantStorageKey } from "./tenant";
+import { assertGeneratedReferenceJpeg, readGeneratedAssetReference, validateGeneratedAssetReferenceBinding, type GeneratedAssetReferenceSource } from "./generatedAssetReference";
 
 const BASE = "https://www.75api.com/v1";
 interface Settings {
@@ -121,12 +122,21 @@ export class AiVideoService {
       } } : {}),
     };
   }
+  /** Read-only source for client JPEG normalization; never calls a video provider. */
+  async generatedReferenceSource(userId: string, value: unknown): Promise<GeneratedAssetReferenceSource> {
+    this.store.assertAccess(userId);
+    const settings = this.settings();
+    if (!settings.enabled || !settings.apiKeyConfigured) throw new AiError(403, "AI_VIDEO_DISABLED", "管理员尚未启用视频生成");
+    return readGeneratedAssetReference(this.store, userId, value);
+  }
   async uploadReference(userId: string, value: unknown): Promise<{ id: string }> {
     this.store.assertAccess(userId);
     const s = this.settings();
     if (!s.enabled || !s.apiKeyConfigured) throw new AiError(403, "AI_VIDEO_DISABLED", "管理员尚未启用视频生成");
     const p = object(value);
     if (typeof p.dataUrl !== "string" || p.dataUrl.length > 400000 || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(p.dataUrl)) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片格式或大小不正确，请重新选择图片");
+    const generatedAsset = p.generatedAsset === undefined ? undefined : await validateGeneratedAssetReferenceBinding(this.store, userId, p.generatedAsset);
+    if (generatedAsset) assertGeneratedReferenceJpeg(p.dataUrl);
     const box = await this.box(), chunks: string[] = [];
     for (let i = 0; i < p.dataUrl.length; i += 16000) chunks.push(await box.encrypt(p.dataUrl.slice(i, i + 16000)));
     const fingerprint = await aiVideoReferenceFingerprint(p.dataUrl);
@@ -137,7 +147,7 @@ export class AiVideoService {
       this.store.sql.exec("DELETE FROM ai_video_references WHERE tenant_id=? AND expires_at <= ?", this.store.tenantId, Date.now());
       const count = this.store.sql.all<{ n: number }>("SELECT COUNT(*) AS n FROM ai_video_references WHERE tenant_id=? AND user_id=?", this.store.tenantId, storedUserId)[0].n;
       if (count >= 32) throw new AiError(429, "AI_VIDEO_IMAGE_LIMIT", "暂存图片已达上限，请稍后再试");
-      this.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", this.referenceKey(id), this.store.tenantId, publicId, storedUserId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify({ chunks, fingerprint }));
+      this.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", this.referenceKey(id), this.store.tenantId, publicId, storedUserId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify({ chunks, fingerprint, ...(generatedAsset ? { generatedAsset } : {}) }));
     });
     return { id };
   }
@@ -152,19 +162,21 @@ export class AiVideoService {
     const bytes = Uint8Array.from(atob(data.slice(data.indexOf(",") + 1)), c => c.charCodeAt(0));
     return new Response(bytes, { headers: { "Content-Type": "image/jpeg", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
   }
-  private references(userId: string, value: unknown): { urls?: string[]; fingerprints: string[] } {
+  private async references(userId: string, value: unknown, conversationId: string): Promise<{ urls?: string[]; fingerprints: string[] }> {
     if (value === undefined) return { fingerprints: [] };
     if (!Array.isArray(value) || value.length > 9 || value.some(id => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "最多上传 9 张参考图片");
     const fingerprints: string[] = [];
-    const urls = value.map(id => {
+    const urls: string[] = [];
+    for (const id of value) {
       const row = this.store.sql.all<{ expires_at: number; data: string; public_id: string }>("SELECT expires_at,data,public_id FROM ai_video_references WHERE tenant_id=? AND id=? AND user_id=?", this.store.tenantId, this.referenceKey(id), this.userKey(userId))[0];
       if (!row || row.expires_at <= Date.now()) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片已过期，请重新上传");
-      const stored = JSON.parse(row.data) as { fingerprint?: unknown } | string[];
+      const stored = JSON.parse(row.data) as { fingerprint?: unknown; generatedAsset?: unknown } | string[];
       if (Array.isArray(stored) || typeof stored.fingerprint !== "string" || !AI_VIDEO_REFERENCE_FINGERPRINT.test(stored.fingerprint)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "旧参考图片没有完整校验信息，请重新上传并整理视频任务");
+      if (stored.generatedAsset !== undefined) await validateGeneratedAssetReferenceBinding(this.store, userId, stored.generatedAsset, conversationId);
       fingerprints.push(stored.fingerprint);
       if (!/^[a-f0-9]{64}$/.test(row.public_id)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "参考图片缺少完整隔离信息，请重新上传并整理视频任务");
-      return `https://notify.samhubs.com/api/video-reference/${row.public_id}`;
-    });
+      urls.push(`https://notify.samhubs.com/api/video-reference/${row.public_id}`);
+    }
     return { urls, fingerprints };
   }
   async configure(value: unknown): Promise<AiVideoSettings> {
@@ -325,7 +337,7 @@ export class AiVideoService {
       if (!same) throw new AiError(409, "AI_VIDEO_REQUEST_CONFLICT", "相同请求编号不能用于不同的视频内容");
       return this.public(existingJob);
     }
-    const references = this.references(userId, p.referenceIds);
+    const references = await this.references(userId, p.referenceIds, conversationId);
     if (JSON.stringify(references.fingerprints) !== JSON.stringify(plannedParameters.referenceFingerprints)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "参考图片与已确认的同频 AI 方案不一致，请重新整理后确认");
     const input = parseH3VideoInput({ ...p, model: selectedSpec.id, images: references.urls });
     const key = mediaRoute ? await (await this.box()).decrypt(mediaRoute.encryptedKey) : await this.key(s), encryptedKey = await (await this.box()).encrypt(key);
