@@ -49,6 +49,7 @@ export interface DifyToolExecutionResult {
 
 export interface DifyToolCallRecord {
   scope: string;
+  runScope: string;
   requestHash: string;
   status: "running" | "succeeded" | "failed" | "unknown";
   result?: DifyToolExecutionResult;
@@ -59,11 +60,15 @@ export type DifyToolReservation =
   | { kind: "reserved" }
   | { kind: "replay"; record: DifyToolCallRecord }
   | { kind: "conflict" }
-  | { kind: "in_progress" };
+  | { kind: "in_progress" }
+  | { kind: "run_blocked" };
 
 export interface DifyToolCallStore {
-  /** Must be atomic across processes for (tenantId, userId, toolCallId). */
-  reserve(scope: string, requestHash: string): Promise<DifyToolReservation>;
+  /**
+   * Must atomically enforce both the (tenantId, userId, toolCallId) reservation
+   * and the run-level unknown-outcome freeze across processes.
+   */
+  reserve(scope: string, runScope: string, requestHash: string): Promise<DifyToolReservation>;
   finish(scope: string, requestHash: string, update: Pick<DifyToolCallRecord, "status" | "result" | "errorCode">): Promise<void>;
 }
 
@@ -142,7 +147,9 @@ export class DifyToolGateway {
     const { authorization: _authorization, ...request } = invocation;
     const hash = requestHash(request);
     const scope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.toolCallId}`;
-    const reservation = await this.dependencies.store.reserve(scope, hash);
+    const runScope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.runId}`;
+    const reservation = await this.dependencies.store.reserve(scope, runScope, hash);
+    if (reservation.kind === "run_blocked") throw new DifyToolGatewayError("DIFY_RUN_OUTCOME_UNKNOWN", "父任务存在结果未知的工具调用，调和前禁止新执行", 409);
     if (reservation.kind === "conflict") throw new DifyToolGatewayError("DIFY_TOOL_IDEMPOTENCY_CONFLICT", "相同 toolCallId 已绑定其他参数", 409);
     if (reservation.kind === "in_progress") throw new DifyToolGatewayError("DIFY_TOOL_IN_PROGRESS", "该工具调用正在执行，请只查询原任务", 409);
     if (reservation.kind === "replay") {

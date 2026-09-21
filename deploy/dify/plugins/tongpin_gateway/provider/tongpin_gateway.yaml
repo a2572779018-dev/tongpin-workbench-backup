@@ -1,0 +1,33 @@
+credentials_for_provider:
+  gateway_url:
+    label:
+      en_US: Tongpin gateway URL
+      zh_Hans: 同频网关地址
+    placeholder:
+      en_US: http://host.docker.internal:4318/internal/ai/dify/tools/invoke
+      zh_Hans: http://host.docker.internal:4318/internal/ai/dify/tools/invoke
+    required: true
+    type: text-input
+  gateway_secret:
+    label:
+      en_US: Dify-to-Tongpin service credential
+      zh_Hans: Dify 到同频的服务凭据
+    required: true
+    type: secret-input
+extra:
+  python:
+    source: provider/tongpin_gateway.py
+identity:
+  author: tongpin
+  description:
+    en_US: Executes only through the authenticated Tongpin tool gateway.
+    zh_Hans: 仅通过已认证的同频工具网关执行。
+  icon: icon.svg
+  label:
+    en_US: Tongpin Controlled Tools
+    zh_Hans: 同频受控工具
+  name: tongpin_gateway
+  tags:
+    - productivity
+tools:
+  - tools/invoke_tongpin_tool.yaml

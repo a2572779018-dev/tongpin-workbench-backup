@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "engine": "dify",
+  "difyVersion": "1.17.1",
+  "agentPlugin": {
+    "id": "langgenius/agent",
+    "version": "0.0.47",
+    "strategy": "function_calling"
+  },
+  "requiredInputs": [
+    "tongpin_tenant_id",
+    "tongpin_user_id",
+    "tongpin_conversation_id",
+    "tongpin_run_id",
+    "tongpin_attempt_id",
+    "tongpin_tool_authorization"
+  ],
+  "toolProvider": {
+    "id": "tongpin/tongpin_gateway",
+    "version": "0.1.0",
+    "minimumDifyVersion": "1.14.2",
+    "tool": "invoke_tongpin_tool",
+    "modelVisibleParameters": ["tool_name", "input_json"],
+    "boundParameters": [
+      "tenant_id",
+      "user_id",
+      "conversation_id",
+      "run_id",
+      "attempt_id",
+      "source_asset_ids_json",
+      "authorization"
+    ]
+  },
+  "invariants": {
+    "singleDecisionEngine": true,
+    "toolExecutionOwner": "tongpin",
+    "automaticFallback": false,
+    "automaticPaidRetry": false
+  }
+}

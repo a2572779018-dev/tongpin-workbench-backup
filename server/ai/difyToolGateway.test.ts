@@ -10,15 +10,18 @@ import {
 
 class MemoryToolStore implements DifyToolCallStore {
   records = new Map<string, DifyToolCallRecord>();
-  async reserve(scope: string, requestHash: string) {
+  async reserve(scope: string, runScope: string, requestHash: string) {
+    if ([...this.records.values()].some(record => record.runScope === runScope && record.status === "unknown")) return { kind: "run_blocked" as const };
     const existing = this.records.get(scope);
-    if (!existing) { this.records.set(scope, { scope, requestHash, status: "running" }); return { kind: "reserved" as const }; }
+    if (!existing) { this.records.set(scope, { scope, runScope, requestHash, status: "running" }); return { kind: "reserved" as const }; }
     if (existing.requestHash !== requestHash) return { kind: "conflict" as const };
     if (existing.status === "running") return { kind: "in_progress" as const };
     return { kind: "replay" as const, record: existing };
   }
   async finish(scope: string, requestHash: string, update: Pick<DifyToolCallRecord, "status" | "result" | "errorCode">) {
-    this.records.set(scope, { scope, requestHash, ...update });
+    const running = this.records.get(scope);
+    if (!running) throw new Error("missing reservation");
+    this.records.set(scope, { ...running, requestHash, ...update });
   }
 }
 
@@ -76,7 +79,8 @@ describe("Dify controlled tool gateway", () => {
     const execute = vi.fn(async () => { throw new Error("connection lost after submit"); });
     const runtime = gateway(new MemoryToolStore(), execute);
     await expect(runtime.gateway.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "DIFY_TOOL_OUTCOME_UNKNOWN" });
-    await expect(runtime.gateway.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "DIFY_TOOL_OUTCOME_UNKNOWN" });
+    await expect(runtime.gateway.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "DIFY_RUN_OUTCOME_UNKNOWN" });
+    await expect(runtime.gateway.invoke({ ...invocation(), toolCallId: "tool-call-2" }, { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "DIFY_RUN_OUTCOME_UNKNOWN" });
     expect(execute).toHaveBeenCalledTimes(1);
   });
 

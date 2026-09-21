@@ -1,0 +1,80 @@
+identity:
+  author: tongpin
+  label:
+    en_US: Invoke an authorized Tongpin tool
+    zh_Hans: 调用已授权的同频工具
+  name: invoke_tongpin_tool
+description:
+  human:
+    en_US: Runs a tool through Tongpin permission, quota, asset and idempotency checks.
+    zh_Hans: 通过同频的权限、额度、素材与幂等检查执行工具。
+  llm: Use only the named tool required by the task. A rejection or unknown result must be returned to the user; never retry it under another name.
+parameters:
+  - name: tool_name
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Tool name
+      zh_Hans: 工具名称
+    human_description:
+      en_US: A tool allowed by the current Tongpin authorization.
+      zh_Hans: 本次同频授权允许的工具。
+    llm_description: Select one tool explicitly allowed for this task.
+  - name: input_json
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Tool input JSON
+      zh_Hans: 工具参数 JSON
+    human_description:
+      en_US: Strict JSON arguments for the selected tool.
+      zh_Hans: 所选工具的严格 JSON 参数。
+    llm_description: Provide one strict JSON object. Do not include credentials, tenant ids or asset ids not supplied by the task.
+  - name: tenant_id
+    type: string
+    required: true
+    form: form
+    label: { en_US: Tenant binding, zh_Hans: 租户绑定 }
+    human_description: { en_US: Bind to the tongpin_tenant_id app input., zh_Hans: 绑定 tongpin_tenant_id 应用输入。 }
+  - name: user_id
+    type: string
+    required: true
+    form: form
+    label: { en_US: User binding, zh_Hans: 用户绑定 }
+    human_description: { en_US: Bind to the tongpin_user_id app input., zh_Hans: 绑定 tongpin_user_id 应用输入。 }
+  - name: conversation_id
+    type: string
+    required: true
+    form: form
+    label: { en_US: Conversation binding, zh_Hans: 会话绑定 }
+    human_description: { en_US: Bind to the tongpin_conversation_id app input., zh_Hans: 绑定 tongpin_conversation_id 应用输入。 }
+  - name: run_id
+    type: string
+    required: true
+    form: form
+    label: { en_US: Run binding, zh_Hans: 任务绑定 }
+    human_description: { en_US: Bind to the tongpin_run_id app input., zh_Hans: 绑定 tongpin_run_id 应用输入。 }
+  - name: attempt_id
+    type: string
+    required: true
+    form: form
+    label: { en_US: Attempt binding, zh_Hans: 尝试绑定 }
+    human_description: { en_US: Bind to the tongpin_attempt_id app input., zh_Hans: 绑定 tongpin_attempt_id 应用输入。 }
+  - name: source_asset_ids_json
+    type: string
+    required: true
+    default: "[]"
+    form: form
+    label: { en_US: Authorized source asset ids, zh_Hans: 已授权素材 ID }
+    human_description: { en_US: Bind the exact authorized asset id JSON array., zh_Hans: 绑定精确的已授权素材 ID JSON 数组。 }
+  - name: authorization
+    type: string
+    required: true
+    form: form
+    label: { en_US: Per-run authorization, zh_Hans: 单次任务授权 }
+    human_description: { en_US: Bind to tongpin_tool_authorization. Never expose it to the model., zh_Hans: 绑定 tongpin_tool_authorization，不向模型暴露。 }
+extra:
+  python:
+    source: tools/invoke_tongpin_tool.py

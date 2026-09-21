@@ -1,0 +1,10 @@
+[project]
+name = "tongpin-dify-gateway"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "dify_plugin==0.9.0",
+]
+
+[dependency-groups]
+dev = []

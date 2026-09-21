@@ -1,0 +1,30 @@
+version: 0.1.0
+type: plugin
+author: tongpin
+name: tongpin_gateway
+label:
+  en_US: Tongpin Controlled Tool Gateway
+  zh_Hans: 同频受控工具网关
+description:
+  en_US: Routes Dify Agent tool calls through Tongpin authorization, quota, asset and idempotency checks.
+  zh_Hans: 将 Dify Agent 工具调用送回同频进行授权、额度、素材与幂等校验。
+created_at: "2026-09-21T00:00:00.000000000Z"
+icon: icon.svg
+resource:
+  memory: 1048576
+  permission:
+    tool:
+      enabled: true
+plugins:
+  tools:
+    - provider/tongpin_gateway.yaml
+meta:
+  version: 0.0.2
+  minimum_dify_version: "1.14.2"
+  arch:
+    - amd64
+    - arm64
+  runner:
+    language: python
+    version: "3.12"
+    entrypoint: main
