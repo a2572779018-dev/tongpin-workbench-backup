@@ -13,6 +13,10 @@ function fixture() {
   state.artifacts = [{ id: "artifact-a", conversationId: "conversation-a", projectId: "project-a", title: "图片", kind: "图片", updatedLabel: "刚刚", summary: "结果", sections: [], data: { images: [{ assetId: "asset-a", mimeType: "image/png" }] } }];
   state.drafts = { "conversation-a": "待删除草稿", "conversation-b": "保留草稿" };
   state.draftAttachments = { "conversation-a": [{ id: "document-a", name: "资料.txt", mimeType: "text/plain", content: "资料" }] };
+  state.videoDraftSettings = {
+    "conversation-a": { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" },
+    "conversation-b": { seconds: 15, resolution: "768p", aspectRatio: "9:16" },
+  };
   state.activeConversationId = "conversation-a";
   state.activeProjectId = "project-a";
   return state;
@@ -59,6 +63,8 @@ describe("conversation generation/deletion race guards", () => {
     expect(next.conversations.map(item => item.id)).toEqual(["conversation-b"]);
     expect(next.artifacts).toEqual([]); expect(next.drafts).toEqual({ "conversation-b": "保留草稿" }); expect(next.draftAttachments).toEqual({});
     expect(state.conversations).toHaveLength(2); expect(state.drafts["conversation-a"]).toBe("待删除草稿");
+    expect(next.videoDraftSettings).toEqual({ "conversation-b": state.videoDraftSettings!["conversation-b"] });
+    expect(state.videoDraftSettings!["conversation-a"].model).toBe("sd-2.5-c1");
     expect(() => validateAiWorkspaceState(serializeWorkspace(next))).not.toThrow();
   });
 

@@ -49,6 +49,24 @@ describe("workspace serialized save queue", () => {
     expect(body.state.projects[0].title).toBe("原始");
     response.resolve(acknowledge(body)); await queue.flush(); expect(queue.isDirty()).toBe(false);
   });
+  it("persists video draft settings immutably and then acknowledges an explicit clear", async () => {
+    const response = deferred<AiWorkspaceSnapshot>();
+    const write = vi.fn<(body: AiWorkspaceSaveRequest) => Promise<AiWorkspaceSnapshot>>()
+      .mockImplementationOnce(() => response.promise).mockImplementation(async body => acknowledge(body));
+    const queue = new WorkspaceSaveQueue(initial(), write, vi.fn());
+    const desired = state();
+    desired.videoDraftSettings = { "new-conversation": { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" } };
+    queue.setState(desired); const saved = queue.flush();
+    desired.videoDraftSettings["new-conversation"].seconds = 5;
+    await Promise.resolve();
+    const body = write.mock.calls[0][0];
+    expect(body.state.videoDraftSettings?.["new-conversation"].seconds).toBe(30);
+    queue.setState({ ...desired, videoDraftSettings: {} }, { flush: false });
+    response.resolve(acknowledge(body)); await saved;
+    expect(write.mock.calls).toHaveLength(2);
+    expect(write.mock.calls[1][0].state.videoDraftSettings).toEqual({});
+    expect(queue.isDirty()).toBe(false);
+  });
   it("retries unknown results with the exact UUID and body before sending newer edits", async () => {
     const write = vi.fn<(body: AiWorkspaceSaveRequest) => Promise<AiWorkspaceSnapshot>>().mockRejectedValueOnce(new ApiRequestError(0, "NETWORK_UNAVAILABLE", "网络中断")).mockImplementation(async body => acknowledge(body));
     const queue = new WorkspaceSaveQueue(initial(), write, vi.fn());

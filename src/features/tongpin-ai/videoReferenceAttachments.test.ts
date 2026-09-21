@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
-import { videoReferencesFromAttachments } from "./videoReferenceAttachments";
+import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "./videoReferenceAttachments";
 
 const image = (name: string, dataUrl = "data:image/png;base64,aGVsbG8="): AiWorkspaceDocument => ({
   id: `image-${name}`,
@@ -21,6 +21,24 @@ describe("video reference attachment migration", () => {
         { name: "second.webp", dataUrl: second.media!.frames[0].dataUrl },
       ],
     });
+  });
+
+  it("round-trips clarification references as inert draft media without execution metadata", () => {
+    const references = [
+      { name: "first.png", dataUrl: "data:image/png;base64,aGVsbG8=" },
+      { name: "second.webp", dataUrl: "data:image/webp;base64,d29ybGQ=" },
+    ];
+    const drafts = videoReferenceDraftAttachments(references, "video-conversation-a");
+    expect(videoReferencesFromAttachments(drafts)).toEqual({ ok: true, images: references });
+    expect(drafts).toEqual([
+      expect.objectContaining({ id: "video-conversation-a-1", mimeType: "image/png" }),
+      expect.objectContaining({ id: "video-conversation-a-2", mimeType: "image/webp" }),
+    ]);
+    for (const draft of drafts) {
+      expect(draft).not.toHaveProperty("planRequestId");
+      expect(draft).not.toHaveProperty("trace");
+      expect(draft).not.toHaveProperty("referenceId");
+    }
   });
 
   it("fails closed for text and sampled-video attachments", () => {

@@ -21,7 +21,7 @@ export function AdminAiVideoSettings() {
   async function action(fn: () => Promise<void>) { if (busyRef.current) return; busyRef.current = true; setBusy(true); setNotice(""); try { await fn(); } catch (e) { setNotice(e instanceof Error ? e.message : "操作失败"); } finally { busyRef.current = false; setBusy(false); } }
   if (openedAccount.current !== account) return null;
   return <section className="tp-ai-admin-card" aria-label="视频生成接入">
-    <header className="tp-ai-admin-heading"><div><h2>视频生成</h2><p>75api · MiniMax H3 / SD 2.0 / SD 2.5</p></div></header>
+    <header className="tp-ai-admin-heading"><div><h2>视频生成与计费</h2><p>各档位的视频服务和模型在「服务与模型」中选择。</p></div></header>
     {!settings ? <p role="status">{notice || "读取配置中…"}</p> : <>
       <form onSubmit={e => { e.preventDefault(); void action(async () => {
         const selected = defaultModel ?? settings.defaultModel ?? "minimax_h3";
@@ -41,9 +41,11 @@ export function AdminAiVideoSettings() {
         }
       }); }}>
         <fieldset className="tp-ai-admin-fields" disabled={busy}>
+          <details className="tp-ai-provider-capabilities is-wide"><summary>旧版视频接入</summary><div className="tp-ai-admin-fields">
           <label className="tp-ai-admin-field">视频 API 地址<input readOnly value="https://www.75api.com/v1" /></label>
           <label className="tp-ai-admin-field">默认模型<select value={defaultModel ?? settings.defaultModel ?? "minimax_h3"} onChange={e => setDefaultModel(e.target.value as VideoModelId)}>{VIDEO_MODELS.map(m => <option key={m.id} value={m.id} disabled={!m.generationEnabled}>{m.label} · {m.id}{m.generationEnabled ? "" : "（暂不可用）"}</option>)}</select></label>
           <label className="tp-ai-admin-field">独立视频密钥<input type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} placeholder={settings.apiKeyConfigured ? "已在服务端安全保存，留空保留" : "粘贴好漫剧专用密钥"} /></label>
+          </div></details>
           <label className="tp-ai-admin-field">每段视频折算 · 同频点<input type="number" min="1" max="10000000" step="1" value={points} onChange={e => setPoints(e.target.value)} /></label>
           <label className="tp-ai-admin-toggle"><input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />启用视频生成</label>
         </fieldset>

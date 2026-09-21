@@ -40,6 +40,7 @@ export interface TongpinAIMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  analysisSummary?: string;
   time: string;
   /** Epoch milliseconds for a durable in-flight timer. */
   startedAt?: number;

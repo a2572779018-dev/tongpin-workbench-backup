@@ -43,10 +43,12 @@ export class ChatPreflightGate {
 export function withPreparedChatSend(latest: AiWorkspaceState, conversation: AiWorkspaceConversation, draftKey: string): AiWorkspaceState {
   const drafts = { ...latest.drafts };
   const draftAttachments = { ...latest.draftAttachments };
+  const videoDraftSettings = { ...latest.videoDraftSettings };
   // Missing and empty drafts hydrate identically. Removing the consumed entries
   // avoids accumulating thousands of empty keys and never deletes conversation data.
   delete drafts[draftKey];
   delete draftAttachments[draftKey];
+  delete videoDraftSettings[draftKey];
   return {
     ...latest,
     conversations: [conversation, ...latest.conversations.filter(item => item.id !== conversation.id)],
@@ -54,6 +56,7 @@ export function withPreparedChatSend(latest: AiWorkspaceState, conversation: AiW
     view: "chat",
     drafts,
     draftAttachments,
+    videoDraftSettings,
   };
 }
 

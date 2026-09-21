@@ -10,7 +10,7 @@ import type { AiRequestResult } from "../../shared/ai";
 import type { AiChatPreflight, AiChatRequest, AiChatResponse, AiHarnessTrace, AiImageRequest, AiImageResponse, AiStatus, AiToolPlan } from "../../shared/ai";
 import { aiVideoReferenceFingerprint } from "../../shared/aiVideoReferences";
 import { ChatPreflightGate, preflightNotice, sameSendContext, withPreparedChatSend } from "../features/tongpin-ai/chatPreflight";
-import type { AiWorkspaceDocument, AiWorkspaceSaveRequest, AiWorkspaceSnapshot } from "../../shared/aiWorkspace";
+import type { AiWorkspaceDocument, AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceVideoDraftSettings } from "../../shared/aiWorkspace";
 import { useWorkspacePersistence } from "../features/tongpin-ai/useWorkspacePersistence";
 import { liveConversation, withoutConversation } from "../features/tongpin-ai/conversationOperations";
 import { registerAiLeaveGuard } from "../features/tongpin-ai/workspaceLeaveGuard";
@@ -27,8 +27,9 @@ import { computerUseConversationRequestMessage, computerUsePlanningObservation, 
 import { buildChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence, typewriterDuration, TYPEWRITER_FRAME_MS } from "../features/tongpin-ai/chatPerformance";
 import { AI_DOWNLOAD_FEEDBACK_EVENT, saveBlobWithFeedback, type AiDownloadFeedback } from "../features/tongpin-ai/downloadFeedback";
-import { videoReferencesFromAttachments } from "../features/tongpin-ai/videoReferenceAttachments";
-import { persistedVideoChatRequest } from "../features/tongpin-ai/videoChat";
+import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "../features/tongpin-ai/videoReferenceAttachments";
+import { persistedVideoChatRequest, type VideoChatRequest } from "../features/tongpin-ai/videoChat";
+import { preserveVideoClarificationDraft } from "../features/tongpin-ai/videoDraftRecovery";
 import { hasConversationActivity } from "../features/tongpin-ai/conversationActivity";
 import { sameHarnessTrace } from "../features/tongpin-ai/runTracePolling";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
@@ -190,7 +191,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     initialSession.drafts,
   );
   const [draftAttachments, setDraftAttachments] = useState<Record<string, AiWorkspaceDocument[]>>(initialSession.draftAttachments ?? {});
+  const [videoDraftSettings, setVideoDraftSettings] = useState<Record<string, AiWorkspaceVideoDraftSettings>>(initialSession.videoDraftSettings ?? {});
   const [composerTool, setComposerTool] = useState<"text" | "presentation" | "image">(initialSession.composerTool ?? "text");
+  const [videoDispatchRequest, setVideoDispatchRequest] = useState<{ id: string; conversationId: string; prompt: string; request?: VideoChatRequest } | undefined>();
   const [webSearch, setWebSearch] = useState(false);
   const availability = useAiAvailability(api, user.id, composerTool === "image" ? "image" : "chat", setAiStatus);
   const availabilityScope = composerTool === "image" ? "image" : `${mode}:${webSearch ? "search" : "chat"}`;
@@ -203,6 +206,33 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       : "new-conversation");
   const draft = drafts[draftKey] ?? "";
   const attachments = draftAttachments[draftKey] ?? [];
+  const persistedVideoResumeRequest = useMemo(() => {
+    const settings = videoDraftSettings[draftKey];
+    if (!settings || settings.aspectRatio === "1:1") return undefined;
+    const references = videoReferencesFromAttachments(attachments);
+    if (!references.ok) return undefined;
+    const request: VideoChatRequest = {
+      requestId: `draft-${draftKey}`,
+      prompt: draft,
+      originalPrompt: draft,
+      model: settings.model,
+      seconds: settings.seconds,
+      resolution: settings.resolution,
+      aspectRatio: settings.aspectRatio,
+      ...(references.images.length ? { referenceImages: references.images } : {}),
+    };
+    return {
+      // Stable for this pending conversation draft: autosave, attachment
+      // hydration, or rerenders must not reopen a panel the member closed.
+      id: `video-draft:${draftKey}`,
+      conversationId: activeConversationId ?? draftKey,
+      prompt: draft,
+      request,
+    };
+  }, [activeConversationId, attachments, draft, draftKey, videoDraftSettings]);
+  const activeVideoDispatchRequest = videoDispatchRequest?.conversationId === activeConversationId
+    ? videoDispatchRequest
+    : persistedVideoResumeRequest;
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () =>
       initialSession.sidebarCollapsed ??
@@ -234,8 +264,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const announcementTimerRef = useRef<number | null>(null);
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null);
-  const workspaceRef = useRef({ conversations, projects, artifacts, drafts, draftAttachments, activeConversationId, activeProjectId, view, workspaceDialog });
-  workspaceRef.current = { conversations, projects, artifacts, drafts, draftAttachments, activeConversationId, activeProjectId, view, workspaceDialog };
+  const workspaceRef = useRef({ conversations, projects, artifacts, drafts, draftAttachments, videoDraftSettings, activeConversationId, activeProjectId, view, workspaceDialog });
+  workspaceRef.current = { conversations, projects, artifacts, drafts, draftAttachments, videoDraftSettings, activeConversationId, activeProjectId, view, workspaceDialog };
 
   useEffect(() => {
     mountedRef.current = true;
@@ -309,7 +339,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       }
     }
   }, [activeConversationId, computerBridgeAvailable, computerRequest, conversations, view]);
-  const sendContext = [draftKey, draft, draftAttachments[draftKey], mode, composerTool, webSearch,
+  const sendContext = [draftKey, draft, draftAttachments[draftKey], videoDraftSettings[draftKey], mode, composerTool, webSearch,
     activeConversation, activeProject, enabledSkillIds, persona.revision, view, workspaceDialog];
   const sendContextRef = useRef(sendContext);
   sendContextRef.current = sendContext;
@@ -317,7 +347,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     ? preflightNotice(budgetNotice.result) : undefined;
   useEffect(() => {
     if (preflightGate.cancelIfChanged(sendContextRef.current)) setCheckingQuota(false);
-  }, [preflightGate, draftKey, draft, draftAttachments, mode, composerTool, webSearch,
+  }, [preflightGate, draftKey, draft, draftAttachments, videoDraftSettings, mode, composerTool, webSearch,
     activeConversation, activeProject, enabledSkillIds, persona.revision, view, workspaceDialog]);
   const activeProjectConversations = activeProject
     ? conversations.filter(
@@ -352,13 +382,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       artifacts,
       drafts: persistentDrafts,
       draftAttachments,
+      videoDraftSettings,
       composerTool,
       webSearch,
       activeConversationId,
       activeProjectId,
       enabledSkillIds,
       sidebarCollapsed,
-    }), [view, mode, persistentConversations, projects, artifacts, persistentDrafts, draftAttachments,
+    }), [view, mode, persistentConversations, projects, artifacts, persistentDrafts, draftAttachments, videoDraftSettings,
       composerTool, webSearch, activeConversationId, activeProjectId, enabledSkillIds, sidebarCollapsed]);
   const writeWorkspace = useCallback((body: AiWorkspaceSaveRequest) => api<AiWorkspaceSnapshot>("/api/ai/workspace", {
     method: "PUT", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(body),
@@ -463,7 +494,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       : conversation));
   }
 
-  function beginComputerUse(originalPrompt: string) {
+  function beginComputerUse(originalPrompt: string, existingConversationId?: string) {
     if (!computerBridgeAvailable || !getComputerUseBridge()) {
       showAnnouncement("电脑控制只在同频桌面端中提供");
       return;
@@ -481,14 +512,17 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       return;
     }
 
-    const conversationId = activeConversation?.id ?? createLocalId("conversation");
+    const conversationId = existingConversationId ?? activeConversation?.id ?? createLocalId("conversation");
     const userMessage = {
       id: createLocalId("user"),
       role: "user" as const,
       content: computerUseConversationRequestMessage(originalPrompt),
       time: currentTimeLabel(),
     };
-    if (activeConversation) {
+    if (existingConversationId) {
+      // The dispatch turn already persisted the user's request. Continue from
+      // that same turn instead of inserting a duplicate user message.
+    } else if (activeConversation) {
       setConversations(current => current.map(conversation => conversation.id === conversationId
         ? { ...conversation, timeLabel: "刚刚", messages: [...conversation.messages, userMessage] }
         : conversation));
@@ -509,6 +543,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       return next;
     });
     setDraftAttachments(current => {
+      const next = { ...current };
+      delete next[draftKey];
+      delete next[conversationId];
+      return next;
+    });
+    setVideoDraftSettings(current => {
       const next = { ...current };
       delete next[draftKey];
       delete next[conversationId];
@@ -724,6 +764,10 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       if (!(pendingDraftKey in current)) return current;
       const next = { ...current, [id]: current[pendingDraftKey] }; delete next[pendingDraftKey]; return next;
     });
+    setVideoDraftSettings(current => {
+      if (!(pendingDraftKey in current)) return current;
+      const next = { ...current, [id]: current[pendingDraftKey] }; delete next[pendingDraftKey]; return next;
+    });
     setConversations((current) => [nextConversation, ...current]);
     setActiveConversationId(id);
     setActiveProjectId(projectId ?? null);
@@ -778,6 +822,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       return next;
     });
     setDraftAttachments(current => { const next = { ...current }; delete next[`new-project-conversation:${projectId}`]; return next; });
+    setVideoDraftSettings(current => { const next = { ...current }; delete next[`new-project-conversation:${projectId}`]; return next; });
     setConversations((current) =>
       current.map((conversation) =>
         conversation.projectId === projectId
@@ -843,6 +888,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         setArtifacts(next.artifacts);
         setDrafts(next.drafts);
         setDraftAttachments(next.draftAttachments);
+        setVideoDraftSettings(next.videoDraftSettings ?? {});
         if (latest.activeConversationId === conversationId) {
           setActiveConversationId(next.activeConversationId);
           setActiveProjectId(next.activeProjectId);
@@ -1022,6 +1068,37 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       const harnessPlanRequestId = typeof request === "string"
         ? persistedMessage?.harnessPlanRequestId
         : "prompt" in request ? request.planRequestId : request.toolPlanRequestId;
+      if (!("images" in response) && response.dispatch) {
+        const decision = response.dispatch;
+        if (decision.kind === "text" || decision.clarification) {
+          acceptGeneration(conversationId, messageId, { ...response, content: decision.kind === "text" ? decision.content : decision.clarification! });
+          return;
+        }
+        // Dispatch only classifies the already-persisted turn. Release its
+        // local lock before entering the real, independently validated plan.
+        requestRef.current.delete(conversationId);
+        pendingGenerationRef.current.delete(conversationId);
+        const originalPrompt = typeof request !== "string" && !("prompt" in request)
+          ? request.messages.filter(message => message.role === "user").at(-1)?.content ?? decision.prompt
+          : decision.prompt;
+        const continuation = { conversationId, messageId, originalPrompt };
+        if (decision.kind === "image" || decision.kind === "presentation") {
+          const plan = await planTool(decision.kind, decision.prompt, undefined, continuation);
+          if (plan) await sendMessage({ ...plan, originalPrompt }, continuation);
+          return;
+        }
+        clearReplyActivity(conversationId, messageId);
+        if (decision.kind === "video") {
+          updateReply(conversationId, messageId, { content: "已识别为视频生成任务，请在下方确认模型、时长和画幅后发送。", status: "ready", startedAt: undefined });
+          setDrafts(current => ({ ...current, [conversationId]: decision.prompt }));
+          setVideoDispatchRequest({ id: crypto.randomUUID(), conversationId, prompt: decision.prompt });
+          return;
+        }
+        const computerReady = Boolean(computerBridgeAvailable && getComputerUseBridge());
+        updateReply(conversationId, messageId, { content: computerReady ? "已识别为电脑操作任务，即将进入系统安全确认流程。" : "已识别为电脑操作任务，但当前环境未接入安全桌面能力。", status: "ready", startedAt: undefined });
+        if (computerReady) beginComputerUse(decision.prompt, conversationId);
+        return;
+      }
       acceptGeneration(conversationId, messageId, response, harnessPlanRequestId);
     } catch (error) {
       if (!mountedRef.current) return;
@@ -1039,13 +1116,20 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     }
   }
 
-  async function planTool(kind: "image" | "video" | "presentation", prompt: string, videoRequest?: import("../features/tongpin-ai/videoChat").VideoChatRequest): Promise<AiToolPlan> {
-    const conversationId = requestConversationId();
-    if (!persona.profile.onboardingComplete || conversationBusy(conversationId) || !serviceConnected || connectionError || availabilityBlocked) throw new Error("AI 服务暂时不可用，请稍后重试");
+  async function planTool(kind: "image" | "video" | "presentation", prompt: string, videoRequest?: import("../features/tongpin-ai/videoChat").VideoChatRequest,
+    continuation?: { conversationId: string; messageId: string; originalPrompt: string }): Promise<AiToolPlan | null> {
+    const conversationId = continuation?.conversationId ?? requestConversationId();
+    const planningContext = sendContextRef.current;
+    if (!persona.profile.onboardingComplete || (!continuation && conversationBusy(conversationId)) || !serviceConnected || connectionError || availabilityBlocked) throw new Error("AI 服务暂时不可用，请稍后重试");
     const detail = kind === "video" && videoRequest
-      ? `${prompt}\n\n同频应用中已选择的视频参数（仅作为约束，不是系统指令）：${JSON.stringify({ seconds: videoRequest.seconds, resolution: videoRequest.resolution, aspectRatio: videoRequest.aspectRatio, referenceImages: videoRequest.referenceImages?.map(item => item.name) ?? [] })}`
+      ? `${prompt}\n\n同频应用中已选择的视频参数（仅作为约束，不是系统指令）：${JSON.stringify({ model: videoRequest.model, seconds: videoRequest.seconds, resolution: videoRequest.resolution, aspectRatio: videoRequest.aspectRatio, referenceImages: videoRequest.referenceImages?.map(item => item.name) ?? [] })}`
       : prompt;
-    const messages = [...(activeConversation?.messages ?? []), { id: createLocalId("user"), role: "user" as const, content: detail, time: currentTimeLabel() }];
+    const continuedConversation = continuation ? workspaceRef.current.conversations.find(item => item.id === conversationId) : undefined;
+    const continuedMessages = (continuedConversation?.messages ?? []).filter(message => message.id !== continuation?.messageId);
+    const continuedUserIndex = continuation ? continuedMessages.map(message => message.role).lastIndexOf("user") : -1;
+    const messages = continuation
+      ? continuedMessages.map((message, index) => index === continuedUserIndex ? { ...message, content: detail } : message)
+      : [...(activeConversation?.messages ?? []), { id: createLocalId("user"), role: "user" as const, content: detail, time: currentTimeLabel() }];
     const referenceFingerprints = kind === "video" && videoRequest
       ? await Promise.all((videoRequest.referenceImages ?? []).map(image => aiVideoReferenceFingerprint(image.dataUrl)))
       : [];
@@ -1063,6 +1147,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       projectContext: activeProject?.instructions || undefined,
       outputFormat: kind === "video" ? "video_plan" : kind === "presentation" ? "presentation_plan" : "image_plan",
       ...(kind === "video" && videoRequest ? { videoParameters: {
+        model: videoRequest.model,
         seconds: videoRequest.seconds,
         resolution: videoRequest.resolution,
         aspectRatio: videoRequest.aspectRatio,
@@ -1079,6 +1164,64 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     if (!preflight.canSend) throw new Error(preflightNotice(preflight).message);
     const response = await api<AiChatResponse>("/api/ai/chat", { method: "POST", headers, body: JSON.stringify(request) }, 130_000);
     if (mountedRef.current) setAiStatus(current => current ? { ...current, quota: response.quota } : current);
+    const clarification = response.toolClarification?.trim();
+    if (clarification) {
+      if (!sameSendContext(planningContext, sendContextRef.current) || (!continuation && requestConversationId() !== conversationId) || (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId))) return null;
+      const latest = workspaceRef.current;
+      const current = latest.conversations.find(item => item.id === conversationId);
+      const preserveVideoDraft = (state: import("../../shared/aiWorkspace").AiWorkspaceState) =>
+        kind === "video" && videoRequest
+          ? preserveVideoClarificationDraft(state, conversationId, prompt, videoRequest)
+          : state;
+      if (continuation) {
+        if (!current?.messages.some(message => message.id === continuation.messageId)) return null;
+        const next = preserveVideoDraft({ ...persistentStateRef.current,
+          conversations: latest.conversations.map(item => item.id !== conversationId ? item : { ...item, messages: item.messages.map(message => message.id !== continuation.messageId ? message : {
+            ...message, requestId: response.requestId, content: clarification, status: "ready" as const, startedAt: undefined,
+            ...(response.trace ? { trace: response.trace } : {}),
+          }) }),
+        });
+        const saved = await persistenceRef.current.saveNow(next);
+        if (!saved) { showAnnouncement("AI 需要你补充信息，但记录尚未保存。请先恢复同步后重试。"); return null; }
+        if (!mountedRef.current) return null;
+        workspaceRef.current = { ...latest, conversations: next.conversations, drafts: next.drafts,
+          draftAttachments: next.draftAttachments ?? {}, videoDraftSettings: next.videoDraftSettings ?? {} };
+        persistentStateRef.current = next;
+        setConversations(next.conversations);
+        setDrafts(next.drafts); setDraftAttachments(next.draftAttachments ?? {}); setVideoDraftSettings(next.videoDraftSettings ?? {});
+        if (kind === "video" && videoRequest) setVideoDispatchRequest({ id: crypto.randomUUID(), conversationId, prompt, request: videoRequest });
+        clearReplyActivity(conversationId, continuation.messageId);
+        return null;
+      }
+      const conversation: TongpinAIConversation = {
+        ...(current ?? { id: conversationId, projectId: activeProject?.id, title: Array.from(prompt.split("\n")[0]).slice(0, 28).join("") }),
+        timeLabel: "刚刚",
+        messages: [...(current?.messages ?? []),
+          { id: createLocalId("user"), role: "user", content: prompt, time: currentTimeLabel(), ...(attachments.length ? { attachments } : {}) },
+          { id: createLocalId("assistant"), requestId: response.requestId, role: "assistant", content: clarification, status: "ready", time: currentTimeLabel(), ...(response.trace ? { trace: response.trace } : {}) }],
+      };
+      const next = preserveVideoDraft(withPreparedChatSend({ ...persistentStateRef.current,
+        conversations: latest.conversations, projects: latest.projects, artifacts: latest.artifacts,
+        drafts: latest.drafts, draftAttachments: latest.draftAttachments, videoDraftSettings: latest.videoDraftSettings, activeProjectId: latest.activeProjectId,
+      }, conversation, draftKey));
+      try { ensureAttachmentWorkspaceCapacity(next, "reply"); setCapacityNotice(null); }
+      catch (error) {
+        if (error instanceof WorkspaceCapacityError) setCapacityNotice(error.message);
+        else showAnnouncement(error instanceof Error ? error.message : "保存空间不足，原输入已保留");
+        return null;
+      }
+      const saved = await persistenceRef.current.saveNow(next);
+      if (!saved) { showAnnouncement("AI 需要你补充信息，但记录尚未保存，原输入已保留。请先恢复同步后重试。"); return null; }
+      if (!mountedRef.current) return null;
+      workspaceRef.current = { ...latest, conversations: next.conversations, drafts: next.drafts,
+        draftAttachments: next.draftAttachments ?? {}, videoDraftSettings: next.videoDraftSettings ?? {}, activeConversationId: conversationId, view: "chat" };
+      persistentStateRef.current = next;
+      setConversations(next.conversations); setActiveConversationId(conversationId); setView("chat");
+      setDrafts(next.drafts); setDraftAttachments(next.draftAttachments ?? {}); setVideoDraftSettings(next.videoDraftSettings ?? {});
+      if (kind === "video" && videoRequest) setVideoDispatchRequest({ id: crypto.randomUUID(), conversationId, prompt, request: videoRequest });
+      draftConversationIdsRef.current.delete(draftKey);
+      return null;
+    }
     if (!response.toolPlan || response.toolPlan.kind !== kind) throw new Error("同频 AI 没有返回可确认的生成方案，请重新整理任务");
     return { ...response.toolPlan, planRequestId: response.requestId, ...(response.trace ? { trace: response.trace } : {}) };
   }
@@ -1124,11 +1267,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     const latest = workspaceRef.current;
     const next = withPreparedChatSend({ ...persistentStateRef.current,
       conversations: latest.conversations, projects: latest.projects, drafts: latest.drafts,
-      draftAttachments: latest.draftAttachments, activeProjectId: latest.activeProjectId,
+      draftAttachments: latest.draftAttachments, videoDraftSettings: latest.videoDraftSettings, activeProjectId: latest.activeProjectId,
       artifacts: [artifact, ...latest.artifacts] }, conversation, draftKey);
     if (importOnly) {
       next.drafts = draftKey === conversationId ? latest.drafts : { ...latest.drafts, [conversationId]: latest.drafts[draftKey] ?? "", [draftKey]: "" };
       next.draftAttachments = latest.draftAttachments;
+      next.videoDraftSettings = latest.videoDraftSettings;
     }
     try { ensureAttachmentWorkspaceCapacity(next, "video"); }
     catch (e) { showAnnouncement(e instanceof Error ? e.message : "记录空间不足"); return false; }
@@ -1136,12 +1280,13 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     pendingCancelledRef.current.delete(conversationId);
     setReplyActivity(conversationId, messageId, "waiting");
     workspaceRef.current = { ...latest, conversations: next.conversations, artifacts: next.artifacts, drafts: next.drafts,
-      draftAttachments: next.draftAttachments ?? {}, activeConversationId: conversationId, view: "chat" };
+      draftAttachments: next.draftAttachments ?? {}, videoDraftSettings: next.videoDraftSettings ?? {}, activeConversationId: conversationId, view: "chat" };
     persistentStateRef.current = next;
     setConversations(next.conversations); setArtifacts(next.artifacts); setDrafts(next.drafts);
-    setDraftAttachments(next.draftAttachments ?? {}); setActiveConversationId(conversationId); setView("chat");
+    setDraftAttachments(next.draftAttachments ?? {}); setVideoDraftSettings(next.videoDraftSettings ?? {}); setActiveConversationId(conversationId); setView("chat");
     draftConversationIdsRef.current.delete(draftKey);
     let posted = false;
+    let keepComposerOpen = false;
     try {
       const saved = await persistenceRef.current.saveNow(next);
       if (!mountedRef.current) return true;
@@ -1153,6 +1298,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       const { referenceImages: _referenceImages, originalPrompt: _originalPrompt, planSummary: _planSummary, planTrace: _planTrace, ...wireRequest } = preparedRequest;
       posted = true;
       await api("/api/ai/videos", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(wireRequest) }, 80000);
+      setVideoDispatchRequest(undefined);
     } catch (e) {
       if (mountedRef.current) {
         const rejected = !posted || e instanceof ApiRequestError && [400, 401, 402, 403, 409, 413, 429].includes(e.status);
@@ -1161,10 +1307,20 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           const current = workspaceRef.current;
           const nextConversations = replaceChatMessage(current.conversations, conversationId, messageId, { status: "ready", content: "视频未提交，原设置和参考图片已保留。" });
           const nextArtifacts = current.artifacts.map(item => item.id === artifactId ? { ...item, data: { ...item.data, videoSubmitError: message } } : item);
-          const failedState = { ...persistentStateRef.current, conversations: nextConversations, artifacts: nextArtifacts };
-          workspaceRef.current = { ...current, conversations: nextConversations, artifacts: nextArtifacts };
+          const nextDraftAttachments = { ...current.draftAttachments, [conversationId]: videoReferenceDraftAttachments(request.referenceImages ?? [], `video-reference-${conversationId}`) };
+          const nextVideoDraftSettings = { ...current.videoDraftSettings, [conversationId]: {
+            model: request.model, seconds: request.seconds, resolution: request.resolution, aspectRatio: request.aspectRatio,
+          } };
+          const nextDrafts = { ...current.drafts, [conversationId]: request.originalPrompt ?? request.prompt };
+          const failedState = { ...persistentStateRef.current, conversations: nextConversations, artifacts: nextArtifacts,
+            drafts: nextDrafts, draftAttachments: nextDraftAttachments, videoDraftSettings: nextVideoDraftSettings };
+          workspaceRef.current = { ...current, conversations: nextConversations, artifacts: nextArtifacts,
+            drafts: nextDrafts, draftAttachments: nextDraftAttachments, videoDraftSettings: nextVideoDraftSettings };
           persistentStateRef.current = failedState;
-          setConversations(nextConversations); setArtifacts(nextArtifacts);
+          setConversations(nextConversations); setArtifacts(nextArtifacts); setDrafts(nextDrafts);
+          setDraftAttachments(nextDraftAttachments); setVideoDraftSettings(nextVideoDraftSettings);
+          setVideoDispatchRequest({ id: crypto.randomUUID(), conversationId, prompt: request.originalPrompt ?? request.prompt, request });
+          keepComposerOpen = true;
           try { await persistenceRef.current.saveNow(failedState); } catch { /* visible retry state remains local */ }
         } else updateReply(conversationId, messageId, { status: "ready", content: "提交结果正在核对，请勿重复生成。下方只查询原任务。" });
       }
@@ -1173,7 +1329,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       pendingCancelledRef.current.delete(conversationId);
       if (mountedRef.current) { clearReplyActivity(conversationId, messageId); void refreshStatus(); }
     }
-    return true;
+    return !keepComposerOpen;
   }
 
   async function useVideoHistory(jobId: string): Promise<boolean> {
@@ -1183,34 +1339,38 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     return sendVideo({ requestId: job.id, prompt: job.prompt, seconds: job.seconds, resolution: job.resolution, aspectRatio: job.aspectRatio }, true);
   }
 
-  async function sendMessage(approvedPlan?: AiToolPlan & { originalPrompt: string }) {
-    if (!persona.profile.onboardingComplete || (!draft.trim() && !attachments.length) || preflightGate.busy || fileImportRef.current || quotaInsufficient || !serviceConnected || connectionError || availabilityBlocked) return;
+  async function sendMessage(approvedPlan?: AiToolPlan & { originalPrompt: string }, continuation?: { conversationId: string; messageId: string; originalPrompt: string }) {
+    const generationTool = approvedPlan?.kind === "image" || approvedPlan?.kind === "presentation" ? approvedPlan.kind : composerTool;
+    if (!persona.profile.onboardingComplete || !continuation && !draft.trim() && !attachments.length || preflightGate.busy || fileImportRef.current || quotaInsufficient || !serviceConnected || connectionError || availabilityBlocked) return;
     if (activeConversationId && !liveConversation(workspaceRef.current, deletingConversationRef.current, activeConversationId)) {
       showAnnouncement("此对话正在删除或已被删除，请选择其他对话"); return;
     }
     if (persistence.status === "conflict" || persistence.status === "error") { showAnnouncement("请先完成记录同步，再发送消息"); return; }
-    if (composerTool === "image" && (!aiStatus?.imageEnabled || attachments.length || webSearch)) {
+    if (generationTool === "image" && (!aiStatus?.imageEnabled || attachments.length || webSearch)) {
       showAnnouncement(!aiStatus?.imageEnabled ? "请管理员先配置图片生成功能" : "图片生成暂不支持附件和联网，请先移除或切回对话"); return;
     }
     if (webSearch && !aiStatus?.webSearchEnabled) { showAnnouncement("请关闭联网搜索，或联系管理员启用"); return; }
-    if (composerTool === "image" && (!approvedPlan || approvedPlan.kind !== "image")) { showAnnouncement("请先让同频 AI 整理图片任务，再确认生成"); return; }
-    if (composerTool === "presentation" && (!approvedPlan || approvedPlan.kind !== "presentation" || !approvedPlan.planRequestId)) { showAnnouncement("请先让同频 AI 整理 PPT 任务，再确认生成"); return; }
-    const conversationId = requestConversationId();
-    if (conversationBusy(conversationId)) return;
-    const content = (approvedPlan?.originalPrompt ?? draft.trim()) || "请分析附件中的内容。视频仅需分析提供的采样画面，不推测未提供的声音和画面。";
-    const messageId = createLocalId("assistant");
+    if (generationTool === "image" && (!approvedPlan || approvedPlan.kind !== "image")) { showAnnouncement("图片生成需要先完成 AI 规划"); return; }
+    if (generationTool === "presentation" && (!approvedPlan || approvedPlan.kind !== "presentation" || !approvedPlan.planRequestId)) { showAnnouncement("PPT 生成需要先完成 AI 规划"); return; }
+    const conversationId = continuation?.conversationId ?? requestConversationId();
+    if (!continuation && conversationBusy(conversationId)) return;
+    const content = (continuation?.originalPrompt ?? approvedPlan?.originalPrompt ?? draft.trim()) || "请分析附件中的内容。视频仅需分析提供的采样画面，不推测未提供的声音和画面。";
+    const messageId = continuation?.messageId ?? createLocalId("assistant");
     const requestId = crypto.randomUUID();
-    const messages = [...(activeConversation?.messages ?? []), { id: createLocalId("user"), role: "user" as const, content, time: currentTimeLabel(), ...(attachments.length ? { attachments } : {}) }];
+    const continuedConversation = continuation ? workspaceRef.current.conversations.find(item => item.id === conversationId) : undefined;
+    const messages = continuation
+      ? (continuedConversation?.messages ?? []).filter(message => message.id !== messageId)
+      : [...(activeConversation?.messages ?? []), { id: createLocalId("user"), role: "user" as const, content, time: currentTimeLabel(), ...(attachments.length ? { attachments } : {}) }];
     let request: GenerationRequest;
     try {
       // Prior attachments stay as untrusted source material for follow-up questions.
-      const documentPayload = composerTool === "image" ? [] : toolAttachmentContext(attachments, activeProject?.contextDocuments ?? [], activeConversation?.messages ?? []);
+      const documentPayload = generationTool === "image" ? [] : toolAttachmentContext(attachments, activeProject?.contextDocuments ?? [], continuation ? messages : activeConversation?.messages ?? []);
       if (documentPayload.some(item => item.dataUrl) && !aiStatus?.visionEnabled) throw new Error("管理员尚未启用图片理解，请联系管理员启用支持视觉输入的模型");
-      const requestMessages = composerTool === "presentation" && approvedPlan
+      const requestMessages = generationTool === "presentation" && approvedPlan
         ? [...messages.slice(0, -1), { ...messages[messages.length - 1], content: approvedPlan.prompt }]
         : messages;
       const workflowId = mentionedWorkflowId(content);
-      request = composerTool === "image" ? {
+      request = generationTool === "image" ? {
         requestId,
         conversationId,
         prompt: approvedPlan!.prompt,
@@ -1221,8 +1381,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         skillIds: workflowSkillIds(content) ?? (mentionedSkillIds(content).length ? mentionedSkillIds(content) : skillRequestIds(enabledSkillIds)),
         ...(workflowId ? { workflowId } : {}),
         projectContext: activeProject?.instructions || undefined,
-        attachments: documentPayload, outputFormat: composerTool === "presentation" ? "presentation" : "text",
-        ...(composerTool === "presentation" ? { toolPlanRequestId: approvedPlan!.planRequestId } : {}), webSearchMode: "auto",
+        attachments: documentPayload, outputFormat: generationTool === "presentation" ? "presentation" : generationTool === "text" ? "dispatch" : "text",
+        ...(generationTool === "presentation" ? { toolPlanRequestId: approvedPlan!.planRequestId } : {}), webSearchMode: "auto",
       };
     } catch (error) { showAnnouncement(error instanceof Error ? error.message : "内容超出限制"); return; }
     // Check before saving a sent message, clearing the draft or calling a provider.
@@ -1265,18 +1425,19 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     if (persistenceRef.current.status === "conflict" || persistenceRef.current.status === "error") {
       showAnnouncement("请先完成记录同步，再发送消息。草稿已保留。"); return;
     }
-    const conversation: TongpinAIConversation = {
-      ...(activeConversation ?? { id: conversationId, projectId: activeProject?.id, title: Array.from(content.split("\n")[0]).slice(0, 28).join("") }),
-      timeLabel: "刚刚", messages: [...messages, { id: messageId, requestId, role: "assistant", content: "", status: "thinking", startedAt: Date.now(), time: currentTimeLabel(),
-        ...(approvedPlan?.planRequestId ? { harnessPlanRequestId: approvedPlan.planRequestId } : {}),
-        ...(approvedPlan?.trace ? { trace: approvedPlan.trace } : {}) }],
-    };
     const latest = workspaceRef.current;
-    const nextState = withPreparedChatSend({ ...persistentStateRef.current,
+    const pendingReply = { id: messageId, requestId, role: "assistant" as const, content: "", status: "thinking" as const, startedAt: Date.now(), time: currentTimeLabel(),
+      ...(approvedPlan?.planRequestId ? { harnessPlanRequestId: approvedPlan.planRequestId } : {}),
+      ...(approvedPlan?.trace ? { trace: approvedPlan.trace } : {}) };
+    const conversation: TongpinAIConversation = continuation
+      ? { ...continuedConversation!, timeLabel: "刚刚", messages: [...messages, pendingReply] }
+      : { ...(activeConversation ?? { id: conversationId, projectId: activeProject?.id, title: Array.from(content.split("\n")[0]).slice(0, 28).join("") }), timeLabel: "刚刚", messages: [...messages, pendingReply] };
+    const baseState = { ...persistentStateRef.current,
       conversations: latest.conversations, projects: latest.projects, artifacts: latest.artifacts,
-      drafts: latest.drafts, draftAttachments: latest.draftAttachments,
-      activeProjectId: latest.activeProjectId,
-    }, conversation, draftKey);
+      drafts: latest.drafts, draftAttachments: latest.draftAttachments, videoDraftSettings: latest.videoDraftSettings, activeProjectId: latest.activeProjectId };
+    const nextState = continuation
+      ? { ...baseState, conversations: [conversation, ...latest.conversations.filter(item => item.id !== conversationId)] }
+      : withPreparedChatSend(baseState, conversation, draftKey);
     try { ensureAttachmentWorkspaceCapacity(nextState, "reply"); setCapacityNotice(null); }
     catch (error) {
       if (error instanceof WorkspaceCapacityError) setCapacityNotice(error.message);
@@ -1287,13 +1448,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     pendingCancelledRef.current.delete(conversationId);
     setReplyActivity(conversationId, messageId, "waiting");
     workspaceRef.current = { ...latest, conversations: nextState.conversations, drafts: nextState.drafts,
-      draftAttachments: nextState.draftAttachments ?? {}, activeConversationId: conversationId, view: "chat" };
+      draftAttachments: nextState.draftAttachments ?? {}, videoDraftSettings: nextState.videoDraftSettings ?? {}, activeConversationId: conversationId, view: "chat" };
     persistentStateRef.current = nextState;
     setConversations(nextState.conversations);
     setActiveConversationId(conversationId);
     setView("chat");
     setDrafts(nextState.drafts);
     setDraftAttachments(nextState.draftAttachments ?? {});
+    setVideoDraftSettings(nextState.videoDraftSettings ?? {});
     draftConversationIdsRef.current.delete(draftKey);
     const saved = await persistenceRef.current.saveNow(nextState);
     if (!mountedRef.current) { pendingGenerationRef.current.delete(conversationId); return; }
@@ -1527,6 +1689,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onPlanTool={planTool}
           onSubmitVideo={sendVideo}
           onUseVideoHistory={useVideoHistory}
+          videoDispatchRequest={activeVideoDispatchRequest}
           computerAvailable={computerBridgeAvailable}
           computerRequest={computerRequest ? { id: computerRequest.id, originalPrompt: computerRequest.originalPrompt } : undefined}
           onOpenComputer={beginComputerUse}

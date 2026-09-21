@@ -5,7 +5,7 @@ import type {
   TongpinAIProject,
   TongpinAIWorkspaceView,
 } from "./types";
-import type { AiWorkspaceDocument, AiWorkspaceState } from "../../../shared/aiWorkspace";
+import type { AiWorkspaceDocument, AiWorkspaceState, AiWorkspaceVideoDraftSettings } from "../../../shared/aiWorkspace";
 
 export interface TongpinAIWorkspaceSession {
   view: TongpinAIWorkspaceView;
@@ -19,6 +19,7 @@ export interface TongpinAIWorkspaceSession {
   enabledSkillIds: Set<string>;
   sidebarCollapsed?: boolean;
   draftAttachments?: Record<string, AiWorkspaceDocument[]>;
+  videoDraftSettings?: Record<string, AiWorkspaceVideoDraftSettings>;
   composerTool?: "text" | "presentation" | "image";
   webSearch?: boolean;
 }
@@ -53,17 +54,26 @@ export function saveWorkspaceSession(
 }
 
 export function serializeWorkspace(session: TongpinAIWorkspaceSession): AiWorkspaceState {
-  const { draftAttachments: _sessionDraftAttachments, ...sessionWithoutDraftAttachments } = session;
+  const { draftAttachments: _sessionDraftAttachments, videoDraftSettings: _sessionVideoDraftSettings, ...sessionWithoutDrafts } = session;
   const drafts = Object.fromEntries(
     Object.entries(session.drafts).filter(([, value]) => value.length > 0),
   );
   const draftAttachments = session.draftAttachments
     ? Object.fromEntries(Object.entries(session.draftAttachments).filter(([, value]) => value.length > 0))
     : undefined;
+  // Keep preferences even before a prompt is typed. Never persist transient
+  // request/approval state alongside these harmless per-conversation choices.
+  const videoDraftSettings = Object.fromEntries(Object.entries(session.videoDraftSettings ?? {}).map(([key, value]) => [key, {
+      ...(value.model ? { model: value.model } : {}),
+      seconds: value.seconds, resolution: value.resolution, aspectRatio: value.aspectRatio,
+    }]));
   return {
-    ...sessionWithoutDraftAttachments,
+    ...sessionWithoutDrafts,
     drafts,
     ...(draftAttachments && Object.keys(draftAttachments).length ? { draftAttachments } : {}),
+    // An explicit empty map distinguishes a new client clearing its drafts
+    // from an older client that does not know this field yet.
+    videoDraftSettings,
     enabledSkillIds: [...session.enabledSkillIds].sort(),
   };
 }

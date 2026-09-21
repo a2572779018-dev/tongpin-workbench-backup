@@ -1,199 +1,207 @@
 import { Activity, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import {
-  AI_BUSINESS_TIERS,
-  AI_BUSINESS_TIER_LABELS,
-  type AiHarnessCapability,
-  type AiHarnessConfig,
-  type AiHarnessInput,
-  type AiHarnessProviderInput,
-  type AiHarnessTierRoute,
-  type AiMode,
-  type AiProviderTestResult,
+  AI_BUSINESS_TIERS, AI_BUSINESS_TIER_LABELS,
+  type AiHarnessCapability, type AiHarnessConfig, type AiHarnessInput, type AiHarnessProviderConfig,
+  type AiHarnessProviderInput, type AiHarnessTierRoute, type AiMode,
 } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
 import { adminAiErrorMessage, normalizeAiBaseUrl } from "./adminAiForms";
+import { planModelDiscovery } from "./adminAiModels";
+import { AdminAiModelSelect } from "./AdminAiModelSelect";
 
 const CAPABILITIES: Array<[AiHarnessCapability, string]> = [
   ["vision", "图片理解"], ["web_search", "自动联网"], ["image", "生成图片"], ["video", "生成视频"],
   ["presentation", "生成 PPT"], ["computer", "控制电脑"],
 ];
-
-const emptyRoute = (providerId = "primary"): AiHarnessTierRoute => ({
-  providerId, modelId: "", protocol: "chat_completions", maxOutputTokens: 2048,
-  reasoningEffort: "", capabilities: ["chat"], enabled: true,
-});
-
+const emptyRoute = (): AiHarnessTierRoute => ({ providerId: "primary", modelId: "", protocol: "chat_completions", maxOutputTokens: 2048, reasoningEffort: "", capabilities: ["chat"], enabled: true });
 const emptyInput = (): AiHarnessInput => ({
   providers: [{ id: "primary", name: "主要 AI 服务", baseUrl: "", protocol: "chat_completions", enabled: true }],
   tiers: Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, emptyRoute()])) as Record<AiMode, AiHarnessTierRoute>,
   policy: { strategy: "react", maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
 });
-
 function editable(config: AiHarnessConfig | null): AiHarnessInput {
   if (!config) return emptyInput();
   return {
     providers: config.providers.map(({ apiKeyConfigured: _key, modelsVerified: _verified, availableModels: _models, modelsVerifiedAt: _at, ...provider }) => provider),
-    tiers: structuredClone(config.tiers),
-    policy: { ...config.policy, requireApproval: true },
+    tiers: structuredClone(config.tiers), policy: { ...config.policy, requireApproval: true },
   };
 }
 
-export function AdminAiHarnessSettings() {
-  const { api } = useAuth();
-  const id = useId();
+export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (config: AiHarnessConfig | null) => void }) {
+  const { api } = useAuth(); const id = useId();
   const [saved, setSaved] = useState<AiHarnessConfig | null>(null);
   const [draft, setDraft] = useState<AiHarnessInput>(emptyInput);
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [discovered, setDiscovered] = useState<Record<string, string[]>>({});
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [version, setVersion] = useState(0);
+  const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true), [loadFailed, setLoadFailed] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null), busyRef = useRef(false);
+  const connectionRevisions = useRef<Record<string, number>>({});
+  const [error, setError] = useState(""), [notice, setNotice] = useState("");
+  const [version, setVersion] = useState(0), [activeTier, setActiveTier] = useState<AiMode>("quick");
 
   useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true); setError("");
-    api<{ harness: AiHarnessConfig | null }>("/api/admin/ai/harness", { signal: controller.signal })
-      .then(({ harness }) => {
-        if (controller.signal.aborted) return;
-        setSaved(harness); setDraft(editable(harness)); setKeys({});
-        setDiscovered(Object.fromEntries((harness?.providers ?? []).map(provider => [provider.id, provider.availableModels])));
-      })
-      .catch((caught: unknown) => { if (!controller.signal.aborted) setError(adminAiErrorMessage(caught, "业务档位读取失败，请重试。")); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    const controller = new AbortController(); setLoading(true); setLoadFailed(false); setError("");
+    api<{ harness: AiHarnessConfig | null }>("/api/admin/ai/harness", { signal: controller.signal }).then(({ harness }) => {
+      if (controller.signal.aborted) return;
+      setSaved(harness); setDraft(editable(harness)); setKeys({}); setProviderErrors({});
+      onConfigured?.(harness);
+      setDiscovered(Object.fromEntries((harness?.providers ?? []).map(provider => [provider.id, provider.availableModels])));
+    }).catch((caught: unknown) => {
+      if (!controller.signal.aborted) { setLoadFailed(true); setError(adminAiErrorMessage(caught, "服务与模型读取失败，请重试。")); }
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [api, version]);
+  }, [api, version, onConfigured]);
 
-  function updateProvider(index: number, patch: Partial<AiHarnessProviderInput>) {
-    setDraft(current => {
-      const previous = current.providers[index];
-      const nextId = patch.id ?? previous.id;
-      return {
-        ...current,
-        providers: current.providers.map((provider, item) => item === index ? { ...provider, ...patch } : provider),
-        tiers: Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, {
-          ...current.tiers[tier],
-          ...(patch.id !== undefined && current.tiers[tier].providerId === previous.id ? { providerId: nextId } : {}),
-          ...(patch.id !== undefined && current.tiers[tier].imageProviderId === previous.id ? { imageProviderId: nextId } : {}),
-          ...(patch.id !== undefined && current.tiers[tier].videoProviderId === previous.id ? { videoProviderId: nextId } : {}),
-          ...(patch.protocol !== undefined && current.tiers[tier].providerId === previous.id ? { protocol: patch.protocol } : {}),
-        }])) as Record<AiMode, AiHarnessTierRoute>,
-      };
-    });
-    setNotice(""); setError("");
+  function updateProvider(providerId: string, patch: Partial<AiHarnessProviderInput>) {
+    setDraft(current => ({ ...current,
+      providers: current.providers.map(provider => provider.id === providerId ? { ...provider, ...patch } : provider),
+      tiers: Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, { ...current.tiers[tier],
+        ...(patch.protocol !== undefined && current.tiers[tier].providerId === providerId ? { protocol: patch.protocol } : {}),
+      }])) as Record<AiMode, AiHarnessTierRoute>,
+    }));
+    if (patch.baseUrl !== undefined) {
+      connectionRevisions.current[providerId] = (connectionRevisions.current[providerId] ?? 0) + 1;
+      setDiscovered(current => ({ ...current, [providerId]: [] }));
+    }
+    setProviderErrors(current => ({ ...current, [providerId]: "" })); setNotice(""); setError("");
   }
-
   function updateTier(tier: AiMode, patch: Partial<AiHarnessTierRoute>) {
     setDraft(current => ({ ...current, tiers: { ...current.tiers, [tier]: { ...current.tiers[tier], ...patch } } }));
     setNotice(""); setError("");
   }
-
   async function discover(provider: AiHarnessProviderInput) {
-    if (busy || loading) return;
-    setBusy(`discover:${provider.id}`); setError(""); setNotice("");
+    if (busyRef.current || loading) return;
+    const plan = planModelDiscovery(provider, keys[provider.id] ?? "", saved);
+    if (plan.error) { setProviderErrors(current => ({ ...current, [provider.id]: plan.error })); return; }
+    busyRef.current = true; setBusy(`discover:${provider.id}`); setError(""); setNotice("");
+    const revision = connectionRevisions.current[provider.id] ?? 0;
+    setProviderErrors(current => ({ ...current, [provider.id]: "" }));
     try {
-      let models: string[];
-      const savedProvider = saved?.providers.find(item => item.id === provider.id);
-      if (!keys[provider.id]?.trim() && savedProvider?.apiKeyConfigured && saved?.migratedFromLegacy === false) {
-        const result = await api<{ models: string[] }>(`/api/admin/ai/harness/providers/${encodeURIComponent(provider.id)}/discover`, { method: "POST" }, 30_000);
-        models = result.models;
-      } else {
-        if (!keys[provider.id]?.trim()) throw new Error("首次读取模型时请填写 API Key。");
-        const result = await api<AiProviderTestResult>("/api/admin/ai/provider/test", {
-          method: "POST",
-          body: JSON.stringify({ target: "chat", baseUrl: normalizeAiBaseUrl(provider.baseUrl), apiKey: keys[provider.id].trim() }),
-        }, 30_000);
-        models = result.models;
-      }
-      setDiscovered(current => ({ ...current, [provider.id]: models }));
-      setNotice(`已读取 ${models.length} 个模型，仅查询列表，未生成内容。`);
-    } catch (caught) { setError(adminAiErrorMessage(caught, "模型列表读取失败，请核对 API 地址和密钥。")); }
-    finally { setBusy(null); }
+      const result = await api<{ models: string[] }>(plan.path!, { method: "POST", ...(plan.body ? { body: JSON.stringify(plan.body) } : {}) }, 30_000);
+      if ((connectionRevisions.current[provider.id] ?? 0) !== revision) return;
+      setDiscovered(current => ({ ...current, [provider.id]: result.models }));
+      setNotice(`${provider.name}：已读取 ${result.models.length} 个模型。`);
+      if (!result.models.length) setProviderErrors(current => ({ ...current, [provider.id]: "此密钥没有返回可选模型，请核对服务商模型权限。" }));
+    } catch (caught) { if ((connectionRevisions.current[provider.id] ?? 0) === revision) setProviderErrors(current => ({ ...current, [provider.id]: adminAiErrorMessage(caught, "模型列表读取失败，请核对这个服务的地址和密钥。") })); }
+    finally { busyRef.current = false; setBusy(null); }
   }
-
+  function discoverIfNeeded(providerId: string) {
+    const provider = draft.providers.find(item => item.id === providerId);
+    if (provider && !discovered[providerId]?.length && !providerErrors[providerId]) void discover(provider);
+  }
   async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (busy || loading) return;
-    setBusy("save"); setError(""); setNotice("");
+    event.preventDefault(); if (busyRef.current || loading || loadFailed) return;
+    for (const provider of draft.providers) {
+      const plan = planModelDiscovery(provider, keys[provider.id] ?? "", saved);
+      if (plan.error) { setError(`${provider.name}：${plan.error}`); return; }
+    }
+    for (const tier of AI_BUSINESS_TIERS) {
+      const route = draft.tiers[tier];
+      if (!route.modelId) { setActiveTier(tier); setError(`请为${AI_BUSINESS_TIER_LABELS[tier]}选择文字模型。`); return; }
+      for (const capability of ["image", "video"] as const) {
+        if ((route.capabilities.includes(capability) || route[`${capability}ProviderId`] || route[`${capability}ModelId`]) && (!route[`${capability}ProviderId`] || !route[`${capability}ModelId`])) {
+          setActiveTier(tier); setError(`请为${AI_BUSINESS_TIER_LABELS[tier]}选择${capability === "image" ? "图片" : "视频"}服务和模型。`); return;
+        }
+      }
+    }
+    busyRef.current = true; setBusy("save"); setError(""); setNotice("");
     try {
-      const payload: AiHarnessInput = {
-        ...draft,
+      const payload: AiHarnessInput = { ...draft,
         providers: draft.providers.map(provider => ({ ...provider, baseUrl: normalizeAiBaseUrl(provider.baseUrl), ...(keys[provider.id]?.trim() ? { apiKey: keys[provider.id].trim() } : {}) })),
         policy: { ...draft.policy, requireApproval: true },
       };
-      const result = await api<{ harness: AiHarnessConfig }>("/api/admin/ai/harness", { method: "PUT", body: JSON.stringify(payload) });
-      const verified: Record<string, string[]> = {};
-      for (const provider of result.harness.providers.filter(item => item.enabled)) {
-        const list = await api<{ models: string[] }>(`/api/admin/ai/harness/providers/${encodeURIComponent(provider.id)}/discover`, { method: "POST" }, 30_000);
-        verified[provider.id] = list.models;
-      }
+      const { harness } = await api<{ harness: AiHarnessConfig }>("/api/admin/ai/harness", { method: "PUT", body: JSON.stringify(payload) });
+      // Persisted credentials stay cleared even when a subsequent provider check fails.
+      setSaved(harness); setDraft(editable(harness)); setKeys({});
+      onConfigured?.(harness);
+      const results = await Promise.all(harness.providers.filter(provider => provider.enabled).map(async provider => {
+        try {
+          const result = await api<{ provider: AiHarnessProviderConfig; models: string[] }>(`/api/admin/ai/harness/providers/${encodeURIComponent(provider.id)}/discover`, { method: "POST" }, 30_000);
+          return { id: provider.id, ...result, error: "" };
+        } catch (caught) { return { id: provider.id, models: [] as string[], provider, error: adminAiErrorMessage(caught, "无法读取当前密钥的模型列表。") }; }
+      }));
+      const verified = Object.fromEntries(results.map(result => [result.id, result.models]));
+      setDiscovered(verified); setProviderErrors(Object.fromEntries(results.map(result => [result.id, result.error])));
+      setSaved({ ...harness, providers: harness.providers.map(provider => results.find(result => result.id === provider.id)?.provider ?? provider) });
       const missing = AI_BUSINESS_TIERS.filter(tier => {
-        const route = draft.tiers[tier];
+        const route = harness.tiers[tier]; if (!route.enabled) return false;
         return !verified[route.providerId]?.includes(route.modelId)
-          || (route.capabilities.includes("image") && (!route.imageProviderId || !route.imageModelId || !verified[route.imageProviderId]?.includes(route.imageModelId)))
-          || (route.capabilities.includes("video") && (!route.videoProviderId || !route.videoModelId || !verified[route.videoProviderId]?.includes(route.videoModelId)));
+          || (route.capabilities.includes("image") && !verified[route.imageProviderId ?? ""]?.includes(route.imageModelId ?? ""))
+          || (route.capabilities.includes("video") && !verified[route.videoProviderId ?? ""]?.includes(route.videoModelId ?? ""));
       });
-      setSaved(result.harness); setKeys({}); setDiscovered(verified);
-      if (missing.length) setError(`配置已保存，但${missing.map(tier => AI_BUSINESS_TIER_LABELS[tier]).join("、")}所选模型不在当前密钥返回列表中；该档位会保持不可用。`);
-      else setNotice("四个业务档位已保存，并与当前密钥返回的模型列表完成绑定。");
-    } catch (caught) { setError(adminAiErrorMessage(caught, "业务档位保存或模型校验失败，请检查配置。")); }
-    finally { setBusy(null); }
+      if (missing.length) setError(`配置已保存，${missing.map(tier => AI_BUSINESS_TIER_LABELS[tier]).join("、")}的模型尚未全部验证，请检查服务连接和模型权限。`);
+      else setNotice("服务连接和四个档位已保存，模型列表校验通过。");
+    } catch (caught) { setError(adminAiErrorMessage(caught, "配置保存失败，请检查服务连接和档位设置。")); }
+    finally { busyRef.current = false; setBusy(null); }
   }
-
+  const route = draft.tiers[activeTier];
+  const modelField = (capability: "text" | "image" | "video") => {
+    const providerId = capability === "text" ? route.providerId : route[`${capability}ProviderId`] ?? "";
+    const value = capability === "text" ? route.modelId : route[`${capability}ModelId`] ?? "";
+    return <AdminAiModelSelect key={`${activeTier}-${capability}-${providerId}`} label={`${capability === "text" ? "文字" : capability === "image" ? "图片" : "视频"}模型`}
+      value={value} models={discovered[providerId] ?? []} disabled={!providerId || loading || busy === "save"}
+      loading={busy === `discover:${providerId}`} emptyMessage={providerErrors[providerId] || "点击上方服务的「读取模型」重试"}
+      onOpen={() => discoverIfNeeded(providerId)} onChange={modelId => updateTier(activeTier, capability === "text" ? { modelId } : { [`${capability}ModelId`]: modelId })} />;
+  };
+  const providerOptions = draft.providers.map(provider => <option value={provider.id} key={provider.id}>{provider.name || provider.id}{provider.enabled ? "" : "（停用）"}</option>);
   return <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`} aria-busy={loading || Boolean(busy)}>
-    <header className="tp-ai-admin-heading"><div>
-      <h2 id={`${id}-title`}><Activity size={21} aria-hidden="true" />业务档位与 Harness</h2>
-      <p>成员只看到快速、标准、深度和 Pro；服务商、模型 ID 与专属参数仅管理员可见。</p>
-    </div><button className="tp-ai-admin-button" type="button" disabled={loading || Boolean(busy)} onClick={() => setVersion(value => value + 1)}><RefreshCw size={16} />刷新</button></header>
+    <header className="tp-ai-admin-heading"><div><h2 id={`${id}-title`}><Activity size={21} aria-hidden="true" />服务与模型</h2>
+      <p>先接入 API 服务，再为快速、标准、深度、Pro 分配模型。</p></div>
+      <button className="tp-ai-admin-button" type="button" disabled={loading || Boolean(busy)} onClick={() => setVersion(value => value + 1)}><RefreshCw size={16} />刷新</button></header>
     {error ? <p className="tp-ai-admin-error" role="alert">{error}</p> : null}
     {notice ? <p className="tp-ai-admin-success" role="status">{notice}</p> : null}
-    <form onSubmit={submit} autoComplete="off">
-      <fieldset className="tp-ai-admin-fields" disabled={loading || Boolean(busy)}>
-        {draft.providers.map((provider, index) => <div className="tp-ai-provider-capabilities is-wide" key={provider.id || index}>
-          <strong>服务连接 {index + 1}</strong>
-          <div className="tp-ai-admin-fields" style={{ marginTop: 12 }}>
-            <label className="tp-ai-admin-field">服务标识<input value={provider.id} maxLength={48} required onChange={event => updateProvider(index, { id: event.target.value.toLowerCase() })} /></label>
-            <label className="tp-ai-admin-field">服务名称<input value={provider.name} maxLength={80} required onChange={event => updateProvider(index, { name: event.target.value })} /></label>
-            <label className="tp-ai-admin-field is-wide">API Base URL<input type="url" value={provider.baseUrl} required placeholder="https://api.example.com/v1" onChange={event => updateProvider(index, { baseUrl: event.target.value })} /></label>
-            <label className="tp-ai-admin-field">协议<select value={provider.protocol} onChange={event => updateProvider(index, { protocol: event.target.value as AiHarnessProviderInput["protocol"] })}><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label>
-            <label className="tp-ai-admin-field">API Key<input type="password" value={keys[provider.id] ?? ""} placeholder={saved?.providers.some(item => item.id === provider.id && item.apiKeyConfigured) ? "留空保持已保存密钥" : "首次配置必须填写"} onChange={event => setKeys(current => ({ ...current, [provider.id]: event.target.value }))} /></label>
+    {loadFailed ? null : <form onSubmit={submit} autoComplete="off">
+      <fieldset className="tp-ai-admin-fields" disabled={loading || busy === "save"}>
+        <div className="is-wide tp-ai-admin-section-heading"><h3>1. 服务连接</h3></div>
+        {draft.providers.map(provider => <div className="tp-ai-provider-capabilities is-wide" key={provider.id}>
+          <div className="tp-ai-admin-fields">
+            <label className="tp-ai-admin-field">服务名称<input value={provider.name} maxLength={80} required onChange={event => updateProvider(provider.id, { name: event.target.value })} /></label>
+            <label className="tp-ai-admin-field">API Base URL<input type="url" value={provider.baseUrl} required placeholder="https://api.example.com/v1" onChange={event => updateProvider(provider.id, { baseUrl: event.target.value })} /></label>
+            <label className="tp-ai-admin-field">API Key<input type="password" autoComplete="new-password" value={keys[provider.id] ?? ""} placeholder={saved?.providers.some(item => item.id === provider.id && item.apiKeyConfigured) ? "已保存；留空保留" : "粘贴 API Key"} onChange={event => {
+              connectionRevisions.current[provider.id] = (connectionRevisions.current[provider.id] ?? 0) + 1;
+              setKeys(current => ({ ...current, [provider.id]: event.target.value })); setDiscovered(current => ({ ...current, [provider.id]: [] }));
+              setProviderErrors(current => ({ ...current, [provider.id]: "" })); setNotice("");
+            }} /></label>
+            <label className="tp-ai-admin-field">文字接口协议<select value={provider.protocol} onChange={event => updateProvider(provider.id, { protocol: event.target.value as AiHarnessProviderInput["protocol"] })}><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label>
           </div>
-          <div className="tp-ai-admin-actions"><button className="tp-ai-admin-button" type="button" onClick={() => void discover(provider)}><RefreshCw size={16} />读取模型</button>
-            {draft.providers.length > 1 ? <button className="tp-ai-admin-button" type="button" onClick={() => setDraft(current => ({ ...current, providers: current.providers.filter((_, item) => item !== index) }))}><Trash2 size={16} />移除</button> : null}
-            <small className="tp-ai-admin-hint">{discovered[provider.id]?.length ?? 0} 个可选模型</small></div>
+          <div className="tp-ai-admin-actions"><button className="tp-ai-admin-button" type="button" disabled={Boolean(busy)} onClick={() => void discover(provider)}><RefreshCw size={16} />{busy === `discover:${provider.id}` ? "读取中…" : "读取模型"}</button>
+            <small className="tp-ai-admin-hint">{discovered[provider.id]?.length ?? 0} 个可选模型</small>
+            <label className="tp-ai-admin-toggle"><input type="checkbox" checked={provider.enabled} onChange={event => updateProvider(provider.id, { enabled: event.target.checked })} />启用</label>
+            {draft.providers.length > 1 ? <button className="tp-ai-admin-button" type="button" disabled={AI_BUSINESS_TIERS.some(tier => [draft.tiers[tier].providerId, draft.tiers[tier].imageProviderId, draft.tiers[tier].videoProviderId].includes(provider.id))}
+              title="使用中的服务请先在下方档位中更换" onClick={() => setDraft(current => ({ ...current, providers: current.providers.filter(item => item.id !== provider.id) }))}><Trash2 size={16} />移除</button> : null}
+          </div>{providerErrors[provider.id] ? <p className="tp-ai-admin-error" role="alert">{providerErrors[provider.id]}</p> : null}
         </div>)}
         <div className="is-wide"><button className="tp-ai-admin-button" type="button" disabled={draft.providers.length >= 8} onClick={() => {
-          const providerId = `provider-${draft.providers.length + 1}`;
+          const providerId = `provider-${crypto.randomUUID().slice(0, 8)}`;
           setDraft(current => ({ ...current, providers: [...current.providers, { id: providerId, name: `AI 服务 ${current.providers.length + 1}`, baseUrl: "", protocol: "chat_completions", enabled: true }] }));
         }}><Plus size={16} />添加服务连接</button></div>
-        {AI_BUSINESS_TIERS.map(tier => {
-          const route = draft.tiers[tier];
-          const options = discovered[route.providerId] ?? saved?.providers.find(provider => provider.id === route.providerId)?.availableModels ?? [];
-          const imageOptions = discovered[route.imageProviderId ?? ""] ?? saved?.providers.find(provider => provider.id === route.imageProviderId)?.availableModels ?? [];
-          const videoOptions = discovered[route.videoProviderId ?? ""] ?? saved?.providers.find(provider => provider.id === route.videoProviderId)?.availableModels ?? [];
-          return <div className="tp-ai-provider-capabilities" key={tier}>
-            <strong>{AI_BUSINESS_TIER_LABELS[tier]}</strong>
-            <div className="tp-ai-admin-fields" style={{ marginTop: 12 }}>
-              <label className="tp-ai-admin-field">文字服务<select value={route.providerId} onChange={event => updateTier(tier, { providerId: event.target.value, modelId: "" })}>{draft.providers.map(provider => <option value={provider.id} key={provider.id}>{provider.name || provider.id}</option>)}</select></label>
-              <label className="tp-ai-admin-field">文字模型 ID<input list={`${id}-${tier}-models`} value={route.modelId} required placeholder="输入关键字搜索" onChange={event => updateTier(tier, { modelId: event.target.value })} /><datalist id={`${id}-${tier}-models`}>{options.map(model => <option value={model} key={model} />)}</datalist></label>
-              <label className="tp-ai-admin-field">图片服务<select value={route.imageProviderId ?? ""} onChange={event => updateTier(tier, { imageProviderId: event.target.value || undefined, imageModelId: "" })}><option value="">未配置</option>{draft.providers.map(provider => <option value={provider.id} key={provider.id}>{provider.name || provider.id}</option>)}</select></label>
-              <label className="tp-ai-admin-field">图片模型 ID<input list={`${id}-${tier}-image-models`} value={route.imageModelId ?? ""} placeholder="输入关键字搜索" onChange={event => updateTier(tier, { imageModelId: event.target.value || undefined })} /><datalist id={`${id}-${tier}-image-models`}>{imageOptions.map(model => <option value={model} key={model} />)}</datalist></label>
-              <label className="tp-ai-admin-field">视频服务<select value={route.videoProviderId ?? ""} onChange={event => updateTier(tier, { videoProviderId: event.target.value || undefined, videoModelId: "" })}><option value="">未配置</option>{draft.providers.map(provider => <option value={provider.id} key={provider.id}>{provider.name || provider.id}</option>)}</select></label>
-              <label className="tp-ai-admin-field">视频模型 ID<input list={`${id}-${tier}-video-models`} value={route.videoModelId ?? ""} placeholder="输入关键字搜索" onChange={event => updateTier(tier, { videoModelId: event.target.value || undefined })} /><datalist id={`${id}-${tier}-video-models`}>{videoOptions.map(model => <option value={model} key={model} />)}</datalist><small className="tp-ai-admin-hint">付费视频当前只执行 https://www.75api.com/v1 的已验证模型。</small></label>
-              <label className="tp-ai-admin-field">单次输出上限<input type="number" min={16} max={32768} value={route.maxOutputTokens} onChange={event => updateTier(tier, { maxOutputTokens: Number(event.target.value) })} /></label>
-              <label className="tp-ai-admin-field">思考强度<select value={route.reasoningEffort} onChange={event => updateTier(tier, { reasoningEffort: event.target.value as AiHarnessTierRoute["reasoningEffort"] })}><option value="">默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
-              <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={route.enabled} onChange={event => updateTier(tier, { enabled: event.target.checked })} />启用此档位</label>
-              <div className="is-wide tp-ai-admin-actions" style={{ marginTop: 0 }}><span className="tp-ai-admin-hint">开放能力：</span>{CAPABILITIES.map(([capability, label]) => <label className="tp-ai-admin-toggle" key={capability}><input type="checkbox" checked={route.capabilities.includes(capability)} onChange={event => updateTier(tier, { capabilities: event.target.checked ? [...route.capabilities, capability] : route.capabilities.filter(item => item !== capability) })} />{label}</label>)}</div>
-            </div>
-          </div>;
-        })}
-        <label className="tp-ai-admin-field">代理策略<select value={draft.policy.strategy} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, strategy: event.target.value as AiHarnessInput["policy"]["strategy"] } }))}><option value="direct">直接回答</option><option value="react">观察后调用安全工具</option><option value="plan_execute">先规划、确认后执行</option></select></label>
-        <label className="tp-ai-admin-field">单轮工具步骤上限<input type="number" min={1} max={8} value={draft.policy.maxToolSteps} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, maxToolSteps: Number(event.target.value) } }))} /></label>
-        <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.policy.autoWebSearch} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, autoWebSearch: event.target.checked } }))} />需要时自动联网（成员端不显示开关）</label>
+        <div className="is-wide tp-ai-admin-section-heading"><h3>2. 四个档位</h3></div>
+        <div className="tp-ai-admin-tier-tabs is-wide" role="tablist" aria-label="配置业务档位">{AI_BUSINESS_TIERS.map(tier => <button key={tier} type="button" role="tab" aria-selected={activeTier === tier} aria-controls={`${id}-tier-panel`} onClick={() => setActiveTier(tier)}>{AI_BUSINESS_TIER_LABELS[tier]}{draft.tiers[tier].enabled ? "" : " · 停用"}</button>)}</div>
+        <div className="tp-ai-provider-capabilities is-wide" id={`${id}-tier-panel`} role="tabpanel" aria-label={`${AI_BUSINESS_TIER_LABELS[activeTier]}配置`}>
+          <div className="tp-ai-admin-fields">
+            <label className="tp-ai-admin-field">文字服务<select value={route.providerId} onChange={event => updateTier(activeTier, { providerId: event.target.value, protocol: draft.providers.find(provider => provider.id === event.target.value)?.protocol ?? "chat_completions", modelId: "" })}>{providerOptions}</select></label>
+            {modelField("text")}
+            <label className="tp-ai-admin-field">图片服务<select value={route.imageProviderId ?? ""} onChange={event => updateTier(activeTier, { imageProviderId: event.target.value || undefined, imageModelId: undefined })}><option value="">未配置</option>{providerOptions}</select></label>
+            {modelField("image")}
+            <label className="tp-ai-admin-field">视频服务<select value={route.videoProviderId ?? ""} onChange={event => updateTier(activeTier, { videoProviderId: event.target.value || undefined, videoModelId: undefined })}><option value="">未配置</option>{providerOptions}</select></label>
+            {modelField("video")}
+            <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={route.enabled} onChange={event => updateTier(activeTier, { enabled: event.target.checked })} />启用{AI_BUSINESS_TIER_LABELS[activeTier]}档</label>
+            <div className="is-wide tp-ai-admin-actions"><span className="tp-ai-admin-hint">开放能力</span>{CAPABILITIES.map(([capability, label]) => <label className="tp-ai-admin-toggle" key={capability}><input type="checkbox" checked={route.capabilities.includes(capability)} onChange={event => updateTier(activeTier, { capabilities: event.target.checked ? [...route.capabilities, capability] : route.capabilities.filter(item => item !== capability) })} />{label}</label>)}</div>
+            <details className="is-wide tp-ai-provider-capabilities"><summary>高级参数</summary><div className="tp-ai-admin-fields">
+              <label className="tp-ai-admin-field">单次输出上限 · Token<input type="number" min={16} max={32768} required value={route.maxOutputTokens} onChange={event => updateTier(activeTier, { maxOutputTokens: Number(event.target.value) })} /></label>
+              <label className="tp-ai-admin-field">思考强度<select value={route.reasoningEffort} onChange={event => updateTier(activeTier, { reasoningEffort: event.target.value as AiHarnessTierRoute["reasoningEffort"] })}><option value="">服务商默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+            </div></details>
+          </div>
+        </div>
+        <details className="is-wide tp-ai-provider-capabilities"><summary>自动调用规则</summary><div className="tp-ai-admin-fields">
+          <label className="tp-ai-admin-field">任务处理方式<select value={draft.policy.strategy} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, strategy: event.target.value as AiHarnessInput["policy"]["strategy"] } }))}><option value="direct">直接回答</option><option value="react">按需要调用工具</option><option value="plan_execute">先规划再执行</option></select></label>
+          <label className="tp-ai-admin-field">单轮工具步骤上限<input type="number" min={1} max={8} required value={draft.policy.maxToolSteps} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, maxToolSteps: Number(event.target.value) } }))} /></label>
+          <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.policy.autoWebSearch} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, autoWebSearch: event.target.checked } }))} />需要时自动联网</label>
+        </div></details>
       </fieldset>
-      <div className="tp-ai-admin-actions"><button className="tp-ai-admin-button is-primary" type="submit" disabled={loading || Boolean(busy)}><Save size={16} />{busy === "save" ? "保存并校验中…" : "保存并校验四档配置"}</button><span className="tp-ai-admin-hint">付费生成与本机操作始终需要成员确认。</span></div>
-    </form>
+      <div className="tp-ai-admin-actions"><button className="tp-ai-admin-button is-primary" type="submit" disabled={loading || Boolean(busy)}><Save size={16} />{busy === "save" ? "保存并校验中…" : "保存服务与档位"}</button></div>
+    </form>}
   </section>;
 }

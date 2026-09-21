@@ -112,6 +112,10 @@ describe("preflight send ownership", () => {
     latest.projects = [{ id: "project", title: "检查期间新增项目", timeLabel: "刚刚" }];
     latest.drafts = { "new-conversation": "发送内容", other: "保留另外的草稿" };
     latest.draftAttachments = { "new-conversation": [], other: [{ id: "doc", name: "资料.txt", mimeType: "text/plain", content: "保留附件" }] };
+    latest.videoDraftSettings = {
+      "new-conversation": { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" },
+      other: { seconds: 15, resolution: "768p", aspectRatio: "9:16" },
+    };
     latest.sidebarCollapsed = true;
     const sent = { id: "sent", title: "发送内容", timeLabel: "刚刚", messages: [] };
     const next = withPreparedChatSend(latest, sent, "new-conversation");
@@ -120,6 +124,9 @@ describe("preflight send ownership", () => {
     expect(next.drafts).toEqual({ other: "保留另外的草稿" });
     expect(next.draftAttachments).not.toHaveProperty("new-conversation");
     expect(next.draftAttachments?.other).toBe(latest.draftAttachments.other);
+    expect(next.videoDraftSettings).toEqual({ other: latest.videoDraftSettings.other });
+    expect(next.videoDraftSettings?.other).toBe(latest.videoDraftSettings.other);
+    expect(latest.videoDraftSettings["new-conversation"].model).toBe("sd-2.5-c1");
     expect(next.sidebarCollapsed).toBe(true);
     expect(next.activeConversationId).toBe("sent");
     expect(latest.drafts["new-conversation"]).toBe("发送内容");

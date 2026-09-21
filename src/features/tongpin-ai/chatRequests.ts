@@ -30,7 +30,7 @@ export function replaceChatMessage(
   conversations: TongpinAIConversation[],
   conversationId: string,
   messageId: string,
-    patch: Partial<Pick<TongpinAIMessage, "content" | "status" | "model" | "usage" | "artifactId" | "sources" | "trace" | "startedAt">>,
+    patch: Partial<Pick<TongpinAIMessage, "content" | "analysisSummary" | "status" | "model" | "usage" | "artifactId" | "sources" | "trace" | "startedAt">>,
 ) {
   return conversations.map((conversation) => conversation.id === conversationId
     ? { ...conversation, messages: conversation.messages.map((message) =>
@@ -49,5 +49,5 @@ export function recoverInterruptedMessages(conversations: TongpinAIConversation[
 }
 
 export function completedReply(response: AiChatResponse, options: { preserveExistingTrace?: boolean } = {}) {
-  return { content: response.content, status: "ready" as const, model: response.model, usage: response.usage, ...(response.sources ? { sources: response.sources } : {}), ...(!options.preserveExistingTrace && response.trace ? { trace: response.trace } : {}) };
+  return { content: response.content, ...(response.analysisSummary ? { analysisSummary: response.analysisSummary } : {}), status: "ready" as const, model: response.model, usage: response.usage, ...(response.sources ? { sources: response.sources } : {}), ...(!options.preserveExistingTrace && response.trace ? { trace: response.trace } : {}) };
 }

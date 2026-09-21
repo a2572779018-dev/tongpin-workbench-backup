@@ -2,9 +2,11 @@ import { Check, CheckCircle2, Circle, Copy, FileText, LoaderCircle, Paperclip, T
 import { memo, useEffect, useRef, useState } from "react";
 import type { AiHarnessTrace } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
+import { AnalysisSummary } from "./AnalysisSummary";
 import { AiSourceLink } from "./AiSourceLink";
 import { MarkdownReply } from "./MarkdownReply";
 import { ReplyWaiting } from "./ReplyWaiting";
+import { memberVisibleHarnessSteps } from "./tracePresentation";
 import { AiVideoReply } from "./AiVideoReply";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
 import type { VideoChatRequest } from "./videoChat";
@@ -61,9 +63,12 @@ function RunTrace({ requestId, initial, onChange }: { requestId?: string; initia
     return () => { controller.abort(); if (timer) clearTimeout(timer); };
   }, [api, requestId, trace]);
 
+  const visibleSteps = memberVisibleHarnessSteps(trace);
+  if (!visibleSteps.length) return null;
+  const label = visibleSteps.some(step => step.kind === "tool" || step.kind === "approval" || step.kind === "result") ? "工具进度" : "任务进度";
   return <details className="tp-ai-run-trace" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>处理过程 · {trace.reasoningSummary}</summary>
-    <ol>{trace.steps.map(step => <li key={step.id} className={`is-${step.status}`}>
+    <summary>{label}</summary>
+    <ol>{visibleSteps.map(step => <li key={step.id} className={`is-${step.status}`}>
       {step.status === "succeeded" ? <CheckCircle2 size={15} aria-hidden="true" /> : step.status === "running" ? <LoaderCircle className="is-spinning" size={15} aria-hidden="true" /> : step.status === "failed" ? <TriangleAlert size={15} aria-hidden="true" /> : <Circle size={15} aria-hidden="true" />}
       <span><strong>{step.title}</strong><small>{step.summary}</small></span>
     </li>)}</ol>
@@ -91,7 +96,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
       </ul> : null}
       {message.status === "thinking" ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> :
         message.role === "assistant" && message.status !== "error"
-          ? <MarkdownReply content={message.content} typing={message.status === "typing"} />
+          ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}<MarkdownReply content={message.content} typing={message.status === "typing"} /></>
           : <p>{message.content}</p>}
       {artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string" ? <AiVideoReply key={artifact.data.videoJobId} jobId={artifact.data.videoJobId} onSettled={onVideoSettled} savedRequest={artifact.data.videoRequest} submissionError={typeof artifact.data.videoSubmitError === "string" ? artifact.data.videoSubmitError : undefined} onEdit={onEditVideo} editDisabled={videoEditDisabled} /> : artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
         <span className="tp-ai-artifact-card__icon"><FileText size={20} /></span>

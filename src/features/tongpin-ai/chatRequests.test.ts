@@ -83,6 +83,12 @@ describe("real AI chat request state", () => {
       quota: { limitTokens: 1000, usedTokens: 42, remainingTokens: 958, reservedTokens: 0, inputTokens: 30, outputTokens: 12 },
     })).toEqual({ content: "已收到", status: "ready", model: "test-model", usage });
   });
+  it("keeps a model-authored public analysis summary separate from the formal reply", () => {
+    const usage = { inputTokens: 30, outputTokens: 12, totalTokens: 42, estimated: false };
+    expect(completedReply({ requestId: "summary-id", content: "正式回答", analysisSummary: "依据现有资料，先处理高风险项。", model: "test-model", usage,
+      quota: { limitTokens: 1000, usedTokens: 42, remainingTokens: 958, reservedTokens: 0, inputTokens: 30, outputTokens: 12 },
+    })).toEqual({ content: "正式回答", analysisSummary: "依据现有资料，先处理高风险项。", status: "ready", model: "test-model", usage });
+  });
   it("preserves the parent planning trace when a PPT execution response carries a different terminal run", () => {
     const parent: AiHarnessTrace = { runId: "parent-plan", tier: "deep", strategy: "plan_execute", status: "planned",
       reasoningSummary: "已校验 PPT 方案", nextAction: "resume", toolBudget: { used: 1, max: 3, remaining: 2 }, steps: [] };

@@ -1,6 +1,6 @@
 import { Coins, History, Plus, RefreshCw, Search, UsersRound, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { AiMember, AiUsageEntry } from "../../../shared/ai";
+import type { AiHarnessConfig, AiMember, AiUsageEntry } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
 import { AdminAiProviderSettings } from "./AdminAiProviderSettings";
 import { AdminAiVideoSettings } from "./AdminAiVideoSettings";
@@ -175,6 +175,8 @@ export function AdminAiQuotaPanel() {
   const [notice, setNotice] = useState("");
   const [quotaMember, setQuotaMember] = useState<AiMember | null>(null);
   const [usageMember, setUsageMember] = useState<AiMember | null>(null);
+  const [section, setSection] = useState<"models" | "capabilities" | "members" | "monitoring">("models");
+  const [harnessConfig, setHarnessConfig] = useState<AiHarnessConfig | null>(null);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -193,11 +195,16 @@ export function AdminAiQuotaPanel() {
 
   return (
     <section className="tp-admin-ai-quota" aria-label="AI 接入与额度管理">
-      <AdminAiProviderSettings />
-      <AdminAiHarnessSettings />
-      <AdminAiVideoSettings key={session?.user.id} />
-      <AdminAiObservability />
-      <section className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>
+      <nav className="tp-ai-admin-tabs" aria-label="AI 管理分类">{([
+        ["models", "服务与模型"], ["capabilities", "生成与搜索"], ["members", "成员额度"], ["monitoring", "运行监控"],
+      ] as const).map(([key, label]) => <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => setSection(key)}>{label}</button>)}</nav>
+      <div hidden={section !== "models"}><AdminAiHarnessSettings onConfigured={setHarnessConfig} /></div>
+      <div className="tp-ai-admin-section-stack" hidden={section !== "capabilities"}>
+        <AdminAiProviderSettings harnessConfig={harnessConfig} />
+        <AdminAiVideoSettings key={session?.user.id} />
+      </div>
+      <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} /></div>
+      <section hidden={section !== "members"} className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>
         <header className="tp-ai-admin-heading">
           <div><h2 id="tp-ai-admin-members-title"><UsersRound size={21} aria-hidden="true" />成员额度</h2>
             <p>{AI_QUOTA_BILLING_NOTE}默认分配 0 同频点，用尽后仅管理员可追加。</p></div>

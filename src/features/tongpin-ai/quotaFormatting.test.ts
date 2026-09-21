@@ -90,12 +90,14 @@ describe("point labels preserve underlying quota and token accounting", () => {
   it("labels administrator balances and tool conversions in points, while keeping the text output cap in Token", () => {
     const admin = readFileSync(new URL("./AdminAiQuotaPanel.tsx", import.meta.url), "utf8");
     const provider = readFileSync(new URL("./AdminAiProviderSettings.tsx", import.meta.url), "utf8");
+    const harness = readFileSync(new URL("./AdminAiHarnessSettings.tsx", import.meta.url), "utf8");
     expect(admin).toContain('JSON.stringify({ limitTokens: next.limitTokens,');
     expect(admin).toContain('formatAiPoints(member.quota.limitTokens)');
     expect(admin).toContain('AI_QUOTA_BILLING_NOTE');
     expect(provider).toContain('每张图片折算 · 同频点');
     expect(provider).toContain('每次联网搜索折算 · 同频点');
-    expect(provider).toContain('单次最大文本输出 · Token');
+    expect(harness).toContain('单次输出上限 · Token');
+    expect(harness).toContain('value={route.maxOutputTokens}');
     expect(provider).toContain('imageQuotaTokens: input.imageQuotaTokens ?? 0');
     expect(provider).toContain('webSearchQuotaTokens: input.webSearchQuotaTokens ?? 0');
   });

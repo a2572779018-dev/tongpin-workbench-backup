@@ -1,7 +1,7 @@
 import type { TongpinAIWorkspaceSession } from "./workspaceState";
 
 export type ConversationOperationState = Pick<TongpinAIWorkspaceSession,
-  "conversations" | "projects" | "artifacts" | "drafts" | "draftAttachments" |
+  "conversations" | "projects" | "artifacts" | "drafts" | "draftAttachments" | "videoDraftSettings" |
   "activeConversationId" | "activeProjectId" | "view">;
 
 /** Resolve again after awaits: a rendered callback may refer to a deleted target. */
@@ -23,8 +23,10 @@ export function withoutConversation<T extends ConversationOperationState>(state:
   if (!conversation) return state;
   const drafts = { ...state.drafts };
   const draftAttachments = { ...state.draftAttachments };
+  const videoDraftSettings = { ...state.videoDraftSettings };
   delete drafts[conversationId];
   delete draftAttachments[conversationId];
+  delete videoDraftSettings[conversationId];
   const selected = state.activeConversationId === conversationId;
   const projectId = conversation.projectId && state.projects.some(project => project.id === conversation.projectId)
     ? conversation.projectId : null;
@@ -34,6 +36,7 @@ export function withoutConversation<T extends ConversationOperationState>(state:
     artifacts: state.artifacts.filter(item => item.conversationId !== conversationId),
     drafts,
     draftAttachments,
+    videoDraftSettings,
     ...(selected ? {
       activeConversationId: null,
       activeProjectId: projectId,

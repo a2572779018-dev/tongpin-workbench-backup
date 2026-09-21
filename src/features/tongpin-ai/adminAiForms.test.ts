@@ -97,6 +97,12 @@ describe("AI administrator provider forms", () => {
     expect(validateAiProviderInput({ ...provider, imageQuotaTokens: NaN }, saved)).toContain("整数");
     expect(normalizeAiBaseUrl("https://images.example/v1/images/generations")).toBe("https://images.example/v1");
   });
+  it("uses a configured Responses search tier instead of forcing the legacy text route to Responses", () => {
+    const input = { ...provider, protocol: "chat_completions" as const, webSearchEnabled: true, webSearchQuotaTokens: 20 };
+    expect(validateAiProviderInput(input, saved, true)).toBe("");
+    expect(validateAiProviderInput(input, saved, false)).toContain("Responses");
+    expect(validateAiProviderInput({ ...input, webSearchQuotaTokens: 0 }, saved, true)).toContain("折算");
+  });
 });
 
 describe("AI administrator quota forms", () => {

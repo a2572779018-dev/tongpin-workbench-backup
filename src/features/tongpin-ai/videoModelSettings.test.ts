@@ -21,10 +21,11 @@ describe("video model settings feedback", () => {
     expect(shouldApplyVideoDefault(false, "sd-2-c6", ["minimax_h3"])).toBe(false);
     expect(shouldApplyVideoDefault(false, "sd-2-c6", ["sd-2-c6"])).toBe(true);
     const composer = readFileSync(new URL("./AiVideoComposer.tsx", import.meta.url), "utf8");
-    expect(composer).toContain("result.settings.profile");
+    expect(composer).toContain("result.settings.availableModels.includes(model)");
     expect(composer).toContain("profile?.seconds[resolution]");
-    expect(composer).not.toContain("<label>模型<select");
-    expect(composer).not.toContain("{VIDEO_MODELS.map");
+    expect(composer).toContain("<label>模型<select");
+    expect(composer).toContain("VIDEO_MODELS.filter(item => authorizedModels.includes(item.id))");
+    expect(composer).toContain("model, resolution, aspectRatio");
   });
 
   it("keeps the non-generating probe disclaimer and confirms a listed default", () => {

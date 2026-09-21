@@ -23,6 +23,7 @@ export function validateAiProviderConnection(baseUrl: string, apiKey: string, sa
 export function validateAiProviderInput(
   input: AiProviderInput,
   saved: AiProviderConfig | null,
+  harnessSearchConfigured = false,
 ): string {
   const connectionError = validateAiProviderConnection(input.baseUrl, input.apiKey ?? "", saved);
   if (connectionError) return connectionError;
@@ -46,7 +47,7 @@ export function validateAiProviderInput(
     const previous = saved?.imageBaseUrl ? normalizeAiBaseUrl(saved.imageBaseUrl) : "";
     if ((!saved?.imageApiKeyConfigured || previous !== base) && !input.imageApiKey?.trim()) return "首次接入或更换图片 API 地址后，请重新填写图片密钥。";
   } else if (input.imageApiKey?.trim()) return "填写独立图片密钥时，还需填写图片 API 地址。";
-  if (input.webSearchEnabled && (input.protocol !== "responses" || !(input.webSearchQuotaTokens && input.webSearchQuotaTokens > 0))) return "联网搜索需要 Responses 协议，并设置每次搜索折算的同频点。";
+  if (input.webSearchEnabled && ((!harnessSearchConfigured && input.protocol !== "responses") || !(input.webSearchQuotaTokens && input.webSearchQuotaTokens > 0))) return "联网搜索需要至少一个支持搜索的 Responses 档位，并设置每次搜索折算的同频点。";
   return "";
 }
 

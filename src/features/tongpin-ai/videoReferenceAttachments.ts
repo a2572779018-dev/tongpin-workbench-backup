@@ -35,3 +35,24 @@ export function videoReferencesFromAttachments(
   }
   return { ok: true, images };
 }
+
+/**
+ * Keep a clarification-time video reference recoverable in the ordinary
+ * workspace draft container. These records are inert media drafts: they do
+ * not contain a provider reference id, plan id, trace, or execution grant.
+ */
+export function videoReferenceDraftAttachments(
+  images: readonly LocalVideoReferenceImage[],
+  idPrefix: string,
+): AiWorkspaceDocument[] {
+  return images.map((image, index) => {
+    const mimeType = image.dataUrl.slice(5, image.dataUrl.indexOf(";"));
+    return {
+      id: `${idPrefix}-${index + 1}`,
+      name: image.name,
+      mimeType,
+      content: "视频参考图片",
+      media: { kind: "image", frames: [{ dataUrl: image.dataUrl }] },
+    };
+  });
+}

@@ -14,7 +14,7 @@ describe("@computer desktop integration", () => {
     );
     expect(submit.indexOf('mentionedTools[0] === "computer"')).toBeGreaterThan(-1);
     expect(submit.indexOf('mentionedTools[0] === "computer"')).toBeLessThan(submit.indexOf("if (videoOpen)"));
-    expect(submit.indexOf("onOpenComputer(draft.trim())")).toBeLessThan(submit.indexOf("onSubmit(imagePlan"));
+    expect(submit.indexOf("onOpenComputer(draft.trim())")).toBeLessThan(submit.lastIndexOf("onSubmit()"));
     expect(page).toContain("onOpenComputer={beginComputerUse}");
   });
 

@@ -9,14 +9,14 @@ import type { AiWorkspaceState } from "../../../shared/aiWorkspace";
 describe("video conversations", () => {
   it("stores retry inputs without duplicating the planning trace in generic artifact JSON", () => {
     const request = {
-      requestId: "video-request-id-123456", prompt: "品牌宣传", seconds: 10 as const,
+      requestId: "video-request-id-123456", prompt: "品牌宣传", model: "sd-2-c6" as const, seconds: 10 as const,
       resolution: "720p" as const, aspectRatio: "16:9" as const,
       originalPrompt: "用我的 Logo 生成视频", planSummary: "品牌开场", planRequestId: "plan-request-id-123456",
       planTrace: { runId: "run-plan", tier: "quick" as const, strategy: "plan_execute" as const, status: "planned" as const,
         reasoningSummary: "安全摘要", nextAction: "resume" as const, toolBudget: { used: 1, max: 3, remaining: 2 }, steps: [] },
     };
     const persisted = persistedVideoChatRequest(request);
-    expect(persisted).toMatchObject({ requestId: request.requestId, originalPrompt: request.originalPrompt, planRequestId: request.planRequestId });
+    expect(persisted).toMatchObject({ requestId: request.requestId, model: "sd-2-c6", originalPrompt: request.originalPrompt, planRequestId: request.planRequestId });
     expect(persisted).not.toHaveProperty("planTrace");
     expect(JSON.stringify(persisted)).not.toContain("reasoningSummary");
   });

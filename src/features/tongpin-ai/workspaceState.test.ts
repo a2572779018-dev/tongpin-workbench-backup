@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   loadWorkspaceSession,
+  hydrateWorkspace,
   moveConversationToProject,
   saveWorkspaceSession,
+  serializeWorkspace,
   submitUnavailableMessage,
 } from "./workspaceState";
 import type { TongpinAIConversation } from "./types";
@@ -27,11 +29,30 @@ describe("account-scoped workspace memory", () => {
       ...initial,
       drafts: { "chat-a": "尚未发送的内容" },
       projects: [{ id: "project-a", title: "我的项目", timeLabel: "今天" }],
+      videoDraftSettings: { "chat-a": { model: "sd-2.5-c1" as const, seconds: 30, resolution: "720p" as const, aspectRatio: "16:9" as const } },
     };
     saveWorkspaceSession("member-a", saved);
     expect(loadWorkspaceSession("member-a")).toBe(saved);
     expect(loadWorkspaceSession("member-b").drafts).toEqual({});
     expect(loadWorkspaceSession("member-b").projects).toEqual([]);
+    expect(loadWorkspaceSession("member-b").videoDraftSettings).toBeUndefined();
+  });
+  it("round-trips video preferences with reference attachments even before any prompt is typed", () => {
+    const session = hydrateWorkspace(null);
+    session.videoDraftSettings = { "new-conversation": { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" } };
+    session.draftAttachments = { "new-conversation": [{ id: "reference-a", name: "logo.png", mimeType: "image/png", content: "参考 Logo" }] };
+    const restored = hydrateWorkspace(JSON.parse(JSON.stringify(serializeWorkspace(session))));
+    expect(restored.videoDraftSettings).toEqual(session.videoDraftSettings);
+    expect(restored.draftAttachments).toEqual(session.draftAttachments);
+    expect(restored.drafts).toEqual({});
+  });
+  it("explicitly clears empty preference maps and saves only bounded settings, not a prior plan or approval", () => {
+    const session = hydrateWorkspace(null);
+    session.videoDraftSettings = {};
+    expect(serializeWorkspace(session).videoDraftSettings).toEqual({});
+    const settings = { seconds: 15, resolution: "768p" as const, aspectRatio: "16:9" as const, planRequestId: "never-persist", approved: true };
+    session.videoDraftSettings = { "new-conversation": settings };
+    expect(serializeWorkspace(session).videoDraftSettings).toEqual({ "new-conversation": { seconds: 15, resolution: "768p", aspectRatio: "16:9" } });
   });
 });
 

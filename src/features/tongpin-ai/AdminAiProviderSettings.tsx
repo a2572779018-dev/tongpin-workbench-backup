@@ -1,8 +1,9 @@
 import { Globe, Image, KeyRound, RefreshCw, Save } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import type { AiProviderConfig, AiProviderInput, AiProviderTestResult } from "../../../shared/ai";
+import { AI_BUSINESS_TIERS, type AiHarnessConfig, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
-import { BAI_ASTRA_MODEL, BAI_QUICK_MODELS, isTongpinQuickAgent, TONGPIN_QUICK_AGENT } from "../../../shared/aiAuto";
+import { BAI_ASTRA_MODEL, BAI_QUICK_MODELS, isTongpinQuickAgent } from "../../../shared/aiAuto";
+import { AdminAiModelSelect } from "./AdminAiModelSelect";
 import { adminAiErrorMessage, normalizeAiBaseUrl, validateAiProviderConnection, validateAiProviderInput } from "./adminAiForms";
 
 function getProviderModelOptions(baseUrl: string, saved: AiProviderConfig | null, discoveredModels: string[]): string[] {
@@ -35,7 +36,7 @@ const EMPTY_PROVIDER: AiProviderInput = {
   webSearchProtocol: "standard",
 };
 
-export function AdminAiProviderSettings() {
+export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiHarnessConfig | null }) {
   const { api } = useAuth();
   const id = useId();
   const [saved, setSaved] = useState<AiProviderConfig | null>(null);
@@ -43,6 +44,7 @@ export function AdminAiProviderSettings() {
   const [apiKey, setApiKey] = useState("");
   const [imageApiKey, setImageApiKey] = useState("");
   const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false); dirtyRef.current = dirty;
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"save" | "test" | "image-test" | null>(null);
   const busyRef = useRef(false);
@@ -53,10 +55,14 @@ export function AdminAiProviderSettings() {
   const [models, setModels] = useState<string[]>([]);
   const [imageModels, setImageModels] = useState<string[]>([]);
   const modelOptions = getProviderModelOptions(draft.baseUrl, saved, models);
-  const baiHost = (() => { try { return new URL(draft.baseUrl).hostname === "api.b.ai"; } catch { return false; } })();
-  const agentSelected = isTongpinQuickAgent(draft.quickModel);
+  const harnessSearchConfigured = Boolean(harnessConfig && !harnessConfig.migratedFromLegacy && AI_BUSINESS_TIERS.some(tier => {
+    const route = harnessConfig.tiers[tier];
+    return route.enabled && route.protocol === "responses" && route.capabilities.includes("web_search")
+      && harnessConfig.providers.some(provider => provider.id === route.providerId && provider.enabled);
+  }));
 
   useEffect(() => {
+    if (dirtyRef.current) return;
     const controller = new AbortController();
     setLoading(true);
     setError("");
@@ -78,7 +84,7 @@ export function AdminAiProviderSettings() {
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [api, loadVersion]);
+  }, [api, loadVersion, harnessConfig]);
 
   function update<K extends keyof AiProviderInput>(field: K, value: AiProviderInput[K]) {
     setDraft((current) => ({ ...current, [field]: value }));
@@ -93,7 +99,7 @@ export function AdminAiProviderSettings() {
     event.preventDefault();
     if (busyRef.current || loading || loadFailed) return;
     const input: AiProviderInput = { ...draft, ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}), ...(imageApiKey.trim() ? { imageApiKey: imageApiKey.trim() } : {}) };
-    const validation = validateAiProviderInput(input, saved);
+    const validation = validateAiProviderInput(input, saved, harnessSearchConfigured);
     if (validation) { setError(validation); return; }
     const payload: AiProviderInput = {
       name: input.name.trim(),
@@ -235,8 +241,8 @@ export function AdminAiProviderSettings() {
   return (
     <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`} aria-busy={loading}>
       <header className="tp-ai-admin-heading">
-        <div><h2 id={`${id}-title`}><KeyRound size={21} aria-hidden="true" />AI 接入</h2>
-          <p>密钥仅保存到服务器，不向成员公开。</p></div>
+        <div><h2 id={`${id}-title`}><KeyRound size={21} aria-hidden="true" />图片与联网搜索</h2>
+          <p>设置能力开关和额度折算。各档位使用的模型在「服务与模型」中选择。</p></div>
         <span className={`tp-ai-admin-status ${saved?.enabled ? "is-active" : ""}`}>
           {loading ? "加载中" : loadFailed ? "读取失败" : saved?.enabled ? "已启用" : saved ? "已停用" : "未配置"}
         </span>
@@ -246,6 +252,10 @@ export function AdminAiProviderSettings() {
       {loadFailed ? <button className="tp-ai-admin-button" type="button" onClick={() => setLoadVersion((value) => value + 1)}>重新加载</button> : (
         <form onSubmit={save} autoComplete="off">
           <fieldset className="tp-ai-admin-fields" disabled={loading || busy !== null}>
+            <details className="tp-ai-provider-capabilities is-wide">
+              <summary>旧版兼容连接</summary>
+              <p className="tp-ai-admin-hint">供旧版客户端保留的接入配置；当前四个档位统一在「服务与模型」中设置。</p>
+              <div className="tp-ai-admin-fields">
             <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-name`}>服务名称
               <input id={`${id}-name`} value={draft.name} required maxLength={80} placeholder="例如：公司 AI"
                 onChange={(event) => update("name", event.target.value)} />
@@ -272,59 +282,32 @@ export function AdminAiProviderSettings() {
               </button>
               <span className="tp-ai-admin-hint">填写地址和密钥即可测试，不生成内容。</span>
             </div>
-            <label className="tp-ai-admin-field" htmlFor={`${id}-quick`}>快速模式 · 模型 ID
-              <input id={`${id}-quick`} value={draft.quickModel} required maxLength={160} list={`${id}-models`}
-                placeholder="填写服务商提供的模型 ID" spellCheck={false} onChange={(event) => update("quickModel", event.target.value)} />
-            </label>
-            {baiHost ? <div className="tp-ai-admin-inline-test is-wide">
-              <button type="button" className="tp-ai-admin-button" onClick={() => {
-                setDraft(current => ({ ...current, quickModel: TONGPIN_QUICK_AGENT, deepModel: BAI_ASTRA_MODEL, protocol: "responses", reasoningEffort: "medium" }));
-                setDirty(true); setModels([]); setError(""); setNotice("");
-              }}>快速 Agent · 深度 Astra 6</button>
-              {agentSelected ? <span className="tp-ai-admin-hint">{dirty
-                ? "保存后会自动使用已保存密钥检查模型；未验证前不会发送成员请求。"
-                : saved?.modelsVerified
-                  ? `当前密钥已验证 ${saved.availableModels?.length ?? 0} 个同频支持模型。`
-                  : "当前密钥尚未完成 Agent 模型检查，成员请求会在发送前被阻止。"}</span> : null}
-            </div> : null}
-            <label className="tp-ai-admin-field" htmlFor={`${id}-deep`}>深度思考 · 模型 ID
-              <input id={`${id}-deep`} value={draft.deepModel} readOnly={agentSelected} required maxLength={160} list={`${id}-models`}
-                placeholder="可与快速模式使用相同模型" spellCheck={false} onChange={(event) => update("deepModel", event.target.value)} />
-            </label>
-            <datalist id={`${id}-models`}>{modelOptions.map((model) => <option key={model} value={model} />)}</datalist>
-            <label className="tp-ai-admin-field" htmlFor={`${id}-max`}>单次最大文本输出 · Token
-              <input id={`${id}-max`} type="number" min="16" max="32768" step="1" required value={Number.isNaN(draft.maxOutputTokens) ? "" : draft.maxOutputTokens}
-                onChange={(event) => update("maxOutputTokens", event.target.valueAsNumber)} />
-            </label>
-            <label className="tp-ai-admin-field" htmlFor={`${id}-reasoning`}>深度思考强度
-              <select id={`${id}-reasoning`} value={draft.reasoningEffort} onChange={(event) => update("reasoningEffort", event.target.value as AiProviderInput["reasoningEffort"])}>
-                <option value="">服务商默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option>
-              </select>
-            </label>
             <label className="tp-ai-admin-toggle is-wide">
               <input type="checkbox" checked={draft.enabled} onChange={(event) => update("enabled", event.target.checked)} />
-              启用 AI 服务
+              启用旧版客户端接入
             </label>
+              </div>
+            </details>
             <details className="tp-ai-provider-capabilities is-wide">
               <summary><Image size={17} />图片生成</summary>
               <div className="tp-ai-admin-fields">
-                <label className="tp-ai-admin-field" htmlFor={`${id}-image-model`}>图片模型 ID
-                  <input id={`${id}-image-model`} value={draft.imageModel ?? ""} maxLength={160} list={`${id}-image-models`} placeholder="留空关闭图片生成" spellCheck={false} onChange={event => update("imageModel", event.target.value)} />
-                </label>
                 <label className="tp-ai-admin-field" htmlFor={`${id}-image-quota`}>每张图片折算 · 同频点
                   <input id={`${id}-image-quota`} type="number" min={0} max={10_000_000} step={1} value={Number.isNaN(draft.imageQuotaTokens) ? "" : draft.imageQuotaTokens ?? 0} onChange={event => update("imageQuotaTokens", event.target.valueAsNumber)} />
                 </label>
                 <p className="tp-ai-admin-hint is-wide">图片按你设置的同频点扣减，属于折算值，不是服务商实际文本 Token。请先核对服务商图片价格和模型能力。</p>
+                <details className="tp-ai-provider-capabilities is-wide"><summary>旧版图片接入</summary><div className="tp-ai-admin-fields">
+                <AdminAiModelSelect label="旧版默认图片模型" value={draft.imageModel ?? ""} models={imageModels.length ? imageModels : draft.imageBaseUrl ? [] : modelOptions}
+                  allowCustom onChange={value => update("imageModel", value)} onOpen={() => { if (!imageModels.length) void testImageConnection(); }} loading={busy === "image-test"} />
                 <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-image-url`}>独立图片 API 地址
                   <input id={`${id}-image-url`} type="url" value={draft.imageBaseUrl ?? ""} maxLength={512} placeholder="留空复用上面的 API 地址和密钥" spellCheck={false} onChange={event => update("imageBaseUrl", event.target.value)} />
                 </label>
                 <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-image-key`}>独立图片 API 密钥
                   <input id={`${id}-image-key`} type="password" autoComplete="new-password" maxLength={4096} value={imageApiKey} placeholder={saved?.imageBaseUrl && saved.imageApiKeyConfigured ? "已保存；留空保留，填写则替换" : "使用独立图片地址时填写"} onChange={event => { setImageApiKey(event.target.value); setDirty(true); setImageModels([]); setError(""); setNotice(""); }} />
                 </label>
-                <datalist id={`${id}-image-models`}>{imageModels.map(model => <option key={model} value={model} />)}</datalist>
+                <button className="tp-ai-admin-button" type="button" disabled={busy !== null} onClick={() => void testImageConnection()}><RefreshCw size={16} />{busy === "image-test" ? "测试中…" : "读取图片模型"}</button>
+                </div></details>
                 <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.imageStream ?? false} onChange={event => update("imageStream", event.target.checked)} />图片流式响应（SSE）</label>
                 <p className="tp-ai-admin-hint is-wide">服务商要求流式生图时开启。使用标准 Images 接口，仅接收最终图片；与文本的快速 / 深度思考无关。</p>
-                <button className="tp-ai-admin-button" type="button" disabled={busy !== null} onClick={() => void testImageConnection()}><RefreshCw size={16} />{busy === "image-test" ? "测试中…" : "测试图片接口 / 获取模型"}</button>
               </div>
             </details>
             <details className="tp-ai-provider-capabilities is-wide">

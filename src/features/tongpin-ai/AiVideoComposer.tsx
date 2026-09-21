@@ -5,7 +5,7 @@ import type { AiVideoList } from "../../../shared/aiVideo";
 import type { AiToolPlan } from "../../../shared/ai";
 import type { AiMode } from "../../../shared/ai";
 import { AI_IMAGE_ACCEPT } from "../../../shared/aiMedia";
-import type { VideoResolution } from "../../../shared/aiVideoModels";
+import { VIDEO_MODELS, videoModel, videoSeconds, type VideoModelId, type VideoResolution } from "../../../shared/aiVideoModels";
 import type { VideoChatRequest } from "./videoChat";
 import "./ai-video.css";
 
@@ -15,13 +15,14 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   tier: AiMode;
   initialRequest?: VideoChatRequest;
   initialReferenceImages?: Array<{ name: string; dataUrl: string }>;
-  onPlan(request: VideoChatRequest): Promise<AiToolPlan>;
+  onPlan(request: VideoChatRequest): Promise<AiToolPlan | null>;
   onSubmit(request: VideoChatRequest): Promise<boolean>;
   onUseHistory?: (jobId: string) => Promise<boolean>;
 }>(function AiVideoComposer({ prompt, tier, onClose, onBusy, onPlan, onSubmit, onUseHistory, initialRequest, initialReferenceImages }, ref) {
   const { api, session } = useAuth();
   const [data, setData] = useState<AiVideoList | null>(null);
   const [error, setError] = useState("");
+  const [model, setModel] = useState<VideoModelId>(initialRequest?.model ?? "minimax_h3");
   const [seconds, setSeconds] = useState(initialRequest?.seconds ?? 15);
   const [resolution, setResolution] = useState<VideoResolution>(initialRequest?.resolution ?? "768p");
   const [submitted, setSubmitted] = useState(false);
@@ -30,26 +31,37 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   const [plan, setPlan] = useState<AiToolPlan | null>(null);
   const [plannedFrom, setPlannedFrom] = useState(initialRequest?.originalPrompt ?? initialRequest?.prompt ?? "");
   const [dragging, setDragging] = useState(false);
-  const profile = data?.settings.profile;
-  const modelAvailable = Boolean(profile);
+  const authorizedModels = data?.settings.availableModels ?? [];
+  const selectedModel = authorizedModels.includes(model) ? videoModel(model) : undefined;
+  const profile = selectedModel ? {
+    resolutions: [...selectedModel.resolutions] as VideoResolution[],
+    seconds: Object.fromEntries(selectedModel.resolutions.map(item => [item, videoSeconds(selectedModel.id, item)])) as Partial<Record<VideoResolution, number[]>>,
+    maxImages: selectedModel.maxImages,
+    requiresImage: selectedModel.requiresImage,
+  } : undefined;
+  const modelAvailable = Boolean(selectedModel);
   const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16">(initialRequest?.aspectRatio ?? "16:9");
   const [images, setImages] = useState<Array<{ name: string; dataUrl: string }>>(
     initialRequest?.referenceImages ?? initialReferenceImages ?? [],
   );
   const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState("");
   const lock = useRef(false), live = useRef(true), input = useRef<HTMLInputElement>(null);
   const controller = useRef<AbortController | null>(null);
   useEffect(() => { if (plan && prompt.trim() !== plannedFrom) setPlan(null); }, [plan, plannedFrom, prompt]);
   const headers = { "X-Tongpin-Account": session?.user.id ?? "" };
-  function setWorking(value: boolean) { lock.current = value; setBusy(value); onBusy(value); }
+  function setWorking(value: boolean, label = "") { lock.current = value; setBusy(value); setBusyLabel(value ? label : ""); onBusy(value); }
   async function refresh() {
     try { const result = await api<AiVideoList>(`/api/ai/videos?tier=${encodeURIComponent(tier)}`, { headers }); if (live.current) {
       setData(result); setError("");
-      const nextProfile = result.settings.profile;
-      if (nextProfile) {
-        const nextResolution = nextProfile.resolutions.includes(resolution) ? resolution : nextProfile.resolutions.at(-1)!;
-        const durations = nextProfile.seconds[nextResolution] ?? [];
-        setPlan(null); setResolution(nextResolution); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current);
+      const nextModel = result.settings.availableModels.includes(model) ? model
+        : result.settings.defaultModel && result.settings.availableModels.includes(result.settings.defaultModel) ? result.settings.defaultModel
+          : result.settings.availableModels[0];
+      const nextSpec = nextModel ? videoModel(nextModel) : undefined;
+      if (nextModel && nextSpec) {
+        const nextResolution = (nextSpec.resolutions as readonly VideoResolution[]).includes(resolution) ? resolution : nextSpec.resolutions.at(-1)!;
+        const durations = videoSeconds(nextModel, nextResolution);
+        setPlan(null); setModel(nextModel); setResolution(nextResolution); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current);
       }
     } }
     catch (e) { if (live.current) setError(e instanceof Error ? e.message : "视频服务暂时不可用"); }
@@ -64,17 +76,18 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     if (data.jobs.some(job => job.reserved)) { setError("已有视频正在处理或等待核对，请先查看原任务"); return; }
     if (data.quota.remainingTokens < data.settings.quotaPoints) { setError("剩余额度不足以生成这段视频，请联系管理员增加额度。尚未提交生成任务。"); return; }
     if (!profile || images.length > profile.maxImages || (profile.requiresImage && !images.length)) { setError(profile?.requiresImage && !images.length ? "当前档位需要添加参考图片" : `最多添加 ${profile?.maxImages ?? 0} 张参考图片`); return; }
-    const base: VideoChatRequest = { requestId: crypto.randomUUID(), prompt: prompt.trim(), seconds, resolution, aspectRatio, ...(images.length ? { referenceImages: images } : {}) };
-    setWorking(true); setError("");
+    const base: VideoChatRequest = { requestId: crypto.randomUUID(), prompt: prompt.trim(), seconds, model, resolution, aspectRatio, ...(images.length ? { referenceImages: images } : {}) };
+    setWorking(true, "正在整理并提交视频任务…"); setError("");
     try {
-      if (!plan) {
-        const next = await onPlan(base);
-        if (next.kind !== "video") throw new Error("同频 AI 返回的不是视频任务，请重新整理");
-        if (live.current) { setPlannedFrom(prompt.trim()); setPlan(next); }
-        return;
+      let approvedPlan = plan;
+      if (!approvedPlan) {
+        approvedPlan = await onPlan(base);
+        if (!approvedPlan) return;
+        if (approvedPlan.kind !== "video" || !approvedPlan.planRequestId) throw new Error("同频 AI 没有返回可执行的视频任务，请重试");
+        if (live.current) { setPlannedFrom(prompt.trim()); setPlan(approvedPlan); }
       }
       setSubmitted(true);
-      if (await onSubmit({ ...base, prompt: plan.prompt, originalPrompt: initialRequest?.originalPrompt ?? prompt.trim(), planSummary: plan.summary, ...(plan.planRequestId ? { planRequestId: plan.planRequestId } : {}), ...(plan.trace ? { planTrace: plan.trace } : {}) })) {
+      if (await onSubmit({ ...base, prompt: approvedPlan.prompt, originalPrompt: initialRequest?.originalPrompt ?? prompt.trim(), planSummary: approvedPlan.summary, planRequestId: approvedPlan.planRequestId, ...(approvedPlan.trace ? { planTrace: approvedPlan.trace } : {}) })) {
         if (live.current) { setImages([]); onClose(); }
       } else if (live.current) setSubmitted(false);
     } catch (e) { if (live.current) { setSubmitted(false); setError(e instanceof Error ? e.message : "暂时无法提交视频"); } }
@@ -85,7 +98,7 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     if (lock.current || !files.length) return;
     if (!modelAvailable) { setError("当前业务档位尚未配置可用的视频生成功能，请联系管理员"); return; }
     if (images.length + files.length > (profile?.maxImages ?? 0)) { setError(`最多添加 ${profile?.maxImages ?? 0} 张参考图片`); return; }
-    setWorking(true); setError("");
+    setWorking(true, "正在读取参考图片…"); setError("");
     const abort = new AbortController(); controller.current = abort;
     try {
       const { extractMediaAttachment } = await import("./mediaAttachments");
@@ -106,7 +119,16 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
     onDrop={e => { e.preventDefault(); e.stopPropagation(); setDragging(false); void addImages(Array.from(e.dataTransfer.files)); }}>
     <div className="tp-ai-video-inline-heading"><strong><Video size={16} />生成视频</strong><button type="button" aria-label="取消生成视频" onClick={onClose}><X size={16} /></button></div>
+    {busy ? <p role="status">{busyLabel || "正在处理视频任务…"}</p> : <>
     <div className="tp-ai-video-options">
+      <label>模型<select value={model} disabled={!authorizedModels.length} onChange={e => {
+        const nextModel = e.target.value as VideoModelId;
+        const nextSpec = videoModel(nextModel);
+        if (!nextSpec || !authorizedModels.includes(nextModel)) return;
+        const nextResolution = (nextSpec.resolutions as readonly VideoResolution[]).includes(resolution) ? resolution : nextSpec.resolutions.at(-1)!;
+        const durations = videoSeconds(nextModel, nextResolution);
+        setPlan(null); setModel(nextModel); setResolution(nextResolution); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current);
+      }}>{VIDEO_MODELS.filter(item => authorizedModels.includes(item.id)).map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
       <label>时长<select value={seconds} disabled={!modelAvailable} onChange={e => { setPlan(null); setSeconds(Number(e.target.value)); }}>{(profile?.seconds[resolution] ?? []).map(n => <option key={n} value={n}>{n} 秒</option>)}</select></label>
       <label>清晰度<select value={resolution} disabled={!modelAvailable} onChange={e => { setPlan(null); const next = e.target.value as VideoResolution; const durations = profile?.seconds[next] ?? []; setResolution(next); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current); }}>{profile?.resolutions.map(r => <option key={r}>{r}</option>)}</select></label>
       <label>画幅<select value={aspectRatio} onChange={e => { setPlan(null); setAspectRatio(e.target.value as typeof aspectRatio); }}><option value="16:9">横屏 16:9</option><option value="9:16">竖屏 9:16</option></select></label>
@@ -114,17 +136,15 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     <input ref={input} type="file" hidden multiple accept={AI_IMAGE_ACCEPT} onChange={e => { const files = Array.from(e.target.files ?? []); e.target.value = ""; void addImages(files); }} />
     <button type="button" disabled={!modelAvailable || images.length >= (profile?.maxImages ?? 0)} onClick={() => input.current?.click()}>拖入或添加参考图片（{images.length}/{profile?.maxImages ?? 0}）</button>
     <div className="tp-ai-video-reference-grid">{images.map((image, index) => <figure key={`${index}-${image.name}`}><img src={image.dataUrl} alt={`参考图 ${index + 1}`} /><figcaption>{image.name}<button type="button" aria-label={`移除参考图 ${index + 1}`} onClick={() => { setPlan(null); setImages(current => current.filter((_, i) => i !== index)); }}><X size={12} /></button></figcaption></figure>)}</div>
-    {plan ? <section className="tp-ai-tool-plan" aria-label="同频 AI 整理的视频任务"><strong>同频 AI 已整理任务</strong><p>{plan.summary}</p><label>生成提示词<textarea value={plan.prompt} readOnly /></label><small>如需修改，请直接改上方任务描述，再让同频 AI 重新整理。</small></section> : <p className="tp-ai-tool-plan-hint">先由同频 AI 整理任务，再由你确认生成。</p>}
-    <button type="button" className="tp-ai-tool-confirm" disabled={busy || !modelAvailable} onClick={() => void submit()}>{plan ? "确认生成" : "让同频 AI 整理"}</button>
     {!data ? <p role="status">正在检查视频服务…</p> : unavailable ? <p role="status">请管理员启用视频服务并配置密钥。</p> : null}
     {data && !unavailable && !profile ? <p role="status" className="tp-ai-video-error">当前业务档位尚未配置可用的视频能力，请联系管理员。</p> : null}
-    {busy ? <p role="status">正在读取图片…</p> : null}
     {data?.jobs.length && onUseHistory ? <details className="tp-ai-video-hint"><summary>已有视频任务</summary>{data.jobs.map(job => <button type="button" key={job.id} onClick={async () => {
-      if (lock.current) return; setWorking(true);
+      if (lock.current) return; setWorking(true, "正在读取原视频任务…");
       try { if (await onUseHistory(job.id)) { if (live.current) onClose(); } }
       catch (e) { if (live.current) setError(e instanceof Error ? e.message : "无法读取原任务"); }
       finally { lock.current = false; if (live.current) setWorking(false); }
     }}>查看原任务：{job.prompt.slice(0, 40)}</button>)}</details> : null}
+    </>}
   </fieldset>
     {error ? <p role="alert" className="tp-ai-video-error tp-ai-video-submit-error">{error}<button type="button" onClick={() => void refresh()}>重新检查</button></p> : null}
   </>;

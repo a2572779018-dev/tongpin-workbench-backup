@@ -4,6 +4,7 @@ import { BASE_CAPABILITIES, CAPABILITY_HUBS, hubIsActive, hubSkillNames } from "
 describe("AI capability center catalogue", () => {
   it("separates base capabilities from composable workflow hubs", () => {
     expect(BASE_CAPABILITIES.map(item => item.id)).toEqual(["chat", "attachments", "image", "video", "presentation", "computer"]);
+    expect(BASE_CAPABILITIES.find(item => item.id === "computer")?.availability).toBe("macOS 与 Windows 桌面端");
     expect(CAPABILITY_HUBS.length).toBeGreaterThanOrEqual(3);
   });
 
