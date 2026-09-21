@@ -157,16 +157,6 @@ function archiveFixture(root, target) {
   fs.cpSync(path.join(root, "node_modules"), unpackedModules, {
     recursive: true,
   });
-  const packages = new Map([
-    [
-      "node_modules/@trycua/cua-driver/package.json",
-      packageJson("@trycua/cua-driver", "0.28.1"),
-    ],
-    [
-      "node_modules/@ubjs/node/package.json",
-      packageJson("@ubjs/node", "0.31.0-3"),
-    ],
-  ]);
   const nativeSpecs =
     target === MAC_UNIVERSAL_TARGET
       ? DARWIN_NATIVE_SPECS
@@ -188,7 +178,7 @@ function archiveFixture(root, target) {
       (spec) => `/node_modules/${spec.scope}/${spec.packageName}/package.json`,
     ),
   ]);
-  return { archivePath, archiveEntries, packages };
+  return { archivePath, archiveEntries };
 }
 
 afterEach(() => {
@@ -282,7 +272,7 @@ describe("computer-use Windows native packaging gate", () => {
 
   it("checks both app.asar wrappers and unpacked Windows binaries", () => {
     const root = createWindowsFixture();
-    const { archivePath, archiveEntries, packages } = archiveFixture(
+    const { archivePath, archiveEntries } = archiveFixture(
       root,
       WINDOWS_TARGET,
     );
@@ -290,7 +280,6 @@ describe("computer-use Windows native packaging gate", () => {
       verifyPackagedComputerUseRuntime({
         archivePath,
         archiveEntries,
-        readArchiveFile: (entry) => Buffer.from(packages.get(entry) ?? ""),
         target: WINDOWS_TARGET,
       }),
     ).toBe(true);
@@ -299,10 +288,24 @@ describe("computer-use Windows native packaging gate", () => {
       verifyPackagedComputerUseRuntime({
         archivePath,
         archiveEntries,
-        readArchiveFile: () => Buffer.from("{}"),
         target: WINDOWS_TARGET,
       }),
     ).toThrow(/computer-use\.cjs/);
+
+    archiveEntries.add("/electron/computer-use.cjs");
+    fs.rmSync(
+      path.join(
+        `${archivePath}.unpacked`,
+        "node_modules/@trycua/cua-driver/package.json",
+      ),
+    );
+    expect(() =>
+      verifyPackagedComputerUseRuntime({
+        archivePath,
+        archiveEntries,
+        target: WINDOWS_TARGET,
+      }),
+    ).toThrow(/missing @trycua\/cua-driver\/package\.json/);
   });
 });
 
@@ -410,7 +413,7 @@ describe("computer-use macOS universal native packaging gate", () => {
 
   it("checks both Darwin variants inside the packaged universal app", () => {
     const root = createDarwinFixture();
-    const { archivePath, archiveEntries, packages } = archiveFixture(
+    const { archivePath, archiveEntries } = archiveFixture(
       root,
       MAC_UNIVERSAL_TARGET,
     );
@@ -418,7 +421,6 @@ describe("computer-use macOS universal native packaging gate", () => {
       verifyPackagedComputerUseRuntime({
         archivePath,
         archiveEntries,
-        readArchiveFile: (entry) => Buffer.from(packages.get(entry) ?? ""),
         target: MAC_UNIVERSAL_TARGET,
       }),
     ).toBe(true);
@@ -430,7 +432,6 @@ describe("computer-use macOS universal native packaging gate", () => {
       verifyPackagedComputerUseRuntime({
         archivePath,
         archiveEntries,
-        readArchiveFile: (entry) => Buffer.from(packages.get(entry) ?? ""),
         target: MAC_UNIVERSAL_TARGET,
       }),
     ).toThrow(/cua-driver-darwin-x64/);

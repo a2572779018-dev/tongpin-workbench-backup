@@ -364,15 +364,10 @@ function verifySourceComputerUseRuntime({
 function verifyPackagedComputerUseRuntime({
   archivePath,
   archiveEntries,
-  readArchiveFile,
   target = WINDOWS_TARGET,
 }) {
   if (!SUPPORTED_TARGETS.has(target)) fail(`unsupported target ${target}`);
-  if (
-    !archivePath ||
-    !(archiveEntries instanceof Set) ||
-    typeof readArchiveFile !== "function"
-  ) {
+  if (!archivePath || !(archiveEntries instanceof Set)) {
     fail("packaged runtime verifier received invalid inputs");
   }
   const requiredArchiveEntries = [
@@ -392,15 +387,12 @@ function verifyPackagedComputerUseRuntime({
     }
   }
   const unpackedModules = path.join(`${archivePath}.unpacked`, "node_modules");
-  verifyModuleVersions(unpackedModules, (relativePath) => {
-    try {
-      return JSON.parse(
-        readArchiveFile(`node_modules/${relativePath}`).toString("utf8"),
-      );
-    } catch {
-      fail(`packaged ${relativePath} is not valid JSON`);
-    }
-  });
+  // These packages are deliberately matched by build.asarUnpack. Validate the
+  // physical files that Electron will load instead of asking @electron/asar to
+  // extract them. The asar library resolves nested entry names with the host
+  // path separator, so slash-separated names fail on Windows even though the
+  // corresponding unpacked file is valid and present.
+  verifyModuleVersions(unpackedModules);
   for (const spec of specsForTarget(target)) {
     verifyNativePackage(unpackedModules, spec);
   }

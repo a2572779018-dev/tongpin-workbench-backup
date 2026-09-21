@@ -103,7 +103,6 @@ if (target) {
   verifyPackagedComputerUseRuntime({
     archivePath: resolvedArchive,
     archiveEntries: entries,
-    readArchiveFile: (entry) => asar.extractFile(resolvedArchive, entry),
     target,
   });
 }
