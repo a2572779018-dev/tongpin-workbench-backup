@@ -786,6 +786,9 @@ function repositionQuickTaskWindows() {
 
 function configureQuickTaskLifecycle() {
   const suspend = () => {
+    // Locking/suspending is an emergency stop, never implicit permission to
+    // resume old approvals or continue typing after unlock.
+    void computerUseController?.stopSession();
     quickTasksSuspended = true;
     stopQuickCornerPolling();
     hideQuickCorner({ animate: false });

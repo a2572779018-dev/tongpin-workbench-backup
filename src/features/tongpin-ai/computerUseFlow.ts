@@ -78,6 +78,7 @@ export function isEditableComputerElement(
     element.elementToken &&
     element.enabled !== false &&
     cleanLabel(element.label ?? "") &&
+    !/(?:password|passcode|secret|api[\s_-]*key|verification[\s_-]*code|one[\s_-]*time|密码|口令|验证码|密钥)/iu.test(element.label ?? "") &&
     EDITABLE_ELEMENT_ROLES.has(role),
   );
 }

@@ -471,7 +471,7 @@ describe("computer-use one-time action approval", () => {
         inner: { pid: 42, windowId: 9_007_199_254_740_993n },
       },
       position: { tag: "Element", inner: { elementToken: "element-token-1" } },
-      deliveryMode: 1,
+      deliveryMode: 0,
       session: "tongpin-test-session",
       button: 0,
       count: 1,
@@ -872,5 +872,67 @@ describe("computer-use Electron boundary", () => {
       main.indexOf("if (isDevelopment)", main.indexOf('mainWindow.webContents.on("will-navigate"')),
     );
     expect(mainNavigation).not.toContain('url.startsWith("file://")');
+  });
+});
+
+describe("computer-use main-process task bounds", () => {
+  const action = { kind: "click", target: { pid: 42, windowId: "9007199254740993" }, snapshotId: "snapshot-1", elementToken: "element-token-1" };
+  it("caps a native session at six execution attempts even if a renderer keeps asking", async () => {
+    const fake = makeFakeSdk();
+    const controller = makeController(fake, { confirmAction: async () => true });
+    await controller.startSession();
+    for (let index = 0; index < 6; index += 1) {
+      await controller.getWindowState(action.target);
+      const approved = await controller.requestActionApproval(action);
+      expect(approved.ok).toBe(true);
+      expect((await controller.executeApprovedAction(approved.value.token)).ok).toBe(true);
+    }
+    await controller.getWindowState(action.target);
+    expect(await controller.requestActionApproval(action)).toMatchObject({ ok: false, error: { code: "session_not_active" } });
+    expect(fake.driver.click).toHaveBeenCalledTimes(6);
+    await controller.stopSession();
+  });
+  it("checks the native deadline after approval, before input", async () => {
+    let now = 0;
+    const fake = makeFakeSdk();
+    const controller = makeController(fake, { now: () => now, confirmAction: async () => true });
+    await controller.startSession();
+    now = 299_000;
+    await controller.getWindowState(action.target);
+    const approved = await controller.requestActionApproval(action);
+    now = 300_001;
+    expect(await controller.executeApprovedAction(approved.value.token)).toMatchObject({ ok: false, error: { code: "session_not_active" } });
+    expect(fake.driver.click).not.toHaveBeenCalled();
+    await controller.stopSession();
+  });
+  it("will not type into a password-labelled ordinary text field", async () => {
+    const fake = makeFakeSdk();
+    const original = fake.driver.getWindowState;
+    fake.driver.getWindowState = vi.fn(async input => {
+      const state = await original(input);
+      return { ...state, elements: [{ elementIndex: 1n, role: "AXTextField", depth: 1, elementToken: "secret", label: "API Key 密钥" }] };
+    });
+    const confirmAction = vi.fn(async () => true);
+    const controller = makeController(fake, { confirmAction });
+    await controller.startSession();
+    await controller.getWindowState(action.target);
+    expect(await controller.requestActionApproval({ ...action, kind: "type", elementToken: "secret", text: "abc" })).toMatchObject({ ok: false, error: { code: "invalid_action" } });
+    expect(confirmAction).not.toHaveBeenCalled();
+    expect(fake.driver.callTool).not.toHaveBeenCalled();
+    await controller.stopSession();
+  });
+  it("pins the granted window and rejects changing targets inside the same session", async () => {
+    const fake = makeFakeSdk({ windows: [testWindow(), testWindow({ pid: 43, windowId: 99n })] });
+    const confirmAction = vi.fn(async () => true);
+    const controller = makeController(fake, { confirmAction });
+    await controller.startSession();
+    await controller.getWindowState(action.target);
+    expect((await controller.requestActionApproval(action)).ok).toBe(true);
+    const otherTarget = { pid: 43, windowId: "99" };
+    await controller.getWindowState(otherTarget);
+    expect(await controller.requestActionApproval({ ...action, target: otherTarget })).toMatchObject({ ok: false, error: { code: "target_changed" } });
+    expect(confirmAction).toHaveBeenCalledTimes(1);
+    expect(fake.driver.click).not.toHaveBeenCalled();
+    await controller.stopSession();
   });
 });

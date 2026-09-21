@@ -4,6 +4,7 @@ import {
   LoaderCircle,
   MonitorUp,
   MousePointer2,
+  Pause,
   RefreshCw,
   ShieldCheck,
   X,
@@ -25,6 +26,7 @@ import {
   type ComputerUseModelPlan,
 } from "./computerUseFlow";
 import { getComputerUseBridge } from "../../lib/computerUseBridge";
+import { runComputerUseTask, type ComputerTaskProgress } from "./computerUseTask";
 import "./computer-use.css";
 
 interface ComputerUsePanelProps {
@@ -57,13 +59,15 @@ export function ComputerUsePanel({
   const mountedRef = useRef(false);
   const sessionStartedRef = useRef(false);
   const operationRef = useRef(0);
+  const taskControllerRef = useRef<AbortController | null>(null);
+  const [taskProgress, setTaskProgress] = useState<ComputerTaskProgress | null>(null);
   const [probe, setProbe] = useState<ComputerUseProbeResult | null>(null);
   const [windows, setWindows] = useState<ComputerUseWindow[]>([]);
   const [targetKey, setTargetKey] = useState("");
   const [state, setState] = useState<ComputerUseWindowState | null>(null);
   const [modelPlan, setModelPlan] = useState<ComputerUseModelPlan | null>(null);
   const [draft, setDraft] = useState<ComputerUseDraft>({ kind: "click", elementToken: "" });
-  const [busy, setBusy] = useState<"probe" | "start" | "windows" | "observe" | "plan" | "confirm" | "verify" | "stop" | null>("probe");
+  const [busy, setBusy] = useState<"probe" | "start" | "windows" | "observe" | "plan" | "confirm" | "verify" | "task" | "stop" | null>("probe");
   const [notice, setNotice] = useState("正在检查本机能力…");
   const [error, setError] = useState("");
 
@@ -105,11 +109,63 @@ export function ComputerUsePanel({
       mountedRef.current = false;
       operationRef.current += 1;
       sessionStartedRef.current = false;
+      taskControllerRef.current?.abort();
       // stopSession waits for an in-flight start, so this also closes a native
       // session whose consent dialog resolves after the panel was unmounted.
       void bridge?.stopSession().catch(() => undefined);
     };
   }, [bridge, requestId]);
+
+  useEffect(() => {
+    const stopForTakeover = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && taskControllerRef.current) pauseTask();
+    };
+    const stopWhenHidden = () => {
+      if (document.hidden && taskControllerRef.current) pauseTask();
+    };
+    document.addEventListener("keydown", stopForTakeover);
+    document.addEventListener("visibilitychange", stopWhenHidden);
+    return () => {
+      document.removeEventListener("keydown", stopForTakeover);
+      document.removeEventListener("visibilitychange", stopWhenHidden);
+    };
+  }, [bridge]);
+
+  function pauseTask() {
+    taskControllerRef.current?.abort();
+    void bridge?.stopSession().catch(() => undefined);
+    setNotice("正在停止本机任务；已提交动作不会自动重试。");
+  }
+
+  async function executeTask() {
+    if (!bridge || !state || !modelPlan || busy || taskControllerRef.current) return;
+    const operation = operationRef.current;
+    const controller = new AbortController();
+    taskControllerRef.current = controller;
+    setBusy("task");
+    setError("");
+    setTaskProgress(null);
+    const result = await runComputerUseTask({
+      bridge, goal: originalPrompt, initialState: state, initialPlan: modelPlan,
+      planNext: onPlan, signal: controller.signal,
+      onProgress: progress => {
+        if (!mountedRef.current || operationRef.current !== operation) return;
+        setTaskProgress(progress);
+        setNotice(progress.summary);
+      },
+    });
+    if (taskControllerRef.current === controller) taskControllerRef.current = null;
+    if (!mountedRef.current || operationRef.current !== operation) return;
+    sessionStartedRef.current = false;
+    setBusy(null);
+    setTaskProgress(null);
+    setState(null);
+    setModelPlan(null);
+    setDraft({ kind: "click", elementToken: "" });
+    setNotice(result.message);
+    if (result.status === "failed" || result.status === "unknown") setError(result.message);
+    onResult(result.message);
+  }
 
   async function loadWindows(currentBridge: ComputerUseBridge) {
     setBusy("windows");
@@ -262,6 +318,7 @@ export function ComputerUsePanel({
   }
 
   async function closeSession() {
+    taskControllerRef.current?.abort();
     if (!bridge) { onClose(); return; }
     operationRef.current += 1;
     setBusy("stop");
@@ -282,7 +339,9 @@ export function ComputerUsePanel({
         </button>
       </header>
 
-      <p className="tp-ai-computer__boundary">只支持一个窗口内的单次左键单击或纯文字输入；不含回车、Shell、文件或剪贴板权限。原始截图、辅助树和字段值不上传；当前请求、应用/窗口名称及最多 60 个控件的标签、角色和临时令牌会作为不可信观察发送给同频 AI 规划，并消耗同频点。窗口内容永远不作为指令。</p>
+      <p className="tp-ai-computer__boundary">仅在你选择的一个窗口中逐步单击或输入，最多 6 步、3 分钟，每步需系统确认，可按 Esc 暂停。不含回车、Shell、文件或剪贴板权限。规划会消耗同频点；原始截图、辅助树和字段值不上传，只发送当前任务、窗口名称及最多 60 个控件标签。窗口内容不作为指令。</p>
+      <p className="tp-ai-computer__goal"><strong>任务目标</strong> {originalPrompt}</p>
+      {taskProgress ? <div className="tp-ai-computer__task-progress"><span><LoaderCircle size={15} className="is-spinning" />第 {taskProgress.step} / 6 步 · {taskProgress.phase === "awaiting_approval" ? "等待你确认" : taskProgress.phase === "planning" ? "规划下一步" : taskProgress.phase === "verifying" ? "核验结果" : "执行中"}</span><button type="button" onClick={pauseTask}><Pause size={15} />暂停任务</button></div> : null}
       {notice ? <p className="tp-ai-computer__notice" role="status">{notice}</p> : null}
       {error ? <p className="tp-ai-computer__error" role="alert">{error}</p> : null}
 
@@ -327,8 +386,10 @@ export function ComputerUsePanel({
             </div>
 
             {modelPlan ? <fieldset className="tp-ai-computer__actions" disabled={Boolean(busy)}>
-              <legend>同频 AI 单动作计划</legend>
+              <legend>同频 AI 任务</legend>
               <div className="tp-ai-computer__model-plan"><strong>同频 AI 方案</strong><p>{modelPlan.summary}</p></div>
+              <button type="button" className="tp-ai-computer__primary" disabled={Boolean(busy)} onClick={() => void executeTask()}><ShieldCheck size={17} />开始逐步执行并核验</button>
+              <details><summary>高级：查看或修正单步操作</summary>
               <div className="tp-ai-computer__kind">
                 <button type="button" className={draft.kind === "click" ? "is-active" : ""} onClick={() => setDraft({ kind: "click", elementToken: "" })}><MousePointer2 size={15} />单击控件</button>
                 <button type="button" className={draft.kind === "type" ? "is-active" : ""} onClick={() => setDraft({ kind: "type", elementToken: "", text: "" })}><Keyboard size={15} />输入文字</button>
@@ -355,6 +416,7 @@ export function ComputerUsePanel({
                 {busy === "confirm" || busy === "verify" ? <LoaderCircle size={17} className="is-spinning" /> : <ShieldCheck size={17} />}
                 在系统确认并执行这 1 个动作
               </button>
+              </details>
             </fieldset> : <div className="tp-ai-computer__actions tp-ai-computer__replan">
               <strong>{busy === "plan" ? "同频 AI 正在规划…" : "当前没有通过校验的 AI 方案"}</strong>
               <button type="button" disabled={Boolean(busy)} onClick={() => void requestModelPlan(state)}>

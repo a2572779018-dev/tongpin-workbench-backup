@@ -7,6 +7,7 @@
 .tp-ai-computer > header button { width:34px; padding:0; }
 .tp-ai-computer__boundary,.tp-ai-computer__notice,.tp-ai-computer__error,.tp-ai-computer__empty-plan { margin:0; font-size:12px; line-height:1.5; }
 .tp-ai-computer__boundary { color:color-mix(in srgb, currentColor 76%, transparent); }
+.tp-ai-computer__goal { margin:0; font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
 .tp-ai-computer__notice { padding:8px 10px; border-radius:9px; background:color-mix(in srgb, #fff 76%, transparent); }
 .tp-ai-computer__error { color:#a52929; }
 .tp-ai-computer__loading { display:flex; align-items:center; gap:7px; font-size:13px; }
@@ -26,6 +27,11 @@
 .tp-ai-computer__snapshot p,.tp-ai-computer__snapshot small { margin:0; font-size:11px; color:color-mix(in srgb, currentColor 64%, transparent); }
 .tp-ai-computer__actions { display:grid; align-content:start; gap:9px; min-width:0; margin:0; padding:10px; border:1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius:10px; }
 .tp-ai-computer__actions legend { padding:0 5px; font-size:12px; font-weight:700; }
+.tp-ai-computer__actions details > summary { cursor:pointer; font-size:12px; padding:5px 0; }
+.tp-ai-computer__actions details[open] { display:grid; gap:8px; }
+.tp-ai-computer__task-progress { display:flex; justify-content:space-between; gap:10px; align-items:center; font-size:12px; }
+.tp-ai-computer__task-progress > span { display:inline-flex; align-items:center; gap:6px; }
+.tp-ai-computer__task-progress button { padding:4px 9px; }
 .tp-ai-computer__kind { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
 .tp-ai-computer__kind button { padding:6px 8px; }
 .tp-ai-computer__kind button.is-active { border-color:#8b6f00; background:#fff0ad; }
@@ -35,6 +41,7 @@
 .tp-ai-computer__plan small { color:color-mix(in srgb, currentColor 62%, transparent); }
 .tp-ai-computer .is-spinning { animation:tp-ai-computer-spin .8s linear infinite; }
 @keyframes tp-ai-computer-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .tp-ai-computer .is-spinning { animation:none; } }
 @media (max-width:760px) {
   .tp-ai-computer__target,.tp-ai-computer__state { grid-template-columns:1fr; }
   .tp-ai-computer__target > button { width:100%; }

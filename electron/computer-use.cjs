@@ -6,6 +6,8 @@ const CUA_DRIVER_VERSION = "0.28.1";
 const APPROVAL_TTL_MS = 30_000;
 const SNAPSHOT_TTL_MS = 60_000;
 const NATIVE_CALL_TIMEOUT_MS = 8_000;
+const SESSION_MAX_ACTIONS = 6;
+const SESSION_MAX_DURATION_MS = 5 * 60_000;
 const MAX_WINDOWS = 200;
 const MAX_TEXT_LENGTH = 200;
 const MAX_WINDOW_LABEL_LENGTH = 160;
@@ -378,6 +380,7 @@ function isEditableElement(element) {
     element?.elementToken &&
     element.enabled !== false &&
     safeLabel(element.label) &&
+    !/(?:password|passcode|secret|api[\s_-]*key|verification[\s_-]*code|one[\s_-]*time|密码|口令|验证码|密钥)/i.test(element.label) &&
     EDITABLE_ELEMENT_ROLES.has(role),
   );
 }
@@ -648,6 +651,9 @@ function createComputerUseController({
   let startPromise = null;
   let stopPromise = null;
   let approvalPending = false;
+  let sessionDeadlineMs = 0;
+  let executionAttempts = 0;
+  let approvedWindowKey = null;
   const approvals = new Map();
   const knownWindows = new Map();
   const latestSnapshots = new Map();
@@ -839,6 +845,9 @@ function createComputerUseController({
       driver = nextDriver;
       sessionId = nextSessionId;
       lifecycleState = "running";
+      sessionDeadlineMs = now() + SESSION_MAX_DURATION_MS;
+      executionAttempts = 0;
+      approvedWindowKey = null;
       approvals.clear();
       knownWindows.clear();
       latestSnapshots.clear();
@@ -1001,6 +1010,11 @@ function createComputerUseController({
       return failure("session_not_active");
     }
     if (approvalPending) return failure("approval_busy");
+    if (now() >= sessionDeadlineMs || executionAttempts >= SESSION_MAX_ACTIONS) {
+      approvals.clear();
+      return failure("session_not_active", "本次电脑任务已达到步骤或时长上限，请停止后重新开启会话");
+    }
+    if (approvedWindowKey && approvedWindowKey !== windowKey(action.target)) return failure("target_changed");
 
     const windowsResult = await refreshWindows();
     if (!windowsResult.ok) return windowsResult;
@@ -1027,6 +1041,8 @@ function createComputerUseController({
     if (lifecycleState !== "running" || sessionId !== expectedSessionId) {
       return failure("session_not_active");
     }
+    if (now() >= sessionDeadlineMs || executionAttempts >= SESSION_MAX_ACTIONS) return failure("session_not_active");
+    approvedWindowKey = windowKey(action.target);
 
     approvals.clear();
     const token = createToken();
@@ -1075,6 +1091,10 @@ function createComputerUseController({
     const approval = approvals.get(rawToken);
     approvals.delete(rawToken);
     if (!approval) return failure("approval_required");
+    if (now() >= sessionDeadlineMs || executionAttempts >= SESSION_MAX_ACTIONS) {
+      approvals.clear();
+      return failure("session_not_active", "本次电脑任务已达到步骤或时长上限，未执行后续动作");
+    }
     if (now() > approval.expiresAtMs) return failure("approval_expired");
     if (
       lifecycleState !== "running" ||
@@ -1112,6 +1132,7 @@ function createComputerUseController({
       return failure("target_changed");
     }
     if (now() > approval.expiresAtMs) return failure("approval_expired");
+    if (now() >= sessionDeadlineMs || executionAttempts >= SESSION_MAX_ACTIONS) return failure("session_not_active");
     if (
       lifecycleState !== "running" ||
       !driver ||
@@ -1144,6 +1165,7 @@ function createComputerUseController({
     // Each bounded observation authorizes at most one execution attempt.
     // The renderer must observe again before it can plan another action.
     latestSnapshots.delete(windowKey(approval.action.target));
+    executionAttempts += 1;
 
     try {
       const sdk = await getSdk();
@@ -1160,7 +1182,10 @@ function createComputerUseController({
             sdk.ClickInput.new({
               target,
               position,
-              deliveryMode: sdk.InputDeliveryMode.Foreground,
+              // Semantic, exact-window delivery must not steal global focus.
+              // Unsupported background routes fail closed; never retry in the
+              // foreground and risk clicking another application.
+              deliveryMode: sdk.InputDeliveryMode.Background,
               session: approval.sessionId,
               button: sdk.ClickButton.Left,
               count: 1,
