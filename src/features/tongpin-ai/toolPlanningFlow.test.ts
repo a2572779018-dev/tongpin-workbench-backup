@@ -34,6 +34,7 @@ describe("conversational tool planning boundary", () => {
 
   it("uses one explicit video send to plan first and then submit that server-issued plan", () => {
     const submit = section(composer, "async function submit()", "useImperativeHandle");
+    expect(submit.indexOf("onSubmitTask({ ...base")).toBeLessThan(submit.indexOf("await onPlan(base)"));
     const planBranch = section(submit, "if (!approvedPlan)", "setSubmitted(true)");
     expect(planBranch).toContain("await onPlan(base)");
     expect(planBranch).not.toContain("await onSubmit(");
@@ -58,12 +59,13 @@ describe("conversational tool planning boundary", () => {
     expect(explicitRoute).toContain("setQueuedToolPlan({ kind: pendingPlanKind, originalPrompt, contextKey: toolPlanContextKeyFor(targetComposerTool) })");
     expect(explicitRoute).toContain("onComposerToolChange?.(targetComposerTool)");
     expect(explicitRoute).toContain("return;");
+    expect(explicitRoute).toContain("onSubmitTool(pendingPlanKind, draft.trim())");
     expect(explicitRoute).not.toContain("onSubmit(");
     expect(submit).not.toContain("requestedTool");
     const queuedPlanning = section(workspace, "if (!queuedToolPlan) return;", "if (quickAuto");
     expect(queuedPlanning).toContain("if (composerTool !== targetTool) return;");
     expect(queuedPlanning).toContain("beginToolPlan(queuedToolPlan.kind, queuedToolPlan.originalPrompt, queuedToolPlan.contextKey)");
-    const planBranch = section(submit, "if (pendingPlanKind)", "followResponseRef.current");
+    const planBranch = section(submit, "if (pendingPlanKind)", "    onSubmit();");
     expect(planBranch).toContain("const originalPrompt = draft.trim()");
     expect(planBranch).toContain("beginToolPlan(pendingPlanKind, originalPrompt, toolPlanContextKey)");
     expect(planBranch).toContain("return;");
@@ -93,5 +95,9 @@ describe("conversational tool planning boundary", () => {
     for (const operation of ["saveNow(next)", '"/api/ai/video-references"', '"/api/ai/videos"']) {
       expect(guard).toBeLessThan(send.indexOf(operation));
     }
+    expect(send.indexOf("saveNow(next)")).toBeLessThan(send.indexOf('"/api/ai/video-references"'));
+    expect(send.indexOf('"/api/ai/video-references"')).toBeLessThan(send.indexOf("saveNow(preparedState)"));
+    expect(send.indexOf("saveNow(preparedState)")).toBeLessThan(send.indexOf('"/api/ai/videos"'));
+    expect(send).toContain("attachments: origin.attachments");
   });
 });

@@ -9,6 +9,13 @@ const state = (): AiWorkspaceState => ({
 });
 
 describe("video clarification draft recovery", () => {
+  it("restores the original video with all samples and its selected source time", () => {
+    const initial = state();
+    const video = { id: "source", name: "actor.mp4", mimeType: "video/mp4", content: "sampled only", media: { kind: "video" as const, durationSeconds: 9, selectedFrameIndex: 1, frames: [{ timeSeconds: 0.001, dataUrl: "data:image/jpeg;base64,YQ==" }, { timeSeconds: 4.5, dataUrl: "data:image/jpeg;base64,Yg==" }] } };
+    initial.conversations = [{ id: "a", title: "A", timeLabel: "", messages: [{ id: "message", role: "user", content: "use selected frame", time: "", attachments: [video] }] }];
+    const next = preserveVideoClarificationDraft(initial, "a", "补充", { requestId: "request", prompt: "补充", seconds: 6, resolution: "768p", aspectRatio: "16:9", referenceImages: [{ name: "actor.mp4 · 4.50 秒", dataUrl: "data:image/jpeg;base64,Yg==", sourceVideo: { documentId: "source", name: "actor.mp4", timeSeconds: 4.5 } }] });
+    expect(next.draftAttachments?.a).toEqual([video]);
+  });
   it("keeps the exact editable inputs and references without persisting execution authorization", () => {
     const next = preserveVideoClarificationDraft(state(), "conversation-a", "请做品牌短片", {
       requestId: "local-request", planRequestId: "single-use-plan", planTrace: {

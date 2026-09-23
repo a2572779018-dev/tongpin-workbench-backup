@@ -1,4 +1,4 @@
-import type { AiHarnessTrace, AiQuota, AiUsage, AiSource } from "../../../shared/ai";
+import type { AiChatResponse, AiHarnessTrace, AiQuota, AiUsage, AiSource } from "../../../shared/ai";
 import type { AiWorkspaceDocument, AiWorkspaceJson } from "../../../shared/aiWorkspace";
 
 export type AiQuotaFilter = "all" | "available" | "low" | "empty";
@@ -41,6 +41,9 @@ export interface TongpinAIMessage {
   role: "user" | "assistant";
   content: string;
   analysisSummary?: string;
+  completion?: AiChatResponse["completion"];
+  retryDisposition?: "recover" | "regenerate";
+  taskPhase?: "queued" | "planning" | "awaiting_input" | "awaiting_authorization" | "running" | "partial" | "completed" | "failed" | "cancelled" | "unknown";
   time: string;
   /** Epoch milliseconds for a durable in-flight timer. */
   startedAt?: number;

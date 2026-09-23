@@ -46,6 +46,7 @@ import type { AiWorkspaceDocument } from "../../../shared/aiWorkspace";
 import { ATTACHMENT_ACCEPT, TEXT_ATTACHMENT_ACCEPT, workspaceAttachment } from "./attachments";
 import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT } from "../../../shared/aiMedia";
 import { AttachmentChips } from "./AttachmentChips";
+import { containsFileDrag, uniqueIntakeFiles } from "./attachmentIntake";
 import { ChatMessageRow } from "./ChatMessageRow";
 import { AiVideoComposer, type VideoComposerHandle } from "./AiVideoComposer";
 import { ComputerUsePanel } from "./ComputerUsePanel";
@@ -86,8 +87,9 @@ interface ChatWorkspaceProps {
   availabilityNotice?: ReactNode;
   connectionError?: string;
   onRefreshConnection?: () => void;
-  onRetry?: (messageId: string) => void;
+  onRetry?: (messageId: string, mode?: "continue" | "regenerate") => void;
   onTraceChange?: (messageId: string, trace: AiHarnessTrace) => void;
+  onMessageVisible?: (messageId: string) => void;
   retryableMessageIds?: Set<string>;
   sidebarCollapsed?: boolean;
   serviceConnected?: boolean;
@@ -96,9 +98,11 @@ interface ChatWorkspaceProps {
   attachments?: AiWorkspaceDocument[];
   onAddFiles?: (files: File[], signal?: AbortSignal) => void | Promise<void>;
   onRemoveAttachment?: (index: number) => void;
+  onSelectVideoFrame?: (attachmentIndex: number, frameIndex: number) => void;
   composerTool?: "text" | "presentation" | "image";
   onComposerToolChange?: (tool: "text" | "presentation" | "image") => void;
   imageEnabled?: boolean;
+  imageEditEnabled?: boolean;
   visionEnabled?: boolean;
   webSearchEnabled?: boolean;
   quickAuto?: boolean;
@@ -115,8 +119,10 @@ interface ChatWorkspaceProps {
   onToggleSidebar?: () => void;
   onStop?: () => void;
   onSubmit: (approvedPlan?: AiToolPlan & { originalPrompt: string }) => void;
+  onSubmitTool?: (kind: "image" | "presentation", prompt: string) => void;
   onPlanTool?: (kind: "image" | "video" | "presentation", prompt: string, videoRequest?: VideoChatRequest) => Promise<AiToolPlan | null>;
   onSubmitVideo?: (request: VideoChatRequest) => Promise<boolean>;
+  onSubmitVideoTask?: (request: VideoChatRequest) => Promise<boolean>;
   onUseVideoHistory?: (jobId: string) => Promise<boolean>;
   videoDispatchRequest?: { id: string; prompt: string; request?: VideoChatRequest };
   computerAvailable?: boolean;
@@ -153,6 +159,7 @@ export function ChatWorkspace({
   onRefreshConnection,
   onRetry,
   onTraceChange,
+  onMessageVisible,
   retryableMessageIds,
   sidebarCollapsed = false,
   serviceConnected = false,
@@ -160,9 +167,11 @@ export function ChatWorkspace({
   attachments = [],
   onAddFiles,
   onRemoveAttachment,
+  onSelectVideoFrame,
   composerTool = "text",
   onComposerToolChange,
   imageEnabled = false,
+  imageEditEnabled = false,
   visionEnabled = false,
   webSearchEnabled = false,
   quickAuto = false,
@@ -179,8 +188,10 @@ export function ChatWorkspace({
   onToggleSidebar,
   onStop,
   onSubmit,
+  onSubmitTool,
   onPlanTool,
   onSubmitVideo,
+  onSubmitVideoTask,
   onUseVideoHistory,
   videoDispatchRequest,
   computerAvailable = false,
@@ -191,6 +202,7 @@ export function ChatWorkspace({
   onComputerResult,
 }: ChatWorkspaceProps) {
   const messageListRef = useRef<HTMLDivElement>(null);
+  const onVisibleRef = useRef(onMessageVisible); onVisibleRef.current = onMessageVisible;
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<ReturnType<typeof activeSkillMention>>();
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -274,11 +286,16 @@ export function ChatWorkspace({
   const skillInputRef = useRef<HTMLInputElement>(null);
   const isEmpty = messages.length === 0;
   const [readingFiles, setReadingFiles] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
+  const dragDepth = useRef(0);
   const [fileError, setFileError] = useState("");
   const [celebrating, setCelebrating] = useState(false);
   const previousReply = useRef<CharacterReplySnapshot>({});
   const fileReadingRef = useRef(false);
-  useEffect(() => () => attachmentController.current?.abort(), [conversationId]);
+  useEffect(() => {
+    setReadingFiles(false); setFileError(""); setDropActive(false); dragDepth.current = 0; fileReadingRef.current = false;
+    return () => { attachmentController.current?.abort(); attachmentController.current = null; fileReadingRef.current = false; };
+  }, [conversationId, projectId]);
   const [historyWindow, setHistoryWindow] = useState({ conversationId, count: CHAT_MESSAGE_PAGE_SIZE });
   const historyAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const callbacksRef = useRef({ onOpenArtifact, onRetry, onRefreshConnection });
@@ -287,10 +304,28 @@ export function ChatWorkspace({
   videoComposerContextRef.current = { attachments, onComposerToolChange, onDraftChange, onWebSearchChange };
   const videoSettled = useCallback(() => callbacksRef.current.onRefreshConnection?.(), []);
   const openArtifact = useCallback((id: string) => callbacksRef.current.onOpenArtifact(id), []);
-  const retryMessage = useCallback((id: string) => callbacksRef.current.onRetry?.(id), []);
+  const retryMessage = useCallback((id: string, mode?: "continue" | "regenerate") => callbacksRef.current.onRetry?.(id, mode), []);
   const visibleCount = historyWindow.conversationId === conversationId ? historyWindow.count : CHAT_MESSAGE_PAGE_SIZE;
   const hiddenCount = Math.max(0, messages.length - visibleCount);
+  useEffect(() => {
+    const list = messageListRef.current;
+    if (!list || typeof IntersectionObserver === "undefined") return;
+    const visible = new Set<string>();
+    const report = () => { if (!document.hidden) for (const id of visible) onVisibleRef.current?.(id); };
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        const id = (entry.target as HTMLElement).dataset.aiMessageId;
+        if (!id) continue;
+        if (entry.isIntersecting) visible.add(id); else visible.delete(id);
+      }
+      report();
+    }, { root: list, threshold: 0.01 });
+    for (const row of list.querySelectorAll("[data-ai-message-id]")) observer.observe(row);
+    document.addEventListener("visibilitychange", report);
+    return () => { observer.disconnect(); document.removeEventListener("visibilitychange", report); };
+  }, [conversationId, messages, visibleCount]);
   const capabilityUnavailable = composerTool === "image" ? !imageEnabled : webSearch && !webSearchEnabled;
+  const imageReferencesAllowed = !attachments.length || imageEditEnabled && attachments.every(item => item.media?.kind === "image");
   const computerMentioned = mentionedToolIds(draft).includes("computer");
   const openVideoComposer = useCallback((initial?: VideoChatRequest) => {
     const { attachments: currentAttachments, onComposerToolChange: changeComposerTool, onWebSearchChange: changeWebSearch } = videoComposerContextRef.current;
@@ -315,7 +350,6 @@ export function ChatWorkspace({
   }, [openVideoComposer]);
   useEffect(() => {
     if (!videoDispatchRequest) return;
-    videoComposerContextRef.current.onDraftChange(videoDispatchRequest.prompt);
     openVideoComposer(videoDispatchRequest.request);
   }, [openVideoComposer, videoDispatchRequest?.id]);
   const beginToolPlan = useCallback((kind: "image" | "presentation", originalPrompt: string, contextKey: string) => {
@@ -352,7 +386,7 @@ export function ChatWorkspace({
     if (
       !queuedToolPlan.originalPrompt || responding || checkingQuota || readingFiles || fileReadingRef.current
       || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked
-      || (queuedToolPlan.kind === "image" && (!imageEnabled || attachments.length > 0))
+      || (queuedToolPlan.kind === "image" && (!imageEnabled || !imageReferencesAllowed))
     ) return;
     beginToolPlan(queuedToolPlan.kind, queuedToolPlan.originalPrompt, queuedToolPlan.contextKey);
   }, [
@@ -364,6 +398,7 @@ export function ChatWorkspace({
     connectionError,
     connectionLoading,
     imageEnabled,
+    imageReferencesAllowed,
     queuedToolPlan,
     quotaInsufficient,
     readingFiles,
@@ -529,11 +564,12 @@ export function ChatWorkspace({
         setFileError("图片生成尚未启用，请联系管理员配置。");
         return;
       }
-      if (mentionedTools[0] === "image" && attachments.length) {
-        setFileError("图片生成暂不支持普通附件，请先移除附件再试。");
+      if (mentionedTools[0] === "image" && !imageReferencesAllowed) {
+        setFileError("当前档位的图片生成只接受已启用的图片参考附件，请先移除其他附件。");
         return;
       }
       const pendingPlanKind = mentionedTools[0] === "image" ? "image" : "presentation";
+      if (onSubmitTool) { setMenu(null); followResponseRef.current = true; onSubmitTool(pendingPlanKind, draft.trim()); return; }
       const targetComposerTool = pendingPlanKind === "image" ? "image" : "presentation";
       const originalPrompt = draft.trim();
       setQueuedToolPlan({ kind: pendingPlanKind, originalPrompt, contextKey: toolPlanContextKeyFor(targetComposerTool) });
@@ -546,11 +582,12 @@ export function ChatWorkspace({
     const pendingPlanKind = composerTool === "image" ? "image" : composerTool === "presentation" ? "presentation" : undefined;
     if (pendingPlanKind) {
       if (imagePlanning || !draft.trim()) return;
-      if (pendingPlanKind === "image" && attachments.length) {
-        setFileError("图片生成暂不支持普通附件，请先移除附件再试。");
+      if (pendingPlanKind === "image" && !imageReferencesAllowed) {
+        setFileError("当前档位的图片生成只接受已启用的图片参考附件，请先移除其他附件。");
         return;
       }
       const originalPrompt = draft.trim();
+      if (onSubmitTool) { setMenu(null); followResponseRef.current = true; onSubmitTool(pendingPlanKind, originalPrompt); return; }
       beginToolPlan(pendingPlanKind, originalPrompt, toolPlanContextKey);
       return;
     }
@@ -560,11 +597,15 @@ export function ChatWorkspace({
   }
   async function addFiles(files: File[]) {
     if (!files.length || !onAddFiles || fileReadingRef.current) return;
+    if (responding || videoBusy) { setFileError("此对话任务正在进行，请稍后添加附件。"); return; }
+    if (videoOpen) { setFileError("请把参考图片拖入视频设置中的参考图区。"); return; }
+    if (composerTool === "image" && !imageEditEnabled) { setFileError("当前档位尚未配置参考图编辑，未上传文件。"); return; }
+    if (composerTool === "image" && files.some(file => !/\.(?:png|jpe?g|webp)$/i.test(file.name))) { setFileError("图片生成只接受 PNG、JPEG 或 WebP 参考图。"); return; }
     const controller = new AbortController(); attachmentController.current = controller;
     fileReadingRef.current = true; setReadingFiles(true); setFileError("");
-    try { await onAddFiles(files, controller.signal); }
+    try { await onAddFiles(uniqueIntakeFiles(files), controller.signal); }
     catch (caught) { if (!controller.signal.aborted) setFileError(caught instanceof Error ? caught.message : "附件读取失败，请重试"); }
-    finally { if (attachmentController.current === controller) attachmentController.current = null; fileReadingRef.current = false; setReadingFiles(false); }
+    finally { if (attachmentController.current === controller) { attachmentController.current = null; fileReadingRef.current = false; setReadingFiles(false); } }
   }
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
@@ -598,7 +639,17 @@ export function ChatWorkspace({
     <section
       className={`tp-ai-chat${isEmpty ? " is-empty" : ""}`}
       aria-label={`与${assistantName}对话`}
+      onDragEnter={event => { if (containsFileDrag(Array.from(event.dataTransfer.types))) { event.preventDefault(); dragDepth.current += 1; setDropActive(true); } }}
+      onDragOver={event => { if (containsFileDrag(Array.from(event.dataTransfer.types))) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }}
+      onDragLeave={event => { if (containsFileDrag(Array.from(event.dataTransfer.types))) { event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDropActive(false); } }}
+      onDrop={event => {
+        if (!containsFileDrag(Array.from(event.dataTransfer.types))) return;
+        const handled = event.defaultPrevented;
+        event.preventDefault(); dragDepth.current = 0; setDropActive(false);
+        if (!handled) void addFiles(Array.from(event.dataTransfer.files));
+      }}
     >
+      {dropActive ? <div className="tp-ai-file-drop-overlay" aria-live="polite"><Paperclip size={25} /><strong>松开添加到当前对话</strong><span>图片、视频或文档</span></div> : null}
       <header className="tp-ai-chat__header">
         <div className="tp-ai-chat__identity">
           <button
@@ -674,7 +725,7 @@ export function ChatWorkspace({
                 artifact={artifact}
                 assistantName={assistantName} copied={copiedId === message.id}
                 retryable={Boolean(retryableMessageIds?.has(message.id))}
-                retryDisabled={message.status === "error" && responding}
+                retryDisabled={responding}
                 onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
                 onTraceChange={onTraceChange}
                 onVideoSettled={isVideoArtifact ? videoSettled : undefined}
@@ -739,8 +790,8 @@ export function ChatWorkspace({
             onResult={onComputerResult ?? (() => undefined)}
           /> : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑动作规划器未接入，已停止流程。</p> : (
           <form className="tp-ai-composer" onSubmit={submitMessage}>
-            {videoOpen && onSubmitVideo && onPlanTool ? <AiVideoComposer ref={videoComposerRef} tier={mode} initialRequest={videoInitial} initialReferenceImages={videoAttachmentReferences} prompt={draft} onPlan={request => onPlanTool("video", request.prompt, request)} onSubmit={onSubmitVideo} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }} /> : null}
-            <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
+            {videoOpen && onSubmitVideo && onPlanTool ? <AiVideoComposer ref={videoComposerRef} tier={mode} initialRequest={videoInitial} initialReferenceImages={videoAttachmentReferences} prompt={draft} onPlan={request => onPlanTool("video", request.prompt, request)} onSubmit={onSubmitVideo} onSubmitTask={onSubmitVideoTask} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }} /> : null}
+            <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={composerTool === "image" ? AI_IMAGE_ACCEPT : visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);
             }} />
@@ -756,7 +807,7 @@ export function ChatWorkspace({
               const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = "";
               if (files.length) void addFiles(files);
             }} />
-            {!videoOpen && attachments.length ? <AttachmentChips attachments={attachments.map(workspaceAttachment)} onRemove={index => onRemoveAttachment?.(index)} disabled={responding || readingFiles} /> : null}
+            {!videoOpen && attachments.length ? <AttachmentChips attachments={attachments.map(workspaceAttachment)} onRemove={index => onRemoveAttachment?.(index)} onSelectVideoFrame={onSelectVideoFrame} disabled={responding || readingFiles} /> : null}
             {readingFiles ? <div className="tp-ai-attachment-progress" role="status"><LoaderCircle size={16} />正在处理附件…<button type="button" onClick={() => attachmentController.current?.abort()}>取消</button></div> : null}
             {composerTool !== "text" ? <div className="tp-ai-composer-capabilities" aria-label="当前生成设置">
               <button type="button" disabled={responding} onClick={() => onComposerToolChange?.("text")} aria-label={`取消${composerTool === "presentation" ? "生成 PPT" : "生成图片"}`}>
@@ -781,13 +832,10 @@ export function ChatWorkspace({
               onBlur={() => setMention(undefined)}
               onKeyDown={handleComposerKeyDown}
               onPaste={event => {
-                const images = Array.from(event.clipboardData.files).filter(file => file.type.startsWith("image/"));
-                if (!images.length) return;
+                const files = Array.from(event.clipboardData.files);
+                if (!files.length) return;
                 event.preventDefault();
-                if (videoOpen) { setFileError("请用视频设置中的「添加参考图片」上传参考图"); return; }
-                if (composerTool === "image") { setFileError("图片生成模式暂不支持参考图，请切换到对话后添加图片"); return; }
-                if (!visionEnabled) { setFileError("请管理员先启用图片理解"); return; }
-                if (!responding) void addFiles(images);
+                void addFiles(files);
               }}
             />
             {computerMentioned ? <p className="tp-ai-computer-input-warning" role="note">请勿在 @computer 请求中填写密码、验证码、API 密钥或其他敏感信息；请求会发送给同频 AI 规划。</p> : null}
@@ -863,8 +911,8 @@ export function ChatWorkspace({
                           <Paperclip size={18} />
                           <span>上传文件</span>
                         </button>
-                        <button type="button" role="menuitem" disabled={responding || readingFiles || composerTool === "image" || !visionEnabled || !onAddFiles}
-                          title={!visionEnabled ? "请管理员启用支持视觉输入的模型" : "PNG、JPEG、WebP，单张最大 12 MB"}
+                        <button type="button" role="menuitem" disabled={responding || readingFiles || !(composerTool === "image" ? imageEditEnabled : visionEnabled) || !onAddFiles}
+                          title={composerTool === "image" ? imageEditEnabled ? "添加图片编辑参考图，单张最大 12 MB" : "当前档位尚未配置参考图编辑" : !visionEnabled ? "请管理员启用支持视觉输入的模型" : "PNG、JPEG、WebP，单张最大 12 MB"}
                           onClick={() => { setMenu(null); imageInputRef.current?.click(); }}>
                           <ImagePlus size={18} /><span>上传图片</span>
                         </button>
@@ -902,8 +950,8 @@ export function ChatWorkspace({
                         <button
                           type="button"
                           role="menuitem"
-                          disabled={responding || readingFiles || !imageEnabled || attachments.length > 0 || !onComposerToolChange}
-                          title={!imageEnabled ? "请管理员配置图片生成与折算额度" : attachments.length ? "请先移除附件，图片模式仅支持文字描述" : "生成一张图片"}
+                          disabled={responding || readingFiles || !imageEnabled || !imageReferencesAllowed || !onComposerToolChange}
+                          title={!imageEnabled ? "请管理员配置图片生成与折算额度" : !imageReferencesAllowed ? "当前档位只接受已启用的图片参考附件" : "生成一张图片"}
                           onClick={() => {
                             setMenu(null);
                             onWebSearchChange?.(false); onComposerToolChange?.("image"); composerRef.current?.focus();

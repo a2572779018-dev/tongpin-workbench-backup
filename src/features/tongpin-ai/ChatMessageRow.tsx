@@ -21,7 +21,7 @@ interface ChatMessageRowProps {
   retryDisabled: boolean;
   onCopy: (message: TongpinAIMessage) => void;
   onOpenArtifact: (artifactId: string) => void;
-  onRetry: (messageId: string) => void;
+  onRetry: (messageId: string, mode?: "continue" | "regenerate") => void;
   onVideoSettled?: () => void;
   onEditVideo?: (request: VideoChatRequest) => void;
   onTraceChange?: (messageId: string, trace: AiHarnessTrace) => void;
@@ -80,6 +80,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
   message, artifact, assistantName, copied, retryable, retryDisabled, onCopy, onOpenArtifact, onRetry, onVideoSettled, onEditVideo, onTraceChange, videoEditDisabled,
 }: ChatMessageRowProps) {
   return <article
+    data-ai-message-id={message.id}
     className={`tp-ai-message is-${message.role}${message.status === "error" ? " is-error" : ""}`}
     aria-label={message.role === "assistant" ? `${assistantName} 消息` : "你的消息"}
   >
@@ -94,7 +95,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
           </figure>)}</div>{file.media.kind === "video" ? <small>仅分析采样画面，不含音频</small> : null}</> : null}
         </li>)}
       </ul> : null}
-      {message.status === "thinking" ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> :
+      {message.status === "thinking" ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}{message.content ? <MarkdownReply content={message.content} /> : null}<ReplyWaiting key={message.id} startedAt={message.startedAt} /></> :
         message.role === "assistant" && message.status !== "error"
           ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}<MarkdownReply content={message.content} typing={message.status === "typing"} /></>
           : <p>{message.content}</p>}
@@ -108,8 +109,9 @@ export const ChatMessageRow = memo(function ChatMessageRow({
       </ul> : null}
       {message.role === "assistant" && message.trace ? <RunTrace requestId={harnessTraceRequestId(message)} initial={message.trace} onChange={trace => onTraceChange?.(message.id, trace)} /> : null}
       {message.status === "error" && retryable && <div className="tp-ai-message__controls">
-        <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id)}>重新获取回复</button>
+        <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, message.retryDisposition === "regenerate" ? "regenerate" : undefined)}>{message.retryDisposition === "regenerate" ? "重新生成" : "查询原任务"}</button>
       </div>}
+      {message.completion?.state === "partial" ? <div className="tp-ai-message__controls" role="status"><span>回复尚未完成{message.completion.reason === "output_limit" ? "：达到本次输出上限" : "：连接中断"}</span>{message.completion.canContinue ? <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, "continue")}>继续生成</button> : null}<button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, "regenerate")}>重新生成</button></div> : null}
       {message.role === "assistant" && message.content && !["thinking", "typing", "error"].includes(message.status ?? "ready") &&
         <div className="tp-ai-message__controls"><button type="button" aria-label={copied ? "已复制回复" : "复制回复"} onClick={() => onCopy(message)}>
           {copied ? <Check size={15} /> : <Copy size={15} />}

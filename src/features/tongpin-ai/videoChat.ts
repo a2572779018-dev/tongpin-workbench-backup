@@ -16,7 +16,7 @@ export interface VideoChatRequest {
   aspectRatio: "16:9" | "9:16";
   referenceIds?: string[];
   /** Local-only; converted to account-bound reference IDs before persistence, never sent in the generation JSON. */
-  referenceImages?: Array<{ name: string; dataUrl: string }>;
+  referenceImages?: Array<{ name: string; dataUrl: string; generatedAsset?: { conversationId: string; assetId: string; sourceFingerprint: string }; sourceVideo?: { documentId: string; name: string; timeSeconds: number } }>;
 }
 
 /** Persist only retry inputs. The public, schema-validated trace belongs on

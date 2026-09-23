@@ -9,6 +9,9 @@ import {
   FolderOutput,
   FolderPlus,
   MessageSquare,
+  LoaderCircle,
+  CircleHelp,
+  CircleAlert,
   MessageSquarePlus,
   MoreHorizontal,
   PanelLeftClose,
@@ -24,6 +27,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { User } from "../../types";
 import { TongpinAIAccountUsage } from "./TongpinAIAccountUsage";
+import type { ConversationTaskStatus } from "./conversationTaskStatus";
 import type {
   TongpinAIConversation,
   TongpinAIProject,
@@ -36,6 +40,7 @@ interface TongpinAISidebarProps {
   activeProjectId: string | null;
   collapsed: boolean;
   conversations: TongpinAIConversation[];
+  conversationStatuses?: Readonly<Record<string, ConversationTaskStatus | undefined>>;
   projects: TongpinAIProject[];
   skillCount: number;
   usage: TongpinAIUsage;
@@ -70,6 +75,7 @@ export function TongpinAISidebar({
   activeProjectId,
   collapsed,
   conversations,
+  conversationStatuses = {},
   projects,
   skillCount,
   usage,
@@ -282,8 +288,13 @@ export function TongpinAISidebar({
           title={conversation.title}
           onClick={() => navigate(() => onSelectConversation(conversation.id))}
         >
-          <MessageSquare size={15} aria-hidden="true" />
+          {conversationStatuses[conversation.id]?.phase === "running" ? <LoaderCircle size={15} className="tp-ai-task-running" aria-label="任务进行中" />
+            : conversationStatuses[conversation.id]?.phase === "queued" ? <Clock3 size={15} aria-label="任务排队中" />
+              : ["awaiting_input", "unknown"].includes(conversationStatuses[conversation.id]?.phase ?? "") ? <CircleHelp size={15} aria-label={conversationStatuses[conversation.id]?.phase === "unknown" ? "任务结果待核对" : "等待你的回复"} />
+                : conversationStatuses[conversation.id]?.phase === "failed" ? <CircleAlert size={15} className="tp-ai-task-failed" aria-label="任务失败" />
+                  : <MessageSquare size={15} aria-hidden="true" />}
           <span>{conversation.title}</span>
+          {conversationStatuses[conversation.id]?.unread ? <i className="tp-ai-task-unread" aria-label="有未读完成结果" /> : null}
         </button>
         <button
           type="button"

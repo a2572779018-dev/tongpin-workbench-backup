@@ -12,6 +12,7 @@ export function preserveVideoClarificationDraft(
   const referenceDrafts = videoReferenceDraftAttachments(
     request.referenceImages ?? [],
     `video-reference-${conversationId}`,
+    [...(state.draftAttachments?.[conversationId] ?? []), ...(state.conversations.find(item => item.id === conversationId)?.messages.flatMap(message => message.attachments ?? []) ?? [])],
   );
   const draftAttachments = { ...(state.draftAttachments ?? {}) };
   if (referenceDrafts.length) draftAttachments[conversationId] = referenceDrafts;

@@ -1,13 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { MediaBlobCache } from "./mediaCache";
+import { MediaBlobCache, mediaCacheScope } from "./mediaCache";
 import type { AiVideoJob } from "../../../shared/aiVideo";
+import type { Session } from "../../types";
 
 const job = (status: AiVideoJob["status"] = "completed"): AiVideoJob => ({
   id: "job-123456789012", prompt: "test", model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9",
   status, progress: status === "completed" ? 100 : 50, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), quotaPoints: 1000, reserved: status !== "completed",
 });
 describe("private session media cache", () => {
+  it("separates authenticated sessions even when tenant user and job IDs match", () => {
+    const first = { user: { id: "member" } } as Session;
+    const second = { user: { id: "member" } } as Session;
+    const scopeA = mediaCacheScope(first), scopeB = mediaCacheScope(second);
+    expect(mediaCacheScope(first)).toBe(scopeA);
+    expect(scopeB).not.toBe(scopeA);
+    const cache = new MediaBlobCache(), blob = new Blob(["tenant-a"]);
+    cache.put(scopeA, "shared-job", blob);
+    expect(cache.get(scopeB, "shared-job")).toBeUndefined();
+    expect(cache.get(scopeA, "shared-job")).toBe(blob);
+  });
   it("isolates accounts, evicts least-recently-used blobs and clears on logout", () => {
     const cache = new MediaBlobCache(6), blob = new Blob(["abc"]);
     cache.put("a", "1", blob); cache.put("a", "2", blob);
@@ -62,6 +74,10 @@ describe("private session media cache", () => {
     cache.clear(); finish(new Blob(["private"]));
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(cache.snapshot("old-account", "job")).toBeUndefined();
+  });
+  it("handles a rejected media GET without a detached promise rejection", async () => {
+    const cache = new MediaBlobCache();
+    await expect(cache.loadBlob("member", "job", async () => { throw Error("GET 404"); }, new AbortController().signal)).rejects.toThrow("GET 404");
   });
   it("clears private playback state whenever the authenticated account changes", () => {
     const auth = readFileSync(new URL("../../auth/AuthContext.tsx", import.meta.url), "utf8");

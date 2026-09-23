@@ -1,4 +1,15 @@
 import type { AiVideoJob } from "../../../shared/aiVideo";
+import type { Session } from "../../types";
+
+const sessionScopes = new WeakMap<Session, string>();
+/** Cache entries belong to one authenticated session object, not merely the
+ * public user ID. The same user ID can be valid in a different tenant. */
+export function mediaCacheScope(session: Session | null): string {
+  if (!session?.user.id) return "";
+  let scope = sessionScopes.get(session);
+  if (!scope) { scope = `${session.user.id}:${crypto.randomUUID()}`; sessionScopes.set(session, scope); }
+  return scope;
+}
 
 interface InFlight<T> { controller: AbortController; promise: Promise<T> }
 interface MediaCacheEntry {
@@ -30,7 +41,10 @@ function waitForCaller<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T>
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(abortError(signal));
     signal.addEventListener("abort", abort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    // Clean up in both handled branches. Chaining a detached .finally here
+    // creates an unhandled rejection when a media GET fails.
+    promise.then(value => { signal.removeEventListener("abort", abort); resolve(value); },
+      error => { signal.removeEventListener("abort", abort); reject(error); });
   });
 }
 

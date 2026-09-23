@@ -6,6 +6,13 @@
 .tp-ai-file-chips button{display:grid;place-items:center;flex-shrink:0;border:0;background:transparent;color:inherit;min-width:28px;min-height:28px;border-radius:7px;cursor:pointer}
 .tp-ai-file-chips button:hover{background:#eee7d7}.tp-ai-file-chips button:disabled{opacity:.5;cursor:default}
 .tp-ai-file-thumbnail{width:46px;height:46px;object-fit:cover;border-radius:7px;flex:none}
+.tp-ai-file-chips>li:has(.tp-ai-video-frame-picker){flex-wrap:wrap}
+.tp-ai-video-frame-picker{border:0;padding:0;margin:2px 0 0;flex-basis:100%;min-width:0}
+.tp-ai-video-frame-picker legend{font-size:11px;color:#676b60;margin-bottom:6px}
+.tp-ai-video-frame-picker>div{display:flex;gap:6px;flex-wrap:wrap}
+.tp-ai-video-frame-picker button{padding:3px;border:1px solid #d5cdbb;gap:3px}
+.tp-ai-video-frame-picker button[aria-pressed=true]{border-color:#807021;background:#f3e5a4}
+.tp-ai-video-frame-picker img{width:88px;height:54px;object-fit:contain;border-radius:5px;background:#eee7d7}
 .tp-ai-attachment-progress{display:flex;align-items:center;gap:8px;padding:12px 18px;color:#706646;font-size:13px}
 .tp-ai-attachment-progress button{margin-left:auto;border:1px solid #d5cdbb;border-radius:8px;padding:4px 10px;background:#fff9ee;color:inherit}
 .tp-ai-message-attachments .tp-ai-message-attachment-media{display:flex;flex-direction:column;align-items:flex-start;gap:6px}

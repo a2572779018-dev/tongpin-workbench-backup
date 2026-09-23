@@ -14,11 +14,12 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   prompt: string; onClose(): void; onBusy(busy: boolean): void;
   tier: AiMode;
   initialRequest?: VideoChatRequest;
-  initialReferenceImages?: Array<{ name: string; dataUrl: string }>;
+  initialReferenceImages?: VideoChatRequest["referenceImages"];
   onPlan(request: VideoChatRequest): Promise<AiToolPlan | null>;
   onSubmit(request: VideoChatRequest): Promise<boolean>;
+  onSubmitTask?: (request: VideoChatRequest) => Promise<boolean>;
   onUseHistory?: (jobId: string) => Promise<boolean>;
-}>(function AiVideoComposer({ prompt, tier, onClose, onBusy, onPlan, onSubmit, onUseHistory, initialRequest, initialReferenceImages }, ref) {
+}>(function AiVideoComposer({ prompt, tier, onClose, onBusy, onPlan, onSubmit, onSubmitTask, onUseHistory, initialRequest, initialReferenceImages }, ref) {
   const { api, session } = useAuth();
   const [data, setData] = useState<AiVideoList | null>(null);
   const [error, setError] = useState("");
@@ -41,7 +42,7 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   } : undefined;
   const modelAvailable = Boolean(selectedModel);
   const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16">(initialRequest?.aspectRatio ?? "16:9");
-  const [images, setImages] = useState<Array<{ name: string; dataUrl: string }>>(
+  const [images, setImages] = useState<NonNullable<VideoChatRequest["referenceImages"]>>(
     initialRequest?.referenceImages ?? initialReferenceImages ?? [],
   );
   const [busy, setBusy] = useState(false);
@@ -79,6 +80,13 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     const base: VideoChatRequest = { requestId: crypto.randomUUID(), prompt: prompt.trim(), seconds, model, resolution, aspectRatio, ...(images.length ? { referenceImages: images } : {}) };
     setWorking(true, "正在整理并提交视频任务…"); setError("");
     try {
+      if (onSubmitTask) {
+        const accepted = onSubmitTask({ ...base, originalPrompt: initialRequest?.originalPrompt ?? prompt.trim() });
+        setSubmitted(true);
+        if (await accepted) { if (live.current) { setImages([]); onClose(); } }
+        else if (live.current) setSubmitted(false);
+        return;
+      }
       let approvedPlan = plan;
       if (!approvedPlan) {
         approvedPlan = await onPlan(base);

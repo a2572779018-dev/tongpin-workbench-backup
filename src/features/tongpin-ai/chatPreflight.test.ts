@@ -58,7 +58,8 @@ describe("chat quota preflight feedback", () => {
     expect(send.indexOf('"/api/ai/preflight"')).toBeLessThan(send.indexOf("setDrafts(nextState.drafts)"));
     expect(send.indexOf('"/api/ai/preflight"')).toBeLessThan(send.indexOf("persistenceRef.current.saveNow"));
     expect(send).not.toContain("setWebSearch(false)");
-    expect(send).toContain("preflightGate.isCurrent(ticket, sendContextRef.current)");
+    expect(send).toContain("const gate = continuation ? new ChatPreflightGate() : preflightGate");
+    expect(send).toContain("gate.isCurrent(ticket, continuation ? taskContext : sendContextRef.current)");
     expect(send).toContain("preflightGate.busy");
     expect(send).toContain("const latest = workspaceRef.current;");
     expect(send).toContain("persistenceRef.current.status");

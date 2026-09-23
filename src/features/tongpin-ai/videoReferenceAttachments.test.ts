@@ -57,4 +57,16 @@ describe("video reference attachment migration", () => {
   it("rejects malformed image frames", () => {
     expect(videoReferencesFromAttachments([image("bad.png", "javascript:alert(1)")]).ok).toBe(false);
   });
+
+  it("uses only the explicitly selected video frame and preserves its source", () => {
+    const video: AiWorkspaceDocument = { id: "clip-source", name: "actor.mp4", mimeType: "video/mp4", content: "sampled only", media: {
+      kind: "video", durationSeconds: 9, selectedFrameIndex: 1,
+      frames: [{ dataUrl: "data:image/jpeg;base64,YQ==", timeSeconds: 0.001 }, { dataUrl: "data:image/jpeg;base64,Yg==", timeSeconds: 4.5 }],
+    } };
+    expect(videoReferencesFromAttachments([video])).toEqual({ ok: true, images: [{ name: "actor.mp4 · 4.50 秒", dataUrl: "data:image/jpeg;base64,Yg==", sourceVideo: { documentId: "clip-source", name: "actor.mp4", timeSeconds: 4.5 } }] });
+    expect(video.media!.frames).toHaveLength(2);
+    for (const selectedFrameIndex of [-1, 2, 0.5, undefined]) {
+      expect(videoReferencesFromAttachments([{ ...video, media: { ...video.media!, selectedFrameIndex } }]).ok).toBe(false);
+    }
+  });
 });

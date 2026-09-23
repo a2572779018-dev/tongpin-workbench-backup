@@ -12,10 +12,10 @@ const history: TongpinAIConversation[] = [{ id: "a", title: "A", timeLabel: "刚
 
 describe("real AI chat request state", () => {
   it("allows result recovery without offering a dead retry for terminal provider errors", () => {
-    for (const code of ["NETWORK_UNAVAILABLE", "AI_REQUEST_IN_PROGRESS", "AI_QUOTA_EXHAUSTED", "AI_NOT_CONFIGURED", "AI_SEARCH_QUOTA_INSUFFICIENT", "AI_QUOTA_INSUFFICIENT"]) {
+    for (const code of ["NETWORK_UNAVAILABLE", "AI_REQUEST_IN_PROGRESS", "AI_STREAM_INTERRUPTED", "AI_REQUEST_UNCERTAIN", "AI_QUOTA_EXHAUSTED", "AI_NOT_CONFIGURED", "AI_SEARCH_QUOTA_INSUFFICIENT", "AI_QUOTA_INSUFFICIENT"]) {
       expect(canRecoverChatRequest(code, false)).toBe(true);
     }
-    for (const code of ["AI_PROVIDER_AUTH", "AI_RESPONSE_INCOMPLETE", "AI_REQUEST_UNCERTAIN", "AI_INPUT_INVALID", "AI_CONNECTION_FAILED"]) {
+    for (const code of ["AI_PROVIDER_AUTH", "AI_RESPONSE_INCOMPLETE", "AI_INPUT_INVALID", "AI_CONNECTION_FAILED"]) {
       expect(canRecoverChatRequest(code, false)).toBe(false);
     }
     expect(canRecoverChatRequest(undefined, true)).toBe(true);
@@ -74,20 +74,29 @@ describe("real AI chat request state", () => {
   it("marks interrupted work as interrupted, without fabricating a reply or refund", () => {
     const recovered = recoverInterruptedMessages(history);
     expect(recovered[0].messages[2].status).toBe("error");
-    expect(recovered[0].messages[2].content).toContain("扣额记录");
+    expect(recovered[0].messages[2].content).toContain("查询原任务结果");
+    expect(recovered[0].messages[2].taskPhase).toBe("unknown");
+    expect(recoverInterruptedMessages([{ ...history[0], messages: [{ ...history[0].messages[2], content: "已收到的部分回答" }] }])[0].messages[0].content).toBe("已收到的部分回答");
     expect(recovered[0].messages[0]).toEqual(history[0].messages[0]);
   });
   it("uses provider response and reported usage verbatim", () => {
     const usage = { inputTokens: 30, outputTokens: 12, totalTokens: 42, estimated: false };
     expect(completedReply({ requestId: "one-id", content: "已收到", model: "test-model", usage,
       quota: { limitTokens: 1000, usedTokens: 42, remainingTokens: 958, reservedTokens: 0, inputTokens: 30, outputTokens: 12 },
-    })).toEqual({ content: "已收到", status: "ready", model: "test-model", usage });
+    })).toEqual({ content: "已收到", status: "ready", taskPhase: "completed", model: "test-model", usage });
   });
   it("keeps a model-authored public analysis summary separate from the formal reply", () => {
     const usage = { inputTokens: 30, outputTokens: 12, totalTokens: 42, estimated: false };
     expect(completedReply({ requestId: "summary-id", content: "正式回答", analysisSummary: "依据现有资料，先处理高风险项。", model: "test-model", usage,
       quota: { limitTokens: 1000, usedTokens: 42, remainingTokens: 958, reservedTokens: 0, inputTokens: 30, outputTokens: 12 },
-    })).toEqual({ content: "正式回答", analysisSummary: "依据现有资料，先处理高风险项。", status: "ready", model: "test-model", usage });
+    })).toEqual({ content: "正式回答", analysisSummary: "依据现有资料，先处理高风险项。", status: "ready", taskPhase: "completed", model: "test-model", usage });
+  });
+  it("clears obsolete partial metadata only after a terminal response and remains JSON-safe", () => {
+    const partial = { ...history[0], messages: [{ ...history[0].messages[2], completion: { state: "partial" as const, reason: "output_limit" as const, canContinue: true }, retryDisposition: "recover" as const }] };
+    const next = replaceChatMessage([partial], "a", "t", { content: "完整结果", taskPhase: "completed", startedAt: undefined });
+    expect(next[0].messages[0]).not.toHaveProperty("completion");
+    expect(next[0].messages[0]).not.toHaveProperty("retryDisposition");
+    expect(next[0].messages[0]).toEqual(JSON.parse(JSON.stringify(next[0].messages[0])));
   });
   it("preserves the parent planning trace when a PPT execution response carries a different terminal run", () => {
     const parent: AiHarnessTrace = { runId: "parent-plan", tier: "deep", strategy: "plan_execute", status: "planned",

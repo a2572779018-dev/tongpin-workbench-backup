@@ -5,24 +5,25 @@ import type { AiVideoJob } from "../../../shared/aiVideo";
 import "./ai-video.css";
 import { failedVideoSubmission, restoreVideoRequest } from "./videoRetry";
 import type { VideoChatRequest } from "./videoChat";
-import { videoBlobCache } from "./mediaCache";
+import { mediaCacheScope, videoBlobCache } from "./mediaCache";
 import { saveBlobWithFeedback } from "./downloadFeedback";
 
 const labels: Record<AiVideoJob["status"], string> = { submitting: "正在提交", queued: "排队中", processing: "正在生成视频", completed: "视频已生成", failed: "视频未生成", uncertain: "提交结果待核对，请勿重复生成" };
 interface PlaybackState { identity: string; job: AiVideoJob | null; url: string; duration?: number }
-function cachedPlayback(account: string, jobId: string): PlaybackState {
-  const cached = videoBlobCache.snapshot(account, jobId);
-  return { identity: JSON.stringify([account, jobId]), job: cached?.job ?? null, url: cached?.url ?? "", duration: cached?.duration };
+function cachedPlayback(scope: string, jobId: string): PlaybackState {
+  const cached = videoBlobCache.snapshot(scope, jobId);
+  return { identity: JSON.stringify([scope, jobId]), job: cached?.job ?? null, url: cached?.url ?? "", duration: cached?.duration };
 }
 /** A durable message holds only the job ID. Media and status are fetched with the current account. */
 export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, onEdit, editDisabled }: { jobId: string; onSettled?: () => void; savedRequest?: unknown; submissionError?: string; onEdit?: (request: VideoChatRequest) => void; editDisabled?: boolean }) {
   const { api, session } = useAuth();
   const account = session?.user.id ?? "";
-  const identity = JSON.stringify([account, jobId]);
+  const cacheScope = mediaCacheScope(session);
+  const identity = JSON.stringify([cacheScope, jobId]);
   const element = useRef<HTMLDivElement>(null);
   const player = useRef<HTMLVideoElement>(null);
-  const [playback, setPlayback] = useState<PlaybackState>(() => cachedPlayback(account, jobId));
-  const shown = playback.identity === identity ? playback : cachedPlayback(account, jobId);
+  const [playback, setPlayback] = useState<PlaybackState>(() => cachedPlayback(cacheScope, jobId));
+  const shown = playback.identity === identity ? playback : cachedPlayback(cacheScope, jobId);
   const { job: serverJob, url, duration } = shown;
   const [missingSubmissionError, setMissingSubmissionError] = useState("");
   const job: AiVideoJob | null = serverJob ?? failedVideoSubmission(savedRequest, submissionError || missingSubmissionError) ?? null;
@@ -32,10 +33,10 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
   const [restoring, setRestoring] = useState(false);
   const restoreLock = useRef(false), restoreAbort = useRef<AbortController | null>(null);
   const editTarget = useRef({ onEdit, editDisabled }); editTarget.current = { onEdit, editDisabled };
-  useEffect(() => () => restoreAbort.current?.abort(), [jobId, session?.user.id]);
+  useEffect(() => () => restoreAbort.current?.abort(), [jobId, cacheScope]);
   useEffect(() => () => {
-    if (player.current) videoBlobCache.putCurrentTime(account, jobId, player.current.currentTime);
-  }, [account, jobId]);
+    if (player.current) videoBlobCache.putCurrentTime(cacheScope, jobId, player.current.currentTime);
+  }, [cacheScope, jobId]);
   async function edit() {
     if (!job || !onEdit || editDisabled || restoreLock.current) return;
     restoreLock.current = true; setRestoring(true); setError("");
@@ -58,34 +59,34 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
     const observer = new IntersectionObserver(entries => setVisible(entries.some(entry => entry.isIntersecting)), { rootMargin: "100px" });
     observer.observe(element.current); return () => observer.disconnect();
   }, []);
-  useEffect(() => visible ? videoBlobCache.retain(account, jobId) : undefined, [account, jobId, visible]);
+  useEffect(() => visible ? videoBlobCache.retain(cacheScope, jobId) : undefined, [cacheScope, jobId, visible]);
   useEffect(() => {
     if (!visible || submissionError) return;
     let live = true, timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
     const started = Date.now();
-    const cached = videoBlobCache.snapshot(account, jobId);
+    const cached = videoBlobCache.snapshot(cacheScope, jobId);
     setPlayback({ identity, job: cached?.job ?? null, url: cached?.url ?? "", duration: cached?.duration }); setError(""); setMissingSubmissionError("");
     const headers = { "X-Tongpin-Account": account };
-    const update = (patch: Partial<Omit<PlaybackState, "identity">>) => setPlayback(current => ({ ...(current.identity === identity ? current : cachedPlayback(account, jobId)), ...patch, identity }));
+    const update = (patch: Partial<Omit<PlaybackState, "identity">>) => setPlayback(current => ({ ...(current.identity === identity ? current : cachedPlayback(cacheScope, jobId)), ...patch, identity }));
     async function show(next: AiVideoJob) {
       if (!live) return;
       update({ job: next }); setError("");
       if (["completed", "failed", "uncertain"].includes(next.status)) settled.current?.();
       if (next.status === "completed") {
-        await videoBlobCache.loadBlob(account, jobId,
+        await videoBlobCache.loadBlob(cacheScope, jobId,
           sharedSignal => api<Blob>(`/api/ai/videos/${encodeURIComponent(jobId)}/content`, { headers, signal: sharedSignal }, 130000, "blob"), controller.signal);
         if (!live) return;
-        update({ url: videoBlobCache.objectUrl(account, jobId) ?? "", duration: videoBlobCache.snapshot(account, jobId)?.duration });
+        update({ url: videoBlobCache.objectUrl(cacheScope, jobId) ?? "", duration: videoBlobCache.snapshot(cacheScope, jobId)?.duration });
       }
     }
     async function poll(useWarmTerminal = false) {
       if (!live) return;
       try {
-        let next = useWarmTerminal ? videoBlobCache.snapshot(account, jobId)?.job : undefined;
+        let next = useWarmTerminal ? videoBlobCache.snapshot(cacheScope, jobId)?.job : undefined;
         if (!next) {
           if (document.hidden) { timer = setTimeout(() => void poll(), 15000); return; }
-          next = await videoBlobCache.loadJob(account, jobId, async sharedSignal => {
+          next = await videoBlobCache.loadJob(cacheScope, jobId, async sharedSignal => {
             const result = await api<{ job: AiVideoJob }>(`/api/ai/videos/${encodeURIComponent(jobId)}`, { headers, signal: sharedSignal }, 30000);
             return result.job;
           }, controller.signal, retry > 0 ? 0 : 2000);
@@ -109,7 +110,7 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
     const terminal = cached?.job && ["completed", "failed", "uncertain"].includes(cached.job.status);
     void poll(Boolean(terminal && retry === 0));
     return () => { live = false; controller.abort(); clearTimeout(timer); };
-  }, [api, account, identity, jobId, retry, visible, submissionError]);
+  }, [api, account, cacheScope, identity, jobId, retry, visible, submissionError]);
   useEffect(() => {
     if (!visible || !job || !["submitting", "queued", "processing"].includes(job.status)) return;
     const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - Date.parse(job.createdAt)) / 1000)));
@@ -125,11 +126,11 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
     {onEdit && job && !job.reserved && ["failed", "completed"].includes(job.status) ? <button type="button" disabled={editDisabled || restoring} onClick={() => void edit()}>{restoring ? "正在恢复参考图片…" : "重新编辑并生成"}</button> : null}
     {url && visible ? <><video ref={player} src={url} controls playsInline preload="metadata" onLoadedMetadata={event => {
       const value = event.currentTarget.duration;
-      const resumeAt = videoBlobCache.snapshot(account, jobId)?.currentTime ?? 0;
+      const resumeAt = videoBlobCache.snapshot(cacheScope, jobId)?.currentTime ?? 0;
       if (resumeAt > 0 && resumeAt < value - 0.25) event.currentTarget.currentTime = resumeAt;
-      if (Number.isFinite(value) && value > 0) { videoBlobCache.putDuration(account, jobId, value); setPlayback(current => ({ ...(current.identity === identity ? current : cachedPlayback(account, jobId)), identity, duration: value })); }
-    }} onTimeUpdate={event => videoBlobCache.putCurrentTime(account, jobId, event.currentTarget.currentTime)} aria-label="同频 AI 生成的视频" /><button type="button" onClick={() => {
-      const blob = videoBlobCache.get(account, jobId);
+      if (Number.isFinite(value) && value > 0) { videoBlobCache.putDuration(cacheScope, jobId, value); setPlayback(current => ({ ...(current.identity === identity ? current : cachedPlayback(cacheScope, jobId)), identity, duration: value })); }
+    }} onTimeUpdate={event => videoBlobCache.putCurrentTime(cacheScope, jobId, event.currentTarget.currentTime)} aria-label="同频 AI 生成的视频" /><button type="button" onClick={() => {
+      const blob = videoBlobCache.get(cacheScope, jobId);
       if (blob) void saveBlobWithFeedback(blob, `同频视频-${jobId}.mp4`);
     }}>下载视频</button></> : job?.status === "completed" && !error ? <p>正在读取视频…</p> : null}
     {error ? <p role="alert">{error}</p> : null}

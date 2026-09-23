@@ -94,3 +94,11 @@
   .tp-ai-character--header { width: 52px; height: 56px; }
   .tp-ai-character--welcome { width: 128px; height: 142px; }
 }
+
+.tp-ai-chat { position: relative; }
+.tp-ai-file-drop-overlay { position: absolute; inset: 10px; z-index: 80; border: 2px dashed #b59930; border-radius: 18px; background: #fffdf2f2; display: flex; gap: 10px; align-items: center; justify-content: center; flex-direction: column; pointer-events: none; }
+.tp-ai-task-running { animation: tp-ai-task-spin .9s linear infinite; flex-shrink: 0; }
+.tp-ai-task-failed { color: #a63925; flex-shrink: 0; }
+.tp-ai-task-unread { display: inline-block; width: 7px; height: 7px; min-width: 7px; border-radius: 50%; background: #b38b11; margin-left: auto; }
+@keyframes tp-ai-task-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .tp-ai-task-running { animation: none; } }
