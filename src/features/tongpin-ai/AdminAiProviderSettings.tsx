@@ -5,15 +5,21 @@ import { useAuth } from "../../auth/AuthContext";
 import { BAI_ASTRA_MODEL, BAI_QUICK_MODELS, isTongpinQuickAgent } from "../../../shared/aiAuto";
 import { AdminAiModelSelect } from "./AdminAiModelSelect";
 import { adminAiErrorMessage, normalizeAiBaseUrl, validateAiProviderConnection, validateAiProviderInput } from "./adminAiForms";
+import { ModelDiscoveryRevision } from "./modelDiscoveryRevision";
 
-function getProviderModelOptions(baseUrl: string, saved: AiProviderConfig | null, discoveredModels: string[]): string[] {
+export function getProviderModelOptions(baseUrl: string, saved: AiProviderConfig | null, discoveredModels: string[], draftKey = ""): string[] {
   const options = new Set(discoveredModels);
   try {
-    if (saved?.modelsVerified && normalizeAiBaseUrl(saved.baseUrl) === normalizeAiBaseUrl(baseUrl)) {
+    if (!draftKey.trim() && saved?.modelsVerified && normalizeAiBaseUrl(saved.baseUrl) === normalizeAiBaseUrl(baseUrl)) {
       saved.availableModels?.forEach((model) => options.add(model));
     }
   } catch { /* Keep discovered models only when URL is invalid/unset. */ }
   return [...options];
+}
+
+export function getImageModelOptions(imageModels: string[], separateBaseUrl: string, separateKey: string, chatModels: string[]): string[] {
+  if (imageModels.length) return imageModels;
+  return separateBaseUrl.trim() || separateKey.trim() ? [] : chatModels;
 }
 
 const EMPTY_PROVIDER: AiProviderInput = {
@@ -54,7 +60,9 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
   const [notice, setNotice] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [imageModels, setImageModels] = useState<string[]>([]);
-  const modelOptions = getProviderModelOptions(draft.baseUrl, saved, models);
+  const modelOptions = getProviderModelOptions(draft.baseUrl, saved, models, apiKey);
+  const imageModelOptions = getImageModelOptions(imageModels, draft.imageBaseUrl ?? "", imageApiKey, modelOptions);
+  const discoveryRevisions = useRef(new ModelDiscoveryRevision());
   const harnessSearchConfigured = Boolean(harnessConfig && !harnessConfig.migratedFromLegacy && AI_BUSINESS_TIERS.some(tier => {
     const route = harnessConfig.tiers[tier];
     return route.enabled && route.protocol === "responses" && route.capabilities.includes("web_search")
@@ -63,6 +71,7 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
 
   useEffect(() => {
     if (dirtyRef.current) return;
+    discoveryRevisions.current.invalidateAll();
     const controller = new AbortController();
     setLoading(true);
     setError("");
@@ -91,8 +100,12 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
     setDirty(true);
     setNotice("");
     setError("");
-    if (field === "baseUrl") setModels([]);
-    if (field === "imageBaseUrl") setImageModels([]);
+    if (field === "baseUrl") {
+      discoveryRevisions.current.invalidate("chat");
+      if (!draft.imageBaseUrl?.trim()) discoveryRevisions.current.invalidate("image");
+      setModels([]); if (!draft.imageBaseUrl?.trim()) setImageModels([]);
+    }
+    if (field === "imageBaseUrl") { discoveryRevisions.current.invalidate("image"); setImageModels([]); }
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -101,6 +114,7 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
     const input: AiProviderInput = { ...draft, ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}), ...(imageApiKey.trim() ? { imageApiKey: imageApiKey.trim() } : {}) };
     const validation = validateAiProviderInput(input, saved, harnessSearchConfigured);
     if (validation) { setError(validation); return; }
+    discoveryRevisions.current.invalidateAll();
     const payload: AiProviderInput = {
       name: input.name.trim(),
       baseUrl: normalizeAiBaseUrl(input.baseUrl),
@@ -189,13 +203,15 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
     const validation = validateAiProviderConnection(baseUrl, key, previous);
     if (validation) { setError(validation); return; }
     busyRef.current = true; setBusy("image-test"); setError(""); setNotice("");
+    const revision = discoveryRevisions.current.begin("image");
     try {
       const result = await api<AiProviderTestResult>("/api/admin/ai/provider/test", {
         method: "POST", body: JSON.stringify({ target: separate ? "image" : "chat", baseUrl: normalizeAiBaseUrl(baseUrl), ...(key.trim() ? { apiKey: key.trim() } : {}) }),
       }, 30_000);
+      if (!discoveryRevisions.current.isCurrent("image", revision)) return;
       setImageModels(result.models);
       setNotice(result.ok ? `已读取 ${result.models.length} 个模型。请确认所选图片模型支持图像生成，测试未生成图片。` : "图片接口测试未通过，请核对服务商信息。");
-    } catch (caught) { setError(adminAiErrorMessage(caught, "图片接口连接失败，可核对文档后手动填写图片模型。")); }
+    } catch (caught) { if (discoveryRevisions.current.isCurrent("image", revision)) setError(adminAiErrorMessage(caught, "图片接口连接失败，可核对文档后手动填写图片模型。")); }
     finally { busyRef.current = false; setBusy(null); }
   }
 
@@ -207,11 +223,13 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
     setBusy("test");
     setError("");
     setNotice("");
+    const revision = discoveryRevisions.current.begin("chat");
     try {
       const result = await api<AiProviderTestResult>("/api/admin/ai/provider/test", {
         method: "POST",
         body: JSON.stringify({ target: "chat", baseUrl: normalizeAiBaseUrl(draft.baseUrl), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) }),
       }, 30_000);
+      if (!discoveryRevisions.current.isCurrent("chat", revision)) return;
       const agent = isTongpinQuickAgent(draft.quickModel);
       const availableModels = result.availableModels ?? [];
       setModels(agent ? availableModels : result.models);
@@ -231,7 +249,7 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
         setError("未能读取模型列表，请核对接入信息；若服务不提供列表，可手动填写模型 ID。");
       }
     } catch (caught) {
-      setError(adminAiErrorMessage(caught, "连接测试未通过，请核对 API 地址和密钥；模型 ID 也可以手动填写。"));
+      if (discoveryRevisions.current.isCurrent("chat", revision)) setError(adminAiErrorMessage(caught, "连接测试未通过，请核对 API 地址和密钥；模型 ID 也可以手动填写。"));
     } finally {
       busyRef.current = false;
       setBusy(null);
@@ -274,7 +292,7 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
             <label className="tp-ai-admin-field" htmlFor={`${id}-key`}>API 密钥
               <input id={`${id}-key`} type="password" value={apiKey} autoComplete="new-password" maxLength={4_096}
                 placeholder={saved?.apiKeyConfigured ? "已保存密钥；留空保留，填写则替换" : "粘贴你的 API 密钥"}
-                onChange={(event) => { setApiKey(event.target.value); setDirty(true); setModels([]); setError(""); setNotice(""); }} />
+                onChange={(event) => { discoveryRevisions.current.invalidate("chat"); if (!draft.imageBaseUrl?.trim()) discoveryRevisions.current.invalidate("image"); setApiKey(event.target.value); setDirty(true); setModels([]); if (!draft.imageBaseUrl?.trim()) setImageModels([]); setError(""); setNotice(""); }} />
             </label>
             <div className="tp-ai-admin-inline-test is-wide">
               <button className="tp-ai-admin-button" type="button" onClick={() => void testConnection()} disabled={loading || busy !== null}>
@@ -296,13 +314,13 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
                 </label>
                 <p className="tp-ai-admin-hint is-wide">图片按你设置的同频点扣减，属于折算值，不是服务商实际文本 Token。请先核对服务商图片价格和模型能力。</p>
                 <details className="tp-ai-provider-capabilities is-wide"><summary>旧版图片接入</summary><div className="tp-ai-admin-fields">
-                <AdminAiModelSelect label="旧版默认图片模型" value={draft.imageModel ?? ""} models={imageModels.length ? imageModels : draft.imageBaseUrl ? [] : modelOptions}
+                <AdminAiModelSelect label="旧版默认图片模型" value={draft.imageModel ?? ""} models={imageModelOptions}
                   allowCustom onChange={value => update("imageModel", value)} onOpen={() => { if (!imageModels.length) void testImageConnection(); }} loading={busy === "image-test"} />
                 <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-image-url`}>独立图片 API 地址
                   <input id={`${id}-image-url`} type="url" value={draft.imageBaseUrl ?? ""} maxLength={512} placeholder="留空复用上面的 API 地址和密钥" spellCheck={false} onChange={event => update("imageBaseUrl", event.target.value)} />
                 </label>
                 <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-image-key`}>独立图片 API 密钥
-                  <input id={`${id}-image-key`} type="password" autoComplete="new-password" maxLength={4096} value={imageApiKey} placeholder={saved?.imageBaseUrl && saved.imageApiKeyConfigured ? "已保存；留空保留，填写则替换" : "使用独立图片地址时填写"} onChange={event => { setImageApiKey(event.target.value); setDirty(true); setImageModels([]); setError(""); setNotice(""); }} />
+                  <input id={`${id}-image-key`} type="password" autoComplete="new-password" maxLength={4096} value={imageApiKey} placeholder={saved?.imageBaseUrl && saved.imageApiKeyConfigured ? "已保存；留空保留，填写则替换" : "使用独立图片地址时填写"} onChange={event => { discoveryRevisions.current.invalidate("image"); setImageApiKey(event.target.value); setDirty(true); setImageModels([]); setError(""); setNotice(""); }} />
                 </label>
                 <button className="tp-ai-admin-button" type="button" disabled={busy !== null} onClick={() => void testImageConnection()}><RefreshCw size={16} />{busy === "image-test" ? "测试中…" : "读取图片模型"}</button>
                 </div></details>

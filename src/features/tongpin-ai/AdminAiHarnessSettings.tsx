@@ -10,6 +10,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { adminAiErrorMessage, normalizeAiBaseUrl } from "./adminAiForms";
 import { planModelDiscovery } from "./adminAiModels";
 import { AdminAiModelSelect } from "./AdminAiModelSelect";
+import { ModelDiscoveryRevision } from "./modelDiscoveryRevision";
 
 const CAPABILITIES: Array<[AiHarnessCapability, string]> = [
   ["vision", "图片理解"], ["web_search", "自动联网"], ["image", "生成图片"], ["video", "生成视频"],
@@ -38,11 +39,12 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
   const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true), [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null), busyRef = useRef(false);
-  const connectionRevisions = useRef<Record<string, number>>({});
+  const connectionRevisions = useRef(new ModelDiscoveryRevision());
   const [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [version, setVersion] = useState(0), [activeTier, setActiveTier] = useState<AiMode>("quick");
 
   useEffect(() => {
+    connectionRevisions.current.invalidateAll();
     const controller = new AbortController(); setLoading(true); setLoadFailed(false); setError("");
     api<{ harness: AiHarnessConfig | null }>("/api/admin/ai/harness", { signal: controller.signal }).then(({ harness }) => {
       if (controller.signal.aborted) return;
@@ -64,7 +66,7 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
       }])) as Record<AiMode, AiHarnessTierRoute>,
     }));
     if (patch.baseUrl !== undefined) {
-      connectionRevisions.current[providerId] = (connectionRevisions.current[providerId] ?? 0) + 1;
+      connectionRevisions.current.invalidate(providerId);
       setDiscovered(current => ({ ...current, [providerId]: [] }));
     }
     setProviderErrors(current => ({ ...current, [providerId]: "" })); setNotice(""); setError("");
@@ -80,15 +82,15 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
     const plan = planModelDiscovery(provider, keys[provider.id] ?? "", saved);
     if (plan.error) { setProviderErrors(current => ({ ...current, [provider.id]: plan.error })); return; }
     busyRef.current = true; setBusy(`discover:${provider.id}`); setError(""); setNotice("");
-    const revision = connectionRevisions.current[provider.id] ?? 0;
+    const revision = connectionRevisions.current.begin(provider.id);
     setProviderErrors(current => ({ ...current, [provider.id]: "" }));
     try {
       const result = await api<{ models: string[] }>(plan.path!, { method: "POST", ...(plan.body ? { body: JSON.stringify(plan.body) } : {}) }, 30_000);
-      if ((connectionRevisions.current[provider.id] ?? 0) !== revision) return;
+      if (!connectionRevisions.current.isCurrent(provider.id, revision)) return;
       setDiscovered(current => ({ ...current, [provider.id]: result.models }));
       setNotice(`${provider.name}：已读取 ${result.models.length} 个模型。`);
       if (!result.models.length) setProviderErrors(current => ({ ...current, [provider.id]: "此密钥没有返回可选模型，请核对服务商模型权限。" }));
-    } catch (caught) { if ((connectionRevisions.current[provider.id] ?? 0) === revision) setProviderErrors(current => ({ ...current, [provider.id]: adminAiErrorMessage(caught, "模型列表读取失败，请核对这个服务的地址和密钥。") })); }
+    } catch (caught) { if (connectionRevisions.current.isCurrent(provider.id, revision)) setProviderErrors(current => ({ ...current, [provider.id]: adminAiErrorMessage(caught, "模型列表读取失败，请核对这个服务的地址和密钥。") })); }
     finally { busyRef.current = false; setBusy(null); }
   }
   function discoverIfNeeded(providerId: string) {
@@ -164,7 +166,7 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
             <label className="tp-ai-admin-field">服务名称<input value={provider.name} maxLength={80} required onChange={event => updateProvider(provider.id, { name: event.target.value })} /></label>
             <label className="tp-ai-admin-field">API Base URL<input type="url" value={provider.baseUrl} required placeholder="https://api.example.com/v1" onChange={event => updateProvider(provider.id, { baseUrl: event.target.value })} /></label>
             <label className="tp-ai-admin-field">API Key<input type="password" autoComplete="new-password" value={keys[provider.id] ?? ""} placeholder={saved?.providers.some(item => item.id === provider.id && item.apiKeyConfigured) ? "已保存；留空保留" : "粘贴 API Key"} onChange={event => {
-              connectionRevisions.current[provider.id] = (connectionRevisions.current[provider.id] ?? 0) + 1;
+              connectionRevisions.current.invalidate(provider.id);
               setKeys(current => ({ ...current, [provider.id]: event.target.value })); setDiscovered(current => ({ ...current, [provider.id]: [] }));
               setProviderErrors(current => ({ ...current, [provider.id]: "" })); setNotice("");
             }} /></label>
