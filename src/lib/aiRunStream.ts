@@ -33,6 +33,17 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
         (runId !== undefined && event.runId !== runId)) throw new UnsafeEvent("回复事件标识不正确");
     if (event.type === "answer_delta" || event.type === "public_summary_delta") {
       if (typeof event.data?.delta !== "string") throw new UnsafeEvent("回复增量格式无效");
+    } else if (event.type === "usage_updated") {
+      const usage = event.data?.usage;
+      const tokenCount = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0;
+      if (!usage || !tokenCount(usage.inputTokens) || !tokenCount(usage.outputTokens) || !tokenCount(usage.totalTokens) ||
+          usage.totalTokens < usage.inputTokens + usage.outputTokens || typeof usage.estimated !== "boolean" ||
+          (usage.convertedTokens !== undefined && !tokenCount(usage.convertedTokens)) ||
+          (usage.searchCalls !== undefined && !tokenCount(usage.searchCalls)) ||
+          (usage.tokenUsageEstimated !== undefined && typeof usage.tokenUsageEstimated !== "boolean") ||
+          (usage.billingKind !== undefined && !["tokens", "image_conversion", "video_conversion", "tokens_with_search"].includes(usage.billingKind)) ||
+          !["completed", "failed", "uncertain"].includes(event.data.status) || event.data.providerReported !== true)
+        throw new UnsafeEvent("回复用量事件格式无效");
     } else if (event.type === "run_finished") {
       if (!event.data?.response || event.data.response.requestId !== request.requestId ||
           typeof event.data.response.content !== "string") throw new UnsafeEvent("回复结果标识不正确");

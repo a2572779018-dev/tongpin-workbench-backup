@@ -738,6 +738,33 @@ export class AiService {
       const event = this.store.appendRunEvent(userId, request.requestId, payload);
       try { options.onEvent?.(event); } catch { /* A closed subscriber cannot change billing or cancel an accepted task. */ }
     };
+    let providerUsage: AiUsage | undefined;
+    let providerUsageSettled = false;
+    let usageEventSent = false;
+    const settleChat: typeof this.settle = (...args) => {
+      const settled = this.settle(...args);
+      if (settled && providerUsage && args[1] === providerUsage) providerUsageSettled = true;
+      return settled;
+    };
+    const emitSettledUsage = () => {
+      if (!options.stream || !providerUsageSettled || usageEventSent || !providerUsage) return;
+      const status = this.store.request(userId, request.requestId)?.status;
+      if (status !== "completed" && status !== "failed" && status !== "uncertain") return;
+      const ledger = this.store.usage(userId).find(entry => entry.requestId === request.requestId && entry.kind === "chat");
+      if (!ledger || ledger.status !== status || ledger.inputTokens !== providerUsage.inputTokens ||
+          ledger.outputTokens !== providerUsage.outputTokens || ledger.totalTokens !== providerUsage.totalTokens ||
+          ledger.estimated !== providerUsage.estimated) return;
+      // These are only the settled, member-visible counters. Never emit the
+      // provider response, model credentials, prompts, or admin diagnostics.
+      const { inputTokens, outputTokens, totalTokens, estimated, convertedTokens, billingKind, searchCalls, tokenUsageEstimated } = ledger;
+      const usage: AiUsage = { inputTokens, outputTokens, totalTokens, estimated,
+        ...(convertedTokens !== undefined ? { convertedTokens } : {}),
+        ...(billingKind !== undefined ? { billingKind } : {}),
+        ...(searchCalls !== undefined ? { searchCalls } : {}),
+        ...(tokenUsageEstimated !== undefined ? { tokenUsageEstimated } : {}) };
+      usageEventSent = true;
+      emit({ type: "usage_updated", data: { usage, status, providerReported: true } });
+    };
     let deltaBuffer = "", lastFlush = 0;
     const flush = () => { if (deltaBuffer) { emit({ type: "answer_delta", data: { delta: deltaBuffer } }); deltaBuffer = ""; lastFlush = Date.now(); } };
     const visible = createVisibleStream(request.mode, delta => { deltaBuffer += delta; if (deltaBuffer.length >= 256 || Date.now() - lastFlush >= 80) flush(); }, delta => emit({ type: "public_summary_delta", data: { delta } }));
@@ -771,6 +798,7 @@ export class AiService {
       const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= maxSearchCalls);
       const convertedTokens = request.webSearch ? provider.webSearchQuotaTokens! * result.searchCalls : 0;
       const usage: AiUsage = validUsage ? { ...result.usage!, ...(request.webSearch ? { searchCalls: result.searchCalls, tokenUsageEstimated: false } : {}), ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind: "tokens_with_search" } : {}) } : conservativeUsage(reserved);
+      if (validUsage) providerUsage = usage;
       const ordinaryOutput = (!request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch") && !request.skillIds?.includes("agent-continuation-v1");
       let partialText: string | undefined;
       if (result.status === "incomplete" && publicExplanation.content.trim() && ordinaryOutput) {
@@ -784,9 +812,10 @@ export class AiService {
         const extras = { completion, ...(publicExplanation.analysisSummary ? { analysisSummary: publicExplanation.analysisSummary } : {}) };
         this.store.sql.transaction(() => {
           const trace = this.harness.finishRun(userId, request.requestId, "uncertain");
-          this.settle(reserved, usage, "uncertain", validUsage ? "回复截断，保留正文并按实际用量记录" : "数据流中断，保留正文，用量待核对", partialText, undefined, { ...extras, ...(trace ? { trace } : {}) });
+          settleChat(reserved, usage, "uncertain", validUsage ? "回复截断，保留正文并按实际用量记录" : "数据流中断，保留正文，用量待核对", partialText, undefined, { ...extras, ...(trace ? { trace } : {}) });
         });
         const partialResponse = { ...memberChatResult(this.store.request(userId, request.requestId)!.result!), quota: this.store.quota(userId) };
+        emitSettledUsage();
         emit({ type: "run_finished", data: { response: partialResponse } });
         return partialResponse;
       }
@@ -796,7 +825,7 @@ export class AiService {
           : new AiError(502, "AI_EMPTY_RESPONSE", "AI 未返回完整可显示的文字，请检查模型及输出上限");
         this.store.sql.transaction(() => {
           const trace = this.harness.finishRun(userId, request.requestId, "uncertain");
-          this.settle(reserved, usage, "uncertain", usage.estimated ? "生成未完成，用量不确定，按预留上限计入" : "生成未完成，按服务商实际 Token 用量计入", undefined, error, trace ? { trace } : undefined);
+          settleChat(reserved, usage, "uncertain", usage.estimated ? "生成未完成，用量不确定，按预留上限计入" : "生成未完成，按服务商实际 Token 用量计入", undefined, error, trace ? { trace } : undefined);
         });
         throw error;
       }
@@ -804,7 +833,7 @@ export class AiService {
         const error = new AiError(502, "AI_SEARCH_NOT_COMPLETED", "服务商未按要求完成联网搜索，请管理员检查模型支持；已记录生成用量");
         this.store.sql.transaction(() => {
           const trace = this.harness.finishRun(userId, request.requestId, "uncertain");
-          this.settle(reserved, usage, "uncertain", "联网搜索执行不符合请求限制，已记录用量，请管理员核对", undefined, error, trace ? { trace } : undefined);
+          settleChat(reserved, usage, "uncertain", "联网搜索执行不符合请求限制，已记录用量，请管理员核对", undefined, error, trace ? { trace } : undefined);
         });
         throw error;
       }
@@ -817,14 +846,14 @@ export class AiService {
         try { dispatch = parseAiDispatchDecision(publicExplanation.content, request.mode, { allowPlainText: true }); }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_DISPATCH_INVALID", "同频 AI 返回的任务类型不正确");
-          this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "任务分派结果未通过应用校验，已记录模型生成用量", undefined, safe));
+          this.store.sql.transaction(() => settleChat(reserved, usage, validUsage ? "failed" : "uncertain", "任务分派结果未通过应用校验，已记录模型生成用量", undefined, safe));
           throw safe;
         }
       } else if (request.outputFormat === "presentation") {
         try { presentation = parsePresentation(publicExplanation.content); }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_PRESENTATION_INVALID", "演示文稿结构不正确");
-          this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "演示文稿格式未通过验证，已记录服务商生成用量", undefined, safe));
+          this.store.sql.transaction(() => settleChat(reserved, usage, validUsage ? "failed" : "uncertain", "演示文稿格式未通过验证，已记录服务商生成用量", undefined, safe));
           throw safe;
         }
       } else if (request.outputFormat === "image_plan" || request.outputFormat === "video_plan" || request.outputFormat === "presentation_plan") {
@@ -837,14 +866,14 @@ export class AiService {
         }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_TOOL_PLAN_INVALID", "同频 AI 返回的工具方案不正确");
-          this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "工具方案未通过应用校验，已记录模型生成用量", undefined, safe));
+          this.store.sql.transaction(() => settleChat(reserved, usage, validUsage ? "failed" : "uncertain", "工具方案未通过应用校验，已记录模型生成用量", undefined, safe));
           throw safe;
         }
       } else if (request.outputFormat === "computer_plan") {
         try { computerPlan = parseComputerPlan(publicExplanation.content); }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_COMPUTER_PLAN_INVALID", "同频 AI 返回的本机操作方案不正确");
-          this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "本机操作方案未通过应用校验，已记录模型生成用量", undefined, safe));
+          this.store.sql.transaction(() => settleChat(reserved, usage, validUsage ? "failed" : "uncertain", "本机操作方案未通过应用校验，已记录模型生成用量", undefined, safe));
           throw safe;
         }
       }
@@ -858,7 +887,7 @@ export class AiService {
       const settled = this.store.sql.transaction(() => {
         const trace = this.harness.finishRun(userId, request.requestId, validUsage ? "succeeded" : "uncertain", toolCapability ? { capability: toolCapability, summary: toolSummary } : undefined);
         if (trace) extras.trace = trace;
-        return this.settle(reserved, usage, validUsage ? "completed" : "uncertain", validUsage ? convertedTokens ? `服务商实际生成 Token + ${result.searchCalls} 次搜索的管理员设定折算额度` : "服务商实际 Token 用量" : "服务商未返回有效 Token 用量或报告超过请求上限，按预留上限保守计入，请管理员核对", content, undefined, extras);
+        return settleChat(reserved, usage, validUsage ? "completed" : "uncertain", validUsage ? convertedTokens ? `服务商实际生成 Token + ${result.searchCalls} 次搜索的管理员设定折算额度` : "服务商实际 Token 用量" : "服务商未返回有效 Token 用量或报告超过请求上限，按预留上限保守计入，请管理员核对", content, undefined, extras);
       });
       if (!settled) {
         const final = this.store.request(userId, request.requestId);
@@ -867,6 +896,7 @@ export class AiService {
       }
       if (request.outputFormat === "presentation" && request.toolPlanRequestId) this.store.sql.transaction(() => this.harness.finishApprovedTool(userId, request.toolPlanRequestId!, "presentation", validUsage ? "succeeded" : "uncertain"));
       const finalResponse = { ...memberChatResult({ requestId: request.requestId, content, model: AI_BUSINESS_TIER_LABELS[request.mode], usage, attempt: reserved.attempt, ...extras }), quota: this.store.quota(userId) };
+      emitSettledUsage();
       emit({ type: "run_finished", data: { response: finalResponse } });
       return finalResponse;
     } catch (error) {
@@ -877,10 +907,11 @@ export class AiService {
       this.store.sql.transaction(() => {
         if (this.store.request(userId, request.requestId)?.status === "pending") {
           const trace = this.harness.finishRun(userId, request.requestId, knownRejection ? "failed" : "uncertain");
-          this.settle(reserved, usage, knownRejection ? "failed" : "uncertain", knownRejection ? "请求未发出或被服务商拒绝，预留额度已释放" : "结果或用量不确定，按预留上限保守计入", undefined, safe, trace ? { trace } : undefined);
+          settleChat(reserved, usage, knownRejection ? "failed" : "uncertain", knownRejection ? "请求未发出或被服务商拒绝，预留额度已释放" : "结果或用量不确定，按预留上限保守计入", undefined, safe, trace ? { trace } : undefined);
         }
         if (request.outputFormat === "presentation" && request.toolPlanRequestId) this.harness.finishApprovedTool(userId, request.toolPlanRequestId, "presentation", knownRejection ? "failed" : "uncertain");
       });
+      emitSettledUsage();
       emit({ type: "run_failed", data: { error: { code: safe.code, message: safe.message } } });
       throw safe;
     }

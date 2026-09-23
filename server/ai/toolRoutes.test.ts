@@ -99,10 +99,12 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     const streamed = await request(runtime.app).post("/api/ai/chat/stream").set(headers("a")).send(body).expect(200);
     expect(streamed.headers["content-type"]).toContain("text/event-stream");
     expect(streamed.text).toContain('"type":"run_started"');
+    expect(streamed.text).toContain('"type":"usage_updated"');
     expect(streamed.text).toContain('"type":"run_finished"');
     expect(streamed.text).not.toContain(KEY);
     const replay = await request(runtime.app).get(`/api/ai/requests/${body.requestId}/events`).set(headers("a")).expect(200);
-    expect(replay.body.events.map((event: { seq: number }) => event.seq)).toEqual([1, 2]);
+    expect(replay.body.events.map((event: { seq: number }) => event.seq)).toEqual([1, 2, 3]);
+    expect(replay.body.events[1]).toMatchObject({ type: "usage_updated", data: { providerReported: true, usage: { totalTokens: 20 } } });
     await request(runtime.app).get(`/api/ai/requests/${body.requestId}/events`).set(headers("b")).expect(403);
     const old = await request(runtime.app).post("/api/ai/chat").set(headers("a")).send(body).expect(200);
     expect(old.body.content).toBe("隔离测试回复");

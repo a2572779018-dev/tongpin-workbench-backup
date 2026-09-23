@@ -218,9 +218,11 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed","response":{"status":"completed","output_text":"真实传输首段","usage":{"input_tokens":24,"output_tokens":48,"total_tokens":72}}}\n\n'));
     controller.close();
     while (true) { const chunk = await reader.read(); if (chunk.done) break; received += decoder.decode(chunk.value); }
+    expect(received).toContain("usage_updated");
     expect(received).toContain("run_finished");
-    const replay = await api<{ events: Array<{ seq: number; type: string }> }>(`/api/ai/requests/${body.requestId}/events?after=1`, member);
-    expect(replay.events.map(event => event.type)).toEqual(["answer_delta", "run_finished"]);
+    const replay = await api<{ events: Array<{ seq: number; type: string; data: unknown }> }>(`/api/ai/requests/${body.requestId}/events?after=1`, member);
+    expect(replay.events.map(event => event.type)).toEqual(["answer_delta", "usage_updated", "run_finished"]);
+    expect(replay.events[1].data).toMatchObject({ status: "completed", providerReported: true, usage: { inputTokens: 24, outputTokens: 48, totalTokens: 72 } });
     await api(`/api/ai/requests/${body.requestId}/events`, other, undefined, "GET", 403);
     await api(`/api/ai/requests/${body.requestId}/events?after=-1`, member, undefined, "GET", 400);
     expect((await api<AiRequestResult>(`/api/ai/requests/${body.requestId}`, member)).result?.content).toBe("真实传输首段");

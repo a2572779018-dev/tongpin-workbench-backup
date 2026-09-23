@@ -45,13 +45,15 @@ describe("AI run stream decoder", () => {
       event(1, "run_started", { startedAt: 1 }),
       event(1, "run_started", { startedAt: 1 }),
       event(2, "answer_delta", { delta: "complete" }),
-      event(3, "run_finished", { response }),
+      event(3, "usage_updated", { status: "completed", providerReported: true, usage: response.usage }),
+      event(3, "usage_updated", { status: "completed", providerReported: true, usage: response.usage }),
+      event(4, "run_finished", { response }),
     ];
     const call = vi.fn();
     const api = async <T,>(): Promise<T> => { call(); return eventResponse(events, 3) as T; };
     const seen: number[] = [];
     await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value.seq) })).resolves.toEqual(response);
-    expect(seen).toEqual([1, 2, 3]);
+    expect(seen).toEqual([1, 2, 3, 4]);
     expect(call).toHaveBeenCalledTimes(1);
   });
 
@@ -91,13 +93,16 @@ describe("AI run stream decoder", () => {
         event(1, "run_started", { startedAt: 1 }),
         event(2, "public_summary_delta", { delta: "依据" }),
         event(3, "answer_delta", { delta: "complete" }),
-        event(4, "run_finished", { response }),
+        event(4, "usage_updated", { status: "completed", providerReported: true, usage: response.usage }),
+        event(4, "usage_updated", { status: "completed", providerReported: true, usage: response.usage }),
+        event(5, "run_finished", { response }),
       ] } as T;
     };
     const seen: AiRunEvent[] = [];
     await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value) }))
       .resolves.toEqual(response);
-    expect(seen.map(value => value.seq)).toEqual([1, 2, 3, 4]);
+    expect(seen.map(value => value.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(seen.filter(value => value.type === "usage_updated")).toMatchObject([{ data: { usage: { totalTokens: 2 }, providerReported: true } }]);
     expect(seen.flatMap(value => value.type === "public_summary_delta" ? [value.data.delta] : [])).toEqual(["依据"]);
     expect(seen.flatMap(value => value.type === "answer_delta" ? [value.data.delta] : [])).toEqual(["complete"]);
     expect(paths).toEqual(["/api/ai/chat/stream", `/api/ai/requests/${request.requestId}/events?after=1`]);
@@ -112,6 +117,17 @@ describe("AI run stream decoder", () => {
       .rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
     expect(seen).not.toHaveBeenCalled();
     expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects malformed or untrusted usage instead of rendering it", async () => {
+    const api = async <T,>() => eventResponse([
+      event(1, "run_started", { startedAt: 1 }),
+      event(2, "usage_updated", { status: "completed", providerReported: true, usage: { ...response.usage, totalTokens: -1 } }),
+    ]) as T;
+    const seen: AiRunEvent[] = [];
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value) }))
+      .rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+    expect(seen.map(value => value.type)).toEqual(["run_started"]);
   });
 
   it("rejects a changed run identity before any replay query", async () => {

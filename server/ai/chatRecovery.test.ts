@@ -31,8 +31,13 @@ describe("recoverable chat output", () => {
   it("stores partial output with actual usage and never resubmits a recovered request", async () => {
     transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: "第一部分已经完成，后续" }, finish_reason: "length" }], usage: { prompt_tokens: 20, completion_tokens: 30, total_tokens: 50 } }));
     const request = chat();
-    const result = await runtime.service.chat("member", request);
+    const events: AiRunEvent[] = [];
+    const result = await runtime.service.chat("member", request, { stream: true, onEvent: value => events.push(value) });
     expect(result).toMatchObject({ content: "第一部分已经完成，后续", completion: { state: "partial", reason: "output_limit", canContinue: true }, usage: { totalTokens: 50, estimated: false } });
+    expect(events.map(value => value.type)).toEqual(["run_started", "usage_updated", "run_finished"]);
+    expect(events[1]).toMatchObject({ data: { status: "uncertain", providerReported: true, usage: { inputTokens: 20, outputTokens: 30, totalTokens: 50, estimated: false } } });
+    expect(events[1].data).toEqual({ status: "uncertain", providerReported: true, usage: { inputTokens: 20, outputTokens: 30, totalTokens: 50, estimated: false } });
+    expect(runtime.store.usage("member").find(value => value.requestId === request.requestId)?.totalTokens).toBe(50);
     expect(runtime.service.getRequestResult("member", request.requestId).result).toMatchObject({ content: result.content, completion: result.completion });
     await runtime.service.chat("member", request);
     expect(transport).toHaveBeenCalledTimes(1);
@@ -95,13 +100,40 @@ describe("recoverable chat output", () => {
     controller.close();
     expect((await client).content).toBe("流式首段");
     const replay = runtime.service.getRunEvents("member", request.requestId);
-    expect(replay.map(value => value.seq)).toEqual([1, 2, 3]);
-    expect(runtime.service.getRunEvents("member", request.requestId, 2)).toHaveLength(1);
+    expect(replay.map(value => value.seq)).toEqual([1, 2, 3, 4]);
+    expect(replay.map(value => value.type)).toEqual(["run_started", "answer_delta", "usage_updated", "run_finished"]);
+    expect(replay[2]).toMatchObject({ data: { status: "completed", providerReported: true, usage: { inputTokens: 20, outputTokens: 30, totalTokens: 50, estimated: false } } });
+    expect(replay[2]).toMatchObject({ requestId: request.requestId, runId: expect.any(String), stepId: request.requestId, seq: 3, timestamp: expect.any(Number) });
+    expect(runtime.service.getRunEvents("member", request.requestId, 2)).toHaveLength(2);
     runtime.service.setQuota("other", "admin", { limitTokens: 100000 });
     expect(() => runtime.service.getRunEvents("other", request.requestId)).toThrow(expect.objectContaining({ code: "AI_REQUEST_NOT_FOUND" }));
     expect(runtime.service.forTenant("other-tenant").store.runEvents("member", request.requestId)).toEqual([]);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.store.quota("member").usedTokens).toBe(50);
+  });
+  it("does not report conservative reservation as provider usage", async () => {
+    transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: "正文" }, finish_reason: "stop" }] }));
+    const request = chat(), events: AiRunEvent[] = [];
+    const result = await runtime.service.chat("member", request, { stream: true, onEvent: value => events.push(value) });
+    expect(result.usage.estimated).toBe(true);
+    expect(events.map(value => value.type)).toEqual(["run_started", "run_finished"]);
+    expect(runtime.service.getRunEvents("member", request.requestId).some(value => value.type === "usage_updated")).toBe(false);
+  });
+  it("reports provider usage already settled before a malformed answer fails", async () => {
+    transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: "" }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 30, total_tokens: 50 } }));
+    const request = chat(), events: AiRunEvent[] = [];
+    await expect(runtime.service.chat("member", request, { stream: true, onEvent: value => events.push(value) })).rejects.toMatchObject({ code: "AI_EMPTY_RESPONSE" });
+    expect(events.map(value => value.type)).toEqual(["run_started", "usage_updated", "run_failed"]);
+    expect(events[1]).toMatchObject({ data: { status: "uncertain", providerReported: true, usage: { totalTokens: 50, estimated: false } } });
+    expect(runtime.store.quota("member").usedTokens).toBe(50);
+  });
+  it("reports settled provider usage on a rejected tool plan without exposing its body", async () => {
+    transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: "not a valid tool plan" }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 30, total_tokens: 50 } }));
+    const request = { ...chat(), outputFormat: "image_plan" }, events: AiRunEvent[] = [];
+    await expect(runtime.service.chat("member", request, { stream: true, onEvent: value => events.push(value) })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_INVALID" });
+    expect(events.map(value => value.type)).toEqual(["run_started", "usage_updated", "run_failed"]);
+    expect(events[1]).toMatchObject({ data: { status: "failed", providerReported: true, usage: { totalTokens: 50 } } });
+    expect(JSON.stringify(events[1])).not.toContain("not a valid tool plan");
   });
   it("keeps an accepted generation running after its SSE subscriber disconnects", async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>;
