@@ -2,7 +2,7 @@
 
 Verified against the installed packages and package-lock.json on 2026-09-05.
 
-This implementation uses npm libraries through their public APIs. It does not transplant a LibreChat, Dify, Open WebUI, LobeHub or AnythingLLM workspace, and does not claim that those projects were installed as the backend. Exact npm artifacts are pinned by lockfile integrity below; an upstream Git commit was not separately pinned.
+This document covers the PDF/PPT/DOCX libraries, which use npm public APIs. The app does not transplant a LibreChat, Dify, Open WebUI, LobeHub or AnythingLLM workspace or backend. A separate, partial LibreChat GFM block renderer reuse is documented with its exact Git commit and MIT notice in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The document-library npm artifacts below are pinned by lockfile integrity; their upstream Git commits were not separately pinned.
 
 PDF/PPT/DOCX libraries are installed as build-time dependencies and bundled into the renderer by Vite. Their Node-only dependency trees are not shipped in Electron; in particular, the optional native canvas package is not needed by browser PDF text extraction. Final archive verification requires the bundled PDF worker and this license document and rejects native canvas binaries.
 

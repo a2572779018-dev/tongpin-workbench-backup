@@ -54,4 +54,22 @@ describe("AI reply formatting", () => {
     expect(row("user", "ready")).toContain("<p>**保留**</p>");
     expect(row("assistant", "error")).toContain("<p>**保留**</p>");
   });
+  it("shows a completed rich table on the real chat row before the stream ends and after reopening", () => {
+    const base = { assistantName: "同频 AI", copied: false, retryable: false, retryDisabled: false,
+      onCopy: () => {}, onOpenArtifact: () => {}, onRetry: () => {} };
+    const prefix = "正在整理。\n\n| 项目 | 状态 |\n| --- | --- |\n| 视频 | 已完成 |";
+    const row = (status: "thinking" | "ready", content: string) => renderToStaticMarkup(createElement(ChatMessageRow, {
+      ...base, message: { id: "streamed-reply", role: "assistant", status, content, time: "12:00", startedAt: Date.now() },
+    }));
+    const duringStream = row("thinking", `${prefix}\n\n结`);
+    const afterReopen = row("ready", `${prefix}\n\n结论。`);
+    for (const html of [duringStream, afterReopen]) {
+      expect(html).toContain("<table>");
+      expect(html).toContain("<th>项目</th>");
+      expect(html).toContain("<td>已完成</td>");
+      expect(html).not.toContain("| --- |");
+    }
+    expect(duringStream).toContain("结</p>");
+    expect(afterReopen).toContain("结论。</p>");
+  });
 });

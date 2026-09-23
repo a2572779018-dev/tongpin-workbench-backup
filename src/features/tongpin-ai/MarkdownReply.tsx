@@ -2,6 +2,7 @@ import { Children, cloneElement, isValidElement, memo, useMemo, type ReactNode }
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AiSourceAnchor } from "./AiSourceLink";
+import { splitMarkdownIntoBlocks, StableMarkdownBlocks } from "./librechatMarkdownBlocks";
 import { remarkReplyEmphasis, replyUrlTransform } from "./replyMarkdown";
 import { TypewriterText } from "./TypewriterText";
 import "./reply-markdown.css";
@@ -13,6 +14,11 @@ const components: Components = {
   img: ({ src, alt }) => <AiSourceAnchor href={typeof src === "string" ? src : ""}>{alt || "查看图片"}</AiSourceAnchor>,
   table: ({ children }) => <div className="tp-ai-markdown-table" tabIndex={0} role="region" aria-label="回复中的表格"><table>{children}</table></div>,
 };
+
+function renderReplyBlock(content: string): ReactNode {
+  return Markdown({ children: content, remarkPlugins: plugins,
+    components, skipHtml: true, urlTransform: replyUrlTransform });
+}
 
 export function replyTreeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -43,12 +49,15 @@ export function revealReplyTree(node: ReactNode, visible: number): ReactNode {
 }
 
 export const MarkdownReply = memo(function MarkdownReply({ content, typing = false }: { content: string; typing?: boolean }) {
-  // Markdown is a synchronous, hook-free parser; memoize the complete render tree.
-  const tree = useMemo(() => Markdown({ children: content, remarkPlugins: plugins,
-    components, skipHtml: true, urlTransform: replyUrlTransform }), [content]);
+  // During the post-response typewriter effect, reveal a single parsed tree.
+  // The active SSE path below uses LibreChat's stable completed-block rendering.
+  const tree = useMemo(() => typing
+    ? splitMarkdownIntoBlocks(content).map(block => renderReplyBlock(block.raw))
+    : null, [content, typing]);
   const text = useMemo(() => replyTreeText(tree), [tree]);
   return <div className="tp-ai-markdown">
-    {typing ? <TypewriterText content={text} render={offset => revealReplyTree(tree, offset)} /> : tree}
+    {typing ? <TypewriterText content={text} render={offset => revealReplyTree(tree, offset)} />
+      : <StableMarkdownBlocks content={content} renderBlock={renderReplyBlock} />}
     {typing && <span className="tp-ai-message__typing-caret" aria-hidden="true" />}
   </div>;
 });

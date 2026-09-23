@@ -61,6 +61,35 @@ can be obtained at https://mozilla.org/MPL/2.0/.
 `remark-gfm` 4.0.1 (https://github.com/remarkjs/remark-gfm) render formatted
 assistant replies. Exact dependency versions are locked in package-lock.json.
 
+Tongpin also adapts LibreChat v0.8.7 commit
+`9e74cc0e57b395926122bd4062c1fcedc48ed465` source from
+`client/src/components/Chat/Messages/Content/splitMarkdown.ts` and
+`MarkdownBlocks.tsx` for GFM top-level block splitting and memoized completed
+block rendering in the actual AI chat. The local adaptation omits upstream
+math/artifact directives and code/artifact index providers because Tongpin's
+current renderer does not enable those features. This is a partial UI module
+reuse, not an installation of the LibreChat backend or its agent/runtime.
+
+LibreChat MIT License, Copyright (c) 2026 LibreChat:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 The MIT License (MIT)
 
 Copyright (c) Espen Hovlandsdal (react-markdown)
@@ -95,9 +124,10 @@ That companion notice is distributed with the application and must be retained.
 ## AI workspace reference screening
 
 The following projects were reviewed as architecture and interaction references,
-not installed or transplanted as Tongpin's backend. This release's AI workspace,
-account isolation and quota service are implemented within Tongpin; no source
-code from these five platforms is vendored by this integration. The license
+not installed as Tongpin's backend. This release's AI workspace, account
+isolation and quota service are implemented within Tongpin. The LibreChat
+GFM block module is the specific partial reuse documented above; source from
+the other four platforms is not vendored by this integration. The license
 screening below records upstream LICENSE snapshots checked on 2026-09-05, not a
 claim that all five have unrestricted commercial or rebranding permissions.
 
