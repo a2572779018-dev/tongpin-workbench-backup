@@ -199,6 +199,22 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     await api(`/api/ai/requests/${request.requestId}`, other, undefined, "GET", 404);
     expect((await api<AiStatus>("/api/ai/status", other)).quota.usedTokens).toBe(0);
   });
+  it("applies the AI-specific body bound at the outer Worker stream route", async () => {
+    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${other.accessToken}`, "X-Tongpin-Account": other.user.id };
+    const accepted = await mf.dispatchFetch("http://tongpin-fixture.local/api/ai/chat/stream", {
+      method: "POST", headers,
+      body: JSON.stringify({ ...requestBody(), _padding: "x".repeat(800 * 1024) }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.text()).toContain("AI_ACCESS_NOT_GRANTED");
+
+    const rejected = await mf.dispatchFetch("http://tongpin-fixture.local/api/ai/chat/stream", {
+      method: "POST", headers,
+      body: JSON.stringify({ ...requestBody(), _padding: "x".repeat(1600 * 1024) }),
+    });
+    expect(rejected.status).toBe(413);
+    expect(await rejected.json()).toMatchObject({ error: { code: "PAYLOAD_TOO_LARGE" } });
+  });
   it("flushes real Worker SSE before provider EOF and replays SQLite events without another generation", async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>;
     streamingBody = new ReadableStream({ start(value) { controller = value; } });
