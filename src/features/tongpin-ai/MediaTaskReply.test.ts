@@ -22,13 +22,13 @@ const expected = { ...props, accountId: "member-1" };
 describe("media task reply remount", () => {
   afterEach(() => { mediaTaskSnapshotCache.clear(); auth.session = null; });
 
-  it("shows a same-login completed or failed task immediately instead of the query placeholder", () => {
+  it("does not reveal even a same-login terminal task before this mount's authorized GET", () => {
     const current = session(); auth.session = current;
     for (const status of ["completed", "failed"] as const) {
       mediaTaskSnapshotCache.put(mediaCacheScope(current), expected, task(status));
       const html = renderToStaticMarkup(createElement(MediaTaskReply, props));
-      expect(html).toContain(status === "completed" ? "图片已生成" : "图片未生成");
-      expect(html).not.toContain("正在查询原任务");
+      expect(html).toContain("正在查询原任务");
+      expect(html).not.toContain(status === "completed" ? "图片已生成" : "图片未生成");
     }
   });
 

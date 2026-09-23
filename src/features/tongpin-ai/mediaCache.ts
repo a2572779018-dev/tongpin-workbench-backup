@@ -16,10 +16,10 @@ function principalIdentity(session: Session | null): string | null {
   const user = session.user as unknown as Record<string, unknown>;
   const tenantValues = [user.tenantId, user.tenant_id, user.orgId, user.org_id]
     .filter(value => value !== undefined && value !== null && value !== "");
-  if (tenantValues.some(value => typeof value !== "string" || value !== tenantValues[0])) return null;
-  // Missing tenant metadata is kept distinct from an explicit default tenant;
-  // the caller must additionally prove this is a refresh of one login chain.
-  return JSON.stringify([session.user.id, tenantValues[0] ?? null]);
+  // A user ID alone cannot prove that a token refresh stayed in the same
+  // tenant. Older/public sessions omit tenant metadata, so fail closed.
+  if (!tenantValues.length || tenantValues.some(value => typeof value !== "string" || value !== tenantValues[0])) return null;
+  return JSON.stringify([session.user.id, tenantValues[0]]);
 }
 
 /** Only call for an authenticated continuation of the *same* login (token

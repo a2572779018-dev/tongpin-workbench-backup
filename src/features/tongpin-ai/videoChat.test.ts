@@ -51,11 +51,11 @@ describe("video conversations", () => {
     expect(source).not.toContain('method: "POST"');
     expect(source).toContain('"X-Tongpin-Account"');
     expect(source).toContain('api<{ job: AiVideoJob }>');
-    expect(source).toContain("videoBlobCache.loadBlob");
-    expect(source).toContain("videoBlobCache.loadJob");
+    expect(source).toContain('api<Blob>(`/api/ai/videos/${encodeURIComponent(jobId)}/content`');
+    expect(source).toContain('api<{ job: AiVideoJob }>(`/api/ai/videos/${encodeURIComponent(jobId)}`');
     expect(source).toContain("videoBlobCache.retain");
-    expect(source).toContain("useState<PlaybackState>(() => cachedPlayback");
-    expect(source).toContain("useState(Boolean(playback.url))");
+    expect(source).toContain("useState<PlaybackState>(() => unverifiedPlayback");
+    expect(source).toContain("useState(false)");
     expect(cache).toContain('URL.revokeObjectURL');
     expect(source).toContain('IntersectionObserver');
     expect(source).toContain('controls playsInline');

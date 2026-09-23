@@ -2,6 +2,7 @@ import { Download, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { AiImageAsset, AiImageMimeType } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
+import { ApiRequestError } from "../../lib/api";
 import { saveBlobWithFeedback } from "./downloadFeedback";
 import { mediaCacheScope, videoBlobCache } from "./mediaCache";
 import "./generated-content.css";
@@ -32,25 +33,27 @@ export function ImageArtifact({ assetId, mimeType, title = "AI 生成图片", on
   const cacheId = `image:${assetId}`;
   useEffect(() => {
     const controller = new AbortController();
-    const cached = videoBlobCache.snapshot(cacheScope, cacheId);
-    const cachedUrl = cached?.url ?? videoBlobCache.objectUrl(cacheScope, cacheId);
-    setImage(cachedUrl ? { url: cachedUrl, mimeType: (cached?.blob?.type as AiImageMimeType | undefined) ?? mimeType ?? "image/png", cacheScope, assetId } : null);
-    setError(""); setLoading(!cachedUrl);
+    // A cached Blob is not proof the asset still belongs to this session.
+    setImage(null); setError(""); setLoading(true);
     if (!accountId || !/^[A-Za-z0-9_-]{8,160}$/.test(assetId)) { setLoading(false); setError("图片标识无效，请重新生成"); return; }
     const release = videoBlobCache.retain(cacheScope, cacheId);
-    if (cached?.blob && cachedUrl) { setLoading(false); return () => { controller.abort(); release(); }; }
-    videoBlobCache.loadBlob(cacheScope, cacheId, async sharedSignal => {
-      const asset = await api<AiImageAsset>(`/api/ai/assets/${encodeURIComponent(assetId)}`, { signal: sharedSignal, headers: { "X-Tongpin-Account": accountId } }, 30_000);
+    void (async () => {
+      const asset = await api<AiImageAsset>(`/api/ai/assets/${encodeURIComponent(assetId)}`, { signal: controller.signal, headers: { "X-Tongpin-Account": accountId } }, 30_000);
       if (asset.assetId !== assetId || mimeType && asset.mimeType !== mimeType) throw new Error("图片响应不匹配，请重新加载");
       return decodePrivateImage(asset);
-    }, controller.signal)
+    })()
       .then(blob => {
         if (controller.signal.aborted) return;
+        videoBlobCache.put(cacheScope, cacheId, blob);
         const url = videoBlobCache.objectUrl(cacheScope, cacheId);
         if (!url) throw new Error("图片缓存暂时不可用");
         setImage({ url, mimeType: blob.type as AiImageMimeType, cacheScope, assetId });
       })
-      .catch(caught => { if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "图片加载失败，请重试"); })
+      .catch(caught => {
+        if (controller.signal.aborted) return;
+        if (caught instanceof ApiRequestError && [401, 403, 404, 409].includes(caught.status)) videoBlobCache.remove(cacheScope, cacheId);
+        setError(caught instanceof Error ? caught.message : "图片加载失败，请重试");
+      })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); release(); };
   }, [accountId, api, assetId, cacheId, cacheScope, mimeType, version]);

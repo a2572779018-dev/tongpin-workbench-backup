@@ -33,13 +33,12 @@ describe("private session media cache", () => {
       expect(mediaCacheScope(next)).not.toBe(originalScope);
     }
   });
-  it("transfers an older login chain without tenant metadata only when the caller proves continuation", () => {
+  it("fails closed on a refresh without trusted tenant metadata", () => {
     const before = login("legacy-member", undefined, "old");
     const refresh = login("legacy-member", undefined, "rotated");
     const scope = mediaCacheScope(before);
-    expect(transferMediaCacheScope(before, refresh)).toBe(true);
-    expect(mediaCacheScope(refresh)).toBe(scope);
-    // A second same-ID login does not call transferMediaCacheScope and remains isolated.
+    expect(transferMediaCacheScope(before, refresh)).toBe(false);
+    expect(mediaCacheScope(refresh)).not.toBe(scope);
     expect(mediaCacheScope(login("legacy-member", undefined, "new-login"))).not.toBe(scope);
   });
   it("separates authenticated sessions even when tenant user and job IDs match", () => {

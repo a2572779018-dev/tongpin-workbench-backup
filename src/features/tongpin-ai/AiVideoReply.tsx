@@ -10,9 +10,8 @@ import { saveBlobWithFeedback } from "./downloadFeedback";
 
 const labels: Record<AiVideoJob["status"], string> = { submitting: "正在提交", queued: "排队中", processing: "正在生成视频", completed: "视频已生成", failed: "视频未生成", uncertain: "提交结果待核对，请勿重复生成" };
 interface PlaybackState { identity: string; job: AiVideoJob | null; url: string; duration?: number }
-function cachedPlayback(scope: string, jobId: string): PlaybackState {
-  const cached = videoBlobCache.snapshot(scope, jobId);
-  return { identity: JSON.stringify([scope, jobId]), job: cached?.job ?? null, url: cached?.url ?? "", duration: cached?.duration };
+function unverifiedPlayback(scope: string, jobId: string): PlaybackState {
+  return { identity: JSON.stringify([scope, jobId]), job: null, url: "" };
 }
 /** A durable message holds only the job ID. Media and status are fetched with the current account. */
 export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, onEdit, editDisabled }: { jobId: string; onSettled?: () => void; savedRequest?: unknown; submissionError?: string; onEdit?: (request: VideoChatRequest) => void; editDisabled?: boolean }) {
@@ -22,12 +21,12 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
   const identity = JSON.stringify([cacheScope, jobId]);
   const element = useRef<HTMLDivElement>(null);
   const player = useRef<HTMLVideoElement>(null);
-  const [playback, setPlayback] = useState<PlaybackState>(() => cachedPlayback(cacheScope, jobId));
-  const shown = playback.identity === identity ? playback : cachedPlayback(cacheScope, jobId);
+  const [playback, setPlayback] = useState<PlaybackState>(() => unverifiedPlayback(cacheScope, jobId));
+  const shown = playback.identity === identity ? playback : unverifiedPlayback(cacheScope, jobId);
   const { job: serverJob, url, duration } = shown;
   const [missingSubmissionError, setMissingSubmissionError] = useState("");
   const job: AiVideoJob | null = serverJob ?? failedVideoSubmission(savedRequest, submissionError || missingSubmissionError) ?? null;
-  const [visible, setVisible] = useState(Boolean(playback.url)), [retry, setRetry] = useState(0);
+  const [visible, setVisible] = useState(false), [retry, setRetry] = useState(0);
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [restoring, setRestoring] = useState(false);
@@ -65,38 +64,40 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
     let live = true, timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
     const started = Date.now();
-    const cached = videoBlobCache.snapshot(cacheScope, jobId);
-    setPlayback({ identity, job: cached?.job ?? null, url: cached?.url ?? "", duration: cached?.duration }); setError(""); setMissingSubmissionError("");
+    setPlayback(unverifiedPlayback(cacheScope, jobId)); setError(""); setMissingSubmissionError("");
     const headers = { "X-Tongpin-Account": account };
-    const update = (patch: Partial<Omit<PlaybackState, "identity">>) => setPlayback(current => ({ ...(current.identity === identity ? current : cachedPlayback(cacheScope, jobId)), ...patch, identity }));
+    const update = (patch: Partial<Omit<PlaybackState, "identity">>) => setPlayback(current => ({ ...(current.identity === identity ? current : unverifiedPlayback(cacheScope, jobId)), ...patch, identity }));
     async function show(next: AiVideoJob) {
       if (!live) return;
       update({ job: next }); setError("");
       if (["completed", "failed", "uncertain"].includes(next.status)) settled.current?.();
       if (next.status === "completed") {
-        await videoBlobCache.loadBlob(cacheScope, jobId,
-          sharedSignal => api<Blob>(`/api/ai/videos/${encodeURIComponent(jobId)}/content`, { headers, signal: sharedSignal }, 130000, "blob"), controller.signal);
+        // Re-authorize the private content on every mount. A warm Blob alone
+        // cannot prove that access or the provider file still exists.
+        const blob = await api<Blob>(`/api/ai/videos/${encodeURIComponent(jobId)}/content`, { headers, signal: controller.signal }, 130000, "blob");
         if (!live) return;
+        videoBlobCache.put(cacheScope, jobId, blob);
         update({ url: videoBlobCache.objectUrl(cacheScope, jobId) ?? "", duration: videoBlobCache.snapshot(cacheScope, jobId)?.duration });
       }
     }
-    async function poll(useWarmTerminal = false) {
+    async function poll() {
       if (!live) return;
       try {
-        let next = useWarmTerminal ? videoBlobCache.snapshot(cacheScope, jobId)?.job : undefined;
-        if (!next) {
-          if (document.hidden) { timer = setTimeout(() => void poll(), 15000); return; }
-          next = await videoBlobCache.loadJob(cacheScope, jobId, async sharedSignal => {
-            const result = await api<{ job: AiVideoJob }>(`/api/ai/videos/${encodeURIComponent(jobId)}`, { headers, signal: sharedSignal }, 30000);
-            return result.job;
-          }, controller.signal, retry > 0 ? 0 : 2000);
-        }
+        if (document.hidden) { timer = setTimeout(() => void poll(), 15000); return; }
+        const result = await api<{ job: AiVideoJob }>(`/api/ai/videos/${encodeURIComponent(jobId)}`, { headers, signal: controller.signal }, 30000);
+        if (!live) return;
+        const next = result.job;
+        videoBlobCache.putJob(cacheScope, jobId, next);
         await show(next);
         if (!live || next.status === "completed") return;
         if (["failed", "uncertain"].includes(next.status)) return;
         timer = setTimeout(() => void poll(), 15000);
       } catch (e) {
         if (!live) return;
+        if (e instanceof ApiRequestError && [401, 403, 404, 409].includes(e.status)) {
+          videoBlobCache.remove(cacheScope, jobId);
+          setPlayback(unverifiedPlayback(cacheScope, jobId));
+        }
         // A newly persisted message may precede the one and only POST. Reads never resubmit it.
         if (e instanceof ApiRequestError && e.status === 404 && Date.now() - started < 10000) { timer = setTimeout(() => void poll(), 2000); return; }
         if (e instanceof ApiRequestError && e.status === 404 && savedRequest) {
@@ -107,8 +108,7 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
         setError(e instanceof ApiRequestError && e.status === 404 ? "暂未查到提交记录。请核对原任务，不会自动重复生成。" : e instanceof Error ? e.message : "暂时无法读取视频");
       }
     }
-    const terminal = cached?.job && ["completed", "failed", "uncertain"].includes(cached.job.status);
-    void poll(Boolean(terminal && retry === 0));
+    void poll();
     return () => { live = false; controller.abort(); clearTimeout(timer); };
   }, [api, account, cacheScope, identity, jobId, retry, visible, submissionError]);
   useEffect(() => {
@@ -128,7 +128,7 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
       const value = event.currentTarget.duration;
       const resumeAt = videoBlobCache.snapshot(cacheScope, jobId)?.currentTime ?? 0;
       if (resumeAt > 0 && resumeAt < value - 0.25) event.currentTarget.currentTime = resumeAt;
-      if (Number.isFinite(value) && value > 0) { videoBlobCache.putDuration(cacheScope, jobId, value); setPlayback(current => ({ ...(current.identity === identity ? current : cachedPlayback(cacheScope, jobId)), identity, duration: value })); }
+      if (Number.isFinite(value) && value > 0) { videoBlobCache.putDuration(cacheScope, jobId, value); setPlayback(current => ({ ...(current.identity === identity ? current : unverifiedPlayback(cacheScope, jobId)), identity, duration: value })); }
     }} onTimeUpdate={event => videoBlobCache.putCurrentTime(cacheScope, jobId, event.currentTarget.currentTime)} aria-label="同频 AI 生成的视频" /><button type="button" onClick={() => {
       const blob = videoBlobCache.get(cacheScope, jobId);
       if (blob) void saveBlobWithFeedback(blob, `同频视频-${jobId}.mp4`);

@@ -3,7 +3,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { ApiRequestError } from "../../lib/api";
 import { AiVideoReply } from "./AiVideoReply";
 import { ImageArtifact } from "./ImageArtifact";
-import { mediaCacheScope } from "./mediaCache";
+import { mediaCacheScope, videoBlobCache } from "./mediaCache";
 import { mediaTaskReadInvalidatesSnapshot, mediaTaskSnapshotCache } from "./mediaTaskSnapshotCache";
 import {
   mediaTaskAnswerPath,
@@ -67,26 +67,33 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
   const scope = mediaCacheScope(session);
   const identity = JSON.stringify([scope, conversationId, requestId, intent, runId ?? "", submissionError ?? ""]);
   const expected = { requestId, runId, conversationId, accountId, intent };
-  const warmTask = submissionError ? null : mediaTaskSnapshotCache.snapshot(scope, expected);
-  const [view, setView] = useState<TaskView>({ identity, task: warmTask, error: "", loading: !warmTask });
+  // A prior task is not authorization for this mount. Its media remains hidden
+  // until the current session's GET confirms access to the original request.
+  const [view, setView] = useState<TaskView>({ identity, task: null, error: "", loading: true });
   const [busy, setBusy] = useState(false);
   const [authorizationUncertain, setAuthorizationUncertain] = useState(false);
   const [retry, setRetry] = useState(0);
-  const shown = view.identity === identity ? view : { identity, task: warmTask, error: "", loading: !warmTask };
-  const latest = useRef<{ identity: string; task: MediaTaskRun | null }>({ identity, task: warmTask });
+  const shown = view.identity === identity ? view : { identity, task: null, error: "", loading: true };
+  const latest = useRef<{ identity: string; task: MediaTaskRun | null }>({ identity, task: null });
   const lastNotified = useRef("");
   const settledNotified = useRef("");
   const callbacks = useRef({ onTask, onSettled, onError });
   callbacks.current = { onTask, onSettled, onError };
   const activeIdentity = useRef(identity);
   activeIdentity.current = identity;
+  const mounted = useRef(false);
+  const updateAbort = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; updateAbort.current?.abort(); };
+  }, [identity]);
 
   function acceptTask(task: MediaTaskRun) {
-    if (activeIdentity.current !== identity) return;
+    if (!mounted.current || activeIdentity.current !== identity) return;
     if (latest.current.identity !== identity) latest.current = { identity, task: null };
     if (latest.current.task && task.version < latest.current.task.version) return;
     latest.current.task = task;
-    mediaTaskSnapshotCache.put(scope, expected, task);
     setView({ identity, task, error: "", loading: false });
     if (task.status !== "awaiting_authorization") setAuthorizationUncertain(false);
     const signature = `${identity}:${task.runId}:${task.version}:${task.status}`;
@@ -102,12 +109,12 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
 
   useEffect(() => {
     if (latest.current.identity !== identity) {
-      latest.current = { identity, task: warmTask };
+      latest.current = { identity, task: null };
       setAuthorizationUncertain(false);
     }
     setView(current => current.identity === identity && current.task
       ? { ...current, error: "" }
-      : { identity, task: warmTask, error: submissionError ?? "", loading: !submissionError && !warmTask });
+      : { identity, task: null, error: submissionError ?? "", loading: !submissionError });
     if (latest.current.task === null) setBusy(false);
     if (submissionError) return;
     const controller = new AbortController();
@@ -130,7 +137,8 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
         }
         const invalid = mediaTaskReadInvalidatesSnapshot(caught);
         if (invalid) {
-          mediaTaskSnapshotCache.remove(scope, expected);
+          mediaTaskSnapshotCache.clear();
+          videoBlobCache.clear();
           latest.current = { identity, task: null };
         }
         const message = caught instanceof ApiRequestError && caught.status === 404
@@ -148,25 +156,35 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
     if (!accountId || busy || !shown.task) return;
     setBusy(true);
     setView(current => ({ ...current, error: "" }));
+    const controller = new AbortController(); updateAbort.current = controller;
     try {
       const response = await api<unknown>(path, {
         method,
         headers: { "X-Tongpin-Account": accountId },
         body: JSON.stringify(body),
+        signal: controller.signal,
       }, 30_000);
-      if (activeIdentity.current !== identity) return;
+      if (controller.signal.aborted || !mounted.current || activeIdentity.current !== identity) return;
       const task = parseMediaTaskResponse(response, { requestId, runId: shown.task.runId, conversationId, accountId, intent });
       acceptTask(task);
       // The server's scheduler owns subsequent execution. A GET merely
       // observes it; a second POST could bill twice.
       setRetry(current => current + 1);
     } catch (caught) {
-      if (activeIdentity.current !== identity) return;
+      if (controller.signal.aborted || !mounted.current || activeIdentity.current !== identity) return;
+      if (mediaTaskReadInvalidatesSnapshot(caught)) {
+        mediaTaskSnapshotCache.clear(); videoBlobCache.clear();
+        latest.current = { identity, task: null };
+        setView(current => ({ ...current, task: null }));
+      }
       if (paidConfirmation && (!(caught instanceof ApiRequestError) || ![400, 401, 402, 403, 404, 409, 413, 429].includes(caught.status))) setAuthorizationUncertain(true);
       const message = caught instanceof Error ? caught.message : "暂时无法更新原任务";
       setView(current => ({ ...current, error: message }));
       callbacks.current.onError?.(message);
-    } finally { if (activeIdentity.current === identity) setBusy(false); }
+    } finally {
+      if (updateAbort.current === controller) updateAbort.current = null;
+      if (mounted.current && activeIdentity.current === identity) setBusy(false);
+    }
   }
 
   const task = shown.task;
