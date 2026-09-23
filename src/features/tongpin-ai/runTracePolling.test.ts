@@ -13,11 +13,12 @@ function trace(overrides: Partial<AiHarnessTrace> = {}): AiHarnessTrace {
   };
 }
 
-describe("Harness trace background refresh", () => {
-  it("keeps polling a collapsed non-terminal trace and claims planned work with POST", () => {
+describe("Harness trace read-only refresh", () => {
+  it("keeps polling a collapsed non-terminal trace without claiming planned work", () => {
     // Disclosure visibility is intentionally absent from this decision API.
     expect(harnessTraceRefresh(trace())).toEqual({ suffix: "", method: "GET" });
-    expect(harnessTraceRefresh(trace({ status: "planned", nextAction: "resume" }))).toEqual({ suffix: "/resume", method: "POST" });
+    expect(harnessTraceRefresh(trace({ status: "planned", nextAction: "resume" }))).toEqual({ suffix: "", method: "GET" });
+    expect(harnessTraceRefresh(trace({ status: "running", nextAction: "poll" }))).toEqual({ suffix: "", method: "GET" });
     expect(harnessTraceRefresh(trace({ status: "succeeded", nextAction: "none" }))).toBeNull();
   });
 

@@ -88,27 +88,25 @@ describe("App-root AI continuation discovery", () => {
     expect(collectBackgroundAiWork(value)).toEqual({ runRequestIds: [], videoJobIds: [] });
   });
 
-  it("awaits an existing video refresh, then reads the run and resumes only a planned trace", async () => {
+  it("awaits an existing video refresh, then reads a planned run without resuming it", async () => {
     const events: string[] = [];
     const completedVideo = { id: "video-1", status: "completed" } as AiVideoJob;
-    const planned = trace("planned"), completed = trace("succeeded");
+    const planned = trace("planned");
     const result = await pollBackgroundAiWork({ videoJobIds: ["video-1"], runRequestIds: ["request-1"] }, {
       refreshVideo: async id => { events.push(`video:${id}`); return completedVideo; },
       readRun: async id => { events.push(`run:${id}`); return planned; },
-      resumeRun: async id => { events.push(`resume:${id}`); return completed; },
     });
-    expect(events).toEqual(["video:video-1", "run:request-1", "resume:request-1"]);
-    expect(result).toEqual({ videoJobIds: [], runRequestIds: [] });
+    expect(events).toEqual(["video:video-1", "run:request-1"]);
+    expect(result).toEqual({ videoJobIds: [], runRequestIds: ["request-1"] });
   });
 
-  it("does not POST resume for polling or approval states and stops when no work exists", async () => {
-    const resume = async () => { throw new Error("must not resume"); };
+  it("reads polling or approval states without mutation and stops when no work exists", async () => {
     const running = trace("running");
     expect(await pollBackgroundAiWork({ videoJobIds: [], runRequestIds: ["request-1"] }, {
-      refreshVideo: async () => null, readRun: async () => running, resumeRun: resume,
+      refreshVideo: async () => null, readRun: async () => running,
     })).toEqual({ videoJobIds: [], runRequestIds: ["request-1"] });
     expect(await pollBackgroundAiWork({ videoJobIds: [], runRequestIds: [] }, {
-      refreshVideo: async () => { throw new Error("must not read"); }, readRun: async () => { throw new Error("must not read"); }, resumeRun: resume,
+      refreshVideo: async () => { throw new Error("must not read"); }, readRun: async () => { throw new Error("must not read"); },
     })).toEqual({ videoJobIds: [], runRequestIds: [] });
   });
 
@@ -121,7 +119,6 @@ describe("App-root AI continuation discovery", () => {
     const result = await pollBackgroundAiWork(work, {
       refreshVideo: async id => { videoReads.push(id); return { id, status: "completed" } as AiVideoJob; },
       readRun: async id => { runReads.push(id); return trace("succeeded"); },
-      resumeRun: async () => { throw new Error("must not resume"); },
     });
     expect(videoReads).toEqual(["v1", "v2", "v3", "v4"]);
     expect(runReads).toEqual(["r1", "r2", "r3", "r4"]);
@@ -133,37 +130,40 @@ describe("App-root AI continuation discovery", () => {
     const client = {
       refreshVideo: async (id: string) => { videoReads.push(id); return { id, status: "processing" } as AiVideoJob; },
       readRun: async (id: string) => { runReads.push(id); return trace("running"); },
-      resumeRun: async () => { throw new Error("must not resume"); },
     };
     const first = await pollBackgroundAiWork({ videoJobIds: ["v1", "v2", "v3", "v4", "v5"], runRequestIds: ["r1", "r2", "r3", "r4", "r5"] }, client);
     await pollBackgroundAiWork(first, client);
     expect(videoReads).toContain("v5"); expect(runReads).toContain("r5");
   });
 
-  it("uses only existing-job GETs plus an idempotent planned resume POST", async () => {
+  it("mounting or remounting a planned trace only reads persisted state", async () => {
     const paths: Array<{ path: string; method: string; account: string | null }> = [];
+    let providerCalls = 0;
     const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
       paths.push({ path, method: init?.method ?? "GET", account: new Headers(init?.headers).get("X-Tongpin-Account") });
+      if (init?.method === "POST") providerCalls += 1;
       if (path === "/api/ai/workspace") return snapshot() as T;
       if (path.startsWith("/api/ai/videos/")) return { job: { id: "44444444-4444-4444-8444-444444444444", status: "completed" } as AiVideoJob } as T;
-      if (path.endsWith("/resume")) return { trace: trace("succeeded") } as T;
       return { trace: trace("planned") } as T;
     };
-    const stop = startBackgroundAiContinuation(api, "member-a");
-    await vi.waitFor(() => expect(paths.at(-1)?.path).toContain("/resume"));
-    stop();
-    expect(paths).toEqual([
+    const stopFirst = startBackgroundAiContinuation(api, "member-a");
+    await vi.waitFor(() => expect(paths.filter(item => item.path.startsWith("/api/ai/runs/"))).toHaveLength(2));
+    stopFirst();
+    const firstMount = [
       { path: "/api/ai/workspace", method: "GET", account: "member-a" },
       { path: "/api/ai/videos/44444444-4444-4444-8444-444444444444", method: "GET", account: "member-a" },
       { path: "/api/ai/runs/33333333-3333-4333-8333-333333333333", method: "GET", account: "member-a" },
       { path: "/api/ai/runs/11111111-1111-4111-8111-111111111111", method: "GET", account: "member-a" },
-      { path: "/api/ai/runs/33333333-3333-4333-8333-333333333333/resume", method: "POST", account: "member-a" },
-      { path: "/api/ai/runs/11111111-1111-4111-8111-111111111111/resume", method: "POST", account: "member-a" },
-    ]);
-    expect(paths.some(item => item.path === "/api/ai/videos" && item.method === "POST")).toBe(false);
+    ];
+    expect(paths).toEqual(firstMount);
+    const stopSecond = startBackgroundAiContinuation(api, "member-a");
+    await vi.waitFor(() => expect(paths.length).toBe(firstMount.length * 2));
+    stopSecond();
+    expect(paths.slice(firstMount.length)).toEqual(firstMount);
+    expect(providerCalls).toBe(0);
   });
 
-  it("continues the parent video plan when only the persisted artifact links it", async () => {
+  it("reads the parent video plan when only the persisted artifact links it", async () => {
     const value = snapshot(); value.state!.conversations = [];
     value.state!.artifacts[0].data = {
       videoJobId: "44444444-4444-4444-8444-444444444444",
@@ -174,21 +174,19 @@ describe("App-root AI continuation discovery", () => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
       if (path === "/api/ai/workspace") return value as T;
       if (path.startsWith("/api/ai/videos/")) return { job: { id: "44444444-4444-4444-8444-444444444444", status: "completed" } as AiVideoJob } as T;
-      if (path.endsWith("/resume")) return { trace: trace("succeeded") } as T;
       return { trace: trace("planned") } as T;
     };
     const stop = startBackgroundAiContinuation(api, "member-a");
-    await vi.waitFor(() => expect(calls).toContain("POST /api/ai/runs/88888888-8888-4888-8888-888888888888/resume"));
+    await vi.waitFor(() => expect(calls).toContain("GET /api/ai/runs/88888888-8888-4888-8888-888888888888"));
     stop();
-    expect(calls.slice(0, 4)).toEqual([
+    expect(calls).toEqual([
       "GET /api/ai/workspace",
       "GET /api/ai/videos/44444444-4444-4444-8444-444444444444",
       "GET /api/ai/runs/88888888-8888-4888-8888-888888888888",
-      "POST /api/ai/runs/88888888-8888-4888-8888-888888888888/resume",
     ]);
   });
 
-  it("continues a persisted parent plan after the page unloads before an image or PPT result artifact is written", async () => {
+  it("observes a persisted parent plan after page unload without invoking the model", async () => {
     const value = snapshot(); value.state!.artifacts = [];
     value.state!.conversations[0].messages = [{
       id: "execution-placeholder", role: "assistant", content: "", time: "10:00", status: "thinking",
@@ -200,13 +198,13 @@ describe("App-root AI continuation discovery", () => {
     const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
       if (path === "/api/ai/workspace") return value as T;
-      if (path.endsWith("/resume")) return { trace: trace("succeeded") } as T;
       return { trace: trace("planned") } as T;
     };
     const stop = startBackgroundAiContinuation(api, "member-a");
-    await vi.waitFor(() => expect(calls).toContain("POST /api/ai/runs/88888888-8888-4888-8888-888888888888/resume"));
+    await vi.waitFor(() => expect(calls).toContain("GET /api/ai/runs/88888888-8888-4888-8888-888888888888"));
     stop();
     expect(calls).not.toContain("GET /api/ai/runs/77777777-7777-4777-8777-777777777777");
+    expect(calls.every(call => call.startsWith("GET "))).toBe(true);
   });
 
   it("backs off after an initial workspace failure instead of retrying every millisecond, then recovers", async () => {
@@ -233,7 +231,7 @@ describe("App-root AI continuation discovery", () => {
     }
   });
 
-  it("keeps a bounded 404 creation grace and later resumes the same persisted job without recreating it", async () => {
+  it("keeps a bounded 404 creation grace and later reads the same persisted job without recreating it", async () => {
     vi.useFakeTimers();
     try {
       const value = snapshot(); value.state!.conversations = [];
@@ -250,7 +248,6 @@ describe("App-root AI continuation discovery", () => {
           if (++videoReads === 1) throw new ApiRequestError(404, "NOT_FOUND", "not created yet");
           return { job: { id: "44444444-4444-4444-8444-444444444444", status: "completed" } as AiVideoJob } as T;
         }
-        if (path.endsWith("/resume")) return { trace: trace("succeeded") } as T;
         if (++runReads === 1) throw new ApiRequestError(404, "NOT_FOUND", "not created yet");
         return { trace: trace("planned") } as T;
       };
@@ -259,8 +256,8 @@ describe("App-root AI continuation discovery", () => {
       expect(videoReads).toBe(1); expect(runReads).toBe(1);
       await vi.advanceTimersByTimeAsync(5);
       expect(videoReads).toBe(2); expect(runReads).toBe(2);
-      expect(calls).toContain("POST /api/ai/runs/88888888-8888-4888-8888-888888888888/resume");
-      expect(calls).not.toContain("POST /api/ai/videos");
+      expect(calls).toContain("GET /api/ai/runs/88888888-8888-4888-8888-888888888888");
+      expect(calls.every(call => call.startsWith("GET "))).toBe(true);
       stop();
     } finally {
       vi.useRealTimers();
@@ -317,11 +314,10 @@ describe("App-root AI continuation discovery", () => {
     const api: BackgroundAiApi = async <T,>(path: string) => {
       calls.push(path);
       if (path === "/api/ai/workspace") return (++workspaceReads === 1 ? empty : late) as T;
-      if (path.endsWith("/resume")) return { trace: trace("succeeded") } as T;
       return { trace: trace("planned") } as T;
     };
     const stop = startBackgroundAiContinuation(api, "member-a", { pollDelayMs: 1, idleScanDelayMs: 1 });
-    await vi.waitFor(() => expect(calls).toContain("/api/ai/runs/77777777-7777-4777-8777-777777777777/resume"));
+    await vi.waitFor(() => expect(calls).toContain("/api/ai/runs/77777777-7777-4777-8777-777777777777"));
     stop();
     expect(workspaceReads).toBeGreaterThanOrEqual(2);
   });
@@ -335,7 +331,6 @@ describe("App-root AI continuation discovery", () => {
     const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
       if (path === "/api/ai/workspace") return (++workspaceReads === 1 ? empty : late) as T;
-      if (path.endsWith("/resume")) return { trace: trace("succeeded") } as T;
       return { trace: trace("planned") } as T;
     };
     const stop = startBackgroundAiContinuation(api, "member-a", { idleScanDelayMs: 60_000 });
@@ -344,7 +339,7 @@ describe("App-root AI continuation discovery", () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(workspaceReads).toBe(1);
     notifyAiWorkspaceSaved("member-a");
-    await vi.waitFor(() => expect(calls).toContain("POST /api/ai/runs/77777777-7777-4777-8777-777777777777/resume"));
+    await vi.waitFor(() => expect(calls).toContain("GET /api/ai/runs/77777777-7777-4777-8777-777777777777"));
     stop();
     const readsAfterStop = workspaceReads;
     notifyAiWorkspaceSaved("member-a");

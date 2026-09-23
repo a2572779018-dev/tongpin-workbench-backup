@@ -23,7 +23,6 @@ export interface BackgroundAiWork {
 export interface BackgroundAiPollClient {
   refreshVideo(jobId: string): Promise<AiVideoJob | null>;
   readRun(requestId: string): Promise<AiHarnessTrace | null>;
-  resumeRun(requestId: string): Promise<AiHarnessTrace>;
 }
 
 export type BackgroundAiApi = <T>(path: string, init?: RequestInit, timeoutMs?: number) => Promise<T>;
@@ -73,8 +72,8 @@ export function collectBackgroundAiWork(snapshot: AiWorkspaceSnapshot): Backgrou
 }
 
 /** Refresh existing video jobs first because a terminal refresh can settle its
- * approved Harness tool. Only a server trace that explicitly requests resume
- * can cause the idempotent continuation POST. Rejected reads stay active for a
+ * approved Harness tool. Harness runs are read-only here: the server scheduler
+ * owns any quota-accounted continuation. Rejected reads stay active for a
  * later retry; `null` means the account-scoped server record no longer exists. */
 export async function pollBackgroundAiWork(work: BackgroundAiWork, client: BackgroundAiPollClient): Promise<BackgroundAiWork> {
   const videoBatch = work.videoJobIds.slice(0, MAX_POLL_BATCH);
@@ -87,11 +86,7 @@ export async function pollBackgroundAiWork(work: BackgroundAiWork, client: Backg
   // starve later jobs across repeated ticks.
   const videoJobIds = [...work.videoJobIds.slice(MAX_POLL_BATCH), ...processedVideoJobIds];
   const runBatch = work.runRequestIds.slice(0, MAX_POLL_BATCH);
-  const runResults = await Promise.allSettled(runBatch.map(async id => {
-    let trace = await client.readRun(id);
-    if (trace?.nextAction === "resume") trace = await client.resumeRun(id);
-    return { id, trace };
-  }));
+  const runResults = await Promise.allSettled(runBatch.map(async id => ({ id, trace: await client.readRun(id) })));
   const processedRunRequestIds = runResults.flatMap((result, index) => {
     if (result.status === "rejected") return [runBatch[index]];
     return result.value.trace && !TERMINAL_RUN.has(result.value.trace.status) ? [result.value.id] : [];
@@ -165,9 +160,6 @@ export function startBackgroundAiContinuation(
         throw error;
       }
     },
-    async resumeRun(requestId) {
-      return (await api<{ trace: AiHarnessTrace }>(`/api/ai/runs/${encodeURIComponent(requestId)}/resume`, { method: "POST", headers, signal: controller.signal }, 130_000)).trace;
-    },
   };
 
   async function tick() {
@@ -226,9 +218,9 @@ export function startBackgroundAiContinuation(
 
 /**
  * Lives above the conditionally mounted AI page. It never creates a tool job:
- * it only refreshes already-persisted jobs and claims a server-planned,
- * idempotent Harness continuation. This keeps work moving while another app
- * module is visible without relying on unsafe Worker fire-and-forget tasks.
+ * it only refreshes already-persisted jobs and reads Harness progress. The
+ * server scheduler alone claims quota-accounted Harness continuations, so
+ * entering another app module or remounting this runner cannot invoke a model.
  */
 export function AiHarnessContinuationRunner({ accountId, aiViewActive }: { accountId: string; aiViewActive: boolean }) {
   const { api } = useAuth();

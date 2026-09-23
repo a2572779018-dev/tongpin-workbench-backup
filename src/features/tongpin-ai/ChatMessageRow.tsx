@@ -54,7 +54,6 @@ function RunTrace({ requestId, initial, onChange }: { requestId?: string; initia
       try {
         const result = await api<{ trace: AiHarnessTrace }>(`/api/ai/runs/${encodeURIComponent(requestId)}${refreshRequest.suffix}`, {
           signal: controller.signal,
-          ...(refreshRequest.method === "POST" ? { method: "POST" } : {}),
         });
         if (!controller.signal.aborted && !sameHarnessTrace(trace, result.trace)) {
           setTrace(result.trace);

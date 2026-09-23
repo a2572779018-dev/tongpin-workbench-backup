@@ -462,6 +462,19 @@ describe("AI Harness", () => {
     tenantService.harness.finishApprovedTool("member", requestId, "image", "succeeded");
     expect(tenantService.harnessTrace("member", requestId)).toMatchObject({ status: "planned", nextAction: "resume" });
 
+    // The member progress panel only calls this read path, including after a
+    // disclosure toggle or page remount. Reading must not claim the run,
+    // invoke the provider, or change billed usage before the scheduler ticks.
+    const callsBeforeReads = transport.mock.calls.length;
+    const usageBeforeReads = tenantService.store.usage("member");
+    const runBeforeReads = tenantService.store.harnessRun("member", requestId);
+    for (let read = 0; read < 3; read += 1) {
+      expect(tenantService.harnessTrace("member", requestId)).toMatchObject({ status: "planned", nextAction: "resume" });
+    }
+    expect(transport).toHaveBeenCalledTimes(callsBeforeReads);
+    expect(tenantService.store.usage("member")).toEqual(usageBeforeReads);
+    expect(tenantService.store.harnessRun("member", requestId)).toEqual(runBeforeReads);
+
     transport.mockResolvedValueOnce(complete('{"action":"tool","capability":"video","summary":"建议制作一段短视频"}'));
     const cycle = await runtime.service.runBackgroundAgentCycle(4);
     expect(cycle).toMatchObject({ scanned: 1, resumed: 1, completed: 0, waitingApproval: 1, failed: 0 });

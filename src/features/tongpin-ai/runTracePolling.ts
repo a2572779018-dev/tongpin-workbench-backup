@@ -3,17 +3,16 @@ import type { AiHarnessTrace } from "../../../shared/ai";
 const TERMINAL_TRACE = new Set<AiHarnessTrace["status"]>(["succeeded", "failed", "cancelled", "uncertain"]);
 
 export interface HarnessTraceRefresh {
-  suffix: "" | "/resume";
-  method: "GET" | "POST";
+  suffix: "";
+  method: "GET";
 }
 
 /** Visibility is intentionally not an input: a collapsed progress disclosure
- * must keep observing the server-owned run and claim a planned continuation. */
+ * may observe the server-owned run, but opening or mounting it must never
+ * claim a continuation or invoke a model. Server-side scheduling owns that. */
 export function harnessTraceRefresh(trace: AiHarnessTrace): HarnessTraceRefresh | null {
   if (TERMINAL_TRACE.has(trace.status)) return null;
-  return trace.nextAction === "resume"
-    ? { suffix: "/resume", method: "POST" }
-    : { suffix: "", method: "GET" };
+  return { suffix: "", method: "GET" };
 }
 
 /** Tool execution recovery keeps using `requestId`; trace polling follows the
