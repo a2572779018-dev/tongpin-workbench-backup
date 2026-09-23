@@ -9,6 +9,7 @@ import {
   type MediaTaskEntrypoint,
   type MediaTaskExecutionGuard,
   type MediaTaskRun,
+  type MediaTaskSnapshot,
   type MediaTaskVideoParameters,
 } from "./mediaTaskRuntime";
 import { AiError } from "./security";
@@ -49,7 +50,7 @@ export interface MediaTaskConfirmation {
   expiresAt?: number;
 }
 
-type MediaTaskService = Pick<AiService, "store" | "chat" | "generateImage" | "video" | "status">;
+type MediaTaskService = Pick<AiService, "store" | "chat" | "generateImage" | "getRequestResult" | "video" | "status">;
 
 function rejected(code: string, message: string, status = 409): never {
   throw new AiError(status, code, message);
@@ -69,11 +70,15 @@ function safeErrorCode(error: unknown): string {
 function normalizedText(value: string): string { return value.replace(/\s+/g, " ").trim(); }
 function explicitMediaAction(intent: "image" | "video", requestText: string): boolean {
   const statement = normalizedText(requestText);
-  if (/(?:不要|别|不想|不需要|无需|禁止|取消|停止|暂不|先不|稍后|以后|明天|为什么|为何|怎么|如何|是否|是不是|能否|可不可以|失败|报错|错误|问题|评价|讨论|分析|提示词|教程|方案|[?？])/.test(statement)) return false;
-  if (!/^(?:请\s*)?(?:帮我|给我|为我|直接|现在|马上|立刻)?\s*(?:生成|创建|制作|绘制|画|做)/.test(statement)) return false;
-  return intent === "image"
-    ? /(?:图片|图像|插画|海报|照片|画作)/.test(statement.slice(0, 100))
-    : /(?:视频|短片|动画|宣传片|影片)/.test(statement.slice(0, 100));
+  if (/^(?:为什么|为何|怎么|如何|是否|是不是|能否|可不可以|请问|你能不能)/.test(statement)
+    || /(?:失败|报错|错误|提示词|教程|方案|[?？])/.test(statement)
+    || /(?:不要|别|不想|不需要|无需|禁止|取消|停止|暂不|先不)\s*(?:帮我|给我|为我)?\s*(?:生成|创建|制作|绘制|画|做)/.test(statement)) return false;
+  const noun = intent === "image" ? /(?:图片|图像|插画|海报|照片|画作)/ : /(?:视频|短片|动画|宣传片|影片)/;
+  // Permit a short factual preface ("这是 logo，帮我生成视频") and negative
+  // creative constraints ("生成视频，不要字幕"), but never a negated action.
+  const action = /(?:^|[,，。;；]\s*)(?:请\s*)?(?:帮我|给我|为我|直接|现在|马上|立刻)?\s*(?:生成|创建|制作|绘制|画|做)(.{0,50})/g;
+  for (const match of statement.matchAll(action)) if (noun.test(match[1])) return true;
+  return false;
 }
 
 function submissionMayCarryGrant(input: SubmitMediaTask): boolean {
@@ -287,6 +292,7 @@ export class AiServiceMediaTaskOrchestrator {
     this.service.store.assertAccess(userId);
     const run = expectedRun(this.runtime, userId, runId);
     if (run.status === "queued") return this.plan(userId, runId);
+    if (run.status === "planning") return this.reconcilePlanning(userId, runId);
     if (run.status === "awaiting_input" && run.freeQuestion) return this.runtime.expireInput(userId, runId);
     if (run.status === "awaiting_authorization" && run.authorization) return this.executeAuthorized(userId, runId);
     if (run.status === "running" || run.status === "partial" || run.status === "unknown") return this.reconcile(userId, runId);
@@ -326,17 +332,7 @@ export class AiServiceMediaTaskOrchestrator {
           referenceCount: snapshot.videoParameters.referenceIds.length, referenceFingerprints: source.fingerprints,
         } } : {}),
       });
-      if (response.toolClarification) {
-        return this.runtime.awaitInput(userId, runId, response.toolClarification, Math.min(snapshot.deadlineAt, this.now() + 5 * 60_000));
-      }
-      const plan = response.toolPlan;
-      if (!plan || plan.kind !== snapshot.intent) rejected("AI_MEDIA_TASK_PLAN_INVALID", "AI 未返回完整的媒体方案");
-      const cost = this.estimatedPoints(userId, snapshot.intent);
-      const staged = this.runtime.stageTool(userId, runId, {
-        capability: snapshot.intent, operationKey: planRequestId, estimatedPoints: cost,
-        sourceAssetIds: [...snapshot.sourceAssetIds], planRequestId,
-      });
-      return staged.authorization ? await this.executeAuthorized(userId, runId) : staged;
+      return this.applyPlanResponse(userId, runId, snapshot, response, planRequestId);
     } catch (error) {
       // A provider response may have been billed even when the application
       // did not receive a valid plan. Inspect the journaled request rather
@@ -344,8 +340,58 @@ export class AiServiceMediaTaskOrchestrator {
       const current = this.runtime.get(userId, runId);
       if (current?.status !== "planning") return current ?? claimed;
       const request = this.service.store.request(userId, `plan-${claimed.stepId}`);
-      const outcome = request && request.status !== "failed" ? "unknown" : "failed";
+      const outcome = request?.status === "pending" || request?.status === "uncertain" ? "unknown" : "failed";
       return this.runtime.failPlanning(userId, runId, safeErrorCode(error), outcome);
+    }
+  }
+
+  private async applyPlanResponse(userId: string, runId: string, snapshot: MediaTaskSnapshot,
+    response: Pick<AiChatResponse, "toolPlan" | "toolClarification">, planRequestId: string): Promise<MediaTaskRun> {
+    if (this.now() >= snapshot.deadlineAt) return this.runtime.failPlanning(userId, runId, "AI_MEDIA_TASK_DEADLINE");
+    if (await this.configurationVersion(snapshot.intent, snapshot.tier) !== snapshot.modelConfigVersion) {
+      return this.runtime.failPlanning(userId, runId, "AI_CONFIG_CHANGED");
+    }
+    const source = await this.scopedSources(userId, snapshot);
+    if (snapshot.sourceAssetIds.length && (snapshot.sourceFingerprints === undefined
+      || JSON.stringify(source.fingerprints) !== JSON.stringify(snapshot.sourceFingerprints))) {
+      return this.runtime.failPlanning(userId, runId, "AI_MEDIA_TASK_SOURCE_CHANGED");
+    }
+    if (response.toolClarification) {
+      return this.runtime.awaitInput(userId, runId, response.toolClarification, Math.min(snapshot.deadlineAt, this.now() + 5 * 60_000));
+    }
+    const plan = response.toolPlan;
+    if (!plan || plan.kind !== snapshot.intent) rejected("AI_MEDIA_TASK_PLAN_INVALID", "AI 未返回完整的媒体方案");
+    const cost = this.estimatedPoints(userId, snapshot.intent);
+    const staged = this.runtime.stageTool(userId, runId, {
+      capability: snapshot.intent, operationKey: planRequestId, estimatedPoints: cost,
+      sourceAssetIds: [...snapshot.sourceAssetIds], planRequestId,
+    });
+    return staged.authorization ? this.executeAuthorized(userId, runId) : staged;
+  }
+
+  /** Recover a claimed plan from the durable AiService journal. Never post the
+   * planner request again after a crash, even if the journal row is absent. */
+  private async reconcilePlanning(userId: string, runId: string): Promise<MediaTaskRun> {
+    const run = expectedRun(this.runtime, userId, runId);
+    if (run.status !== "planning") return run;
+    const snapshot = this.runtime.snapshot(userId, runId);
+    if (!snapshot) return this.runtime.failPlanning(userId, runId, "AI_MEDIA_TASK_SNAPSHOT_MISSING", "unknown");
+    const planRequestId = `plan-${run.stepId}`;
+    try { this.service.getRequestResult(userId, planRequestId); } catch { /* An absent journal is handled below. */ }
+    const request = this.service.store.request(userId, planRequestId);
+    if (!request) return this.runtime.failPlanning(userId, runId, "AI_MEDIA_TASK_PLAN_UNRECORDED", "unknown");
+    if (request.status === "failed") return this.runtime.failPlanning(userId, runId, request.error?.code ?? "AI_MEDIA_TASK_PLAN_FAILED");
+    if (request.status === "uncertain") return this.runtime.failPlanning(userId, runId, request.error?.code ?? "AI_MEDIA_TASK_PLAN_UNCERTAIN", "unknown");
+    if (request.status === "pending") {
+      return this.now() >= run.deadlineAt
+        ? this.runtime.failPlanning(userId, runId, "AI_MEDIA_TASK_PLAN_TIMEOUT", "unknown")
+        : this.runtime.schedulePoll(userId, runId);
+    }
+    if (!request.result) return this.runtime.failPlanning(userId, runId, "AI_MEDIA_TASK_PLAN_RESULT_MISSING", "unknown");
+    try { return await this.applyPlanResponse(userId, runId, snapshot, request.result, planRequestId); }
+    catch (error) {
+      const latest = expectedRun(this.runtime, userId, runId);
+      return latest.status === "planning" ? this.runtime.failPlanning(userId, runId, safeErrorCode(error)) : latest;
     }
   }
 
@@ -478,18 +524,21 @@ export class AiServiceMediaTaskOrchestrator {
     const snapshot = this.runtime.snapshot(userId, runId);
     if (!snapshot) return this.runtime.failTool(userId, runId, toolCallId, "AI_MEDIA_TASK_SNAPSHOT_MISSING", "unknown");
     if (snapshot.intent === "image") {
+      try { this.service.getRequestResult(userId, toolCallId); } catch { /* An absent journal is handled below. */ }
       const request = this.service.store.request(userId, toolCallId);
       if (request?.imageResult?.images.length) return this.runtime.completeTool(userId, runId, toolCallId, request.imageResult.images.map(item => item.assetId));
       if (request?.status === "failed") return this.runtime.failTool(userId, runId, toolCallId, request.error?.code ?? "AI_IMAGE_FAILED", "failed");
       if (request?.status === "uncertain") return this.runtime.failTool(userId, runId, toolCallId, request.error?.code ?? "AI_IMAGE_UNCERTAIN", "unknown");
       if (!request) return this.runtime.failTool(userId, runId, toolCallId, "AI_MEDIA_TASK_UNRECORDED", "unknown");
-      return run;
+      if (this.now() >= run.deadlineAt) return this.runtime.failTool(userId, runId, toolCallId, "AI_MEDIA_TASK_IMAGE_TIMEOUT", "unknown");
+      return this.runtime.schedulePoll(userId, runId);
     }
     const job = this.service.video.list(userId, snapshot.tier).jobs.find(item => item.id === toolCallId);
     if (!job) return this.runtime.failTool(userId, runId, toolCallId, "AI_MEDIA_TASK_UNRECORDED", "unknown");
-    if (["queued", "processing"].includes(job.status) && run.status !== "unknown") {
+    if (["queued", "processing", "submitting"].includes(job.status) && run.status !== "unknown") {
+      if (this.now() >= run.deadlineAt) return this.runtime.failTool(userId, runId, toolCallId, "AI_MEDIA_TASK_VIDEO_TIMEOUT", "unknown");
       try { return this.applyVideoJob(userId, runId, toolCallId, await this.service.video.refresh(userId, toolCallId)); }
-      catch { return run; /* Poll failures do not resubmit. */ }
+      catch { return this.runtime.schedulePoll(userId, runId); /* Poll failures do not resubmit. */ }
     }
     if (run.status === "unknown" && ["queued", "processing", "submitting"].includes(job.status)) return run;
     return this.applyVideoJob(userId, runId, toolCallId, job);

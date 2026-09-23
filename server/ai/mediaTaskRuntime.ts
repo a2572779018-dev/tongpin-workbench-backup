@@ -179,6 +179,7 @@ const VERSION = /^[a-zA-Z0-9._:-]{1,120}$/;
 const ENTRYPOINTS = new Set<MediaTaskEntrypoint>(["natural", "mention_image", "mention_video", "menu"]);
 const TIERS = new Set<AiMode>(["quick", "standard", "deep", "pro"]);
 const CAPABILITIES = new Set<MediaTaskCapability>(["image", "video"]);
+const RECOVERY_POLL_MS = 10_000;
 
 function invalid(message: string): never { throw new AiError(400, "AI_MEDIA_TASK_INVALID", message); }
 function conflict(message: string): never { throw new AiError(409, "AI_MEDIA_TASK_CONFLICT", message); }
@@ -402,7 +403,17 @@ export class MediaTaskRuntime {
       }
       run.status = "planning";
       // An interrupted paid planner request must be reconciled, not replayed.
-      run.dueAt = run.deadlineAt;
+      run.dueAt = Math.min(run.deadlineAt, this.now() + RECOVERY_POLL_MS);
+      return this.update(run);
+    });
+  }
+  /** Read-only reconciliation may defer its next inspection; never reissue a
+   * request solely because it remains pending in the provider journal. */
+  schedulePoll(userId: string, runId: string): MediaTaskRun {
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      if (!["planning", "running", "partial"].includes(run.status)) return clone(run);
+      run.dueAt = Math.min(run.deadlineAt, this.now() + RECOVERY_POLL_MS);
       return this.update(run);
     });
   }
@@ -579,7 +590,7 @@ export class MediaTaskRuntime {
         ...(snapshot.videoParameters ? { videoParameters: snapshot.videoParameters } : {}),
       };
       run.status = "running";
-      run.dueAt = run.deadlineAt;
+      run.dueAt = Math.min(run.deadlineAt, this.now() + RECOVERY_POLL_MS);
       return { kind: "started", run: this.update(run) };
     });
   }

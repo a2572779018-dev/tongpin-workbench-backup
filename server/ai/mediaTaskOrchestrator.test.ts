@@ -97,6 +97,24 @@ describe("real AiService media orchestration", () => {
     },
   );
 
+  it.each(["生成视频，不要字幕或旁白", "这个是 logo，帮我生成一段视频"])(
+    "recognizes an affirmative video request with context or negative creative constraints: %s",
+    async requestText => {
+      await node.service.video.configure({ enabled: true, quotaPoints: 3000, apiKey: "fixture-video-key", defaultModel: "minimax_h3" });
+      const row = node.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0];
+      const settings = JSON.parse(row.data);
+      node.store.sql.exec("UPDATE ai_settings SET data=? WHERE id='video'", JSON.stringify({ ...settings,
+        verifiedConfigVersion: settings.configVersion, verifiedKeyVersion: settings.keyVersion, verifiedModels: ["minimax_h3"] }));
+      const run = await orchestrator.submit("member", {
+        requestId: crypto.randomUUID(), conversationId: "conversation-v", entrypoint: "natural", tier: "quick",
+        intent: "video", requestText, sourceAssetIds: [],
+        videoParameters: { model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [] },
+        confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 3000 },
+      });
+      expect(orchestrator.runtime.snapshot("member", run.runId)?.authorizationScope).toMatchObject({ capabilities: ["video"], maxPointsPerTool: 3000 });
+    },
+  );
+
   it("keeps the Send grant through clarification, but rechecks current budget before paid execution", async () => {
     transport.mockResolvedValueOnce(Response.json({
       choices: [{ message: { content: '{"kind":"clarification","question":"想画什么主题？"}' } }],
@@ -157,6 +175,67 @@ describe("real AiService media orchestration", () => {
     expect(await orchestrator.advance("member", run.runId)).toMatchObject({ status: "failed" });
     expect(await orchestrator.advance("member", run.runId)).toMatchObject({ status: "failed" });
     expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers an already-completed planner journal after restart without reposting", async () => {
+    const run = await orchestrator.submit("member", input());
+    const claimed = orchestrator.runtime.claimPlanning("member", run.runId)!;
+    transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+    await node.service.chat("member", {
+      requestId: `plan-${claimed.stepId}`, conversationId: "conversation-a", mode: "quick",
+      messages: [{ role: "user", content: "画一张蓝色科技海报" }], outputFormat: "image_plan",
+    });
+    orchestrator = new AiServiceMediaTaskOrchestrator(node.service);
+    const recovered = await orchestrator.advance("member", run.runId);
+    expect(recovered).toMatchObject({ status: "awaiting_authorization", tool: { planRequestId: `plan-${claimed.stepId}` } });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("never replays a claimed planner request with no journal, and stops polling a pending plan at deadline", async () => {
+    let clock = Date.now();
+    orchestrator = new AiServiceMediaTaskOrchestrator(node.service, () => clock);
+    const missing = await orchestrator.submit("member", { ...input(), deadlineAt: clock + 60_000 });
+    orchestrator.runtime.claimPlanning("member", missing.runId);
+    expect(await orchestrator.advance("member", missing.runId)).toMatchObject({ status: "unknown", dueAt: null, errorCode: "AI_MEDIA_TASK_PLAN_UNRECORDED" });
+    const pending = await orchestrator.submit("member", { ...input(), deadlineAt: clock + 60_000 });
+    const claimed = orchestrator.runtime.claimPlanning("member", pending.runId)!;
+    node.store.saveRequest({
+      requestId: `plan-${claimed.stepId}`, userId: "member", hash: "fixture", status: "pending",
+      createdAt: new Date().toISOString(), expiresAt: Date.now() + 120_000,
+      inputReserve: 0, outputReserve: 0, model: "text-model", mode: "quick", conversationId: "conversation-a", kind: "chat",
+    });
+    expect((await orchestrator.advance("member", pending.runId)).status).toBe("planning");
+    clock = pending.deadlineAt;
+    expect(await orchestrator.advance("member", pending.runId)).toMatchObject({ status: "unknown", dueAt: null, errorCode: "AI_MEDIA_TASK_PLAN_TIMEOUT" });
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("marks a pending paid image call unknown at deadline rather than hot-polling or resubmitting", async () => {
+    let clock = Date.now();
+    orchestrator = new AiServiceMediaTaskOrchestrator(node.service, () => clock);
+    const run = await orchestrator.submit("member", { ...input(), deadlineAt: clock + 60_000,
+      confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 } });
+    const claimed = orchestrator.runtime.claimPlanning("member", run.runId)!;
+    const staged = orchestrator.runtime.stageTool("member", run.runId, {
+      capability: "image", operationKey: `plan-${claimed.stepId}`, estimatedPoints: 1000,
+      sourceAssetIds: [], planRequestId: `plan-${claimed.stepId}`,
+    });
+    const grant = staged.authorization!;
+    const snapshot = orchestrator.runtime.snapshot("member", run.runId)!;
+    const started = orchestrator.runtime.beginTool("member", run.runId, {
+      modelConfigVersion: snapshot.modelConfigVersion, budgetVersion: grant.budgetVersion,
+      availablePoints: 20_000, sourceAssetsValid: true,
+    });
+    expect(started.kind).toBe("started");
+    node.store.saveRequest({
+      requestId: started.run.tool!.toolCallId!, userId: "member", hash: "fixture", status: "pending",
+      createdAt: new Date().toISOString(), expiresAt: Date.now() + 120_000,
+      inputReserve: 0, outputReserve: 0, model: "image-model", mode: "quick", conversationId: "conversation-a", kind: "image",
+    });
+    expect((await orchestrator.advance("member", run.runId)).status).toBe("running");
+    clock = run.deadlineAt;
+    expect(await orchestrator.advance("member", run.runId)).toMatchObject({ status: "unknown", dueAt: null, errorCode: "AI_MEDIA_TASK_IMAGE_TIMEOUT" });
+    expect(transport).not.toHaveBeenCalled();
   });
 
   it("uses scoped records: a foreign tenant/account cannot observe or authorize a task", async () => {
@@ -245,6 +324,28 @@ describe("real AiService media orchestration", () => {
     expect(transport.mock.calls.some(([url, init]) => url.endsWith("/content") && init.method === "GET")).toBe(true);
     expect(transport.mock.calls.filter(([url, init]) => url === "https://www.75api.com/v1/videos" && init.method === "POST")).toHaveLength(1);
     expect(node.store.usage("member").filter(item => item.kind === "video")).toHaveLength(1);
+  });
+
+  it("stops background polling after the deadline of an accepted video job without another paid POST", async () => {
+    let clock = Date.now();
+    orchestrator = new AiServiceMediaTaskOrchestrator(node.service, () => clock);
+    await node.service.video.configure({ enabled: true, quotaPoints: 3000, apiKey: "fixture-video-key", defaultModel: "minimax_h3" });
+    const row = node.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0];
+    const settings = JSON.parse(row.data);
+    node.store.sql.exec("UPDATE ai_settings SET data=? WHERE id='video'", JSON.stringify({ ...settings,
+      verifiedConfigVersion: settings.configVersion, verifiedKeyVersion: settings.keyVersion, verifiedModels: ["minimax_h3"] }));
+    transport.mockResolvedValueOnce(planResponse("video", "品牌视频"));
+    transport.mockResolvedValueOnce(Response.json({ id: "task_fixture_12345678", status: "queued", progress: 0 }));
+    const run = await orchestrator.submit("member", {
+      requestId: crypto.randomUUID(), conversationId: "conversation-v", entrypoint: "mention_video", tier: "quick",
+      intent: "video", requestText: "生成品牌视频", sourceAssetIds: [], deadlineAt: clock + 60_000,
+      videoParameters: { model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [] },
+      confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 3000 },
+    });
+    expect((await orchestrator.advance("member", run.runId)).status).toBe("running");
+    clock = run.deadlineAt;
+    expect(await orchestrator.advance("member", run.runId)).toMatchObject({ status: "unknown", dueAt: null, errorCode: "AI_MEDIA_TASK_VIDEO_TIMEOUT" });
+    expect(transport.mock.calls.filter(([url, init]) => url.endsWith("/videos") && init.method === "POST")).toHaveLength(1);
   });
 
   it("does not call an inaccessible or invalid video a ready artifact", async () => {
