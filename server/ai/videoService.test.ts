@@ -116,6 +116,18 @@ describe("durable H3 jobs and isolated quotas", () => {
     await expect(runtime.service.video.configure({ enabled: true, quotaPoints: 0 })).rejects.toMatchObject({ code: "AI_VIDEO_SETTINGS_INVALID" });
     await expect(runtime.service.video.configure({ ...config, apiKey: "bad\nkey" })).rejects.toMatchObject({ code: "AI_KEY_INVALID" });
   });
+  it("freezes an opaque media configuration version and validates reference ownership before planning", async () => {
+    const video = runtime.service.video;
+    const before = await video.configurationVersion("quick");
+    expect(before).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify({ before })).not.toContain(config.apiKey);
+    const first = await video.uploadReference("a", { dataUrl: "data:image/jpeg;base64,/9j/AAAA" });
+    expect(await video.referenceFingerprintsForTask("a", [first.id], "conversation_a")).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
+    await expect(video.referenceFingerprintsForTask("b", [first.id], "conversation_a")).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
+    await video.configure({ ...config, defaultModel: "sd-2-c6" });
+    expect(await video.configurationVersion("quick")).not.toBe(before);
+    expect(transport).not.toHaveBeenCalled();
+  });
   it("keeps reference images encrypted, account-bound and expiring; retries do not generate twice", async () => {
     const video = runtime.service.video;
     const dataUrl = "data:image/jpeg;base64,/9j/" + "AAAA".repeat(20000);

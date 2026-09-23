@@ -96,6 +96,25 @@ export class AiVideoService {
     const s = this.saved(), verified = verifiedModels(s);
     return { enabled: s.enabled, quotaPoints: s.quotaPoints, apiKeyConfigured: Boolean(s.encryptedKey || this.deploymentKey() || this.harnessVideoConfigured()), defaultModel: configuredDefaultModel(s.defaultModel), availableModels: verified ?? [], modelsVerified: verified !== null };
   }
+  /** Opaque version for a queued task. A key or tier-route change invalidates
+   * an old approval without returning any provider configuration to members. */
+  async configurationVersion(tier: AiMode): Promise<string> {
+    const harness = this.store.harness();
+    const route = harness?.tiers[tier];
+    const provider = route?.videoProviderId ? harness?.providers.find(item => item.id === route.videoProviderId) : undefined;
+    const bytes = new TextEncoder().encode(JSON.stringify({
+      tenantId: this.store.tenantId, tier, video: this.saved(),
+      route: route ?? null, provider: provider ?? null,
+    }));
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+  /** Planning may use fingerprints, never provider capability URLs. This
+   * revalidates every source in the original conversation before a plan. */
+  async referenceFingerprintsForTask(userId: string, referenceIds: string[], conversationId: string): Promise<string[]> {
+    this.store.assertAccess(userId);
+    return (await this.references(userId, referenceIds, validConversationId(conversationId, referenceIds[0] ?? "reference"))).fingerprints;
+  }
   private memberSettings(tier: AiMode = "quick"): AiVideoSettings {
     const admin = this.settings();
     let access: ReturnType<AiVideoService["harnessVideoAccess"]> = null;
