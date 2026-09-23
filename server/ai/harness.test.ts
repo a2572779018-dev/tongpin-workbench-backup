@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiHarnessCapability, AiHarnessInput, AiMode } from "../../shared/ai";
 import { createNodeAi } from "./node";
@@ -772,5 +773,36 @@ describe("AI Harness", () => {
       expect.objectContaining({ provider: "image-provider", capability: "image", operation: "execution", errors: [] }),
     ]));
     expect(JSON.stringify(dashboard)).not.toContain("unsafe provider body");
+  });
+
+  it("aggregates only measured first-visible text samples without filling missing or cross-tenant data", () => {
+    runtime.store.addObservability({ userId: "member-a", tier: "quick", providerId: "primary", capability: "chat", success: true, latencyMs: 700, firstVisibleMs: 200 });
+    runtime.store.addObservability({ userId: "member-b", tier: "quick", providerId: "primary", capability: "chat", success: true, latencyMs: 900 });
+    runtime.store.addObservability({ userId: "member-c", tier: "deep", providerId: "primary", capability: "chat", success: true, latencyMs: 1_200, firstVisibleMs: 400 });
+    runtime.store.forTenant("other-tenant").addObservability({ userId: "member-a", tier: "quick", providerId: "private", capability: "chat", success: true, latencyMs: 5_000, firstVisibleMs: 4_000 });
+
+    const dashboard = runtime.store.observability(60);
+    expect(dashboard.totals).toMatchObject({ requests: 3, firstVisibleSamples: 2, averageFirstVisibleMs: 300 });
+    expect(dashboard.slices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tier: "quick", requests: 2, firstVisibleSamples: 1, averageFirstVisibleMs: 200 }),
+      expect.objectContaining({ tier: "deep", requests: 1, firstVisibleSamples: 1, averageFirstVisibleMs: 400 }),
+    ]));
+    expect(JSON.stringify(dashboard)).not.toContain("private");
+    expect(runtime.store.forTenant("other-tenant").observability(60).totals).toMatchObject({ requests: 1, firstVisibleSamples: 1, averageFirstVisibleMs: 4000 });
+  });
+
+  it("migrates existing observability rows without inventing old first-visible timing", async () => {
+    const legacyFile = path.join(directory, "legacy.json.ai.sqlite");
+    const database = new DatabaseSync(legacyFile);
+    database.exec("CREATE TABLE ai_observability_events (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', user_id TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, success INTEGER NOT NULL, latency_ms INTEGER NOT NULL, error_code TEXT, created_at INTEGER NOT NULL)");
+    database.prepare("INSERT INTO ai_observability_events VALUES(?,?,?,?,?,?,?,?,?,?)").run("old-event", "default", "member", "quick", "primary", "chat", 1, 750, null, Date.now());
+    database.close();
+
+    const migrated = await createNodeAi(path.join(directory, "legacy.json"), transport);
+    try {
+      expect(migrated.store.observability(60).totals).toMatchObject({ requests: 1, firstVisibleSamples: 0, averageFirstVisibleMs: null });
+      migrated.store.addObservability({ userId: "member", tier: "quick", providerId: "primary", capability: "chat", success: true, latencyMs: 400, firstVisibleMs: 120 });
+      expect(migrated.store.observability(60).totals).toMatchObject({ requests: 2, firstVisibleSamples: 1, averageFirstVisibleMs: 120 });
+    } finally { migrated.close(); }
   });
 });

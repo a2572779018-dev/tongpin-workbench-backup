@@ -44,6 +44,13 @@ describe("recoverable chat output", () => {
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.store.quota("member").usedTokens).toBe(50);
   });
+  it("does not invent a first-visible sample for buffered JSON responses", async () => {
+    transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: "缓冲回复" }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 } }));
+    await runtime.service.chat("member", chat(), { stream: true });
+    const dashboard = runtime.service.observability(60);
+    expect(dashboard.totals).toMatchObject({ requests: 1, firstVisibleSamples: 0, averageFirstVisibleMs: null });
+    expect(dashboard.slices[0]).toMatchObject({ firstVisibleSamples: 0, averageFirstVisibleMs: null });
+  });
   it("never executes or salvages incomplete tool parameters", async () => {
     transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: '{"kind":"image","prompt":"unfinished' }, finish_reason: "length" }], usage: { prompt_tokens: 20, completion_tokens: 30, total_tokens: 50 } }));
     const request = { ...chat(), outputFormat: "image_plan" };
@@ -113,6 +120,7 @@ describe("recoverable chat output", () => {
     expect(runtime.service.forTenant("other-tenant").store.runEvents("member", request.requestId)).toEqual([]);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.store.quota("member").usedTokens).toBe(50);
+    expect(runtime.service.observability(60).totals).toMatchObject({ requests: 1, firstVisibleSamples: 1, averageFirstVisibleMs: expect.any(Number) });
   });
   it("persists versioned markdown block offsets and stable event ids on the real chat stream", async () => {
     const content = "结论。\n\n| 项目 | 状态 |\n| --- | --- |\n| 视频 | 完成 |";

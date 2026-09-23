@@ -120,6 +120,10 @@ export interface AiObservabilitySlice {
   errorRate: number;
   averageLatencyMs: number;
   maxLatencyMs: number;
+  /** Count only replies that emitted a visible text delta while streaming. */
+  firstVisibleSamples: number;
+  /** Accepted request to first visible answer fragment; null when unsampled. */
+  averageFirstVisibleMs: number | null;
   errors: Array<{ code: string; count: number }>;
 }
 export interface AiObservabilityAlert {

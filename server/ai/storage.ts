@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS ai_harness_runs (user_id TEXT NOT NULL, id TEXT NOT N
 CREATE INDEX IF NOT EXISTS ai_harness_runs_user_time ON ai_harness_runs(user_id, started_at DESC);
 CREATE TABLE IF NOT EXISTS ai_harness_steps (user_id TEXT NOT NULL, run_id TEXT NOT NULL, id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', data TEXT NOT NULL, PRIMARY KEY(user_id,run_id,id));
 CREATE INDEX IF NOT EXISTS ai_harness_steps_run ON ai_harness_steps(user_id,run_id);
-CREATE TABLE IF NOT EXISTS ai_observability_events (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', user_id TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, operation TEXT NOT NULL DEFAULT 'execution', success INTEGER NOT NULL, latency_ms INTEGER NOT NULL, error_code TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ai_observability_events (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', user_id TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, operation TEXT NOT NULL DEFAULT 'execution', success INTEGER NOT NULL, latency_ms INTEGER NOT NULL, first_visible_ms INTEGER, error_code TEXT, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS ai_observability_time ON ai_observability_events(created_at DESC);
 CREATE TABLE IF NOT EXISTS ai_observability_alerts (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', fingerprint TEXT NOT NULL, code TEXT NOT NULL, severity TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, message TEXT NOT NULL, first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, occurrence_count INTEGER NOT NULL, acknowledged_at INTEGER, acknowledged_by TEXT, resolved_at INTEGER);
 CREATE INDEX IF NOT EXISTS ai_observability_alerts_tenant_time ON ai_observability_alerts(tenant_id,last_seen_at DESC);
@@ -97,6 +97,8 @@ export interface StoredRequest {
   harnessRunId?: string;
   attempt?: AiChatResponse["attempt"];
   generation?: import("../../shared/ai").AiGenerationDiagnostic;
+  /** Request acceptance to the first emitted public answer fragment, if any. */
+  firstVisibleMs?: number;
   toolPlanRequestId?: string;
   result?: Omit<AiChatResponse, "quota">;
   imageResult?: Omit<AiImageResponse, "quota">;
@@ -138,6 +140,7 @@ export class AiStore {
     this.sql.exec(`UPDATE ai_video_references SET public_id=id WHERE tenant_id='${DEFAULT_AI_TENANT_ID}' AND public_id IS NULL`);
     const observabilityColumns = this.sql.all<{ name: string }>("PRAGMA table_info(ai_observability_events)");
     if (!observabilityColumns.some(column => column.name === "operation")) this.sql.exec("ALTER TABLE ai_observability_events ADD COLUMN operation TEXT NOT NULL DEFAULT 'execution'");
+    if (!observabilityColumns.some(column => column.name === "first_visible_ms")) this.sql.exec("ALTER TABLE ai_observability_events ADD COLUMN first_visible_ms INTEGER");
     const harnessRunColumns = this.sql.all<{ name: string }>("PRAGMA table_info(ai_harness_runs)");
     if (!harnessRunColumns.some(column => column.name === "goal_kind")) this.sql.exec("ALTER TABLE ai_harness_runs ADD COLUMN goal_kind TEXT NOT NULL DEFAULT 'chat'");
     if (!harnessRunColumns.some(column => column.name === "goal_summary")) this.sql.exec("ALTER TABLE ai_harness_runs ADD COLUMN goal_summary TEXT NOT NULL DEFAULT '完成当前对话任务，并根据已校验结果判断下一步。'");
@@ -348,20 +351,22 @@ export class AiStore {
   harnessSteps(userId: string, runId: string): AiHarnessStep[] {
     return this.sql.all<{ data: string }>("SELECT data FROM ai_harness_steps WHERE tenant_id=? AND user_id=? AND run_id=? ORDER BY json_extract(data,'$.createdAt'), rowid", this.tenantId, this.userKey(userId), runId).map(row => JSON.parse(row.data) as AiHarnessStep);
   }
-  addObservability(value: { userId: string; tier: AiMode; providerId: string; capability: AiHarnessCapability; operation?: "planning" | "execution"; success: boolean; latencyMs: number; errorCode?: string }): void {
+  addObservability(value: { userId: string; tier: AiMode; providerId: string; capability: AiHarnessCapability; operation?: "planning" | "execution"; success: boolean; latencyMs: number; firstVisibleMs?: number; errorCode?: string }): void {
     const id = crypto.randomUUID();
     const providerId = /^[a-zA-Z0-9._:-]{1,120}$/.test(value.providerId) ? value.providerId : "unknown-provider";
     const errorCode = value.success ? null : /^[A-Z][A-Z0-9_]{1,95}$/.test(value.errorCode ?? "") ? value.errorCode! : "AI_UNKNOWN_ERROR";
     const operation = value.operation ?? "execution";
     const latencyMs = Math.max(0, Math.round(value.latencyMs));
-    this.sql.exec("INSERT INTO ai_observability_events(id,tenant_id,user_id,tier,provider_id,capability,operation,success,latency_ms,error_code,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", tenantStorageKey(this.tenantId, id), this.tenantId, this.userKey(value.userId), value.tier, providerId, value.capability, operation, value.success ? 1 : 0, latencyMs, errorCode, Date.now());
+    const firstVisibleMs = value.firstVisibleMs !== undefined && Number.isSafeInteger(value.firstVisibleMs) && value.firstVisibleMs >= 0
+      ? value.firstVisibleMs : null;
+    this.sql.exec("INSERT INTO ai_observability_events(id,tenant_id,user_id,tier,provider_id,capability,operation,success,latency_ms,first_visible_ms,error_code,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", tenantStorageKey(this.tenantId, id), this.tenantId, this.userKey(value.userId), value.tier, providerId, value.capability, operation, value.success ? 1 : 0, latencyMs, firstVisibleMs, errorCode, Date.now());
     this.syncObservabilityAlerts(this.observabilitySlices(60), { tier: value.tier, provider: providerId, capability: value.capability, operation, success: value.success, latencyMs });
   }
   private observabilitySlices(windowMinutes: number): AiObservabilitySlice[] {
     const requestedWindow = Number.isFinite(windowMinutes) ? Math.round(windowMinutes) : 60;
     const safeWindow = Math.max(5, Math.min(7 * 24 * 60, requestedWindow));
-    const rows = this.sql.all<{ tier: string; provider_id: string; capability: string; operation: string; requests: number; successes: number; failures: number; average_latency_ms: number; max_latency_ms: number }>(
-      `SELECT tier,provider_id,capability,operation,COUNT(*) requests,SUM(success) successes,SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) failures,ROUND(AVG(latency_ms)) average_latency_ms,MAX(latency_ms) max_latency_ms
+    const rows = this.sql.all<{ tier: string; provider_id: string; capability: string; operation: string; requests: number; successes: number; failures: number; average_latency_ms: number; max_latency_ms: number; first_visible_samples: number; average_first_visible_ms: number | null }>(
+      `SELECT tier,provider_id,capability,operation,COUNT(*) requests,SUM(success) successes,SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) failures,ROUND(AVG(latency_ms)) average_latency_ms,MAX(latency_ms) max_latency_ms,COUNT(first_visible_ms) first_visible_samples,ROUND(AVG(first_visible_ms)) average_first_visible_ms
        FROM ai_observability_events WHERE tenant_id=? AND created_at>=? GROUP BY tier,provider_id,capability,operation ORDER BY requests DESC`, this.tenantId, Date.now() - safeWindow * 60_000,
     );
     const errors = this.sql.all<{ tier: string; provider_id: string; capability: string; operation: string; error_code: string; count: number }>(
@@ -375,6 +380,7 @@ export class AiStore {
       successRate: Number(row.requests) ? Number(row.successes) / Number(row.requests) : 0,
       errorRate: Number(row.requests) ? Number(row.failures) / Number(row.requests) : 0,
       averageLatencyMs: Number(row.average_latency_ms), maxLatencyMs: Number(row.max_latency_ms),
+      firstVisibleSamples: Number(row.first_visible_samples), averageFirstVisibleMs: row.average_first_visible_ms === null ? null : Number(row.average_first_visible_ms),
       errors: errors.filter(error => error.tier === row.tier && error.provider_id === row.provider_id && error.capability === row.capability && error.operation === row.operation).map(error => ({ code: error.error_code, count: Number(error.count) })),
     }));
   }
@@ -437,12 +443,15 @@ export class AiStore {
       successRate: requests ? successes / requests : 0, errorRate: requests ? failures / requests : 0,
       averageLatencyMs: requests ? Math.round(slices.reduce((sum, item) => sum + item.averageLatencyMs * item.requests, 0) / requests) : 0,
       maxLatencyMs: slices.reduce((max, item) => Math.max(max, item.maxLatencyMs), 0),
+      firstVisibleSamples: slices.reduce((sum, item) => sum + item.firstVisibleSamples, 0),
+      averageFirstVisibleMs: null,
       errors: slices.flatMap(item => item.errors).reduce<Array<{ code: string; count: number }>>((all, error) => {
         const existing = all.find(item => item.code === error.code);
         if (existing) existing.count += error.count; else all.push({ ...error });
         return all;
       }, []).sort((left, right) => right.count - left.count || left.code.localeCompare(right.code)),
     };
+    if (totals.firstVisibleSamples) totals.averageFirstVisibleMs = Math.round(slices.reduce((sum, item) => sum + (item.averageFirstVisibleMs ?? 0) * item.firstVisibleSamples, 0) / totals.firstVisibleSamples);
     const alertHistory = this.observabilityAlertHistory();
     return { generatedAt: new Date().toISOString(), windowMinutes: safeWindow, totals, slices, alerts: alertHistory.filter(alert => alert.resolvedAt === null), alertHistory };
   }
