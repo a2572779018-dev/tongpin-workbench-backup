@@ -16,7 +16,7 @@ import {
 import { normalizeSession, normalizeUser } from "../lib/user";
 import type { Session, User } from "../types";
 import { flushAiBeforeLeave } from "../features/tongpin-ai/workspaceLeaveGuard";
-import { videoBlobCache } from "../features/tongpin-ai/mediaCache";
+import { transferMediaCacheScope, videoBlobCache } from "../features/tongpin-ai/mediaCache";
 
 const SESSION_KEY = "tongpin.session.v1";
 
@@ -84,8 +84,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const sessionRef = useRef<Session | null>(null);
   const refreshInFlight = useRef<Promise<Session | null> | null>(null);
 
-  const setSession = useCallback(async (next: Session | null) => {
-    if (sessionRef.current?.user.id !== next?.user.id) {
+  const setSession = useCallback(async (next: Session | null, preserveMediaScope = false) => {
+    const previous = sessionRef.current;
+    if (previous?.user.id !== next?.user.id) {
       try {
         await window.tongpin?.computerUse?.stopSession();
       } catch {
@@ -93,7 +94,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
     }
     await persistSession(next);
-    if (sessionRef.current?.user.id !== next?.user.id) videoBlobCache.clear();
+    // Only refresh/profile update may explicitly continue the current login.
+    // A new login clears private media even if the user ID is unchanged.
+    if (!preserveMediaScope || !transferMediaCacheScope(previous, next)) videoBlobCache.clear();
     sessionRef.current = next;
     setSessionState(next);
   }, []);
@@ -110,7 +113,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       .then(async (next) => {
         if (sessionRef.current !== current) return null;
         const normalized = normalizeSession(next);
-        await setSession(normalized);
+        await setSession(normalized, true);
         return normalized;
       })
       .catch(async (error) => {
@@ -268,7 +271,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
     async (user: User) => {
       const current = sessionRef.current;
       if (!current) return;
-      await setSession({ ...current, user: normalizeUser(user) });
+      await setSession({ ...current, user: normalizeUser(user) }, true);
     },
     [setSession],
   );

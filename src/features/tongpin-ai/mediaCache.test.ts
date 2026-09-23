@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { MediaBlobCache, mediaCacheScope } from "./mediaCache";
+import { MediaBlobCache, mediaCacheScope, transferMediaCacheScope } from "./mediaCache";
 import type { AiVideoJob } from "../../../shared/aiVideo";
 import type { Session } from "../../types";
 
@@ -8,7 +8,40 @@ const job = (status: AiVideoJob["status"] = "completed"): AiVideoJob => ({
   id: "job-123456789012", prompt: "test", model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9",
   status, progress: status === "completed" ? 100 : 50, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), quotaPoints: 1000, reserved: status !== "completed",
 });
+const login = (id: string, tenantId?: string, token = "token") => ({
+  accessToken: token, refreshToken: `${token}-refresh`, user: { id, ...(tenantId === undefined ? {} : { tenantId }) },
+}) as unknown as Session;
 describe("private session media cache", () => {
+  it("keeps warm media across an authenticated refresh of the same principal", () => {
+    const before = login("member", "tenant-a", "old");
+    const after = login("member", "tenant-a", "new");
+    const scope = mediaCacheScope(before), cache = new MediaBlobCache();
+    const blob = new Blob(["private-video"]);
+    cache.put(scope, "job", blob);
+    expect(transferMediaCacheScope(before, after)).toBe(true);
+    expect(mediaCacheScope(after)).toBe(scope);
+    expect(cache.get(mediaCacheScope(after), "job")).toBe(blob);
+  });
+  it("refuses scope transfer when identity or tenant is changed or ambiguous", () => {
+    const original = login("member", "tenant-a");
+    const sameIdOtherTenant = login("member", "tenant-b");
+    const noTenant = login("member");
+    const otherAccount = login("other", "tenant-a");
+    const originalScope = mediaCacheScope(original);
+    for (const next of [sameIdOtherTenant, noTenant, otherAccount]) {
+      expect(transferMediaCacheScope(original, next)).toBe(false);
+      expect(mediaCacheScope(next)).not.toBe(originalScope);
+    }
+  });
+  it("transfers an older login chain without tenant metadata only when the caller proves continuation", () => {
+    const before = login("legacy-member", undefined, "old");
+    const refresh = login("legacy-member", undefined, "rotated");
+    const scope = mediaCacheScope(before);
+    expect(transferMediaCacheScope(before, refresh)).toBe(true);
+    expect(mediaCacheScope(refresh)).toBe(scope);
+    // A second same-ID login does not call transferMediaCacheScope and remains isolated.
+    expect(mediaCacheScope(login("legacy-member", undefined, "new-login"))).not.toBe(scope);
+  });
   it("separates authenticated sessions even when tenant user and job IDs match", () => {
     const first = { user: { id: "member" } } as Session;
     const second = { user: { id: "member" } } as Session;
@@ -81,6 +114,10 @@ describe("private session media cache", () => {
   });
   it("clears private playback state whenever the authenticated account changes", () => {
     const auth = readFileSync(new URL("../../auth/AuthContext.tsx", import.meta.url), "utf8");
-    expect(auth).toContain("if (sessionRef.current?.user.id !== next?.user.id) videoBlobCache.clear()");
+    expect(auth).toContain("if (!preserveMediaScope || !transferMediaCacheScope(previous, next)) videoBlobCache.clear()");
+    expect(auth).toContain("await setSession(normalizeSession(next));");
+    expect(auth).toContain("await setSession(normalized, true);");
+    expect(auth).toContain("await setSession({ ...current, user: normalizeUser(user) }, true);");
+    expect(auth).toContain("await setSession({ ...saved, user: normalizeUser(result.user) });");
   });
 });

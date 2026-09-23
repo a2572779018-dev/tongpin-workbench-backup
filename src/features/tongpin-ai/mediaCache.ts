@@ -2,13 +2,36 @@ import type { AiVideoJob } from "../../../shared/aiVideo";
 import type { Session } from "../../types";
 
 const sessionScopes = new WeakMap<Session, string>();
-/** Cache entries belong to one authenticated session object, not merely the
+/** Cache entries belong to one authenticated login chain, not merely the
  * public user ID. The same user ID can be valid in a different tenant. */
 export function mediaCacheScope(session: Session | null): string {
   if (!session?.user.id) return "";
   let scope = sessionScopes.get(session);
   if (!scope) { scope = `${session.user.id}:${crypto.randomUUID()}`; sessionScopes.set(session, scope); }
   return scope;
+}
+
+function principalIdentity(session: Session | null): string | null {
+  if (!session?.user.id) return null;
+  const user = session.user as unknown as Record<string, unknown>;
+  const tenantValues = [user.tenantId, user.tenant_id, user.orgId, user.org_id]
+    .filter(value => value !== undefined && value !== null && value !== "");
+  if (tenantValues.some(value => typeof value !== "string" || value !== tenantValues[0])) return null;
+  // Missing tenant metadata is kept distinct from an explicit default tenant;
+  // the caller must additionally prove this is a refresh of one login chain.
+  return JSON.stringify([session.user.id, tenantValues[0] ?? null]);
+}
+
+/** Only call for an authenticated continuation of the *same* login (token
+ * rotation or profile update). A fresh login must use a new scope even when
+ * the public user ID happens to match. */
+export function transferMediaCacheScope(previous: Session | null, next: Session | null): boolean {
+  const previousIdentity = principalIdentity(previous);
+  if (!previous || !next || !previousIdentity || previousIdentity !== principalIdentity(next)) return false;
+  const scope = mediaCacheScope(previous);
+  if (!scope) return false;
+  sessionScopes.set(next, scope);
+  return true;
 }
 
 interface InFlight<T> { controller: AbortController; promise: Promise<T> }
