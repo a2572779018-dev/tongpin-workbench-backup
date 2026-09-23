@@ -4,6 +4,7 @@ import { ApiRequestError } from "../../lib/api";
 import { AiVideoReply } from "./AiVideoReply";
 import { ImageArtifact } from "./ImageArtifact";
 import { mediaCacheScope } from "./mediaCache";
+import { mediaTaskReadInvalidatesSnapshot, mediaTaskSnapshotCache } from "./mediaTaskSnapshotCache";
 import {
   mediaTaskAnswerPath,
   mediaTaskAuthorizationAmount,
@@ -65,12 +66,14 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
   const accountId = session?.user.id ?? "";
   const scope = mediaCacheScope(session);
   const identity = JSON.stringify([scope, conversationId, requestId, intent, runId ?? "", submissionError ?? ""]);
-  const [view, setView] = useState<TaskView>({ identity, task: null, error: "", loading: true });
+  const expected = { requestId, runId, conversationId, accountId, intent };
+  const warmTask = submissionError ? null : mediaTaskSnapshotCache.snapshot(scope, expected);
+  const [view, setView] = useState<TaskView>({ identity, task: warmTask, error: "", loading: !warmTask });
   const [busy, setBusy] = useState(false);
   const [authorizationUncertain, setAuthorizationUncertain] = useState(false);
   const [retry, setRetry] = useState(0);
-  const shown = view.identity === identity ? view : { identity, task: null, error: "", loading: true };
-  const latest = useRef<{ identity: string; task: MediaTaskRun | null }>({ identity, task: null });
+  const shown = view.identity === identity ? view : { identity, task: warmTask, error: "", loading: !warmTask };
+  const latest = useRef<{ identity: string; task: MediaTaskRun | null }>({ identity, task: warmTask });
   const lastNotified = useRef("");
   const settledNotified = useRef("");
   const callbacks = useRef({ onTask, onSettled, onError });
@@ -83,6 +86,7 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
     if (latest.current.identity !== identity) latest.current = { identity, task: null };
     if (latest.current.task && task.version < latest.current.task.version) return;
     latest.current.task = task;
+    mediaTaskSnapshotCache.put(scope, expected, task);
     setView({ identity, task, error: "", loading: false });
     if (task.status !== "awaiting_authorization") setAuthorizationUncertain(false);
     const signature = `${identity}:${task.runId}:${task.version}:${task.status}`;
@@ -98,12 +102,12 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
 
   useEffect(() => {
     if (latest.current.identity !== identity) {
-      latest.current = { identity, task: null };
+      latest.current = { identity, task: warmTask };
       setAuthorizationUncertain(false);
     }
     setView(current => current.identity === identity && current.task
       ? { ...current, error: "" }
-      : { identity, task: null, error: submissionError ?? "", loading: !submissionError });
+      : { identity, task: warmTask, error: submissionError ?? "", loading: !submissionError && !warmTask });
     if (latest.current.task === null) setBusy(false);
     if (submissionError) return;
     const controller = new AbortController();
@@ -115,19 +119,24 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
       try {
         const response = await api<unknown>(mediaTaskReadPath(requestId), { headers, signal: controller.signal }, 30_000);
         if (controller.signal.aborted || activeIdentity.current !== identity) return;
-        const task = parseMediaTaskResponse(response, { requestId, runId, conversationId, accountId, intent });
+        const task = parseMediaTaskResponse(response, expected);
         acceptTask(task);
         if (mediaTaskNeedsPolling(task.status)) timer = setTimeout(() => void poll(), document.hidden ? 15_000 : 4_000);
       } catch (caught) {
         if (controller.signal.aborted || activeIdentity.current !== identity) return;
-        if (caught instanceof ApiRequestError && caught.status === 404 && Date.now() - started < 12_000) {
+        if (caught instanceof ApiRequestError && caught.status === 404 && !latest.current.task && Date.now() - started < 12_000) {
           timer = setTimeout(() => void poll(), 2_000);
           return;
+        }
+        const invalid = mediaTaskReadInvalidatesSnapshot(caught);
+        if (invalid) {
+          mediaTaskSnapshotCache.remove(scope, expected);
+          latest.current = { identity, task: null };
         }
         const message = caught instanceof ApiRequestError && caught.status === 404
           ? "暂未查到原任务。请核对提交状态，不会自动重复生成。"
           : caught instanceof Error ? caught.message : "暂时无法读取原任务";
-        setView(current => ({ identity, task: current.identity === identity ? current.task : null, error: message, loading: false }));
+        setView(current => ({ identity, task: invalid ? null : current.identity === identity ? current.task : null, error: message, loading: false }));
         callbacks.current.onError?.(message);
       }
     }

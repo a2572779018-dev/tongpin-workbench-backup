@@ -17,6 +17,7 @@ import { normalizeSession, normalizeUser } from "../lib/user";
 import type { Session, User } from "../types";
 import { flushAiBeforeLeave } from "../features/tongpin-ai/workspaceLeaveGuard";
 import { transferMediaCacheScope, videoBlobCache } from "../features/tongpin-ai/mediaCache";
+import { mediaTaskSnapshotCache } from "../features/tongpin-ai/mediaTaskSnapshotCache";
 
 const SESSION_KEY = "tongpin.session.v1";
 
@@ -96,7 +97,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
     await persistSession(next);
     // Only refresh/profile update may explicitly continue the current login.
     // A new login clears private media even if the user ID is unchanged.
-    if (!preserveMediaScope || !transferMediaCacheScope(previous, next)) videoBlobCache.clear();
+    if (!preserveMediaScope || !transferMediaCacheScope(previous, next)) {
+      videoBlobCache.clear();
+      mediaTaskSnapshotCache.clear();
+    }
     sessionRef.current = next;
     setSessionState(next);
   }, []);

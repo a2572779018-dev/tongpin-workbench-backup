@@ -114,7 +114,9 @@ describe("private session media cache", () => {
   });
   it("clears private playback state whenever the authenticated account changes", () => {
     const auth = readFileSync(new URL("../../auth/AuthContext.tsx", import.meta.url), "utf8");
-    expect(auth).toContain("if (!preserveMediaScope || !transferMediaCacheScope(previous, next)) videoBlobCache.clear()");
+    expect(auth).toContain("if (!preserveMediaScope || !transferMediaCacheScope(previous, next)) {");
+    expect(auth).toContain("videoBlobCache.clear();");
+    expect(auth).toContain("mediaTaskSnapshotCache.clear();");
     expect(auth).toContain("await setSession(normalizeSession(next));");
     expect(auth).toContain("await setSession(normalized, true);");
     expect(auth).toContain("await setSession({ ...current, user: normalizeUser(user) }, true);");
