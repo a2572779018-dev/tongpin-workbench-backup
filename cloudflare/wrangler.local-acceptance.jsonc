@@ -1,0 +1,27 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "tongpin-local-acceptance-only",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [
+      { "name": "TONGPIN_CORE", "class_name": "TongpinCore" }
+    ]
+  },
+  "exports": {
+    "TongpinCore": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "r2_buckets": [
+    { "binding": "RELEASES", "bucket_name": "tongpin-local-acceptance-only" }
+  ],
+  "vars": {
+    "BOOTSTRAP_ADMIN_EMAIL": "admin@company.local",
+    "DEV_EMAIL_PREVIEW": "true",
+    "AI_ALLOWED_HOSTS": "fixture.invalid",
+    "CLIENT_ORIGINS": "http://127.0.0.1:5173",
+    "LORA_EXPLORER_API": "https://unused.invalid/api/v2",
+    "LORA_RPC_URL": "https://unused.invalid"
+  }
+}
