@@ -65,7 +65,9 @@ Tongpin also adapts LibreChat v0.8.7 commit
 `9e74cc0e57b395926122bd4062c1fcedc48ed465` source from
 `client/src/components/Chat/Messages/Content/splitMarkdown.ts` and
 `MarkdownBlocks.tsx` for GFM top-level block splitting and memoized completed
-block rendering in the actual AI chat. The local adaptation omits upstream
+block rendering in the actual AI chat. The shared source-offset splitter is
+now used by both the chat renderer and the settled server response descriptor;
+the descriptor never duplicates response text. The local adaptation omits upstream
 math/artifact directives and code/artifact index providers because Tongpin's
 current renderer does not enable those features. This is a partial UI module
 reuse, not an installation of the LibreChat backend or its agent/runtime.

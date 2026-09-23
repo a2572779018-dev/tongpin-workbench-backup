@@ -1,5 +1,6 @@
 import type { AiChatRequest, AiChatResponse } from "../../shared/ai";
 import type { AiRunEvent } from "../../shared/aiRunEvents";
+import { validAiRichContent } from "../../shared/aiRichContent";
 import { ApiRequestError } from "./api";
 
 type StreamApi = <T>(path: string, init?: RequestInit, timeoutMs?: number, responseMode?: "stream") => Promise<T>;
@@ -31,6 +32,9 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
         event.stepId !== request.requestId ||
         !Number.isSafeInteger(event.seq) || event.seq < 0 ||
         (runId !== undefined && event.runId !== runId)) throw new UnsafeEvent("回复事件标识不正确");
+    if (event.schemaVersion !== undefined && (event.schemaVersion !== 1 ||
+        event.eventId !== `${request.requestId}:${event.seq}` || event.attemptId !== request.requestId ||
+        event.conversationId !== (request.conversationId ?? request.requestId))) throw new UnsafeEvent("回复事件版本或标识不正确");
     if (event.type === "answer_delta" || event.type === "public_summary_delta") {
       if (typeof event.data?.delta !== "string") throw new UnsafeEvent("回复增量格式无效");
     } else if (event.type === "usage_updated") {
@@ -46,7 +50,10 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
         throw new UnsafeEvent("回复用量事件格式无效");
     } else if (event.type === "run_finished") {
       if (!event.data?.response || event.data.response.requestId !== request.requestId ||
-          typeof event.data.response.content !== "string") throw new UnsafeEvent("回复结果标识不正确");
+          typeof event.data.response.content !== "string" ||
+          (event.data.response.richContent !== undefined &&
+            !validAiRichContent(event.data.response.content, event.data.response.richContent)))
+        throw new UnsafeEvent("回复结果标识或内容块不正确");
     } else if (event.type === "run_failed") {
       if (typeof event.data?.error?.code !== "string" || typeof event.data.error.message !== "string")
         throw new UnsafeEvent("回复失败事件格式无效");

@@ -34,6 +34,7 @@ describe("recoverable chat output", () => {
     const events: AiRunEvent[] = [];
     const result = await runtime.service.chat("member", request, { stream: true, onEvent: value => events.push(value) });
     expect(result).toMatchObject({ content: "第一部分已经完成，后续", completion: { state: "partial", reason: "output_limit", canContinue: true }, usage: { totalTokens: 50, estimated: false } });
+    expect(result.richContent).toEqual({ version: 1, blocks: [{ id: "markdown:0", kind: "markdown", start: 0, end: result.content.length }] });
     expect(events.map(value => value.type)).toEqual(["run_started", "usage_updated", "run_finished"]);
     expect(events[1]).toMatchObject({ data: { status: "uncertain", providerReported: true, usage: { inputTokens: 20, outputTokens: 30, totalTokens: 50, estimated: false } } });
     expect(events[1].data).toEqual({ status: "uncertain", providerReported: true, usage: { inputTokens: 20, outputTokens: 30, totalTokens: 50, estimated: false } });
@@ -99,6 +100,8 @@ describe("recoverable chat output", () => {
     controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":30,"total_tokens":50}}\n\ndata: [DONE]\n\n'));
     controller.close();
     expect((await client).content).toBe("流式首段");
+    expect(events.at(-1)).toMatchObject({ type: "run_finished", data: { response: { richContent: { version: 1 } } } });
+    expect(events.every(value => value.schemaVersion === 1 && value.eventId === `${request.requestId}:${value.seq}`)).toBe(true);
     const replay = runtime.service.getRunEvents("member", request.requestId);
     expect(replay.map(value => value.seq)).toEqual([1, 2, 3, 4]);
     expect(replay.map(value => value.type)).toEqual(["run_started", "answer_delta", "usage_updated", "run_finished"]);
@@ -108,6 +111,28 @@ describe("recoverable chat output", () => {
     runtime.service.setQuota("other", "admin", { limitTokens: 100000 });
     expect(() => runtime.service.getRunEvents("other", request.requestId)).toThrow(expect.objectContaining({ code: "AI_REQUEST_NOT_FOUND" }));
     expect(runtime.service.forTenant("other-tenant").store.runEvents("member", request.requestId)).toEqual([]);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.store.quota("member").usedTokens).toBe(50);
+  });
+  it("persists versioned markdown block offsets and stable event ids on the real chat stream", async () => {
+    const content = "结论。\n\n| 项目 | 状态 |\n| --- | --- |\n| 视频 | 完成 |";
+    transport.mockResolvedValueOnce(Response.json({ choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 30, total_tokens: 50 } }));
+    const request = chat();
+    const seen: AiRunEvent[] = [];
+    const result = await runtime.service.chat("member", request, { stream: true, onEvent: value => seen.push(value) });
+    expect(result.richContent).toEqual({ version: 1, blocks: [
+      { id: "markdown:0", kind: "markdown", start: 0, end: 3 },
+      { id: "markdown:5", kind: "markdown", start: 5, end: content.length },
+    ] });
+    expect(runtime.service.getRequestResult("member", request.requestId).result?.richContent).toEqual(result.richContent);
+    expect(seen.at(-1)).toMatchObject({ type: "run_finished", data: { response: { richContent: result.richContent } } });
+    expect(seen).toEqual(runtime.service.getRunEvents("member", request.requestId));
+    for (const event of seen) expect(event).toMatchObject({
+      schemaVersion: 1, eventId: `${request.requestId}:${event.seq}`, attemptId: request.requestId,
+      conversationId: request.conversationId,
+    });
+    expect(runtime.store.quota("member").usedTokens).toBe(50);
+    await runtime.service.chat("member", request);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.store.quota("member").usedTokens).toBe(50);
   });

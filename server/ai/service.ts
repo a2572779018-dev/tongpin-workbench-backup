@@ -22,6 +22,7 @@ import type { AiRunEvent, AiRunEventPayload } from "../../shared/aiRunEvents";
 import { createVisibleStream } from "./visibleStream";
 import { generationDiagnostic } from "./generationDiagnostic";
 import { createAiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
+import { describeAiRichContent } from "../../shared/aiRichContent";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -649,7 +650,8 @@ export class AiService {
     q.reservedTokens = Math.max(0, q.reservedTokens - totalReserved(request));
     q.usedTokens += usage.totalTokens; q.inputTokens += usage.inputTokens; q.outputTokens += usage.outputTokens;
     request.status = status;
-    if (content !== undefined) request.result = { requestId: request.requestId, model: AI_BUSINESS_TIER_LABELS[request.mode], content, usage, ...(request.attempt ? { attempt: request.attempt } : {}), ...extras };
+    if (content !== undefined) request.result = { requestId: request.requestId, model: AI_BUSINESS_TIER_LABELS[request.mode], content,
+      richContent: describeAiRichContent(content), usage, ...(request.attempt ? { attempt: request.attempt } : {}), ...extras };
     if (extras?.toolPlan) request.toolPlanExpiresAt = toolPlanExpiry();
     if (images !== undefined) request.imageResult = { requestId: request.requestId, model: "图片生成", images, usage };
     if (error) request.error = { status: error.status, code: error.code, message: error.message, ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}) };
@@ -895,7 +897,7 @@ export class AiService {
         throw new AiError(final?.error?.status ?? 502, final?.error?.code ?? "AI_REQUEST_UNCERTAIN", final?.error?.message ?? "请求已按中断记录，请管理员核对用量");
       }
       if (request.outputFormat === "presentation" && request.toolPlanRequestId) this.store.sql.transaction(() => this.harness.finishApprovedTool(userId, request.toolPlanRequestId!, "presentation", validUsage ? "succeeded" : "uncertain"));
-      const finalResponse = { ...memberChatResult({ requestId: request.requestId, content, model: AI_BUSINESS_TIER_LABELS[request.mode], usage, attempt: reserved.attempt, ...extras }), quota: this.store.quota(userId) };
+      const finalResponse = { ...memberChatResult(this.store.request(userId, request.requestId)!.result!), quota: this.store.quota(userId) };
       emitSettledUsage();
       emit({ type: "run_finished", data: { response: finalResponse } });
       return finalResponse;

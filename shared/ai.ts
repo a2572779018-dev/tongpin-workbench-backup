@@ -370,11 +370,18 @@ export interface AiChatPreflight {
   /** An explicit user choice is required before sending without search. */
   withoutWebSearch?: { canSend: boolean; reason: AiChatPreflightReason; budget: AiChatBudget };
 }
+/** Exact UTF-16 spans into canonical content; never a second copy of model output. */
+export interface AiRichContentV1 {
+  version: 1;
+  blocks: Array<{ id: string; kind: "markdown"; start: number; end: number }>;
+}
 export interface AiChatResponse {
   requestId: string;
   attempt?: { runId: string; attemptId: string; parentAttemptId?: string };
   completion?: { state: "partial"; reason: "output_limit" | "stream_interrupted"; canContinue: boolean };
   content: string;
+  /** Optional until every installed client understands the v1 rich projection. */
+  richContent?: AiRichContentV1;
   /** Optional model-authored public explanation extracted from an explicit
    * <analysis_summary> block. Never populated from hidden reasoning fields. */
   analysisSummary?: string;

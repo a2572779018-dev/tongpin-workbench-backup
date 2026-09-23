@@ -191,7 +191,11 @@ export class AiStore {
       if (!request) throw new AiError(404, "AI_REQUEST_NOT_FOUND", "没有找到这条请求");
       const seq = (this.sql.all<{ seq: number }>("SELECT MAX(seq) AS seq FROM ai_run_events WHERE tenant_id=? AND user_id=? AND request_id=?", this.tenantId, this.userKey(userId), requestId)[0]?.seq ?? 0) + 1;
       if (seq > 4096) throw new AiError(502, "AI_EVENT_LIMIT", "任务事件超过上限");
-      const event: AiRunEvent = { ...payload, requestId, runId: request.attempt?.runId ?? request.harnessRunId ?? requestId, stepId: requestId, seq, timestamp: Date.now() };
+      const event: AiRunEvent = { ...payload, requestId, runId: request.attempt?.runId ?? request.harnessRunId ?? requestId,
+        stepId: requestId, seq, timestamp: Date.now(), schemaVersion: 1, eventId: `${requestId}:${seq}`,
+        attemptId: request.attempt?.attemptId ?? requestId,
+        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
+      };
       this.sql.exec("INSERT INTO ai_run_events VALUES(?,?,?,?,?)", this.tenantId, this.userKey(userId), requestId, seq, JSON.stringify(event));
       return event;
     });

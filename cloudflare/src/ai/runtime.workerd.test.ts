@@ -132,7 +132,9 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
 
   beforeAll(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-ai-workerd-"));
-    const bundled = await build({ entryPoints: ["cloudflare/src/index.ts"], bundle: true, format: "esm", write: false, platform: "browser", target: "es2022", external: ["cloudflare:*", "node:*"] });
+    // Resolve dependency worker exports, not DOM-only browser exports. The
+    // Markdown entity decoder otherwise reads document at Worker startup.
+    const bundled = await build({ entryPoints: ["cloudflare/src/index.ts"], bundle: true, format: "esm", write: false, platform: "browser", conditions: ["workerd"], target: "es2022", external: ["cloudflare:*", "node:*"] });
     code = bundled.outputFiles[0].text;
     mf = start(); await mf.ready;
     expect((await api<{ storage: string }>("/api/health")).storage).toBe("durable-object-sqlite");
@@ -194,6 +196,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     const request = requestBody();
     const response = await api<AiChatResponse>("/api/ai/chat", member, request);
     expect(response).toMatchObject({ content: sourceResponse, usage: { totalTokens: 72 }, quota: { usedTokens: 72, reservedTokens: 0 } });
+    expect(response.richContent).toEqual({ version: 1, blocks: [{ id: "markdown:0", kind: "markdown", start: 0, end: sourceResponse.length }] });
     expect((await api<AiChatResponse>("/api/ai/chat", member, request)).usage.totalTokens).toBe(72);
     expect(postCount).toBe(before + 1);
     await api(`/api/ai/requests/${request.requestId}`, other, undefined, "GET", 404);
@@ -236,9 +239,11 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     while (true) { const chunk = await reader.read(); if (chunk.done) break; received += decoder.decode(chunk.value); }
     expect(received).toContain("usage_updated");
     expect(received).toContain("run_finished");
-    const replay = await api<{ events: Array<{ seq: number; type: string; data: unknown }> }>(`/api/ai/requests/${body.requestId}/events?after=1`, member);
+    const replay = await api<{ events: Array<{ seq: number; type: string; data: unknown; schemaVersion?: number; eventId?: string; attemptId?: string }> }>(`/api/ai/requests/${body.requestId}/events?after=1`, member);
     expect(replay.events.map(event => event.type)).toEqual(["answer_delta", "usage_updated", "run_finished"]);
+    for (const event of replay.events) expect(event).toMatchObject({ schemaVersion: 1, eventId: `${body.requestId}:${event.seq}`, attemptId: body.requestId });
     expect(replay.events[1].data).toMatchObject({ status: "completed", providerReported: true, usage: { inputTokens: 24, outputTokens: 48, totalTokens: 72 } });
+    expect(replay.events[2].data).toMatchObject({ response: { content: "真实传输首段", richContent: { version: 1, blocks: [{ id: "markdown:0", kind: "markdown", start: 0, end: "真实传输首段".length }] } } });
     await api(`/api/ai/requests/${body.requestId}/events`, other, undefined, "GET", 403);
     await api(`/api/ai/requests/${body.requestId}/events?after=-1`, member, undefined, "GET", 400);
     expect((await api<AiRequestResult>(`/api/ai/requests/${body.requestId}`, member)).result?.content).toBe("真实传输首段");

@@ -9,7 +9,18 @@ export type AiRunEventPayload =
   | { type: "usage_updated"; data: { usage: AiUsage; status: "completed" | "failed" | "uncertain"; providerReported: true } }
   | { type: "run_finished"; data: { response: AiChatResponse } }
   | { type: "run_failed"; data: { error: { code: string; message: string } } };
-export type AiRunEvent = AiRunEventPayload & { requestId: string; runId: string; stepId: string; seq: number; timestamp: number };
+export type AiRunEvent = AiRunEventPayload & {
+  requestId: string;
+  runId: string;
+  stepId: string;
+  seq: number;
+  timestamp: number;
+  /** Optional additive envelope: old clients and journal entries retain the same event types. */
+  schemaVersion?: 1;
+  eventId?: string;
+  attemptId?: string;
+  conversationId?: string;
+};
 
 /** Media tasks have their own durable run and event cursor. These payloads
  * describe committed task-state transitions, not speculative model output. */

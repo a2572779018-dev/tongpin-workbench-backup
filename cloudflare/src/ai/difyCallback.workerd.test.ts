@@ -38,7 +38,7 @@ describe("Dify callback through the bundled Worker and SQLite Durable Object", (
   };
   beforeAll(async () => {
     directory = await mkdtemp(path.join(tmpdir(), "tongpin-dify-worker-"));
-    const bundled = await build({ entryPoints: ["cloudflare/src/index.ts"], bundle: true, format: "esm", write: false, platform: "browser", target: "es2022", external: ["cloudflare:*", "node:*"] });
+    const bundled = await build({ entryPoints: ["cloudflare/src/index.ts"], bundle: true, format: "esm", write: false, platform: "browser", conditions: ["workerd"], target: "es2022", external: ["cloudflare:*", "node:*"] });
     mf = new Miniflare({ ...convertV4MiniflareOptions({
       name: "tongpin-dify-worker-fixture", modules: true, script: bundled.outputFiles[0].text,
       compatibilityDate: "2026-07-28", compatibilityFlags: ["nodejs_compat"],

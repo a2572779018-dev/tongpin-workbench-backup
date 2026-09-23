@@ -40,6 +40,44 @@ function eventResponse(events: AiRunEvent[], fragmentSize = 9): Response {
 }
 
 describe("AI run stream decoder", () => {
+  it("accepts the server's request-id conversation fallback for an older request without conversationId", async () => {
+    const olderRequest: AiChatRequest = { ...request, conversationId: undefined };
+    const finished: AiChatResponse = { ...response, richContent: { version: 1, blocks: [{ id: "markdown:0", kind: "markdown", start: 0, end: response.content.length }] } };
+    const versioned = (seq: number, type: AiRunEvent["type"], data: AiRunEvent["data"]) => ({
+      ...event(seq, type, data), schemaVersion: 1 as const, eventId: `${request.requestId}:${seq}`,
+      attemptId: request.requestId, conversationId: request.requestId,
+    }) as AiRunEvent;
+    const api = async <T,>() => eventResponse([
+      versioned(1, "run_started", { startedAt: 1 }),
+      versioned(2, "run_finished", { response: finished }),
+    ]) as T;
+    await expect(readAiChatStream(api, olderRequest, { accountId: "member", signal: new AbortController().signal })).resolves.toEqual(finished);
+  });
+
+  it("accepts old events but rejects an invalid versioned rich-content span before displaying it", async () => {
+    const badResponse: AiChatResponse = { ...response, richContent: { version: 1, blocks: [{ id: "markdown:0", kind: "markdown", start: 0, end: 999 }] } };
+    const api = async <T,>() => eventResponse([
+      event(1, "run_started", { startedAt: 1 }),
+      { ...event(2, "run_finished", { response: badResponse }), schemaVersion: 1, eventId: `${request.requestId}:2`, attemptId: request.requestId, conversationId: request.conversationId },
+    ] as AiRunEvent[]) as T;
+    const seen = vi.fn();
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: seen }))
+      .rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a mismatched versioned event identity without triggering another POST", async () => {
+    let calls = 0;
+    const api = async <T,>(): Promise<T> => { calls++; return eventResponse([
+      { ...event(1, "answer_delta", { delta: "private" }), schemaVersion: 1, eventId: "another:1", attemptId: request.requestId, conversationId: request.conversationId },
+    ] as AiRunEvent[]) as T; };
+    const seen = vi.fn();
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: seen }))
+      .rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+    expect(seen).not.toHaveBeenCalled();
+    expect(calls).toBe(1);
+  });
+
   it("decodes fragmented ordered events, ignores exact sequence replay, and never posts twice", async () => {
     const events = [
       event(1, "run_started", { startedAt: 1 }),
