@@ -497,6 +497,7 @@ export class AiService {
         if (run.status === "completed") result.completed += 1;
         else if (run.status === "awaiting_input") result.awaitingInput += 1;
         else if (run.status === "awaiting_authorization") result.awaitingAuthorization += 1;
+        else if (run.status === "failed") result.failed += 1;
       } catch {
         // Never replay a paid submission because one tenant's step failed.
         result.failed += 1;
