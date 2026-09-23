@@ -70,7 +70,7 @@ describe("real AiService media orchestration", () => {
   it("freezes an explicit Send grant and automatically executes exactly one image call after planning", async () => {
     transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
     transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
-    const submission = { ...input(), requestText: "帮我生成一张图片", confirmedMediaExecution: { confirmed: true as const, maxPointsPerTool: 1000 } };
+    const submission = { ...input(), requestText: "帮我生成一张蓝色科技海报", confirmedMediaExecution: { confirmed: true as const, maxPointsPerTool: 1000 } };
     const run = await orchestrator.submit("member", submission);
     const frozen = orchestrator.runtime.snapshot("member", run.runId)!;
     expect(frozen.authorizationScope).toMatchObject({ capabilities: ["image"], sourceAssetIds: [], maxPointsPerTool: 1000 });
@@ -82,6 +82,22 @@ describe("real AiService media orchestration", () => {
     expect((await orchestrator.submit("member", { ...submission, confirmedMediaExecution: undefined })).runId).toBe(run.runId);
     await orchestrator.advance("member", run.runId);
     expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks for missing image content in-chat before any model or paid tool call", async () => {
+    const run = await orchestrator.submit("member", {
+      ...input(), requestText: "帮我生成一张图片", confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
+    });
+    const waiting = await orchestrator.advance("member", run.runId);
+    expect(waiting.status).toBe("awaiting_input");
+    expect(waiting.freeQuestion?.prompt).toContain("想生成什么内容");
+    expect(transport).not.toHaveBeenCalled();
+    orchestrator.answer("member", run.runId, waiting.freeQuestion!.questionId, "一只蓝色的猫，扁平插画");
+    transport.mockResolvedValueOnce(planResponse("image", "一只蓝色的猫，扁平插画"));
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    const finished = await orchestrator.advance("member", run.runId);
+    expect(finished.status).toBe("completed");
+    expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
   });
 
   it.each(["不要生成图片", "为什么生成图片失败", "如何生成图片？", "帮我写生成图片的提示词"])(
@@ -143,7 +159,7 @@ describe("real AiService media orchestration", () => {
     transport.mockResolvedValueOnce(planResponse("image", "一只蓝色的猫"));
     transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
     const run = await orchestrator.submit("member", {
-      ...input(), requestText: "帮我生成一张图片", confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
+      ...input(), requestText: "帮我生成一张动物图片", confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
     });
     const question = await orchestrator.advance("member", run.runId);
     expect(question.status).toBe("awaiting_input");
@@ -173,7 +189,7 @@ describe("real AiService media orchestration", () => {
       usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
     }));
     transport.mockResolvedValueOnce(planResponse("image", "一张蓝色的猫海报"));
-    const run = await orchestrator.submit("member", { ...input(), requestText: "帮我生成一张图片" });
+    const run = await orchestrator.submit("member", { ...input(), requestText: "帮我画一张宠物图片" });
     const question = await orchestrator.advance("member", run.runId);
     expect(question).toMatchObject({ status: "awaiting_input", freeQuestion: { prompt: "想画什么主题？" } });
     const answered = orchestrator.answer("member", run.runId, question.freeQuestion!.questionId, "一只蓝色的猫");
@@ -183,7 +199,7 @@ describe("real AiService media orchestration", () => {
     expect(transport).toHaveBeenCalledTimes(2);
     const first = JSON.parse(transport.mock.calls[0][1].body!);
     const second = JSON.parse(transport.mock.calls[1][1].body!);
-    expect(first.messages.at(-1).content).toContain("帮我生成一张图片");
+    expect(first.messages.at(-1).content).toContain("帮我画一张宠物图片");
     expect(second.messages.at(-1).content).toContain("一只蓝色的猫");
     expect(node.store.request("member", `plan-${run.stepId}`)).toBeTruthy();
     expect(node.store.request("member", `plan-${answered.stepId}`)).toBeTruthy();

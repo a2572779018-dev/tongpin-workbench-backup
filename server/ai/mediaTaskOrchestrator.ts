@@ -349,6 +349,14 @@ export class AiServiceMediaTaskOrchestrator {
         && JSON.stringify(source.fingerprints) !== JSON.stringify(snapshot.sourceFingerprints)) {
         rejected("AI_MEDIA_TASK_SOURCE_CHANGED", "参考素材内容已改变，请重新提交任务");
       }
+      // A bare request has no scene, subject or reference to plan. Ask one
+      // bounded question without spending a model call or executing a tool.
+      // The answer is persisted as a new attempt before planning resumes.
+      if (snapshot.intent === "image" && !snapshot.sourceAssetIds.length
+        && !snapshot.contextMessages?.length && !claimed.inputAnswers?.length
+        && /^(?:请)?(?:帮我|给我)?(?:生成|做|画)(?:一张|张)?(?:图片|图像|图)[。.!！]?$/.test(normalizedText(snapshot.requestText))) {
+        return this.runtime.awaitInput(userId, runId, "你想生成什么内容的图片？可以说说主体、风格或用途。", Math.min(snapshot.deadlineAt, this.now() + 5 * 60_000));
+      }
       // Every answered question creates a new persisted attempt. Reusing the
       // original request ID would replay its old clarification forever.
       const planRequestId = `plan-${claimed.stepId}`;
