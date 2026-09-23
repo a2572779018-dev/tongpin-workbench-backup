@@ -111,6 +111,7 @@ try {
     assert.ok((await page.locator("body").innerText()).includes("请先在视频附件中选择一个采样画面"));
     assert.ok(!(await evidence(page).innerText()).includes("video-reference:"));
     await frames.nth(1).click();
+    assert.equal(await page.locator(".tp-ai-toast").count(), 0, "selecting a frame must dismiss the stale selection warning");
     const selectedLabel = await frames.nth(1).getAttribute("aria-label");
     await page.setViewportSize({ width: 720, height: 1000 });
     await page.getByRole("button", { name: "收起侧边栏" }).click();

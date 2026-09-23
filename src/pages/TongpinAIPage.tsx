@@ -1998,7 +1998,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           attachments={attachments}
           onAddFiles={addFiles}
           onRemoveAttachment={index => setDraftAttachments(current => ({ ...current, [draftKey]: attachments.filter((_, itemIndex) => itemIndex !== index) }))}
-          onSelectVideoFrame={(attachmentIndex, frameIndex) => setDraftAttachments(current => ({ ...current, [draftKey]: (current[draftKey] ?? []).map((document, index) => index === attachmentIndex && document.media?.kind === "video" && Number.isInteger(frameIndex) && document.media.frames[frameIndex] ? { ...document, media: { ...document.media, selectedFrameIndex: frameIndex } } : document) }))}
+          onSelectVideoFrame={(attachmentIndex, frameIndex) => {
+            const selected = attachments[attachmentIndex];
+            if (selected?.media?.kind !== "video" || !Number.isInteger(frameIndex) || !selected.media.frames[frameIndex]) return;
+            setDraftAttachments(current => ({ ...current, [draftKey]: (current[draftKey] ?? []).map((document, index) => index === attachmentIndex && document.media?.kind === "video" && document.media.frames[frameIndex] ? { ...document, media: { ...document.media, selectedFrameIndex: frameIndex } } : document) }));
+            setAnnouncement(current => current.startsWith("请先在视频附件中选择一个采样画面") ? "" : current);
+          }}
           composerTool={composerTool}
           onComposerToolChange={setComposerTool}
           imageEnabled={aiStatus?.imageEnabled === true}
