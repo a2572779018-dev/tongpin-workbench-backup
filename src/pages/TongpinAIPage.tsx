@@ -33,6 +33,7 @@ import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "
 import { imageReferencesForGeneration } from "../features/tongpin-ai/imageReferenceAttachments";
 import { generatedImageEditReferenceIds } from "../features/tongpin-ai/generatedImageEditReference";
 import { generatedVideoReference, generatedVideoReferenceCandidates, videoReferenceUploadBody } from "../features/tongpin-ai/generatedVideoReference";
+import { generatedMediaForFollowup, readGeneratedMedia } from "../features/tongpin-ai/generatedMediaContext";
 import { readGeneratedImageSelection, type GeneratedImageSelection } from "../features/tongpin-ai/generatedImageSelection";
 import { persistedVideoChatRequest, type VideoChatRequest } from "../features/tongpin-ai/videoChat";
 import { naturalVideoRequest } from "../features/tongpin-ai/naturalVideoRequest";
@@ -1870,7 +1871,6 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       const current = () => mountedRef.current && gate.isCurrent(ticket, continuation ? taskContext : sendContextRef.current) && !pendingCancelledRef.current.has(conversationId);
       if (!continuation) { setCheckingQuota(true); setBudgetNotice(null); }
       try {
-        const { generatedMediaForFollowup, readGeneratedMedia } = await import("../features/tongpin-ai/generatedMediaContext");
         const media = origin.attachments.some(item => item.media) ? undefined : generatedMediaForFollowup(origin.conversation, workspaceRef.current.artifacts, content);
         if (media) {
           if (!aiStatus?.visionEnabled) throw new Error("当前模型未开启视觉理解，请管理员启用后继续讨论视频或图片。草稿已保留。");

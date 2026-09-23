@@ -1,3 +1,5 @@
+import { saveBlobWithFeedback } from "./downloadFeedback";
+
 /** Serializable slide content; all visible content becomes editable PowerPoint text. */
 export interface PresentationDocument {
   title: string;
@@ -94,7 +96,6 @@ export async function createPresentationBytes(value: unknown): Promise<Uint8Arra
 export async function downloadPresentation(value: unknown): Promise<void> {
   const document = validatePresentation(value);
   const bytes = await createPresentationBytes(document);
-  const { saveBlobWithFeedback } = await import("./downloadFeedback");
   const result = await saveBlobWithFeedback(new Blob([new Uint8Array(bytes)], { type: PRESENTATION_MIME }), presentationFileName(document.title));
   if (result.state === "error") throw new Error(result.message);
 }
