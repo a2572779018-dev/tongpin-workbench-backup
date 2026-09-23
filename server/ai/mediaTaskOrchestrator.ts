@@ -1,6 +1,7 @@
 import type { AiAttachment, AiChatResponse, AiMode } from "../../shared/ai";
 import type { AiMediaTaskEvent } from "../../shared/aiRunEvents";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
+import { isExplicitMediaCreationRequest, withoutLeadingMediaMention } from "../../shared/aiGenerationIntent";
 import type { AiVideoJob } from "../../shared/aiVideo";
 import { validateImageBase64 } from "./capabilities";
 import { readGeneratedAssetReference } from "./generatedAssetReference";
@@ -71,27 +72,9 @@ function safeErrorCode(error: unknown): string {
   return error instanceof AiError && /^[a-zA-Z0-9._:-]{1,120}$/.test(error.code) ? error.code : "AI_MEDIA_TASK_FAILED";
 }
 function normalizedText(value: string): string { return value.replace(/\s+/g, " ").trim(); }
-function explicitMediaAction(intent: "image" | "video", requestText: string): boolean {
-  const statement = normalizedText(requestText);
-  if (/^(?:为什么|为何|怎么|如何|是否|是不是|能否|可不可以|请问|你能不能)/.test(statement)
-    || /(?:失败|报错|错误|提示词|教程|方案|能不能|可以吗|行吗|[?？])/.test(statement)
-    || /(?:不要|别|不想|不需要|不用|无需|禁止|取消|停止|暂不|先不|先别)\s*(?:帮我|给我|为我)?\s*(?:生成|创建|制作|绘制|画|做)/.test(statement)) return false;
-  const noun = intent === "image" ? /(?:图片|图像|插画|海报|照片|画作)/ : /(?:视频|短片|动画|宣传片|影片)/;
-  // Permit a short factual preface ("这是 logo，帮我生成视频") and negative
-  // creative constraints ("生成视频，不要字幕"), but never a negated action.
-  const action = /(?:^|[,，。;；]\s*)(?:请\s*)?(?:帮我|给我|为我|直接|现在|马上|立刻)?\s*(?:生成|创建|制作|绘制|画|做)(.{0,50})/g;
-  for (const match of statement.matchAll(action)) if (noun.test(match[1])) return true;
-  // A reference-first request is still an explicit action, not a discussion:
-  // “用刚才同一个人物做视频”. Keep the prefix narrow; a question or negated
-  // action has already been rejected above, and no model text may mint consent.
-  const referenceFirst = statement.match(/^(?:用|把)(?:刚才|上面|上一张|这张|这个|同一张|同一个|相同的).{0,40}?(?:生成|制作|做)(.{0,50})/);
-  if (referenceFirst && noun.test(referenceFirst[1])) return true;
-  return false;
-}
-
 function submissionMayCarryGrant(input: SubmitMediaTask): boolean {
   if (!input.confirmedMediaExecution || input.confirmedMediaExecution.confirmed !== true) return false;
-  if (input.entrypoint === "natural") return explicitMediaAction(input.intent, input.requestText);
+  if (input.entrypoint === "natural") return isExplicitMediaCreationRequest(input.intent, input.requestText);
   return input.entrypoint === "menu" || input.entrypoint === "mention_image" && input.intent === "image"
     || input.entrypoint === "mention_video" && input.intent === "video";
 }
@@ -358,16 +341,17 @@ export class AiServiceMediaTaskOrchestrator {
       // A bare request has no scene, subject or reference to plan. Ask one
       // bounded question without spending a model call or executing a tool.
       // The answer is persisted as a new attempt before planning resumes.
+      const memberRequest = withoutLeadingMediaMention(snapshot.requestText, snapshot.intent);
       if (snapshot.intent === "image" && !snapshot.sourceAssetIds.length
         && !snapshot.contextMessages?.length && !claimed.inputAnswers?.length
-        && /^(?:请)?(?:帮我|给我)?(?:生成|做|画)(?:一张|张)?(?:图片|图像|图)[。.!！]?$/.test(normalizedText(snapshot.requestText))) {
+        && (!memberRequest || /^(?:请)?(?:帮我|给我)?(?:生成|做|画)(?:一张|张)?(?:图片|图像|图)[。.!！]?$/.test(normalizedText(memberRequest)))) {
         return this.runtime.awaitInput(userId, runId, "你想生成什么内容的图片？可以说说主体、风格或用途。", Math.min(snapshot.deadlineAt, this.now() + 5 * 60_000));
       }
       // Every answered question creates a new persisted attempt. Reusing the
       // original request ID would replay its old clarification forever.
       const planRequestId = `plan-${claimed.stepId}`;
       const followup = (claimed.inputAnswers ?? []).map((item, index) => `补充 ${index + 1}: ${item.answer}`).join("\n");
-      const planningText = `${snapshot.requestText}${followup ? `\n\n用户后续补充：\n${followup}` : ""}`;
+      const planningText = `${memberRequest}${followup ? `\n\n用户后续补充：\n${followup}` : ""}`;
       if (planningText.length > 12_000) rejected("AI_CONTEXT_TOO_LONG", "补充内容过长，请在新任务中简化描述", 400);
       const response: AiChatResponse = await this.service.chat(userId, {
         requestId: planRequestId, conversationId: snapshot.conversationId, mode: snapshot.tier,

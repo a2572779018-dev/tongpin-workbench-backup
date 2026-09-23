@@ -84,6 +84,30 @@ describe("real AiService media orchestration", () => {
     expect(transport).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["请设计一张活动海报", "帮我出一张图", "Create a video thumbnail"])(
+    "accepts a front-end-recognized natural image Send without a second authorization: %s", async requestText => {
+      transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+      transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+      const run = await orchestrator.submit("member", {
+        ...input(), requestText, confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
+      });
+      expect(orchestrator.runtime.snapshot("member", run.runId)?.authorizationScope).toMatchObject({ capabilities: ["image"] });
+      expect((await orchestrator.advance("member", run.runId)).status).toBe("completed");
+      expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
+    },
+  );
+
+  it("asks for the subject of a bare @image request without a model or paid call", async () => {
+    const run = await orchestrator.submit("member", {
+      ...input(), entrypoint: "mention_image", requestText: "@image 生成一张图片",
+      confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
+    });
+    const waiting = await orchestrator.advance("member", run.runId);
+    expect(waiting.status).toBe("awaiting_input");
+    expect(waiting.freeQuestion?.prompt).toContain("想生成什么内容");
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("asks for missing image content in-chat before any model or paid tool call", async () => {
     const run = await orchestrator.submit("member", {
       ...input(), requestText: "帮我生成一张图片", confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
@@ -114,7 +138,7 @@ describe("real AiService media orchestration", () => {
     },
   );
 
-  it.each(["生成视频，不要字幕或旁白", "这个是 logo，帮我生成一段视频", "用刚才同一个人物做视频"])(
+  it.each(["生成视频，不要字幕或旁白", "这个是 logo，帮我生成一段视频", "用刚才同一个人物做视频", "Please create a product video"])(
     "recognizes an affirmative video request with context or negative creative constraints: %s",
     async requestText => {
       await node.service.video.configure({ enabled: true, quotaPoints: 3000, apiKey: "fixture-video-key", defaultModel: "minimax_h3" });
