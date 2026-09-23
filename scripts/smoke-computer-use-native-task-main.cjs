@@ -89,6 +89,14 @@ app.whenReady().then(async () => {
       const key = await controller.executeApprovedAction(keyApproval.value.token);
       effects.push(key);
       navigation = { scroll, key, scrollMoved, before: value(before.value), after: value(afterScroll.value) };
+      if (process.env.TONGPIN_NATIVE_TEST_EXPECT_SCROLL_BLOCKED === "1") {
+        console.log("NATIVE_TASK_RESULT " + JSON.stringify({ status: "boundary_verified", navigation, navDiagnostics,
+          nativeActions, effects, nativeDriver: "@trycua/cua-driver@0.28.1",
+          planner: "deterministic-test-only", approval: "exact-isolated-fixture-only" }));
+        await controller.stopSession();
+        app.exit(scroll.ok === false && key.ok === true ? 0 : 1);
+        return;
+      }
     }
     const initial = await controller.getWindowState(target);
     assert.equal(initial.ok, true);

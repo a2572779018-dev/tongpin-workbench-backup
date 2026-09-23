@@ -56,13 +56,18 @@ function report(process, prefix) {
 try {
   const editor = child("editor");
   const ready = await report(editor, "EDITOR_READY ");
-  const controller = child("controller", { TONGPIN_NATIVE_TEST_TARGET_PID: String(ready.pid), TONGPIN_NATIVE_TEST_NAVIGATION: testNavigation ? "1" : "0" });
+  const controller = child("controller", { TONGPIN_NATIVE_TEST_TARGET_PID: String(ready.pid),
+    TONGPIN_NATIVE_TEST_NAVIGATION: testNavigation ? "1" : "0",
+    TONGPIN_NATIVE_TEST_EXPECT_SCROLL_BLOCKED: expectScrollBlocked ? "1" : "0" });
   const result = await report(controller, "NATIVE_TASK_RESULT ");
   console.log(JSON.stringify({ ...result, isolatedDirectory: directory }, null, 2));
-  assert.equal(result.status, "completed", "Native task did not complete; do not claim acceptance");
-  assert.equal(result.steps, 2);
-  assert.equal(result.verifiedLiteral, true);
-  assert.equal(result.nativeActions, testNavigation ? 4 : 2);
+  assert.equal(result.status, expectScrollBlocked ? "boundary_verified" : "completed",
+    "Native task did not reach the expected verified outcome");
+  if (!expectScrollBlocked) {
+    assert.equal(result.steps, 2);
+    assert.equal(result.verifiedLiteral, true);
+  }
+  assert.equal(result.nativeActions, expectScrollBlocked ? 2 : testNavigation ? 4 : 2);
   if (testNavigation) {
     assert.equal(result.navigation?.scroll?.ok, !expectScrollBlocked,
       "Isolated scroll outcome did not match the declared platform boundary");
