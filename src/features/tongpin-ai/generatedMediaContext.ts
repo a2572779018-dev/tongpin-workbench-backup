@@ -31,8 +31,10 @@ export function generatedMediaForFollowup(conversation: TongpinAIConversation | 
     if (message.role !== "assistant" || message.status === "error") continue;
     const artifact = artifacts.find(a => a.id === message.artifactId && a.conversationId === conversation.id);
     if (!artifact) continue;
-    if (typeof artifact.data?.videoJobId === "string" && kind !== "image") {
-      const id = artifact.data.videoJobId;
+    const videoId = typeof artifact.data?.videoJobId === "string" ? artifact.data.videoJobId
+      : typeof artifact.data?.mediaTaskServiceRequestId === "string" ? artifact.data.mediaTaskServiceRequestId : undefined;
+    if (videoId && kind !== "image") {
+      const id = videoId;
       if (conversation.messages.some(m => m.attachments?.some(a => a.media?.kind === "video" && a.name.includes(id)))) return undefined;
       return artifact;
     }
@@ -56,8 +58,10 @@ export async function readGeneratedMedia(artifact: TongpinAIArtifact, api: Api, 
     for (const [index, frame] of result.media.frames.entries()) attachments.push({ name: `生成成果-${artifact.id.slice(0, 60)}-${index + 1}`, mediaType: "image/jpeg", dataUrl: frame.dataUrl,
       text: result.media.kind === "video" ? `这是当前对话生成的视频采样画面 ${index + 1}/${result.media.frames.length}，时间 ${frame.timeSeconds?.toFixed(2)} 秒，实际总长 ${result.media.durationSeconds?.toFixed(2)} 秒。结合对话讨论这些内容，不含音频，不能声称看过未采样部分或听过声音。` : "这是当前对话中生成的图片，请依据实际画面回答追问。" });
   };
-  if (typeof artifact.data?.videoJobId === "string") {
-    const jobId = artifact.data.videoJobId;
+  const videoId = typeof artifact.data?.videoJobId === "string" ? artifact.data.videoJobId
+    : typeof artifact.data?.mediaTaskServiceRequestId === "string" ? artifact.data.mediaTaskServiceRequestId : undefined;
+  if (videoId) {
+    const jobId = videoId;
     const route = `/api/ai/videos/${encodeURIComponent(jobId)}`;
     const job = await videoBlobCache.loadJob(cacheScope, jobId, async sharedSignal => {
       const result = await api<{ job: AiVideoJob }>(route, { ...init, signal: sharedSignal }, 30000);

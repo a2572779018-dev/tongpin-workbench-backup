@@ -1,0 +1,101 @@
+/** Client-visible task shape. Keep this independent of server internals so a
+ * saved conversation can recover its task with GET alone after a restart. */
+export type MediaTaskStatus =
+  | "queued" | "planning" | "awaiting_input" | "awaiting_authorization"
+  | "running" | "partial" | "completed" | "failed" | "cancelled" | "unknown";
+
+export type MediaTaskIntent = "image" | "video";
+
+export interface MediaTaskRun {
+  requestId: string;
+  runId: string;
+  conversationId: string;
+  userId: string;
+  version: number;
+  status: MediaTaskStatus;
+  createdAt: number;
+  updatedAt: number;
+  deadlineAt: number;
+  authorization?: { grantId: string };
+  freeQuestion?: { questionId: string; prompt: string; deadlineAt: number; answer?: string };
+  tool?: {
+    capability: MediaTaskIntent;
+    estimatedPoints: number;
+    serviceRequestId?: string;
+    artifactIds?: string[];
+    partialArtifactIds?: string[];
+    errorCode?: string;
+  };
+  errorCode?: string;
+  cancelRequested?: boolean;
+}
+
+const statuses = new Set<MediaTaskStatus>([
+  "queued", "planning", "awaiting_input", "awaiting_authorization",
+  "running", "partial", "completed", "failed", "cancelled", "unknown",
+]);
+
+export const mediaTaskReadPath = (requestId: string): string =>
+  `/api/ai/media-tasks/by-request/${encodeURIComponent(requestId)}`;
+
+export const mediaTaskAnswerPath = (runId: string): string =>
+  `/api/ai/media-tasks/${encodeURIComponent(runId)}/answer`;
+
+export const mediaTaskAuthorizePath = (runId: string): string =>
+  `/api/ai/media-tasks/${encodeURIComponent(runId)}/authorize`;
+
+export const mediaTaskCancelPath = (runId: string): string =>
+  `/api/ai/media-tasks/${encodeURIComponent(runId)}`;
+
+export function parseMediaTaskResponse(
+  response: unknown,
+  expected: { requestId: string; runId?: string; conversationId?: string; accountId: string; intent: MediaTaskIntent },
+): MediaTaskRun {
+  const task = response && typeof response === "object" && "task" in response ? response.task : null;
+  if (!task || typeof task !== "object") throw new Error("任务响应不完整，请重新查询原任务");
+  const value = task as Partial<MediaTaskRun>;
+  if (value.requestId !== expected.requestId || expected.runId && value.runId !== expected.runId || expected.conversationId && value.conversationId !== expected.conversationId ||
+    value.userId !== expected.accountId || typeof value.runId !== "string" || !value.runId ||
+    typeof value.version !== "number" || !Number.isSafeInteger(value.version) || value.version < 1 ||
+    !statuses.has(value.status as MediaTaskStatus) ||
+    value.tool?.capability && value.tool.capability !== expected.intent) {
+    throw new Error("任务响应与当前对话或账号不匹配，请重新打开工作台");
+  }
+  return value as MediaTaskRun;
+}
+
+export function mediaTaskIsSettled(status: MediaTaskStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled" || status === "unknown";
+}
+
+export function mediaTaskNeedsPolling(status: MediaTaskStatus): boolean {
+  return !mediaTaskIsSettled(status);
+}
+
+export function mediaTaskStatusText(status: MediaTaskStatus, intent: MediaTaskIntent): string {
+  const kind = intent === "video" ? "视频" : "图片";
+  switch (status) {
+    case "queued": return "请求已保存，等待规划";
+    case "planning": return `正在规划${kind}任务`;
+    case "awaiting_input": return "需要补充信息后才能继续";
+    case "awaiting_authorization": return "方案已就绪，等待确认生成额度";
+    case "running": return `正在生成${kind}`;
+    case "partial": return "已取得部分结果，仍在核对任务";
+    case "completed": return `${kind}已生成`;
+    case "failed": return `${kind}未生成`;
+    case "cancelled": return "任务已取消";
+    case "unknown": return "生成结果待核对，请勿重复提交";
+  }
+}
+
+export function mediaTaskImageIds(task: MediaTaskRun): string[] {
+  if (task.tool?.capability !== "image" || !["partial", "completed"].includes(task.status)) return [];
+  const ids = task.status === "completed" ? task.tool.artifactIds : task.tool.partialArtifactIds;
+  return [...new Set((ids ?? []).filter(id => typeof id === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(id)))];
+}
+
+export function mediaTaskAuthorizationAmount(task: MediaTaskRun): number | null {
+  const amount = task.tool?.estimatedPoints;
+  return task.status === "awaiting_authorization" && !task.authorization && typeof amount === "number" &&
+    Number.isSafeInteger(amount) && amount > 0 && amount <= 10_000_000 ? amount : null;
+}

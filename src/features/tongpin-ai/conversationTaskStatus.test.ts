@@ -36,4 +36,11 @@ describe("durable conversation result status", () => {
     saveSeenResults("account", { a: "reply:video-ready", key: "sk-provider-key", text: "用户隐私内容", nested: { apiKey: "secret" } } as unknown as Record<string, string>, { setItem: (_, value) => { stored = value; } });
     expect(JSON.parse(stored)).toEqual({ a: "reply:video-ready" });
   });
+  it("tracks a new persistent media task without treating its queued assistant message as completed", () => {
+    const media = { ...video, data: { mediaTaskRequestId: "request-media", mediaTaskStatus: "queued" } };
+    expect(conversationTaskStatus(conversation, [media])?.phase).toBe("queued");
+    expect(conversationTaskStatus(conversation, [{ ...media, data: { ...media.data, mediaTaskStatus: "awaiting_input" } }])?.phase).toBe("awaiting_input");
+    expect(conversationTaskStatus(conversation, [{ ...media, data: { ...media.data, mediaTaskStatus: "cancelled" } }])?.phase).toBe("cancelled");
+    expect(conversationTaskStatus(conversation, [{ ...media, data: { ...media.data, mediaTaskStatus: "completed", mediaTaskResultIds: ["asset-id"] } }])?.resultToken).toBe("reply:media-ready");
+  });
 });

@@ -17,7 +17,7 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   initialReferenceImages?: VideoChatRequest["referenceImages"];
   onPlan(request: VideoChatRequest): Promise<AiToolPlan | null>;
   onSubmit(request: VideoChatRequest): Promise<boolean>;
-  onSubmitTask?: (request: VideoChatRequest) => Promise<boolean>;
+  onSubmitTask?: (request: VideoChatRequest, maxPointsPerTool: number) => Promise<boolean>;
   onUseHistory?: (jobId: string) => Promise<boolean>;
 }>(function AiVideoComposer({ prompt, tier, onClose, onBusy, onPlan, onSubmit, onSubmitTask, onUseHistory, initialRequest, initialReferenceImages }, ref) {
   const { api, session } = useAuth();
@@ -81,7 +81,7 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     setWorking(true, "正在整理并提交视频任务…"); setError("");
     try {
       if (onSubmitTask) {
-        const accepted = onSubmitTask({ ...base, originalPrompt: initialRequest?.originalPrompt ?? prompt.trim() });
+        const accepted = onSubmitTask({ ...base, originalPrompt: initialRequest?.originalPrompt ?? prompt.trim() }, data.settings.quotaPoints);
         setSubmitted(true);
         if (await accepted) { if (live.current) { setImages([]); onClose(); } }
         else if (live.current) setSubmitted(false);

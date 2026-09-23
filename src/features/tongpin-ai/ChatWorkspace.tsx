@@ -49,6 +49,7 @@ import { AttachmentChips } from "./AttachmentChips";
 import { containsFileDrag, uniqueIntakeFiles } from "./attachmentIntake";
 import { ChatMessageRow } from "./ChatMessageRow";
 import { AiVideoComposer, type VideoComposerHandle } from "./AiVideoComposer";
+import type { MediaTaskRun } from "./mediaTaskClient";
 import { ComputerUsePanel } from "./ComputerUsePanel";
 import type { ComputerUseModelPlan } from "./computerUseFlow";
 import type { ComputerUseWindowState } from "../../../shared/computerUse";
@@ -119,11 +120,12 @@ interface ChatWorkspaceProps {
   onToggleSidebar?: () => void;
   onStop?: () => void;
   onSubmit: (approvedPlan?: AiToolPlan & { originalPrompt: string }) => void;
-  onSubmitTool?: (kind: "image" | "presentation", prompt: string) => void;
+  onSubmitTool?: (kind: "image" | "video" | "presentation", prompt: string, entrypoint: "natural" | "mention_image" | "mention_video" | "menu") => void;
   onPlanTool?: (kind: "image" | "video" | "presentation", prompt: string, videoRequest?: VideoChatRequest) => Promise<AiToolPlan | null>;
   onSubmitVideo?: (request: VideoChatRequest) => Promise<boolean>;
-  onSubmitVideoTask?: (request: VideoChatRequest) => Promise<boolean>;
+  onSubmitVideoTask?: (request: VideoChatRequest, maxPointsPerTool: number) => Promise<boolean>;
   onUseVideoHistory?: (jobId: string) => Promise<boolean>;
+  onMediaTask?: (conversationId: string, requestId: string, task: MediaTaskRun) => void;
   videoDispatchRequest?: { id: string; prompt: string; request?: VideoChatRequest };
   computerAvailable?: boolean;
   computerRequest?: { id: string; originalPrompt: string };
@@ -193,6 +195,7 @@ export function ChatWorkspace({
   onSubmitVideo,
   onSubmitVideoTask,
   onUseVideoHistory,
+  onMediaTask,
   videoDispatchRequest,
   computerAvailable = false,
   computerRequest,
@@ -527,7 +530,7 @@ export function ChatWorkspace({
 
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    const { mentionedTools } = resolveToolIntent(draft);
+    const { mentionedTools, requestedTool } = resolveToolIntent(draft);
     if (mentionedTools.length > 1) {
       setFileError("一次只能选择一个 @ 工具，请移除多余工具后重试。");
       return;
@@ -555,10 +558,12 @@ export function ChatWorkspace({
     if (videoOpen) {
       if (!responding && !videoBusy) videoComposerRef.current?.submit(); return;
     }
-    if (onSubmitVideo && !responding && mentionedTools[0] === "video") {
-      openVideoComposer(); return;
+    if (onSubmitTool && requestedTool === "video" && !videoOpen) {
+      if (!draft.trim() || responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked) return;
+      setMenu(null); followResponseRef.current = true;
+      onSubmitTool("video", draft.trim(), mentionedTools[0] === "video" ? "mention_video" : "natural"); return;
     }
-    if ((mentionedTools[0] === "image" && composerTool !== "image") || (mentionedTools[0] === "ppt" && composerTool !== "presentation")) {
+    if ((requestedTool === "image" && composerTool !== "image") || (mentionedTools[0] === "ppt" && composerTool !== "presentation")) {
       if (responding || checkingQuota || readingFiles || fileReadingRef.current || quotaInsufficient || !serviceConnected || connectionError || connectionLoading || availabilityBlocked) return;
       if (mentionedTools[0] === "image" && !imageEnabled) {
         setFileError("图片生成尚未启用，请联系管理员配置。");
@@ -568,8 +573,8 @@ export function ChatWorkspace({
         setFileError("当前档位的图片生成只接受已启用的图片参考附件，请先移除其他附件。");
         return;
       }
-      const pendingPlanKind = mentionedTools[0] === "image" ? "image" : "presentation";
-      if (onSubmitTool) { setMenu(null); followResponseRef.current = true; onSubmitTool(pendingPlanKind, draft.trim()); return; }
+      const pendingPlanKind = requestedTool === "image" ? "image" : "presentation";
+      if (onSubmitTool) { setMenu(null); followResponseRef.current = true; onSubmitTool(pendingPlanKind, draft.trim(), mentionedTools[0] === "image" ? "mention_image" : requestedTool === "image" ? "natural" : "menu"); return; }
       const targetComposerTool = pendingPlanKind === "image" ? "image" : "presentation";
       const originalPrompt = draft.trim();
       setQueuedToolPlan({ kind: pendingPlanKind, originalPrompt, contextKey: toolPlanContextKeyFor(targetComposerTool) });
@@ -587,7 +592,7 @@ export function ChatWorkspace({
         return;
       }
       const originalPrompt = draft.trim();
-      if (onSubmitTool) { setMenu(null); followResponseRef.current = true; onSubmitTool(pendingPlanKind, originalPrompt); return; }
+      if (onSubmitTool) { setMenu(null); followResponseRef.current = true; onSubmitTool(pendingPlanKind, originalPrompt, "menu"); return; }
       beginToolPlan(pendingPlanKind, originalPrompt, toolPlanContextKey);
       return;
     }
@@ -729,6 +734,7 @@ export function ChatWorkspace({
                 onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
                 onTraceChange={onTraceChange}
                 onVideoSettled={isVideoArtifact ? videoSettled : undefined}
+                onMediaTask={artifact?.data?.mediaTaskRequestId && onMediaTask ? task => onMediaTask(artifact.conversationId, String(artifact.data!.mediaTaskRequestId), task) : undefined}
                 videoEditDisabled={isVideoArtifact ? responding || videoBusy || videoOpen || Boolean(draft.trim()) || Boolean(attachments.length) : undefined}
                 onEditVideo={isVideoArtifact && onSubmitVideo ? editVideo : undefined}
               />;

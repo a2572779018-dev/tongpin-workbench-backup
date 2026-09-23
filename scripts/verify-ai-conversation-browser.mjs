@@ -60,8 +60,8 @@ try {
     await page.waitForFunction(() => document.querySelector('button[title="C 后台视频"] [aria-label="有未读完成结果"]'), null, { timeout: 20000 });
     assert.equal(await page.locator("textarea").inputValue(), "B 后续草稿保持原样");
     const events = await evidence(page).innerText();
-    assert.equal((events.match(/image:a:/g) ?? []).length, 1);
-    assert.ok(events.includes("A immutable project instructions"));
+    assert.equal((events.match(/media-task-post:image:a:refs=0/g) ?? []).length, 1);
+    assert.ok(events.includes("project-context:A immutable project instructions"));
     assert.ok(events.includes("attachments=B.txt"));
     await page.screenshot({ path: "/tmp/tongpin-conversation-concurrent.png" });
     await page.waitForTimeout(1600); // allow the workspace debounce to save B's new draft
@@ -119,17 +119,15 @@ try {
     await page.screenshot({ path: "/tmp/tongpin-video-frame-selection.png" });
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.getByRole("button", { name: "发送消息", exact: true }).click();
-    await page.getByLabel("模型", { exact: true }).waitFor({ timeout: 7000 }).catch(async () => {
-      throw Error(`Video composer did not open: ${(await page.locator("body").innerText()).slice(-1000)}\nEvents: ${(await evidence(page).innerText()).slice(-600)}\nPage errors: ${errors.join(" | ")}`);
-    });
-    await page.getByRole("button", { name: "生成视频", exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("video-post:references=1"));
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-post:video:a:refs=1"), null, { timeout: 15000 });
     const events = await evidence(page).innerText();
     assert.equal((events.match(/video-reference:/g) ?? []).length, 1);
+    assert.equal((events.match(/media-task-post:video:a:refs=1/g) ?? []).length, 1);
     assert.ok(events.includes('"conversationId":"a"'));
     assert.ok(events.includes('"name":"video-chat-fixture.mp4"'));
+    await page.locator('.tp-ai-media-task-reply video').waitFor({ timeout: 15000 });
     assert.deepEqual(errors, []);
-    results.videoFrame = { decodedRealLocalVideo: true, fileDroppedOnConversation: true, noDefaultSelection: true, selectedLabel, durableSelectedSourceBeforeUpload: true, referenceUploads: 1, videoSubmissions: 1, narrowViewportChecked: true };
+    results.videoFrame = { decodedRealLocalVideo: true, fileDroppedOnConversation: true, noDefaultSelection: true, selectedLabel, durableSelectedSourceBeforeUpload: true, referenceUploads: 1, mediaTaskSubmissions: 1, completedVideoPlayable: true, narrowViewportChecked: true };
     await context.close();
   }
   {
@@ -152,13 +150,75 @@ try {
     await page.getByRole("button", { name: "移除附件 icon.png" }).waitFor();
     await page.locator("textarea").fill("把这张参考图改成暖色背景");
     await page.getByRole("button", { name: "生成图片", exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("image:a:") && document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("image-plan:refs=1"));
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-post:image:a:refs=1") && document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("image-source-validated:1"), null, { timeout: 15000 });
     const events = await evidence(page).innerText();
-    assert.ok(events.includes("image:a:A immutable project instructions:"));
-    assert.ok(events.includes("image-plan:refs=1"));
-    assert.ok(events.includes(":refs=1"));
+    assert.ok(events.includes("project-context:A immutable project instructions"));
+    assert.equal((events.match(/media-task-post:image:a:refs=1/g) ?? []).length, 1);
+    await page.locator(".tp-ai-media-task-reply .tp-ai-generated-image img").waitFor({ timeout: 15000 });
+    await page.waitForTimeout(1600); // allow the completed asset association to persist
+    await page.getByRole("button", { name: "取消生成图片" }).click();
+    await page.locator("textarea").fill("@video 沿用这张图片里的角色做短视频");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-post:video:a:refs=1") && document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("generated-asset:a:"), null, { timeout: 15000 });
+    const boundEvents = await evidence(page).innerText();
+    assert.equal((boundEvents.match(/generated-asset:a:/g) ?? []).length, 1);
+    assert.equal((boundEvents.match(/media-task-post:video:a:refs=1/g) ?? []).length, 1);
+    await page.screenshot({ path: "/tmp/tongpin-generated-image-video-binding.png" });
     assert.deepEqual(errors, []);
-    results.imageEdit = { ordinaryVisionGated: true, unconfiguredTierReferenceGated: true, configuredTierReferenceEnabled: true, planningAndGenerationSameReference: true };
+    results.imageEdit = { ordinaryVisionGated: true, unconfiguredTierReferenceGated: true, configuredTierReferenceEnabled: true, exactPersistedImageSource: true, generatedImageToVideoBoundToSameConversation: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&failMediaSave");
+    const original = await page.locator("textarea").inputValue();
+    assert.ok(original.startsWith("@image "));
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("workspace-media-save-rejected"));
+    await page.waitForFunction(value => (document.querySelector("textarea")?.value ?? "") === value, original);
+    assert.equal((await evidence(page).innerText()).includes("media-task-post:"), false);
+    await page.reload();
+    await page.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+    assert.equal(await page.locator("textarea").inputValue(), original);
+    assert.equal((await evidence(page).innerText()).includes("media-task-post:"), false);
+    assert.deepEqual(errors, []);
+    results.saveFailure = { paidPostPrevented: true, originalDraftRecoveredAfterReload: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&dispatch&fast");
+    await page.locator("textarea").fill("给猫咪来幅画");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-post:image:a:refs=0"), null, { timeout: 15000 });
+    await page.locator(".tp-ai-media-task-reply strong").getByText("方案已就绪，等待确认生成额度").waitFor({ timeout: 15000 });
+    const events = await evidence(page).innerText();
+    assert.ok(events.includes("media-task-grant:image:no"));
+    assert.equal((events.match(/media-task-post:image:a:refs=0/g) ?? []).length, 1);
+    assert.equal(await page.locator(".tp-ai-message.is-user").count(), 1);
+    await page.getByRole("button", { name: "确认额度并生成" }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-completed:image:a"), null, { timeout: 15000 });
+    const authorizedEvents = await evidence(page).innerText();
+    assert.equal((authorizedEvents.match(/media-task-authorize:image:a/g) ?? []).length, 1);
+    assert.equal((authorizedEvents.match(/media-task-post:image:a:refs=0/g) ?? []).length, 1);
+    assert.deepEqual(errors, []);
+    results.dispatchImage = { persistedOriginalTurn: true, mediaTaskPostOnce: true, noAutomaticPaidGrant: true, authorizationInline: true, authorizationResumesSameTask: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&dispatch&fast");
+    await openActions(page);
+    await page.getByRole("menuitem", { name: "上传图片" }).click();
+    await page.locator('input[aria-label="选择图片"]').setInputFiles(fileURLToPath(new URL("../build/icon.png", import.meta.url)));
+    await page.getByRole("button", { name: "移除附件 icon.png" }).waitFor();
+    await page.locator("textarea").fill("让这个图动起来");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-post:video:a:refs=1"), null, { timeout: 15000 });
+    await page.locator(".tp-ai-media-task-reply strong").getByText("方案已就绪，等待确认生成额度").waitFor({ timeout: 15000 });
+    const events = await evidence(page).innerText();
+    assert.ok(events.includes("media-task-grant:video:no"));
+    assert.equal((events.match(/media-task-post:video:a:refs=1/g) ?? []).length, 1);
+    assert.equal(await page.locator(".tp-ai-message.is-user").count(), 1);
+    assert.deepEqual(errors, []);
+    results.dispatchVideo = { persistedOriginalTurn: true, referenceBoundToSavedTurn: true, mediaTaskPostOnce: true, noAutomaticPaidGrant: true, authorizationInline: true };
     await context.close();
   }
   console.log(JSON.stringify({ kind: "real-components-synthetic-transport", results }, null, 2));

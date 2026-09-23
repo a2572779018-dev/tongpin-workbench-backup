@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   CircleHelp,
   CircleAlert,
+  CircleX,
   MessageSquarePlus,
   MoreHorizontal,
   PanelLeftClose,
@@ -292,6 +293,7 @@ export function TongpinAISidebar({
             : conversationStatuses[conversation.id]?.phase === "queued" ? <Clock3 size={15} aria-label="任务排队中" />
               : ["awaiting_input", "unknown"].includes(conversationStatuses[conversation.id]?.phase ?? "") ? <CircleHelp size={15} aria-label={conversationStatuses[conversation.id]?.phase === "unknown" ? "任务结果待核对" : "等待你的回复"} />
                 : conversationStatuses[conversation.id]?.phase === "failed" ? <CircleAlert size={15} className="tp-ai-task-failed" aria-label="任务失败" />
+                  : conversationStatuses[conversation.id]?.phase === "cancelled" ? <CircleX size={15} aria-label="任务已取消" />
                   : <MessageSquare size={15} aria-hidden="true" />}
           <span>{conversation.title}</span>
           {conversationStatuses[conversation.id]?.unread ? <i className="tp-ai-task-unread" aria-label="有未读完成结果" /> : null}

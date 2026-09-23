@@ -1,13 +1,22 @@
 import type { TongpinAIArtifact, TongpinAIConversation, TongpinAIMessage } from "./types";
 
-export type ConversationTaskPhase = "queued" | "running" | "awaiting_input" | "failed" | "unknown" | "completed";
+export type ConversationTaskPhase = "queued" | "running" | "awaiting_input" | "failed" | "cancelled" | "unknown" | "completed";
 export interface ConversationTaskStatus { phase: ConversationTaskPhase; messageId: string; resultToken?: string; unread?: boolean }
 
 export function messageTaskStatus(message: TongpinAIMessage, artifact?: TongpinAIArtifact): ConversationTaskStatus | undefined {
   if (message.role !== "assistant") return undefined;
   const base = { messageId: message.id };
-  if (message.taskPhase === "unknown") return { ...base, phase: "unknown" };
   if (message.status === "error" || artifact?.data?.videoSubmitError) return { ...base, phase: "failed" };
+  if (typeof artifact?.data?.mediaTaskRequestId === "string") {
+    const status = artifact.data.mediaTaskStatus;
+    if (artifact.data.mediaTaskSubmitError || status === "failed") return { ...base, phase: "failed" };
+    if (status === "cancelled") return { ...base, phase: "cancelled" };
+    if (status === "unknown") return { ...base, phase: "unknown" };
+    if (status === "awaiting_input" || status === "awaiting_authorization") return { ...base, phase: "awaiting_input" };
+    if (status === "completed") return { ...base, phase: "completed", resultToken: `${message.id}:media-ready` };
+    return { ...base, phase: status === "queued" ? "queued" : "running" };
+  }
+  if (message.taskPhase === "unknown") return { ...base, phase: "unknown" };
   if (message.taskPhase === "awaiting_input" || message.taskPhase === "awaiting_authorization" || message.taskPhase === "partial") return { ...base, phase: "awaiting_input" };
   if (message.taskPhase === "queued") return { ...base, phase: "queued" };
   const video = typeof artifact?.data?.videoJobId === "string";

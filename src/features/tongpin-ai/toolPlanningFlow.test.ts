@@ -15,7 +15,7 @@ function section(source: string, start: string, end: string): string {
 
 describe("conversational tool planning boundary", () => {
   it("uses only chat preflight and chat inference for image, video and PPT planning", () => {
-    const planning = section(page, 'async function planTool(', 'async function sendVideo(');
+    const planning = section(page, 'async function planTool(', 'function recordMediaTask(');
     expect(planning).toContain('kind === "presentation" ? "presentation_plan" : "image_plan"');
     expect(planning).toContain('api<AiChatPreflight>("/api/ai/preflight"');
     expect(planning).toContain('api<AiChatResponse>("/api/ai/chat"');
@@ -48,42 +48,48 @@ describe("conversational tool planning boundary", () => {
     expect(page).toContain('id: `video-draft:${draftKey}`');
   });
 
-  it("uses one image or PPT send to plan then execute, while null plans remain clarification-only", () => {
+  it("routes direct image/video creation to one durable task and keeps legacy PPT planning", () => {
     const begin = section(workspace, "const beginToolPlan", "useEffect(() => {");
     expect(begin).toContain("onPlanTool(kind, originalPrompt).then(plan =>");
     expect(begin).toContain("if (!plan) return;");
     expect(begin).toContain("onSubmit(confirmed)");
     expect(begin.indexOf("if (!plan) return;")).toBeLessThan(begin.indexOf("onSubmit(confirmed)"));
     const submit = section(workspace, "function submitMessage(", "async function addFiles(");
-    const explicitRoute = section(submit, 'if ((mentionedTools[0] === "image"', 'if ((!draft.trim()');
-    expect(explicitRoute).toContain("setQueuedToolPlan({ kind: pendingPlanKind, originalPrompt, contextKey: toolPlanContextKeyFor(targetComposerTool) })");
-    expect(explicitRoute).toContain("onComposerToolChange?.(targetComposerTool)");
-    expect(explicitRoute).toContain("return;");
-    expect(explicitRoute).toContain("onSubmitTool(pendingPlanKind, draft.trim())");
+    const explicitRoute = section(submit, 'if (onSubmitTool && requestedTool === "video"', 'if ((!draft.trim()');
+    expect(explicitRoute).toContain('onSubmitTool("video", draft.trim()');
+    expect(explicitRoute).toContain('onSubmitTool(pendingPlanKind, draft.trim()');
     expect(explicitRoute).not.toContain("onSubmit(");
-    expect(submit).not.toContain("requestedTool");
+    expect(submit).toContain("requestedTool");
     const queuedPlanning = section(workspace, "if (!queuedToolPlan) return;", "if (quickAuto");
     expect(queuedPlanning).toContain("if (composerTool !== targetTool) return;");
     expect(queuedPlanning).toContain("beginToolPlan(queuedToolPlan.kind, queuedToolPlan.originalPrompt, queuedToolPlan.contextKey)");
     const planBranch = section(submit, "if (pendingPlanKind)", "    onSubmit();");
     expect(planBranch).toContain("const originalPrompt = draft.trim()");
-    expect(planBranch).toContain("beginToolPlan(pendingPlanKind, originalPrompt, toolPlanContextKey)");
+    expect(planBranch).toContain('onSubmitTool(pendingPlanKind, originalPrompt, "menu")');
     expect(planBranch).toContain("return;");
     expect(planBranch).not.toContain("onSubmit(");
     expect(submit).toContain("onSubmit()");
     expect(workspace).not.toContain('className="tp-ai-tool-plan"');
     expect(workspace).not.toContain("让同频 AI 整理图片任务");
     expect(workspace).not.toContain("确认生成图片");
+    const media = section(page, "async function submitMediaTask(", "async function sendVideo(");
+    expect(media.indexOf("saveNow(next)")).toBeLessThan(media.indexOf('"/api/ai/media-tasks"'));
+    expect(media.indexOf("saveNow(next)")).toBeLessThan(media.indexOf('"/api/ai/video-references"'));
+    expect(media).toContain('sourceAssetIds = origin.attachments.length ? origin.attachments.map(item => item.id) : priorImageIds');
+    expect(media).toContain('continuation ? { ...currentState, conversations: latest.conversations.map');
+    expect(media).toContain('let maxPointsPerTool = continuation ? undefined');
+    expect(media).toContain("confirmedMediaExecution: { confirmed: true, maxPointsPerTool }");
+    expect(media).toContain('`/api/ai/media-tasks/by-request/${encodeURIComponent(requestId)}`');
+    expect(media).not.toContain('"/api/ai/images"');
+    expect(media).not.toContain('"/api/ai/videos"');
     const imageSend = section(page, "async function sendMessage(", "async function retryReply");
-    expect(imageSend).toContain('generationTool === "image" && (!approvedPlan || approvedPlan.kind !== "image")');
-    expect(imageSend).toContain("prompt: approvedPlan!.prompt");
-    expect(imageSend).toContain("planRequestId: approvedPlan!.planRequestId");
     expect(imageSend).toContain('generationTool === "presentation" && (!approvedPlan || approvedPlan.kind !== "presentation"');
     expect(imageSend).toContain("content: approvedPlan.prompt");
     expect(imageSend).toContain("toolPlanRequestId: approvedPlan!.planRequestId");
-    expect(imageSend).toContain('generationTool === "text" ? "dispatch"');
     const dispatch = section(page, 'if (!("images" in response) && response.dispatch)', "acceptGeneration(conversationId, messageId, response");
     expect(dispatch).toContain('decision.kind === "text" || decision.clarification');
+    expect(dispatch).toContain('await submitMediaTask(decision.kind, originalPrompt, undefined, "natural", undefined, continuation)');
+    expect(dispatch).toContain('if (decision.kind === "presentation")');
     expect(dispatch).toContain("await planTool(decision.kind, decision.prompt, undefined, continuation)");
     expect(dispatch).toContain("await sendMessage({ ...plan, originalPrompt }, continuation)");
   });
