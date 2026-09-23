@@ -1,7 +1,7 @@
 import { AI_BUSINESS_TIER_LABELS, AI_BUSINESS_TIERS, type AiChatBudget, type AiChatPreflight, type AiChatPreflightReason, type AiChatRequest, type AiChatResponse, type AiHarnessCapability, type AiHarnessConfig, type AiHarnessTrace, type AiImageAsset, type AiImageRequest, type AiImageResponse, type AiMember, type AiObservabilityDashboard, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult, type AiQuota, type AiRequestResult, type AiStatus, type AiUsage } from "../../shared/ai";
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import { AiStore, type StoredProvider, type StoredRequest } from "./storage";
-import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, providerBody, readProviderHttpError, readBoundedJson, readProviderResponse, type AiTransport } from "./provider";
+import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, providerBody, readProviderHttpError, readBoundedJson, readProviderResponse, supportsOfficialPublicSummary, type AiTransport } from "./provider";
 import { chatInputReserve, parseChatCapabilities, parseComputerPlan, parsePresentation, parseToolPlan, parseToolClarification, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
@@ -16,7 +16,7 @@ import { AI_CHAT_CONTEXT_LIMITS, AiCurrentContextTooLongError, fitAiChatMessages
 import { claimToolPlan, toolPlanContextFingerprint, toolPlanExpiry, validateToolPlan } from "./toolPlans";
 import { verifiedBaiAgentModels } from "./modelVerification";
 import { AiHarness, parseHarnessContinuationDecision, requestCapability, validConversationId, type ResolvedHarnessRoute } from "./harness";
-import { parsePublicExplanation, parsePublicAnalysisSummary, supportsPublicExplanation } from "./publicExplanation";
+import { parsePublicExplanation, parseProviderPublicSummary, providerPublicSummaryFromResponse, supportsPublicExplanation } from "./publicExplanation";
 import { parseAiDispatchDecision } from "./dispatch";
 import type { AiRunEvent, AiRunEventPayload } from "../../shared/aiRunEvents";
 import { createVisibleStream } from "./visibleStream";
@@ -661,7 +661,7 @@ export class AiService {
     const run = this.store.harnessRun(request.userId, request.requestId);
     const capability = run?.capability ?? (request.kind === "image" ? "image" : "chat");
     const operation = request.kind === "image" || (capability === "presentation" && Boolean(request.toolPlanRequestId)) ? "execution" : capability === "image" || capability === "video" || capability === "presentation" || capability === "computer" ? "planning" : "execution";
-    this.store.addObservability({ userId: request.userId, tier: request.mode, providerId: request.providerId ?? run?.providerId ?? "legacy", capability, operation, success: status === "completed", latencyMs: Date.now() - Date.parse(request.createdAt), ...(error ? { errorCode: error.code } : {}) });
+    this.store.addObservability({ userId: request.userId, tier: request.mode, providerId: request.providerId ?? run?.providerId ?? "legacy", capability, operation, success: status === "completed", latencyMs: Date.now() - Date.parse(request.createdAt), ...(request.firstVisibleMs !== undefined ? { firstVisibleMs: request.firstVisibleMs } : {}), ...(error ? { errorCode: error.code } : {}) });
     return true;
   }
   getRunEvents(userId: string, requestId: string, after = 0): AiRunEvent[] {
@@ -768,15 +768,24 @@ export class AiService {
       emit({ type: "usage_updated", data: { usage, status, providerReported: true } });
     };
     let deltaBuffer = "", lastFlush = 0;
-    const flush = () => { if (deltaBuffer) { emit({ type: "answer_delta", data: { delta: deltaBuffer } }); deltaBuffer = ""; lastFlush = Date.now(); } };
-    const visible = createVisibleStream(request.mode, delta => { deltaBuffer += delta; if (deltaBuffer.length >= 256 || Date.now() - lastFlush >= 80) flush(); }, delta => emit({ type: "public_summary_delta", data: { delta } }));
+    const flush = () => { if (deltaBuffer) {
+      // This is when a filtered public answer fragment is actually emitted.
+      emit({ type: "answer_delta", data: { delta: deltaBuffer } });
+      reserved.firstVisibleMs ??= Math.max(0, Date.now() - Date.parse(reserved.createdAt));
+      deltaBuffer = ""; lastFlush = Date.now();
+    } };
+    const visible = createVisibleStream(request.mode, delta => {
+      // Never count connection setup, hidden reasoning or a tool envelope.
+      deltaBuffer += delta;
+      if (deltaBuffer.length >= 256 || Date.now() - lastFlush >= 80) flush();
+    }, delta => emit({ type: "public_summary_delta", data: { delta } }));
     const canStream = (!request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch") && !request.skillIds?.includes("agent-continuation-v1");
     let providerSummary = "", summaryRejected = false;
     const publicSummary = (delta: string) => {
       if (summaryRejected) return;
       if (!providerSummary) { delta = delta.trimStart(); if (!delta) return; }
       providerSummary += delta;
-      if (/[<>]/.test(providerSummary) || !parsePublicAnalysisSummary(providerSummary, request.mode)) { summaryRejected = true; providerSummary = ""; return; }
+      if (!parseProviderPublicSummary(providerSummary)) { summaryRejected = true; providerSummary = ""; return; }
       emit({ type: "public_summary_delta", data: { delta } });
     };
     try {
@@ -791,12 +800,20 @@ export class AiService {
       const maxSearchCalls = request.webSearch ? searchCallLimit(provider) : 0;
       const rawResult = await readProviderResponse(response, { maxSearchCalls, ...(options.stream && canStream ? { onTextDelta: (delta: string) => visible.feed(delta), onPublicSummaryDelta: publicSummary } : {}) });
       const result = parseProviderResult(rawResult, provider.protocol);
+      // Some compliant providers return the explicitly public summary only in
+      // the terminal Responses item. This fallback is restricted to routes on
+      // which we actually requested the documented summary capability.
+      const terminalPublicSummary = !summaryRejected && !providerSummary && supportsOfficialPublicSummary(provider, request, model)
+        ? providerPublicSummaryFromResponse(rawResult) : undefined;
+      if (terminalPublicSummary) emit({ type: "public_summary_delta", data: { delta: terminalPublicSummary } });
       reserved.generation = generationDiagnostic(rawResult, response.headers, provider.protocol, reserved.outputReserve, Date.parse(reserved.createdAt), result.usage);
       flush();
       const publicExplanation = supportsPublicExplanation(request)
         ? parsePublicExplanation(result.content, request.mode)
         : { content: result.content };
-      if (!summaryRejected && providerSummary && supportsPublicExplanation(request)) publicExplanation.analysisSummary ??= providerSummary;
+      // A designated provider summary is stronger evidence than a model-authored
+      // <analysis_summary> in the answer body. Never replace it with boilerplate.
+      if (!summaryRejected && supportsPublicExplanation(request) && (providerSummary || terminalPublicSummary)) publicExplanation.analysisSummary = providerSummary || terminalPublicSummary;
       const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= maxSearchCalls);
       const convertedTokens = request.webSearch ? provider.webSearchQuotaTokens! * result.searchCalls : 0;
       const usage: AiUsage = validUsage ? { ...result.usage!, ...(request.webSearch ? { searchCalls: result.searchCalls, tokenUsageEstimated: false } : {}), ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind: "tokens_with_search" } : {}) } : conservativeUsage(reserved);
