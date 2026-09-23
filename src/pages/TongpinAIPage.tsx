@@ -32,7 +32,7 @@ import { AI_DOWNLOAD_FEEDBACK_EVENT, saveBlobWithFeedback, type AiDownloadFeedba
 import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "../features/tongpin-ai/videoReferenceAttachments";
 import { imageReferencesForGeneration } from "../features/tongpin-ai/imageReferenceAttachments";
 import { generatedImageEditReferenceIds } from "../features/tongpin-ai/generatedImageEditReference";
-import { generatedVideoReferenceCandidates } from "../features/tongpin-ai/generatedVideoReference";
+import { generatedVideoReference, generatedVideoReferenceCandidates, videoReferenceUploadBody } from "../features/tongpin-ai/generatedVideoReference";
 import { readGeneratedImageSelection, type GeneratedImageSelection } from "../features/tongpin-ai/generatedImageSelection";
 import { persistedVideoChatRequest, type VideoChatRequest } from "../features/tongpin-ai/videoChat";
 import { naturalVideoRequest } from "../features/tongpin-ai/naturalVideoRequest";
@@ -1495,14 +1495,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         if (!migration.ok) throw new Error(migration.message);
         let references = videoRequest?.referenceImages ?? migration.images;
         if (selectedImage && origin.conversation) {
-          const { generatedVideoReference } = await import("../features/tongpin-ai/generatedVideoReference");
           const { extractMediaAttachment } = await import("../features/tongpin-ai/mediaAttachments");
           const generated = await generatedVideoReference(origin.conversation, workspaceRef.current.artifacts, prompt, api, user.id, new AbortController().signal, extractMediaAttachment,
             { sourceArtifactId: selectedImage.sourceArtifactId, assetId: selectedImage.assetId });
           if (!generated) throw new Error("选中的图片无法恢复，本次未提交视频生成。");
           references = [generated];
         } else if (!references.length && !origin.attachments.length && origin.conversation) {
-          const { generatedVideoReference } = await import("../features/tongpin-ai/generatedVideoReference");
           const { extractMediaAttachment } = await import("../features/tongpin-ai/mediaAttachments");
           const generated = await generatedVideoReference(origin.conversation, workspaceRef.current.artifacts, prompt, api, user.id, new AbortController().signal, extractMediaAttachment);
           if (generated) references = [generated];
@@ -1516,7 +1514,6 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         for (const image of prepared.referenceImages ?? []) {
           if (pendingCancelledRef.current.has(conversationId)) throw new Error("已停止，本次未提交生成。");
           if (!liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) return true;
-          const { videoReferenceUploadBody } = await import("../features/tongpin-ai/generatedVideoReference");
           const ref = await api<{ id: string }>("/api/ai/video-references", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(videoReferenceUploadBody(image, conversationId)) });
           sourceAssetIds.push(ref.id);
         }
@@ -1698,7 +1695,6 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       if (request.referenceImages?.length) {
         const referenceIds = [...(request.referenceIds ?? [])];
         for (const image of request.referenceImages) {
-          const { videoReferenceUploadBody } = await import("../features/tongpin-ai/generatedVideoReference");
           const ref = await api<{ id: string }>("/api/ai/video-references", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(videoReferenceUploadBody(image, conversationId)) });
           referenceIds.push(ref.id);
         }
