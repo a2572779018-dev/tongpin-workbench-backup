@@ -52,7 +52,25 @@ describe("Provider request compatibility", () => {
     const body = providerBody(provider("https://api.b.ai/v1", "responses"), request, "deep-model", 1536);
 
     expect(body).toMatchObject({ max_output_tokens: 1536, reasoning: { effort: "high" }, stream: true });
+    expect(body.reasoning).not.toHaveProperty("summary");
     expect(body).not.toHaveProperty("max_tokens");
     expect(body).not.toHaveProperty("max_completion_tokens");
+  });
+
+  it("opts in to a genuine public summary only for documented OpenAI Responses reasoning models", () => {
+    const body = providerBody(provider("https://api.openai.com/v1", "responses"), request, "gpt-6-astra", 1536);
+
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+    expect(body.instructions).not.toContain("<analysis_summary>");
+  });
+
+  it("never sends summary to lookalike hosts, unsupported models, or quick mode", () => {
+    const lookalike = providerBody(provider("https://api.openai.com.example.com/v1", "responses"), request, "gpt-6-astra", 1536);
+    const otherModel = providerBody(provider("https://api.openai.com/v1", "responses"), request, "other-model", 1536);
+    const quick = providerBody(provider("https://api.openai.com/v1", "responses"), { ...request, mode: "quick" }, "gpt-6-astra", 1536);
+
+    expect(lookalike.reasoning).not.toHaveProperty("summary");
+    expect(otherModel.reasoning).not.toHaveProperty("summary");
+    expect(quick).not.toHaveProperty("reasoning");
   });
 });

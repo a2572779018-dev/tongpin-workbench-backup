@@ -6,6 +6,18 @@ import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { consumeProviderResponse, type ProviderReadOptions } from "./providerStream";
 import { AI_WORKSPACE_LIMITS } from "../../shared/aiWorkspace";
 
+/** Explicit allowlist from OpenAI's Responses reasoning-summary guide.
+ * A matching model name on an arbitrary OpenAI-compatible gateway is not
+ * evidence that it accepts reasoning.summary. */
+const OPENAI_PUBLIC_SUMMARY_MODELS = new Set(["gpt-6-astra", "o4-mini"]);
+export function supportsOfficialPublicSummary(provider: StoredProvider, request: AiChatRequest, model: string): boolean {
+  if (provider.protocol !== "responses" || !provider.reasoningEffort || (request.mode !== "deep" && request.mode !== "pro")) return false;
+  if (request.outputFormat && request.outputFormat !== "text" || request.skillIds?.includes("agent-continuation-v1")) return false;
+  if (!OPENAI_PUBLIC_SUMMARY_MODELS.has(model)) return false;
+  try { return new URL(provider.baseUrl).origin === "https://api.openai.com"; }
+  catch { return false; }
+}
+
 export interface AiTransportInit {
   method: "GET" | "POST";
   headers: Record<string, string>;
@@ -195,7 +207,8 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
 export function providerBody(provider: StoredProvider, request: AiChatRequest, model: string, maxOutputTokens: number, persona?: AiPersonaProfile, options: { stream?: boolean } = {}): Record<string, unknown> {
   const messages = chatMessages(request);
   const images = request.attachments?.filter(item => item.dataUrl) ?? [];
-  const instructions = chatInstructions(request, persona, model);
+  const providerPublicSummary = supportsOfficialPublicSummary(provider, request, model);
+  const instructions = chatInstructions(request, persona, model, { providerPublicSummary });
   if (provider.protocol === "responses") return {
     model, instructions,
     input: messages.map((message, index) => images.length && index === messages.length - 1
@@ -203,7 +216,7 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
       : message),
     max_output_tokens: maxOutputTokens, stream: true, store: false,
     ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], ...(provider.webSearchProtocol === "compatible" ? {} : { max_tool_calls: 1 }), tool_choice: request.webSearchMode === "auto" ? "auto" : "required", include: ["web_search_call.action.sources"] } : {}),
-    ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort } } : {}),
+    ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort, ...(providerPublicSummary ? { summary: "auto" } : {}) } } : {}),
   };
   const isBaiChat = new URL(provider.baseUrl).hostname === "api.b.ai";
   return {

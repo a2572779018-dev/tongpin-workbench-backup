@@ -154,4 +154,41 @@ describe("chat recovery edge invariants", () => {
     expect(result).toMatchObject({ content: "正式回答", analysisSummary: "公开依据" });
     expect(runtime.service.getRequestResult("member", request.requestId).result?.analysisSummary).toBe("公开依据");
   });
+
+  it("requests and persists a provider-designated public summary on the verified official Responses route", async () => {
+    await runtime.service.saveProvider({ ...provider, baseUrl: "https://api.openai.com/v1", protocol: "responses", deepModel: "gpt-6-astra", reasoningEffort: "high" });
+    runtime.service.setQuota("member", "admin", { limitTokens: 10_000 });
+    const publicSummary = "公开依据。".repeat(50);
+    const bytes = new TextEncoder().encode([
+      `data: ${JSON.stringify({ type: "response.reasoning_summary_text.delta", delta: publicSummary.slice(0, 120) })}\n\n`,
+      `data: ${JSON.stringify({ type: "response.reasoning_summary_text.delta", delta: publicSummary.slice(120) })}\n\n`,
+      'data: {"type":"response.reasoning_text.delta","delta":"hidden private reasoning"}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"正式回答"}\n\n',
+      'data: {"type":"response.completed","response":{"output_text":"正式回答","status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n',
+    ].join(""));
+    transport.mockResolvedValueOnce(new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }), { headers: { "content-type": "text/event-stream" } }));
+    const request: AiChatRequest = { requestId: crypto.randomUUID(), conversationId: "conversation-a", mode: "deep", messages: [{ role: "user", content: "比较两个方案" }] };
+    const events: Array<{ type: string; data: unknown }> = [];
+    const result = await runtime.service.chat("member", request, { stream: true, onEvent: event => events.push(event) });
+    expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ reasoning: { effort: "high", summary: "auto" } });
+    expect(events.filter(event => event.type === "public_summary_delta").map(event => (event.data as { delta: string }).delta).join("")).toBe(publicSummary);
+    expect(result.analysisSummary).toBe(publicSummary);
+    expect(JSON.stringify(events)).not.toContain("hidden private reasoning");
+  });
+
+  it("uses a terminal-only official public summary without falling back to private reasoning", async () => {
+    await runtime.service.saveProvider({ ...provider, baseUrl: "https://api.openai.com/v1", protocol: "responses", deepModel: "gpt-6-astra", reasoningEffort: "high" });
+    runtime.service.setQuota("member", "admin", { limitTokens: 10_000 });
+    const terminal = {
+      output_text: "正式回答", status: "completed", usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+      output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "公开依据" }], content: [{ type: "reasoning_text", text: "private chain" }] }],
+    };
+    transport.mockResolvedValueOnce(new Response(`data: ${JSON.stringify({ type: "response.completed", response: terminal })}\n\n`, { headers: { "content-type": "text/event-stream" } }));
+    const request: AiChatRequest = { requestId: crypto.randomUUID(), conversationId: "conversation-a", mode: "deep", messages: [{ role: "user", content: "比较两个方案" }] };
+    const events: Array<{ type: string; data: unknown }> = [];
+    const result = await runtime.service.chat("member", request, { stream: true, onEvent: event => events.push(event) });
+    expect(result).toMatchObject({ content: "正式回答", analysisSummary: "公开依据" });
+    expect(events.some(event => event.type === "public_summary_delta" && (event.data as { delta: string }).delta === "公开依据")).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("private chain");
+  });
 });

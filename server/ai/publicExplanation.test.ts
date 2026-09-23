@@ -3,6 +3,8 @@ import type { AiChatRequest, AiMode } from "../../shared/ai";
 import { chatInstructions } from "./capabilities";
 import {
   AI_PUBLIC_ANALYSIS_LIMITS,
+  parseProviderPublicSummary,
+  providerPublicSummaryFromResponse,
   parsePublicExplanation,
   publicExplanationInstruction,
   supportsPublicExplanation,
@@ -58,6 +60,21 @@ describe("public analysis summaries", () => {
     );
     expect(value).toEqual({ content: "可见回答。" });
     expect(JSON.stringify(value)).not.toMatch(/private chain|secret tokens/);
+  });
+
+  it("accepts a longer provider-designated public summary without accepting private tags", () => {
+    const publishedSummary = "有据可查的公开摘要。".repeat(32);
+    expect(parseProviderPublicSummary(publishedSummary)).toBe(publishedSummary);
+    expect(parseProviderPublicSummary(`<think>hidden</think>${publishedSummary}`)).toBeUndefined();
+    expect(parseProviderPublicSummary("z".repeat(2001))).toBeUndefined();
+  });
+
+  it("reads only terminal public summary items, never private reasoning content", () => {
+    const result = {
+      output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "公开依据" }], content: [{ type: "reasoning_text", text: "private chain" }], encrypted_content: "secret" }],
+    };
+    expect(providerPublicSummaryFromResponse(result)).toBe("公开依据");
+    expect(providerPublicSummaryFromResponse({ output: [{ type: "reasoning", content: [{ type: "reasoning_text", text: "private chain" }] }] })).toBeUndefined();
   });
 
   it("leaves strict structured-output and continuation prompts untouched", () => {

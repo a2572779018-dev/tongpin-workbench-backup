@@ -9,6 +9,10 @@ export const AI_PUBLIC_ANALYSIS_LIMITS: Readonly<Record<AiMode, number>> = Objec
   deep: 240,
   pro: 360,
 });
+/** This limit applies only to an API event explicitly designated as a public
+ * reasoning summary. It is separate from the shorter answer-authored summary
+ * contract, and never permits private reasoning fields to become visible. */
+export const AI_PROVIDER_PUBLIC_SUMMARY_LIMIT = 2000;
 
 export function supportsPublicExplanation(request: AiChatRequest): boolean {
   return (request.outputFormat === undefined || request.outputFormat === "text" || request.outputFormat === "dispatch")
@@ -50,6 +54,33 @@ export function parsePublicAnalysisSummary(value: unknown, mode: AiMode): string
     && !/<\/?(?:analysis_summary|think|reasoning_content)\b/i.test(summary)
     ? summary
     : undefined;
+}
+
+export function parseProviderPublicSummary(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const summary = value.trim();
+  return summary.length > 0
+    && [...summary].length <= AI_PROVIDER_PUBLIC_SUMMARY_LIMIT
+    && !/[<>\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(summary)
+    ? summary
+    : undefined;
+}
+
+/** Only the provider's explicitly public `reasoning.summary[].summary_text`
+ * field is eligible. Never inspect `reasoning.content[].reasoning_text` or
+ * encrypted reasoning payloads. */
+export function providerPublicSummaryFromResponse(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const output = (value as { output?: unknown }).output;
+  if (!Array.isArray(output)) return undefined;
+  const parts: string[] = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object" || Array.isArray(item) || item.type !== "reasoning" || !Array.isArray(item.summary)) continue;
+    for (const part of item.summary) {
+      if (part && typeof part === "object" && !Array.isArray(part) && part.type === "summary_text" && typeof part.text === "string") parts.push(part.text);
+    }
+  }
+  return parseProviderPublicSummary(parts.join("\n\n"));
 }
 
 /** Extract only a model-authored, explicitly delimited public summary. Missing,
