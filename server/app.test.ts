@@ -522,122 +522,134 @@ describe("同频 API 纵向流程", () => {
     const bossSocket = new WebSocket(
       `ws://127.0.0.1:${address.port}/api/realtime`,
     );
-    const socketReady = waitForRealtimeMessage(socket, "realtime:ready");
-    const bossReady = waitForRealtimeMessage(
-      bossSocket,
-      "realtime:ready",
-    );
-    socket.on("open", () => {
-      socket.send(JSON.stringify({ type: "auth", token: bobToken }));
-    });
-    bossSocket.on("open", () => {
-      bossSocket.send(
-        JSON.stringify({ type: "auth", token: aliceToken }),
+    try {
+      const socketReady = waitForRealtimeMessage(socket, "realtime:ready");
+      const bossReady = waitForRealtimeMessage(
+        bossSocket,
+        "realtime:ready",
       );
-    });
-    await Promise.all([socketReady, bossReady]);
-    const pushedNotification = waitForRealtimeMessage(
-      socket,
-      "notification:new",
-    );
+      socket.on("open", () => {
+        socket.send(JSON.stringify({ type: "auth", token: bobToken }));
+      });
+      bossSocket.on("open", () => {
+        bossSocket.send(
+          JSON.stringify({ type: "auth", token: aliceToken }),
+        );
+      });
+      await Promise.all([socketReady, bossReady]);
+      const notificationTitle = `开会提醒-${randomUUID()}`;
+      const pushedNotification = waitForRealtimeMessage(
+        socket,
+        "notification:new",
+        (data) => {
+          const notification = data as
+            | { recipientId?: string; title?: string }
+            | undefined;
+          return (
+            notification?.recipientId === bobId &&
+            notification.title === notificationTitle
+          );
+        },
+      );
 
-    const sent = await request(runtime.app)
-      .post("/api/boss/notifications")
-      .set("Authorization", `Bearer ${aliceToken}`)
-      .send({
-        all: false,
-        recipientIds: [bobId],
-        title: "十分钟后开会",
-        body: "请带上今日任务进度。",
-      })
-      .expect(201);
-    expect(sent.body.accepted).toBe(1);
-    expect(sent.body.delivered).toBe(0);
-    expect(sent.body.targeted).toBe(1);
-    expect(sent.body.dispatch.counts).toEqual({
-      total: 1,
-      delivered: 0,
-      acknowledged: 0,
-      pending: 1,
-    });
-    const realtimeMessage = await pushedNotification;
-    const notificationId = sent.body.notifications[0].id as string;
-    const dispatchId = sent.body.dispatch.id as string;
-    expect((realtimeMessage.data as { id: string }).id).toBe(notificationId);
+      const sent = await request(runtime.app)
+        .post("/api/boss/notifications")
+        .set("Authorization", `Bearer ${aliceToken}`)
+        .send({
+          all: false,
+          recipientIds: [bobId],
+          title: notificationTitle,
+          body: "请带上今日任务进度。",
+        })
+        .expect(201);
+      expect(sent.body.accepted).toBe(1);
+      expect(sent.body.delivered).toBe(0);
+      expect(sent.body.targeted).toBe(1);
+      expect(sent.body.dispatch.counts).toEqual({
+        total: 1,
+        delivered: 0,
+        acknowledged: 0,
+        pending: 1,
+      });
+      const realtimeMessage = await pushedNotification;
+      const notificationId = sent.body.notifications[0].id as string;
+      const dispatchId = sent.body.dispatch.id as string;
+      expect((realtimeMessage.data as { id: string }).id).toBe(notificationId);
 
-    const deliveredReceipt = waitForRealtimeMessage(
-      bossSocket,
-      "notification:receipt",
-    );
-    const delivered = await request(runtime.app)
-      .patch(`/api/notifications/${notificationId}/delivered`)
-      .set("Authorization", `Bearer ${bobToken}`)
-      .expect(200);
-    expect(delivered.body.notification.deliveredAt).toBeTruthy();
-    expect(
-      (
-        (await deliveredReceipt).data as {
-          deliveredAt: string | null;
-        }
-      ).deliveredAt,
-    ).toBeTruthy();
+      const deliveredReceipt = waitForRealtimeMessage(
+        bossSocket,
+        "notification:receipt",
+      );
+      const delivered = await request(runtime.app)
+        .patch(`/api/notifications/${notificationId}/delivered`)
+        .set("Authorization", `Bearer ${bobToken}`)
+        .expect(200);
+      expect(delivered.body.notification.deliveredAt).toBeTruthy();
+      expect(
+        (
+          (await deliveredReceipt).data as {
+            deliveredAt: string | null;
+          }
+        ).deliveredAt,
+      ).toBeTruthy();
 
-    const dingMessage = waitForRealtimeMessage(
-      socket,
-      "notification:ding",
-    );
-    const dinged = await request(runtime.app)
-      .post(`/api/boss/notification-dispatches/${dispatchId}/ding`)
-      .set("Authorization", `Bearer ${aliceToken}`)
-      .expect(200);
-    expect(dinged.body.targeted).toBe(1);
-    expect(dinged.body.dispatch.dingCount).toBe(1);
-    expect(
-      ((await dingMessage).data as { dingCount: number }).dingCount,
-    ).toBe(1);
+      const dingMessage = waitForRealtimeMessage(
+        socket,
+        "notification:ding",
+      );
+      const dinged = await request(runtime.app)
+        .post(`/api/boss/notification-dispatches/${dispatchId}/ding`)
+        .set("Authorization", `Bearer ${aliceToken}`)
+        .expect(200);
+      expect(dinged.body.targeted).toBe(1);
+      expect(dinged.body.dispatch.dingCount).toBe(1);
+      expect(
+        ((await dingMessage).data as { dingCount: number }).dingCount,
+      ).toBe(1);
 
-    const acknowledgedReceipt = waitForRealtimeMessage(
-      bossSocket,
-      "notification:receipt",
-    );
-    const acknowledged = await request(runtime.app)
-      .patch(`/api/notifications/${notificationId}/acknowledge`)
-      .set("Authorization", `Bearer ${bobToken}`)
-      .expect(200);
-    expect(acknowledged.body.notification.acknowledgedAt).toBeTruthy();
-    expect(
-      (
-        (await acknowledgedReceipt).data as {
-          acknowledgedAt: string | null;
-        }
-      ).acknowledgedAt,
-    ).toBeTruthy();
+      const acknowledgedReceipt = waitForRealtimeMessage(
+        bossSocket,
+        "notification:receipt",
+      );
+      const acknowledged = await request(runtime.app)
+        .patch(`/api/notifications/${notificationId}/acknowledge`)
+        .set("Authorization", `Bearer ${bobToken}`)
+        .expect(200);
+      expect(acknowledged.body.notification.acknowledgedAt).toBeTruthy();
+      expect(
+        (
+          (await acknowledgedReceipt).data as {
+            acknowledgedAt: string | null;
+          }
+        ).acknowledgedAt,
+      ).toBeTruthy();
 
-    const dispatches = await request(runtime.app)
-      .get("/api/boss/notification-dispatches")
-      .set("Authorization", `Bearer ${aliceToken}`)
-      .expect(200);
-    expect(dispatches.body.dispatches[0].counts).toEqual({
-      total: 1,
-      delivered: 1,
-      acknowledged: 1,
-      pending: 0,
-    });
-    await request(runtime.app)
-      .post(`/api/boss/notification-dispatches/${dispatchId}/ding`)
-      .set("Authorization", `Bearer ${aliceToken}`)
-      .expect(409);
+      const dispatches = await request(runtime.app)
+        .get("/api/boss/notification-dispatches")
+        .set("Authorization", `Bearer ${aliceToken}`)
+        .expect(200);
+      expect(dispatches.body.dispatches[0].counts).toEqual({
+        total: 1,
+        delivered: 1,
+        acknowledged: 1,
+        pending: 0,
+      });
+      await request(runtime.app)
+        .post(`/api/boss/notification-dispatches/${dispatchId}/ding`)
+        .set("Authorization", `Bearer ${aliceToken}`)
+        .expect(409);
 
-    socket.close();
-    bossSocket.close();
-
-    const inbox = await request(runtime.app)
-      .get("/api/notifications")
-      .set("Authorization", `Bearer ${bobToken}`)
-      .expect(200);
-    expect(inbox.body.unread).toBe(0);
-    expect(inbox.body.notifications[0].title).toBe("十分钟后开会");
-    expect(inbox.body.notifications[0].acknowledgedAt).toBeTruthy();
+      const inbox = await request(runtime.app)
+        .get("/api/notifications")
+        .set("Authorization", `Bearer ${bobToken}`)
+        .expect(200);
+      expect(inbox.body.unread).toBe(0);
+      expect(inbox.body.notifications[0].title).toBe(notificationTitle);
+      expect(inbox.body.notifications[0].acknowledgedAt).toBeTruthy();
+    } finally {
+      socket.close();
+      bossSocket.close();
+    }
   });
 
   it("成员离线期间的强提醒会在重连后补送并幂等回执", async () => {
@@ -645,97 +657,106 @@ describe("同频 API 纵向流程", () => {
     const bossSocket = new WebSocket(
       `ws://127.0.0.1:${address.port}/api/realtime`,
     );
-    const bossReady = waitForRealtimeMessage(bossSocket, "realtime:ready");
-    bossSocket.on("open", () => {
-      bossSocket.send(JSON.stringify({ type: "auth", token: aliceToken }));
-    });
-    await bossReady;
+    const sockets = [bossSocket];
+    try {
+      const bossReady = waitForRealtimeMessage(bossSocket, "realtime:ready");
+      bossSocket.on("open", () => {
+        bossSocket.send(JSON.stringify({ type: "auth", token: aliceToken }));
+      });
+      await bossReady;
 
-    const sent = await request(runtime.app)
-      .post("/api/boss/notifications")
-      .set("Authorization", `Bearer ${aliceToken}`)
-      .send({
-        all: false,
-        recipientIds: [bobId],
-        title: "离线补送验证",
-        body: "恢复网络后无需重启也必须收到。",
-      })
-      .expect(201);
-    expect(sent.body.accepted).toBe(1);
-    expect(sent.body.delivered).toBe(0);
-    expect(sent.body.dispatch.counts.delivered).toBe(0);
-    const notificationId = sent.body.notifications[0].id as string;
-    const dispatchId = sent.body.dispatch.id as string;
+      const sent = await request(runtime.app)
+        .post("/api/boss/notifications")
+        .set("Authorization", `Bearer ${aliceToken}`)
+        .send({
+          all: false,
+          recipientIds: [bobId],
+          title: "离线补送验证",
+          body: "恢复网络后无需重启也必须收到。",
+        })
+        .expect(201);
+      expect(sent.body.accepted).toBe(1);
+      expect(sent.body.delivered).toBe(0);
+      expect(sent.body.dispatch.counts.delivered).toBe(0);
+      const notificationId = sent.body.notifications[0].id as string;
+      const dispatchId = sent.body.dispatch.id as string;
 
-    const memberSocket = new WebSocket(
-      `ws://127.0.0.1:${address.port}/api/realtime`,
-    );
-    const ready = waitForRealtimeMessage(memberSocket, "realtime:ready");
-    const replayed = waitForRealtimeMessage(memberSocket, "notification:new");
-    memberSocket.on("open", () => {
-      memberSocket.send(JSON.stringify({ type: "auth", token: bobToken }));
-    });
-    await ready;
-    expect((await replayed).data).toMatchObject({
-      id: notificationId,
-      deliveredAt: null,
-      acknowledgedAt: null,
-    });
+      const memberSocket = new WebSocket(
+        `ws://127.0.0.1:${address.port}/api/realtime`,
+      );
+      sockets.push(memberSocket);
+      const ready = waitForRealtimeMessage(memberSocket, "realtime:ready");
+      const replayed = waitForRealtimeMessage(
+        memberSocket,
+        "notification:new",
+        (data) =>
+          (data as { id?: string } | undefined)?.id === notificationId,
+      );
+      memberSocket.on("open", () => {
+        memberSocket.send(JSON.stringify({ type: "auth", token: bobToken }));
+      });
+      await ready;
+      expect((await replayed).data).toMatchObject({
+        id: notificationId,
+        deliveredAt: null,
+        acknowledgedAt: null,
+      });
 
-    const inbox = await request(runtime.app)
-      .get("/api/notifications")
-      .set("Authorization", `Bearer ${bobToken}`)
-      .expect(200);
-    expect(
-      inbox.body.notifications.some(
-        (notification: { id: string }) => notification.id === notificationId,
-      ),
-    ).toBe(true);
+      const inbox = await request(runtime.app)
+        .get("/api/notifications")
+        .set("Authorization", `Bearer ${bobToken}`)
+        .expect(200);
+      expect(
+        inbox.body.notifications.some(
+          (notification: { id: string }) => notification.id === notificationId,
+        ),
+      ).toBe(true);
 
-    const receipt = waitForRealtimeMessage(bossSocket, "notification:receipt");
-    const delivered = await request(runtime.app)
-      .patch(`/api/notifications/${notificationId}/delivered`)
-      .set("Authorization", `Bearer ${bobToken}`)
-      .expect(200);
-    const deliveredAt = delivered.body.notification.deliveredAt as string;
-    expect(deliveredAt).toBeTruthy();
-    expect((await receipt).data).toMatchObject({
-      notificationId,
-      dispatchId,
-      recipientId: bobId,
-      deliveredAt,
-    });
-
-    const noDuplicateReceipt = expectNoRealtimeMessage(
-      bossSocket,
-      "notification:receipt",
-      (data) =>
-        (data as { notificationId?: string } | undefined)?.notificationId ===
+      const receipt = waitForRealtimeMessage(bossSocket, "notification:receipt");
+      const delivered = await request(runtime.app)
+        .patch(`/api/notifications/${notificationId}/delivered`)
+        .set("Authorization", `Bearer ${bobToken}`)
+        .expect(200);
+      const deliveredAt = delivered.body.notification.deliveredAt as string;
+      expect(deliveredAt).toBeTruthy();
+      expect((await receipt).data).toMatchObject({
         notificationId,
-    );
-    const repeated = await request(runtime.app)
-      .patch(`/api/notifications/${notificationId}/delivered`)
-      .set("Authorization", `Bearer ${bobToken}`)
-      .expect(200);
-    expect(repeated.body.notification.deliveredAt).toBe(deliveredAt);
-    await noDuplicateReceipt;
+        dispatchId,
+        recipientId: bobId,
+        deliveredAt,
+      });
 
-    const dispatches = await request(runtime.app)
-      .get("/api/boss/notification-dispatches")
-      .set("Authorization", `Bearer ${aliceToken}`)
-      .expect(200);
-    const dispatch = dispatches.body.dispatches.find(
-      (candidate: { id: string }) => candidate.id === dispatchId,
-    );
-    expect(dispatch.counts).toEqual({
-      total: 1,
-      delivered: 1,
-      acknowledged: 0,
-      pending: 1,
-    });
+      const noDuplicateReceipt = expectNoRealtimeMessage(
+        bossSocket,
+        "notification:receipt",
+        (data) =>
+          (data as { notificationId?: string } | undefined)?.notificationId ===
+          notificationId,
+      );
+      const repeated = await request(runtime.app)
+        .patch(`/api/notifications/${notificationId}/delivered`)
+        .set("Authorization", `Bearer ${bobToken}`)
+        .expect(200);
+      expect(repeated.body.notification.deliveredAt).toBe(deliveredAt);
+      await noDuplicateReceipt;
 
-    memberSocket.close();
-    bossSocket.close();
+      const dispatches = await request(runtime.app)
+        .get("/api/boss/notification-dispatches")
+        .set("Authorization", `Bearer ${aliceToken}`)
+        .expect(200);
+      const dispatch = dispatches.body.dispatches.find(
+        (candidate: { id: string }) => candidate.id === dispatchId,
+      );
+      expect(dispatch.counts).toEqual({
+        total: 1,
+        delivered: 1,
+        acknowledged: 0,
+        pending: 1,
+      });
+
+    } finally {
+      for (const socket of sockets) socket.close();
+    }
   });
 
   it("同一账号在另一台电脑确认后会立刻停止所有设备的强提醒", async () => {
