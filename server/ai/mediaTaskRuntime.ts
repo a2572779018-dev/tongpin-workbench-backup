@@ -1,5 +1,5 @@
 import type { AiMode } from "../../shared/ai";
-import type { AiMediaTaskEvent } from "../../shared/aiRunEvents";
+import type { AiMediaTaskEvent, AiMediaTaskEventPayload } from "../../shared/aiRunEvents";
 import { videoModel, videoSeconds, type VideoModelId, type VideoResolution } from "../../shared/aiVideoModels";
 import { AiError } from "./security";
 import type { AiStore } from "./storage";
@@ -332,21 +332,21 @@ export class MediaTaskRuntime {
     this.save(run);
     return clone(run);
   }
-  private appendArtifactReady(run: MediaTaskRun): void {
-    if (run.status !== "completed" || !run.tool?.artifactIds?.length) conflict("成果尚未完成");
+  private appendEvent(run: MediaTaskRun, payload: AiMediaTaskEventPayload): void {
     const seq = (this.store.sql.all<{ seq: number }>(
       "SELECT MAX(seq) AS seq FROM ai_media_task_events WHERE tenant_id=? AND user_id=? AND run_id=?",
       this.store.tenantId, this.userKey(run.userId), run.runId,
     )[0]?.seq ?? 0) + 1;
     if (seq > 4096) throw new AiError(502, "AI_EVENT_LIMIT", "任务事件超过上限");
-    const event: AiMediaTaskEvent = {
-      type: "artifact_ready", data: { capability: run.tool.capability, artifactIds: [...run.tool.artifactIds] },
-      requestId: run.requestId, runId: run.runId, stepId: run.stepId, seq, timestamp: this.now(),
-    };
+    const event: AiMediaTaskEvent = { ...payload, requestId: run.requestId, runId: run.runId, stepId: run.stepId, seq, timestamp: this.now() };
     this.store.sql.exec(
       "INSERT INTO ai_media_task_events(tenant_id,user_id,run_id,seq,data) VALUES(?,?,?,?,?)",
       this.store.tenantId, this.userKey(run.userId), run.runId, seq, JSON.stringify(event),
     );
+  }
+  private appendArtifactReady(run: MediaTaskRun): void {
+    if (run.status !== "completed" || !run.tool?.artifactIds?.length) conflict("成果尚未完成");
+    this.appendEvent(run, { type: "artifact_ready", data: { capability: run.tool.capability, artifactIds: [...run.tool.artifactIds] } });
   }
   get(userId: string, runId: string): MediaTaskRun | null { return clone(this.load(userId, runId)); }
   events(userId: string, runId: string, after = 0): AiMediaTaskEvent[] {
@@ -482,7 +482,10 @@ export class MediaTaskRuntime {
       run.freeQuestion = { questionId: crypto.randomUUID(), prompt: prompt.trim(), deadlineAt };
       run.status = "awaiting_input";
       run.dueAt = deadlineAt;
-      return this.update(run);
+      const opened = this.update(run);
+      const question = run.freeQuestion;
+      this.appendEvent(run, { type: "question_opened", data: { kind: "free_text", questionId: question.questionId, prompt: question.prompt, deadlineAt: question.deadlineAt } });
+      return opened;
     });
   }
   answerInput(userId: string, runId: string, questionId: string, answer: string): MediaTaskRun {
@@ -532,7 +535,12 @@ export class MediaTaskRuntime {
       run.question = { questionId: crypto.randomUUID(), options: normalizedOptions, defaultOptionId, deadlineAt };
       run.status = "awaiting_input";
       run.dueAt = deadlineAt;
-      return this.update(run);
+      const opened = this.update(run);
+      const question = run.question;
+      this.appendEvent(run, { type: "question_opened", data: { kind: "choice", questionId: question.questionId,
+        options: question.options.map(({ id, label, estimatedPoints }) => ({ id, label, estimatedPoints })),
+        defaultOptionId: question.defaultOptionId, deadlineAt: question.deadlineAt } });
+      return opened;
     });
   }
   grantAuthorization(userId: string, runId: string, input: MediaTaskAuthorizationScope): MediaTaskRun {

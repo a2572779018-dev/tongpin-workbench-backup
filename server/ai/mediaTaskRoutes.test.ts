@@ -153,6 +153,13 @@ describe("Node authenticated media-task routes", () => {
     const submitted = await post("/api/ai/media-tasks", input).expect(202);
     const waiting = await waitForStatus(input.requestId, "awaiting_input");
     const questionId = (waiting.freeQuestion as { questionId: string }).questionId;
+    const eventsUrl = `/api/ai/media-tasks/${submitted.body.task.runId}/events`;
+    const opened = (await get(eventsUrl).expect(200)).body.events;
+    expect(opened).toMatchObject([{ type: "question_opened", requestId: input.requestId, runId: submitted.body.task.runId,
+      seq: 1, data: { kind: "free_text", questionId, prompt: expect.any(String), deadlineAt: (waiting.freeQuestion as { deadlineAt: number }).deadlineAt } }]);
+    expect((await get(`${eventsUrl}?after=1`).expect(200)).body.events).toEqual([]);
+    await get(eventsUrl, "member-b").expect(404);
+    await get(eventsUrl, "member-a", "tenant-beta").expect(404);
 
     await post(`/api/ai/media-tasks/${submitted.body.task.runId}/answer`, { questionId, answer: "" }).expect(400);
     await request(app).post(`/api/ai/media-tasks/${submitted.body.task.runId}/answer`).set(actorHeaders()).set("Content-Type", "application/json").send("not-json").expect(400);
@@ -165,6 +172,7 @@ describe("Node authenticated media-task routes", () => {
     expect(advanced.body.task.status).toBe("awaiting_authorization");
     const cancelled = await remove(`/api/ai/media-tasks/${submitted.body.task.runId}`).expect(200);
     expect(cancelled.body.task.status).toBe("cancelled");
+    expect((await get(eventsUrl).expect(200)).body.events).toEqual(opened);
     expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(0);
   });
 
@@ -182,6 +190,10 @@ describe("Node authenticated media-task routes", () => {
     expect(answered.body.task).toMatchObject({ runId: waiting.runId, status: "queued" });
     const finished = await waitForStatus(input.requestId, "completed");
     expect(finished.runId).toBe(waiting.runId);
+    const events = (await get(`/api/ai/media-tasks/${waiting.runId}/events`).expect(200)).body.events;
+    expect(events).toMatchObject([{ type: "question_opened", seq: 1, data: { kind: "free_text", questionId: (waiting.freeQuestion as { questionId: string }).questionId } },
+      { type: "artifact_ready", seq: 2, data: { capability: "image", artifactIds: (finished.tool as { artifactIds: string[] }).artifactIds } }]);
+    expect((await get(`/api/ai/media-tasks/${waiting.runId}/events?after=1`).expect(200)).body.events).toEqual([events[1]]);
     expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
   });
 

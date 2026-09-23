@@ -75,9 +75,15 @@ describe("persisted media task runtime", () => {
       deadlineAt: Date.now() - 1,
     });
     const otherWindow = new MediaTaskRuntime(node.store);
+    expect(tasks.events("member", run.runId)).toMatchObject([{ type: "question_opened", seq: 1, stepId: run.stepId,
+      data: { kind: "choice", questionId: opened.question!.questionId, defaultOptionId: "recommended", options: [{ id: "recommended", label: "生成竖屏视频", estimatedPoints: 250 }, { id: "landscape", label: "生成横屏视频", estimatedPoints: 250 }] } }]);
+    expect(() => otherWindow.openQuestion("member", run.runId, {
+      options: [{ id: "other", label: "重复问题", estimatedPoints: 1 }], defaultOptionId: "other", deadlineAt: Date.now() + 1000,
+    })).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_CONFLICT" }));
     expect(tasks.settleQuestion("member", run.runId, opened.question!.questionId, "landscape", "user").kind).toBe("selected");
     expect(otherWindow.settleQuestion("member", run.runId, opened.question!.questionId, "recommended", "timeout").kind).toBe("already_selected");
     expect(tasks.get("member", run.runId)?.question?.selectedOptionId).toBe("landscape");
+    expect(otherWindow.events("member", run.runId)).toHaveLength(1);
   });
 
   it("does not turn silence into payment or choose defaults without explicit automatic-choice authorization", () => {
@@ -249,12 +255,21 @@ describe("persisted media task runtime", () => {
     tasks.claimPlanning("member", run.runId);
     const question = tasks.awaitInput("member", run.runId, "希望横屏还是竖屏？", Date.now() + 30_000);
     expect(question.status).toBe("awaiting_input");
+    const otherWindow = new MediaTaskRuntime(node.store);
+    expect(() => otherWindow.awaitInput("member", run.runId, "重复追问？", Date.now() + 30_000)).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_CONFLICT" }));
+    expect(tasks.events("member", run.runId)).toMatchObject([{ type: "question_opened", requestId: run.requestId,
+      runId: run.runId, stepId: run.stepId, seq: 1,
+      data: { kind: "free_text", questionId: question.freeQuestion!.questionId, prompt: "希望横屏还是竖屏？", deadlineAt: question.freeQuestion!.deadlineAt } }]);
     const answered = tasks.answerInput("member", run.runId, question.freeQuestion!.questionId, "竖屏");
     expect(answered.status).toBe("queued");
     expect(answered.authorization).toBeUndefined();
     expect(answered.stepId).not.toBe(run.stepId);
     expect(tasks.answerInput("member", run.runId, question.freeQuestion!.questionId, "竖屏").version).toBe(answered.version);
     expect(() => tasks.answerInput("member", run.runId, question.freeQuestion!.questionId, "横屏")).toThrow();
+    expect(tasks.events("member", run.runId, 1)).toEqual([]);
+    expect(otherWindow.events("member", run.runId)).toHaveLength(1);
+    expect(() => tasks.events("other-member", run.runId)).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_NOT_FOUND" }));
+    expect(() => tasks.forTenant("other-tenant").events("member", run.runId)).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_NOT_FOUND" }));
     expect(tasks.claimPlanning("member", run.runId)?.status).toBe("planning");
     expect(tasks.get("other-member", run.runId)).toBeNull();
   });
@@ -269,6 +284,19 @@ describe("persisted media task runtime", () => {
     expect(tasks.expireInput("member", run.runId)).toMatchObject({ status: "failed", errorCode: "AI_MEDIA_TASK_INPUT_TIMEOUT", dueAt: null });
     expect(tasks.get("member", run.runId)?.tool).toBeUndefined();
     expect(tasks.expireInput("member", run.runId).status).toBe("failed");
+    expect(tasks.events("member", run.runId).map(event => event.type)).toEqual(["question_opened"]);
+  });
+  it("keeps one opened question through cancellation and a real SQLite reopen", async () => {
+    const run = tasks.submit("member", input());
+    tasks.claimPlanning("member", run.runId);
+    tasks.awaitInput("member", run.runId, "你想要什么主题？", Date.now() + 30_000);
+    expect(tasks.cancel("member", run.runId).status).toBe("cancelled");
+    expect(tasks.cancel("member", run.runId).status).toBe("cancelled");
+    node.close();
+    node = await createNodeAi(path.join(directory, "runtime.json"));
+    tasks = new MediaTaskRuntime(node.store);
+    expect(tasks.events("member", run.runId)).toMatchObject([{ type: "question_opened", data: { kind: "free_text", prompt: "你想要什么主题？" } }]);
+    expect(tasks.events("member", run.runId, 1)).toEqual([]);
   });
   it("repolls one accepted video service request without submitting another paid call", () => {
     const run = tasks.submit("member", input());

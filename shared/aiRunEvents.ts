@@ -11,11 +11,14 @@ export type AiRunEventPayload =
   | { type: "run_failed"; data: { error: { code: string; message: string } } };
 export type AiRunEvent = AiRunEventPayload & { requestId: string; runId: string; stepId: string; seq: number; timestamp: number };
 
-/** Media tasks have their own durable run and event cursor. Unlike text chat
- * events, these are journaled only when a verified tool result is committed. */
-export type AiMediaTaskEvent = {
-  type: "artifact_ready";
-  data: { capability: "image" | "video"; artifactIds: string[] };
+/** Media tasks have their own durable run and event cursor. These payloads
+ * describe committed task-state transitions, not speculative model output. */
+export type AiMediaTaskEventPayload =
+  | { type: "artifact_ready"; data: { capability: "image" | "video"; artifactIds: string[] } }
+  | { type: "question_opened"; data:
+    | { kind: "free_text"; questionId: string; prompt: string; deadlineAt: number }
+    | { kind: "choice"; questionId: string; options: Array<{ id: string; label: string; estimatedPoints: number }>; defaultOptionId: string; deadlineAt: number } };
+export type AiMediaTaskEvent = AiMediaTaskEventPayload & {
   requestId: string;
   runId: string;
   stepId: string;

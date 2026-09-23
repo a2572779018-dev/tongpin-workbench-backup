@@ -153,6 +153,13 @@ describe("Cloudflare authenticated media-task routes", () => {
     const waiting = await jsonTask(await invoke(`/api/ai/media-tasks/${submitted.runId}`, "GET"));
     expect(waiting.status).toBe("awaiting_input");
     const questionId = waiting.freeQuestion.questionId as string;
+    const eventsUrl = `/api/ai/media-tasks/${submitted.runId}/events`;
+    const opened = (await (await invoke(eventsUrl, "GET")).json() as { events: Array<Record<string, any>> }).events;
+    expect(opened).toMatchObject([{ type: "question_opened", requestId: input.requestId, runId: submitted.runId,
+      seq: 1, data: { kind: "free_text", questionId, prompt: expect.any(String), deadlineAt: waiting.freeQuestion.deadlineAt } }]);
+    expect((await (await invoke(`${eventsUrl}?after=1`, "GET")).json() as { events: unknown[] }).events).toEqual([]);
+    expect((await invoke(eventsUrl, "GET", principal("member-b"))).status).toBe(404);
+    expect((await invoke(eventsUrl, "GET", principal("member-a", "tenant-beta"))).status).toBe(404);
 
     expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/answer`, "POST", principal(), { questionId, answer: "" })).status).toBe(400);
     expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/answer`, "POST", principal(), undefined, undefined, "not-json")).status).toBe(400);
@@ -165,6 +172,7 @@ describe("Cloudflare authenticated media-task routes", () => {
     expect((await invoke(`/api/ai/media-tasks/${submitted.runId}`, "DELETE", principal("member-b"))).status).toBe(404);
     const cancelled = await invoke(`/api/ai/media-tasks/${submitted.runId}`, "DELETE");
     expect((await jsonTask(cancelled)).status).toBe("cancelled");
+    expect((await (await invoke(eventsUrl, "GET")).json() as { events: unknown[] }).events).toEqual(opened);
     expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(0);
   });
 
