@@ -16,7 +16,15 @@ function clean(value: unknown, label: string, max: number, multiline = false): s
 
 /** Parse only the public, schema-bound dispatcher result. Provider hidden
  * reasoning fields are discarded earlier by parseProviderResult(). */
-export function parseAiDispatchDecision(content: string, mode: AiMode): AiDispatchDecision {
+export function parseAiDispatchDecision(content: string, mode: AiMode, options: { allowPlainText?: boolean } = {}): AiDispatchDecision {
+  const trimmed = content.trim();
+  const tagged = trimmed.startsWith("<tool_request>");
+  // Legacy gateways can still return the old envelope. A partial envelope is
+  // never treated as an executable tool or rendered as an ordinary answer.
+  const legacy = /^\s*(?:```(?:json)?\s*)?\{\s*"(?:kind|content|prompt|analysisSummary|clarification)"\s*:/.test(content);
+  if (options.allowPlainText && !tagged && !legacy) return { kind: "text", content: clean(content, "文字答复", 128_000, true) };
+  if (tagged && !trimmed.endsWith("</tool_request>")) throw new AiError(502, "AI_DISPATCH_INVALID", "AI 没有返回完整的工具请求");
+  if (tagged) content = trimmed.slice("<tool_request>".length, -"</tool_request>".length);
   let raw: unknown;
   try {
     raw = JSON.parse(content.replace(/^\s*```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, ""));

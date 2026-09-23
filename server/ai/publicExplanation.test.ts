@@ -24,12 +24,13 @@ describe("public analysis summaries", () => {
     expect(chatInstructions(request(mode))).toContain(instructions);
   });
 
-  it.each(["quick", "standard", "deep", "pro"] as const)("keeps the same safe public-summary limit inside strict dispatch JSON for %s", (mode) => {
+  it.each(["quick", "standard", "deep", "pro"] as const)("keeps the same safe public-summary limit without wrapping the answer in JSON for %s", (mode) => {
     const instructions = chatInstructions(request(mode, { outputFormat: "dispatch" }));
     expect(instructions).toContain(`最多 ${AI_PUBLIC_ANALYSIS_LIMITS[mode]} 个字符`);
-    expect(instructions).toContain('"analysisSummary":"结论依据的公开摘要"');
+    expect(instructions).toContain("不要把整篇回答包装成 JSON");
     expect(instructions).toContain("不是逐步思维链");
-    expect(instructions).not.toContain("<analysis_summary>");
+    expect(instructions).toContain("<analysis_summary>");
+    expect(instructions).toContain("<tool_request>");
   });
 
   it("extracts only an explicitly paired leading summary and keeps the formal answer separate", () => {

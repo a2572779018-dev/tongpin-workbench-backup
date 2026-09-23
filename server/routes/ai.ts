@@ -7,6 +7,7 @@ import { requireRole } from "../middleware";
 import type { JsonStore } from "../store";
 import type { AiMode } from "../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../ai/tenant";
+import { createChatStreamResponse } from "../ai/chatStream";
 import { createDifyGrantResponse, type DifyRouteOptions } from "../ai/difyRuntimeRoutes";
 import {
   createAiServiceMediaTaskOrchestrator,
@@ -111,6 +112,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     });
     router.get("/videos", (request, response) => response.json(video(request).list(request.currentUser!.id, videoTier(request.query.tier))));
     router.post("/video-references", async (request, response) => response.json(await video(request).uploadReference(request.currentUser!.id, request.body)));
+    router.post("/video-references/generated-asset", async (request, response) => response.json(await video(request).generatedReferenceSource(request.currentUser!.id, request.body)));
     router.post("/videos", async (request, response) => response.json({ job: await video(request).submit(request.currentUser!.id, request.body) }));
     router.get("/videos/:id", async (request, response) => response.json({ job: await video(request).refresh(request.currentUser!.id, request.params.id) }));
     router.get("/videos/:id/content", async (request, response) => {
@@ -124,6 +126,14 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.get("/usage", (request, response) => { const current = scoped(request); current.quota(request.currentUser!.id); response.json({ entries: current.memberUsage(request.currentUser!.id) }); });
     router.post("/preflight", (request, response) => response.json(scoped(request).preflight(request.currentUser!.id, request.body)));
     router.post("/chat", async (request, response) => response.json(await scoped(request).chat(request.currentUser!.id, request.body)));
+    router.post("/chat/stream", (request, response) => {
+      const result = createChatStreamResponse(scoped(request), request.currentUser!.id, request.body);
+      result.headers.forEach((value, key) => response.set(key, value));
+      response.flushHeaders();
+      const stream = Readable.fromWeb(result.body as import("node:stream/web").ReadableStream);
+      response.on("close", () => stream.destroy()); stream.on("error", () => response.destroy()); stream.pipe(response);
+    });
+    router.get("/requests/:id/events", (request, response) => response.json({ events: scoped(request).getRunEvents(request.currentUser!.id, request.params.id, Number(request.query.after ?? 0)) }));
     router.post("/media-tasks", async (request, response) => {
       const tenantId = aiTenantIdFromPrincipal(request.currentUser);
       const userId = request.currentUser!.id;

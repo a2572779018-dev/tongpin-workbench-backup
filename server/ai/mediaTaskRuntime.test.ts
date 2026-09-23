@@ -245,6 +245,18 @@ describe("persisted media task runtime", () => {
     expect(tasks.claimPlanning("member", run.runId)?.status).toBe("planning");
     expect(tasks.get("other-member", run.runId)).toBeNull();
   });
+  it("expires an unanswered free-text clarification without selecting or spending", () => {
+    let clock = 1_000_000;
+    tasks = new MediaTaskRuntime(node.store, () => clock);
+    const run = tasks.submit("member", { ...input(), deadlineAt: clock + 30_000 });
+    tasks.claimPlanning("member", run.runId);
+    tasks.awaitInput("member", run.runId, "请提供视频主题", clock + 1000);
+    expect(tasks.expireInput("member", run.runId).status).toBe("awaiting_input");
+    clock += 1001;
+    expect(tasks.expireInput("member", run.runId)).toMatchObject({ status: "failed", errorCode: "AI_MEDIA_TASK_INPUT_TIMEOUT", dueAt: null });
+    expect(tasks.get("member", run.runId)?.tool).toBeUndefined();
+    expect(tasks.expireInput("member", run.runId).status).toBe("failed");
+  });
   it("repolls one accepted video service request without submitting another paid call", () => {
     const run = tasks.submit("member", input());
     tasks.claimPlanning("member", run.runId);

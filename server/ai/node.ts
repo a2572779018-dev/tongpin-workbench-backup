@@ -13,6 +13,7 @@ import type { AiTransport } from "./provider";
 
 /** Resolve and pin a public address within the TLS connection itself; never follow redirects. */
 export const nodeAiTransport: AiTransport = async (target, init) => {
+  if (init.body !== undefined && init.binaryBody !== undefined) throw new AiError(400, "AI_TRANSPORT_BODY_INVALID", "请求不能同时包含 JSON 和二进制内容", true);
   const url = new URL(target);
   safeBaseUrl(url.origin);
   return new Promise<Response>((resolve, reject) => {
@@ -45,14 +46,20 @@ export const nodeAiTransport: AiTransport = async (target, init) => {
           },
         }));
         if (!body) response.resume();
-        resolve(new Response(body, { status, headers: { "Content-Type": String(response.headers["content-type"] ?? "application/json") } }));
+        const headers = new Headers({ "Content-Type": String(response.headers["content-type"] ?? "application/json") });
+        for (const name of ["x-request-id", "cf-ray", "cf-mitigated", "server"]) {
+          const value = response.headers[name];
+          if (typeof value === "string" && value.length <= 200) headers.set(name, value);
+        }
+        resolve(new Response(body, { status, headers }));
       } catch { response.destroy(); reject(new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回了无效响应")); }
     });
     request.on("socket", socket => { socket.once("secureConnect", () => { connected = true; }); });
     // Keep-alive sockets do not emit secureConnect again. A reset on a reused
     // connection may happen after the paid body was sent, so never refund it as unsent.
     request.on("error", () => reject(new AiError(502, "AI_CONNECTION_FAILED", "无法安全连接 AI 服务，请检查公网 API 地址和网络", !connected && !request.reusedSocket)));
-    if (init.body) request.write(init.body);
+    const body = init.binaryBody ?? init.body;
+    if (body !== undefined) request.write(body);
     request.end();
   });
 };

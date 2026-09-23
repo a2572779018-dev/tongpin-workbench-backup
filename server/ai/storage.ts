@@ -2,6 +2,7 @@ import type { AiChatResponse, AiHarnessCapability, AiHarnessConfig, AiHarnessRun
 import { AiError } from "./security";
 import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey, tenantStorageValue } from "./tenant";
 import { aiLatencyThresholds } from "./observabilityThresholds";
+import type { AiRunEvent, AiRunEventPayload } from "../../shared/aiRunEvents";
 
 export interface AiSql {
   exec(query: string, ...bindings: Array<string | number | null>): void;
@@ -14,6 +15,8 @@ CREATE TABLE IF NOT EXISTS ai_video_jobs (user_id TEXT NOT NULL, id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS ai_video_references (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', public_id TEXT, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_quotas (user_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_requests (user_id TEXT NOT NULL, request_id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', data TEXT NOT NULL, PRIMARY KEY(user_id, request_id));
+CREATE TABLE IF NOT EXISTS ai_request_snapshots (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, request_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant_id,user_id,request_id,chunk_index));
+CREATE TABLE IF NOT EXISTS ai_run_events (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, request_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant_id,user_id,request_id,seq));
 CREATE TABLE IF NOT EXISTS ai_harness_runs (user_id TEXT NOT NULL, id TEXT NOT NULL, request_id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', conversation_id TEXT NOT NULL, tier TEXT NOT NULL, provider_id TEXT NOT NULL, capability TEXT NOT NULL, goal_kind TEXT NOT NULL, goal_summary TEXT NOT NULL, background_capable INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, reasoning_summary TEXT NOT NULL, started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(user_id,id), UNIQUE(user_id,request_id));
 CREATE INDEX IF NOT EXISTS ai_harness_runs_user_time ON ai_harness_runs(user_id, started_at DESC);
 CREATE TABLE IF NOT EXISTS ai_harness_steps (user_id TEXT NOT NULL, run_id TEXT NOT NULL, id TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '${DEFAULT_AI_TENANT_ID}', data TEXT NOT NULL, PRIMARY KEY(user_id,run_id,id));
@@ -92,6 +95,8 @@ export interface StoredRequest {
   conversationId?: string;
   providerId?: string;
   harnessRunId?: string;
+  attempt?: AiChatResponse["attempt"];
+  generation?: import("../../shared/ai").AiGenerationDiagnostic;
   toolPlanRequestId?: string;
   result?: Omit<AiChatResponse, "quota">;
   imageResult?: Omit<AiImageResponse, "quota">;
@@ -169,6 +174,30 @@ export class AiStore {
   request(userId: string, requestId: string): StoredRequest | undefined {
     const row = this.sql.all<{ data: string }>("SELECT data FROM ai_requests WHERE user_id=? AND request_id=? AND tenant_id=?", this.userKey(userId), requestId, this.tenantId)[0];
     return row ? JSON.parse(row.data) as StoredRequest : undefined;
+  }
+  saveRequestSnapshot(userId: string, requestId: string, value: unknown): void {
+    const serialized = JSON.stringify(value);
+    if (serialized.length > 1600 * 1024) throw new AiError(413, "AI_CONTEXT_TOO_LONG", "任务快照过大");
+    // Immutable chunked snapshot; account scope is taken from authentication.
+    for (let offset = 0; offset < serialized.length; offset += 32000) this.sql.exec("INSERT INTO ai_request_snapshots VALUES(?,?,?,?,?)", this.tenantId, this.userKey(userId), requestId, offset / 32000, serialized.slice(offset, offset + 32000));
+  }
+  requestSnapshot(userId: string, requestId: string): unknown {
+    const rows = this.sql.all<{ data: string }>("SELECT data FROM ai_request_snapshots WHERE tenant_id=? AND user_id=? AND request_id=? ORDER BY chunk_index", this.tenantId, this.userKey(userId), requestId);
+    return rows.length ? JSON.parse(rows.map(row => row.data).join("")) : undefined;
+  }
+  appendRunEvent(userId: string, requestId: string, payload: AiRunEventPayload): AiRunEvent {
+    return this.sql.transaction(() => {
+      const request = this.request(userId, requestId);
+      if (!request) throw new AiError(404, "AI_REQUEST_NOT_FOUND", "没有找到这条请求");
+      const seq = (this.sql.all<{ seq: number }>("SELECT MAX(seq) AS seq FROM ai_run_events WHERE tenant_id=? AND user_id=? AND request_id=?", this.tenantId, this.userKey(userId), requestId)[0]?.seq ?? 0) + 1;
+      if (seq > 4096) throw new AiError(502, "AI_EVENT_LIMIT", "任务事件超过上限");
+      const event: AiRunEvent = { ...payload, requestId, runId: request.attempt?.runId ?? request.harnessRunId ?? requestId, stepId: requestId, seq, timestamp: Date.now() };
+      this.sql.exec("INSERT INTO ai_run_events VALUES(?,?,?,?,?)", this.tenantId, this.userKey(userId), requestId, seq, JSON.stringify(event));
+      return event;
+    });
+  }
+  runEvents(userId: string, requestId: string, after = 0): AiRunEvent[] {
+    return this.sql.all<{ data: string }>("SELECT data FROM ai_run_events WHERE tenant_id=? AND user_id=? AND request_id=? AND seq>? ORDER BY seq LIMIT 512", this.tenantId, this.userKey(userId), requestId, after).map(row => JSON.parse(row.data) as AiRunEvent);
   }
   pending(userId: string): StoredRequest[] {
     return this.sql.all<{ data: string }>("SELECT data FROM ai_requests WHERE user_id=? AND tenant_id=? AND json_extract(data,'$.status')='pending'", this.userKey(userId), this.tenantId).map(r => JSON.parse(r.data) as StoredRequest);

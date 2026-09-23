@@ -11,7 +11,7 @@ export const AI_PUBLIC_ANALYSIS_LIMITS: Readonly<Record<AiMode, number>> = Objec
 });
 
 export function supportsPublicExplanation(request: AiChatRequest): boolean {
-  return (request.outputFormat === undefined || request.outputFormat === "text")
+  return (request.outputFormat === undefined || request.outputFormat === "text" || request.outputFormat === "dispatch")
     && !request.skillIds?.includes("agent-continuation-v1");
 }
 

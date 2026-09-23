@@ -1,4 +1,4 @@
-import type { AiHarnessTrace, AiMode, AiSource, AiUsage } from "./ai";
+import type { AiChatResponse, AiHarnessTrace, AiMode, AiSource, AiUsage } from "./ai";
 import type { VideoModelId, VideoResolution } from "./aiVideoModels";
 
 /** JSON-only workspace payload. Provider credentials and executable code never belong here. */
@@ -9,6 +9,8 @@ export interface AiWorkspaceMedia {
   kind: "image" | "video";
   frames: Array<{ dataUrl: string; timeSeconds?: number }>;
   durationSeconds?: number;
+  /** Explicit choice among retained video samples; original provenance stays intact. */
+  selectedFrameIndex?: number;
 }
 
 export interface AiWorkspaceDocument {
@@ -26,6 +28,9 @@ export interface AiWorkspaceMessage {
   content: string;
   /** Concise model-authored public explanation, separate from the answer. */
   analysisSummary?: string;
+  completion?: AiChatResponse["completion"];
+  retryDisposition?: "recover" | "regenerate";
+  taskPhase?: "queued" | "planning" | "awaiting_input" | "awaiting_authorization" | "running" | "partial" | "completed" | "failed" | "cancelled" | "unknown";
   time: string;
   /** Epoch milliseconds for a durable in-flight timer. UI remounts must not restart it. */
   startedAt?: number;

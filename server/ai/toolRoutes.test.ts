@@ -90,6 +90,24 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     }
     expect(transport).not.toHaveBeenCalled();
   });
+  it("authenticates streaming and replay routes and retains the legacy JSON contract", async () => {
+    const body = { requestId: crypto.randomUUID(), conversationId: "stream-isolated", mode: "quick", messages: [{ role: "user", content: "无费用流式协议测试" }] };
+    await request(runtime.app).post("/api/ai/chat/stream").send(body).expect(401);
+    await request(runtime.app).post("/api/ai/chat/stream").set(headers("admin")).send(body).expect(403);
+    await request(runtime.app).post("/api/ai/chat/stream").set(headers("a", sessions.b.id)).send(body).expect(409);
+    expect(transport).not.toHaveBeenCalled();
+    const streamed = await request(runtime.app).post("/api/ai/chat/stream").set(headers("a")).send(body).expect(200);
+    expect(streamed.headers["content-type"]).toContain("text/event-stream");
+    expect(streamed.text).toContain('"type":"run_started"');
+    expect(streamed.text).toContain('"type":"run_finished"');
+    expect(streamed.text).not.toContain(KEY);
+    const replay = await request(runtime.app).get(`/api/ai/requests/${body.requestId}/events`).set(headers("a")).expect(200);
+    expect(replay.body.events.map((event: { seq: number }) => event.seq)).toEqual([1, 2]);
+    await request(runtime.app).get(`/api/ai/requests/${body.requestId}/events`).set(headers("b")).expect(403);
+    const old = await request(runtime.app).post("/api/ai/chat").set(headers("a")).send(body).expect(200);
+    expect(old.body.content).toBe("隔离测试回复");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("lists bosses without a default grant and lets only admin enable their isolated AI account", async () => {
     const members = await request(runtime.app).get("/api/admin/ai/members").set(headers("admin")).expect(200);
     expect(members.body.members.find((actor: { id: string }) => actor.id === sessions.boss.id)).toMatchObject({ role: "boss", quota: { limitTokens: 0 } });

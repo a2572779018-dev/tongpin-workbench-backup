@@ -12,6 +12,7 @@ export function createWorkerAiTransport(allowedHosts?: string | readonly string[
   const configured = typeof allowedHosts === "string" ? allowedHosts.split(/[\s,]+/) : allowedHosts ?? DEFAULT_AI_HOSTS;
   const hosts = new Set(configured.map(host => host.trim().toLowerCase()).filter(host => /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]+$/.test(host)));
   return async (target, init) => {
+  if (init.body !== undefined && init.binaryBody !== undefined) throw new AiError(400, "AI_TRANSPORT_BODY_INVALID", "请求不能同时包含 JSON 和二进制内容", true);
   const url = new URL(target);
   safeBaseUrl(url.origin);
   if (!hosts.has(url.hostname.toLowerCase())) throw new AiError(400, "AI_HOST_NOT_ALLOWED", "该 API 域名尚未列入服务器允许名单，请先在部署配置中添加准确域名", true);
@@ -29,8 +30,8 @@ export function createWorkerAiTransport(allowedHosts?: string | readonly string[
   })); } catch { throw new AiError(502, "AI_DNS_FAILED", "暂时无法验证 AI 服务的公网地址，请稍后重试", true); }
   const addresses = lookups.flat();
   if (!addresses.length || addresses.some(address => !isPublicIp(address))) throw new AiError(400, "AI_URL_UNSAFE", "API 域名必须解析到公网地址", true);
-  const { maxResponseBytes: _limit, ...requestInit } = init;
-  return fetcher(target, { ...requestInit, redirect: "manual" });
+  const { maxResponseBytes: _limit, binaryBody, ...requestInit } = init;
+  return fetcher(target, { ...requestInit, ...(binaryBody ? { body: new Uint8Array(binaryBody) } : {}), redirect: "manual" });
   };
 }
 export const workerAiTransport: AiTransport = createWorkerAiTransport();

@@ -585,7 +585,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       env.AI_ALLOWED_HOSTS,
       () => env.TONGPIN_H3_API_KEY ?? "",
       (tenantId, userId) => this.sql.exec<{ id: string }>(
-        "SELECT id FROM users WHERE tenant_id = ? AND id = ? AND status = 'active' LIMIT 1",
+        "SELECT id FROM users WHERE tenant_id = ? AND id = ? AND status = 'active' AND role IN ('member','boss') LIMIT 1",
         tenantId,
         userId,
       ).toArray().length === 1,
@@ -872,13 +872,17 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         const user = await this.requireUser(request, path.startsWith("/api/admin/") ? ["admin"] : undefined);
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
         if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);
-        return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray(), this.difyRouteOptions());
+        return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray(), this.difyRouteOptions(), task => this.ctx.waitUntil(task));
       }
 
       if (path === AI_INTERNAL_AGENT_TICK_PATH) {
         if (method !== "POST") throw new ApiError(405, "METHOD_NOT_ALLOWED", "请求方法不允许");
         this.ensureAiSchemaReady();
-        return json(await this.ai.service.runBackgroundAgentCycle(4));
+        const [agent, media] = await Promise.all([
+          this.ai.service.runBackgroundAgentCycle(4),
+          this.ai.service.runBackgroundMediaCycle(4),
+        ]);
+        return json({ agent, media });
       }
 
       if (path === LORA_INTERNAL_COLLECT_PATH) {

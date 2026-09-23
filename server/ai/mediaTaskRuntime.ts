@@ -392,6 +392,18 @@ export class MediaTaskRuntime {
     }
     return candidates;
   }
+  /** A disabled account must not monopolize the bounded scheduler window.
+   * This changes only the next inspection time, never consent or paid state. */
+  deferInactive(userId: string, runId: string): MediaTaskRun {
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      if (run.dueAt === null || run.dueAt > this.now() || !["queued", "planning", "awaiting_input", "awaiting_authorization", "running", "partial"].includes(run.status)) {
+        return clone(run);
+      }
+      run.dueAt = this.now() + 5 * 60_000;
+      return this.update(run);
+    });
+  }
   claimPlanning(userId: string, runId: string): MediaTaskRun | null {
     return this.store.sql.transaction(() => {
       const run = this.required(userId, runId);
@@ -462,6 +474,19 @@ export class MediaTaskRuntime {
       run.attemptId = crypto.randomUUID();
       run.status = "queued";
       run.dueAt = this.now();
+      return this.update(run);
+    });
+  }
+  /** An unanswered clarification expires without selecting an option, granting
+   * budget, or starting a provider call. */
+  expireInput(userId: string, runId: string): MediaTaskRun {
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      if (run.status !== "awaiting_input" || !run.freeQuestion || run.freeQuestion.answer !== undefined) return clone(run);
+      if (run.freeQuestion.deadlineAt > this.now()) return clone(run);
+      run.status = "failed";
+      run.errorCode = "AI_MEDIA_TASK_INPUT_TIMEOUT";
+      run.dueAt = null;
       return this.update(run);
     });
   }

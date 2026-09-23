@@ -3,13 +3,15 @@ import type { StoredProvider } from "./storage";
 import { AiError } from "./security";
 import { chatInstructions, chatMessages, safeSource } from "./capabilities";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
-import { createSearchStreamGuard } from "./searchStreamGuard";
+import { consumeProviderResponse, type ProviderReadOptions } from "./providerStream";
 import { AI_WORKSPACE_LIMITS } from "../../shared/aiWorkspace";
 
 export interface AiTransportInit {
   method: "GET" | "POST";
   headers: Record<string, string>;
   body?: string;
+  /** Bounded multipart media payload; mutually exclusive with a JSON body. */
+  binaryBody?: Uint8Array;
   signal: AbortSignal;
   maxResponseBytes?: number;
 }
@@ -45,28 +47,9 @@ export async function readBoundedJson(response: Response, maxBytes = 2_000_000):
   try { return JSON.parse(text) as unknown; }
   catch { throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称"); }
 }
-/** Codex-compatible relays may require Responses SSE. Aggregate only a terminal response, never invent a successful stream. */
-export async function readProviderResponse(response: Response, options: { maxSearchCalls?: number } = {}): Promise<unknown> {
-  const guard = options.maxSearchCalls === undefined ? undefined : createSearchStreamGuard(options.maxSearchCalls);
-  const text = await readBoundedText(response, 2_000_000, guard?.feed);
-  if (!response.headers.get("content-type")?.includes("text/event-stream") && !text.trimStart().startsWith("event:") && !text.trimStart().startsWith("data:")) {
-    try { const value = JSON.parse(text) as unknown; guard?.inspectResponse(value); return value; }
-    catch (error) { if (error instanceof AiError) throw error; throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称"); }
-  }
-  let completed: unknown;
-  for (const block of text.replace(/\r\n/g, "\n").split("\n\n")) {
-    const data = block.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n");
-    if (!data || data === "[DONE]") continue;
-    let event: Record<string, unknown>;
-    try { event = object(JSON.parse(data)); }
-    catch { throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回了损坏的数据流"); }
-    if (event.type === "error" || event.type === "response.failed") throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务未完成生成，请管理员检查模型和接口配置");
-    if (event.type === "response.completed" || event.type === "response.incomplete") completed = { ...object(event.response), status: event.type === "response.incomplete" ? "incomplete" : "completed" };
-  }
-  if (!completed) throw new AiError(502, "AI_STREAM_INTERRUPTED", "AI 数据流中断，用量暂按预留上限记录，请管理员核对");
-  // Also reconcile events arriving after the terminal envelope before accepting its usage.
-  guard?.inspectResponse(completed);
-  return completed;
+/** Shared streaming decoder; callbacks run before the upstream body closes. */
+export async function readProviderResponse(response: Response, options: ProviderReadOptions = {}): Promise<unknown> {
+  return consumeProviderResponse(response, options);
 }
 /** Only explicit pre-generation HTTP refusals release a reservation. A timeout/conflict may follow paid work. */
 export function isProviderRejection(status: number): boolean {
@@ -160,7 +143,7 @@ export async function readProviderHttpError(response: Response, operation: AiPro
   return providerHttpError(response.status, operation, metadata);
 }
 export function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
-export function parseProviderResult(value: unknown, protocol: StoredProvider["protocol"]): { content: string; usage: AiUsage | null; status?: string; sources: AiSource[]; searchCalls: number; completedSearchCalls: number } {
+export function parseProviderResult(value: unknown, protocol: StoredProvider["protocol"]): { content: string; usage: AiUsage | null; status?: string; incompleteReason?: "output_limit" | "stream_interrupted"; sources: AiSource[]; searchCalls: number; completedSearchCalls: number } {
   const root = object(value);
   const sources: AiSource[] = [];
   let searchCalls = 0;
@@ -206,9 +189,10 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
   const choice = Array.isArray(root.choices) ? object(root.choices[0]) : {};
   const status = root.error ? "failed" : protocol === "responses" ? typeof root.status === "string" ? root.status : undefined
     : choice.finish_reason === "length" ? "incomplete" : typeof choice.finish_reason === "string" && choice.finish_reason !== "stop" ? "failed" : undefined;
-  return { content, usage, sources, searchCalls, completedSearchCalls, status };
+  const incompleteReason = status === "incomplete" ? object(root.incomplete_details).reason === "stream_interrupted" ? "stream_interrupted" : "output_limit" : undefined;
+  return { content, usage, sources, searchCalls, completedSearchCalls, status, ...(incompleteReason ? { incompleteReason } : {}) };
 }
-export function providerBody(provider: StoredProvider, request: AiChatRequest, model: string, maxOutputTokens: number, persona?: AiPersonaProfile): Record<string, unknown> {
+export function providerBody(provider: StoredProvider, request: AiChatRequest, model: string, maxOutputTokens: number, persona?: AiPersonaProfile, options: { stream?: boolean } = {}): Record<string, unknown> {
   const messages = chatMessages(request);
   const images = request.attachments?.filter(item => item.dataUrl) ?? [];
   const instructions = chatInstructions(request, persona, model);
@@ -225,7 +209,8 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
   return {
     model, messages: [{ role: "system", content: instructions }, ...messages.map((message, index) => images.length && index === messages.length - 1
       ? { role: message.role, content: [{ type: "text", text: message.content }, ...images.map(item => ({ type: "image_url", image_url: { url: item.dataUrl, detail: "low" } }))] }
-      : message)], ...(isBaiChat ? { max_tokens: maxOutputTokens } : { max_completion_tokens: maxOutputTokens }), stream: false,
+      : message)], ...(isBaiChat ? { max_tokens: maxOutputTokens } : { max_completion_tokens: maxOutputTokens }), stream: options.stream === true,
+    ...(options.stream ? { stream_options: { include_usage: true } } : {}),
     ...(!isBaiChat && (request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning_effort: provider.reasoningEffort } : {}),
   };
 }

@@ -1,4 +1,5 @@
 import type { AiWorkflowId } from "./aiWorkflows";
+import type { AiImageEditCapability } from "./aiImageCapabilities";
 
 /** Browser-safe contract. API credentials and prompts never appear in admin usage records. */
 export type AiProtocol = "chat_completions" | "responses";
@@ -40,6 +41,8 @@ export interface AiHarnessTierRoute {
   /** OpenAI-compatible Images API route for this business tier. */
   imageProviderId?: string;
   imageModelId?: string;
+  /** Admin-confirmed edit protocol bound to this exact media URL and model. */
+  imageEditCapability?: AiImageEditCapability;
   /** 75API video route for this business tier. Other video protocols fail closed. */
   videoProviderId?: string;
   videoModelId?: string;
@@ -230,6 +233,19 @@ export interface AiUsageEntry extends AiUsage {
   limitTokens: number | null;
   actorId: string | null;
   diagnostic?: AiProviderDiagnostic;
+  /** Admin-only protocol diagnostics, never prompts or raw provider payloads. */
+  generation?: AiGenerationDiagnostic;
+}
+export interface AiGenerationDiagnostic {
+  protocol: "responses" | "chat_completions";
+  outputLimit: number;
+  durationMs: number;
+  status: "completed" | "incomplete" | "failed" | "unknown";
+  finishReason?: "stop" | "length" | "content_filter" | "tool_calls";
+  incompleteReason?: "max_output_tokens" | "content_filter" | "stream_interrupted" | "unknown";
+  reasoningTokens?: number;
+  actualUsage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  providerRequestId?: string;
 }
 export interface AiStatus {
   /** Server-owned entitlement: a positive quota was granted, even if now exhausted. */
@@ -240,6 +256,8 @@ export interface AiStatus {
   maxOutputTokens: number;
   quota: AiQuota;
   imageEnabled?: boolean;
+  /** Verified business routes with an explicitly configured image edit adapter. */
+  imageEditTiers?: AiMode[];
   imageQuotaTokens?: number;
   visionEnabled?: boolean;
   webSearchEnabled?: boolean;
@@ -306,6 +324,9 @@ export type AiDispatchDecision =
 export interface AiSource { title: string; url: string }
 export interface AiChatRequest {
   requestId: string;
+  /** Explicit user retry creates a new attempt; polling never does. */
+  retryOf?: string;
+  retryMode?: "regenerate" | "continue";
   mode: AiMode;
   /** Stable local conversation identity; allows bounded parallel conversations. */
   conversationId?: string;
@@ -347,6 +368,8 @@ export interface AiChatPreflight {
 }
 export interface AiChatResponse {
   requestId: string;
+  attempt?: { runId: string; attemptId: string; parentAttemptId?: string };
+  completion?: { state: "partial"; reason: "output_limit" | "stream_interrupted"; canContinue: boolean };
   content: string;
   /** Optional model-authored public explanation extracted from an explicit
    * <analysis_summary> block. Never populated from hidden reasoning fields. */

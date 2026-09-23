@@ -3,6 +3,7 @@ import { AiError } from "../../../server/ai/security";
 import { ApiError, json, type UserRow } from "../platform";
 import type { AiMode } from "../../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
+import { createChatStreamResponse } from "../../../server/ai/chatStream";
 import { createDifyGrantResponse, type DifyRouteOptions } from "../../../server/ai/difyRuntimeRoutes";
 import {
   createAiServiceMediaTaskOrchestrator,
@@ -45,7 +46,7 @@ async function parseAiJson<T = unknown>(request: Request): Promise<T> {
   const reader = request.body.getReader();
   const decoder = new TextDecoder();
   let size = 0, text = "";
-  const limit = ["/api/ai/chat", "/api/ai/preflight"].includes(new URL(request.url).pathname) ? 1600 * 1024 : 768 * 1024;
+  const limit = ["/api/ai/chat", "/api/ai/chat/stream", "/api/ai/preflight"].includes(new URL(request.url).pathname) ? 1600 * 1024 : 768 * 1024;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -81,6 +82,7 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (videoReconcile && method === "POST") return json({ job: service.video.reconcile(videoReconcile[1], videoReconcile[2], user.id, await parseAiJson(request)) });
     if (path === "/api/ai/videos" && method === "GET") return json(service.video.list(user.id, videoTier(url.searchParams.get("tier"))));
     if (path === "/api/ai/video-references" && method === "POST") return json(await service.video.uploadReference(user.id, await parseAiJson(request)));
+    if (path === "/api/ai/video-references/generated-asset" && method === "POST") return json(await service.video.generatedReferenceSource(user.id, await parseAiJson(request)));
     if (path === "/api/ai/videos" && method === "POST") return json({ job: await service.video.submit(user.id, await parseAiJson(request)) });
     const videoMatch = path.match(/^\/api\/ai\/videos\/([^/]+)(\/content)?$/);
     if (videoMatch && method === "GET") return videoMatch[2] ? await service.video.content(user.id, videoMatch[1]) : json({ job: await service.video.refresh(user.id, videoMatch[1]) });
@@ -136,6 +138,9 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (path === "/api/ai/usage" && method === "GET") { service.quota(user.id); return json({ entries: service.memberUsage(user.id) }); }
     if (path === "/api/ai/preflight" && method === "POST") return json(service.preflight(user.id, await parseAiJson(request)));
     if (path === "/api/ai/chat" && method === "POST") return json(await service.chat(user.id, await parseAiJson(request)));
+    if (path === "/api/ai/chat/stream" && method === "POST") return createChatStreamResponse(service, user.id, await parseAiJson(request), keepAlive);
+    const eventMatch = path.match(/^\/api\/ai\/requests\/([^/]+)\/events$/);
+    if (eventMatch && method === "GET") return json({ events: service.getRunEvents(user.id, decodeURIComponent(eventMatch[1]), Number(url.searchParams.get("after") ?? 0)) });
     if (path === "/api/ai/media-tasks" && method === "POST") {
       const body = mediaTaskJson(await parseAiJson(request));
       const task = mediaTaskScope(await createAiServiceMediaTaskOrchestrator(service).submit(user.id, {

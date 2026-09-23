@@ -120,7 +120,7 @@ describe("AI transactional service", () => {
     const first = await runtime.service.chat("member-a", request);
     expect(first).toMatchObject({ content: markdown, analysisSummary, dispatch: { kind: "text", content: markdown, analysisSummary }, usage: { totalTokens: 32 } });
     expect(runtime.store.request("member-a", request.requestId)?.result?.dispatch).toEqual({ kind: "text", content: markdown, analysisSummary });
-    expect(JSON.parse(transport.mock.calls[0][1].body!).messages[0].content).toContain("服务端任务分派器");
+    expect(JSON.parse(transport.mock.calls[0][1].body!).messages[0].content).toContain("不要把整篇回答包装成 JSON");
     await expect(runtime.service.chat("member-a", request)).resolves.toMatchObject({ dispatch: { kind: "text" } });
     expect(transport).toHaveBeenCalledTimes(1);
   });
@@ -283,7 +283,7 @@ describe("AI transactional service", () => {
     const result = await runtime.service.chat("member-a", chat());
     expect(result).toMatchObject({ content: "完整回复", usage: { totalTokens: 16, estimated: false } });
     transport.mockResolvedValueOnce(new Response('data: {"type":"response.output_text.delta","delta":"半句"}\n\n', { headers: { "content-type": "text/event-stream" } }));
-    await expect(runtime.service.chat("member-a", chat())).rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+    await expect(runtime.service.chat("member-a", chat())).resolves.toMatchObject({ completion: { state: "partial", reason: "stream_interrupted", canContinue: false } });
     expect(runtime.store.usage("member-a")[0]).toMatchObject({ status: "uncertain", estimated: true });
   });
   it.each(["responses", "chat_completions"] as const)("rejects an unpersistable %s reply without truncating, losing request state or generating twice", async protocol => {
@@ -316,7 +316,7 @@ describe("AI transactional service", () => {
     expect(result.content).toBe("中文最终回复");
     expect(result.usage).toMatchObject({ inputTokens: 18, outputTokens: 32, totalTokens: 50, estimated: false });
   });
-  it.each(["response.failed", "error", "response.incomplete"])("does not report SSE %s as successful chat", async type => {
+  it.each(["response.failed", "error"])("does not report SSE %s as successful chat", async type => {
     await runtime.service.saveProvider({ ...provider, protocol: "responses" });
     runtime.service.setQuota("member-a", "admin", { limitTokens: 5000 });
     const event = { type, response: { output_text: "不完整文字", usage: { input_tokens: 12, output_tokens: 5, total_tokens: 17 } } };

@@ -96,7 +96,7 @@ export async function createRuntime(
   const store = await JsonStore.open(config.dataFile);
   await ensureBootstrapAdmin(store, config);
   const ai = await createNodeAi(config.dataFile, options.aiTransport, (tenantId, userId) => store.read(database => database.users.some(user =>
-    user.id === userId && user.status === "active" && aiTenantIdFromPrincipal(user) === tenantId,
+    user.id === userId && user.status === "active" && (user.role === "member" || user.role === "boss") && aiTenantIdFromPrincipal(user) === tenantId,
   )));
   const aiWorkspace = new AiWorkspaceRepository(ai.store.sql);
   aiWorkspace.initialize();

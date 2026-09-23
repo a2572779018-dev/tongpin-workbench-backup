@@ -116,13 +116,14 @@ function documents(value: unknown, label: string): void {
     string(doc.content, "文件内容", LIMITS.documentCharacters);
     if (doc.createdAt !== undefined) string(doc.createdAt, "文件时间", 80);
     if (doc.media !== undefined) {
-      const media = record(doc.media, "视觉附件", ["kind", "frames", "durationSeconds"]);
+      const media = record(doc.media, "视觉附件", ["kind", "frames", "durationSeconds", "selectedFrameIndex"]);
       if (media.kind !== "image" && media.kind !== "video") invalid("视觉附件类型无效");
       if (media.kind === "video") {
         if (typeof media.durationSeconds !== "number" || !Number.isFinite(media.durationSeconds) || media.durationSeconds <= 0 || media.durationSeconds > AI_MEDIA_LIMITS.videoSeconds) invalid("视频时长无效");
       } else if (media.durationSeconds !== undefined) invalid("图片不能包含视频时长");
       const frames = array(media.frames, "采样画面", media.kind === "image" ? 1 : AI_MEDIA_LIMITS.videoFrames);
       if (!frames.length) invalid("视觉附件缺少画面");
+      if (media.selectedFrameIndex !== undefined && (media.kind !== "video" || !Number.isInteger(media.selectedFrameIndex) || Number(media.selectedFrameIndex) < 0 || Number(media.selectedFrameIndex) >= frames.length)) invalid("视频参考帧选择无效");
       let previousTime = -1;
       for (const rawFrame of frames) {
         const frame = record(rawFrame, "采样画面", ["dataUrl", "timeSeconds"]);
@@ -259,11 +260,17 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
     totalMessages += messages.length;
     if (totalMessages > LIMITS.totalMessages) tooLarge("消息总数超过上限，原记录未被更改");
     for (const entry of messages) {
-      const message = record(entry, "消息", ["id", "role", "content", "analysisSummary", "time", "startedAt", "status", "artifactId", "requestId", "harnessPlanRequestId", "model", "usage", "attachments", "sources", "trace"]);
+      const message = record(entry, "消息", ["id", "role", "content", "analysisSummary", "completion", "retryDisposition", "taskPhase", "time", "startedAt", "status", "artifactId", "requestId", "harnessPlanRequestId", "model", "usage", "attachments", "sources", "trace"]);
+      if (message.retryDisposition !== undefined && !["recover", "regenerate"].includes(String(message.retryDisposition))) invalid("回复重试方式无效");
       id(message.id, "消息"); unique(message.id, messageIds, "消息");
       if (message.role !== "user" && message.role !== "assistant") invalid("消息角色无效");
       string(message.content, "消息内容", LIMITS.messageCharacters);
       if (message.analysisSummary !== undefined) string(message.analysisSummary, "分析摘要", 1000, true);
+      if (message.taskPhase !== undefined && !["queued", "planning", "awaiting_input", "awaiting_authorization", "running", "partial", "completed", "failed", "cancelled", "unknown"].includes(String(message.taskPhase))) invalid("任务阶段无效");
+      if (message.completion !== undefined) {
+        const completion = record(message.completion, "回复状态", ["state", "reason", "canContinue"]);
+        if (completion.state !== "partial" || !["output_limit", "stream_interrupted"].includes(String(completion.reason)) || typeof completion.canContinue !== "boolean") invalid("回复状态无效");
+      }
       string(message.time, "消息时间", 80);
       if (message.startedAt !== undefined && (!Number.isSafeInteger(message.startedAt) || Number(message.startedAt) < 0)) invalid("消息计时格式不正确");
       if (message.status !== undefined && !["thinking", "typing", "ready", "error", "stopped"].includes(String(message.status))) invalid("消息状态无效");

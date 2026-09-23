@@ -37,6 +37,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   let privateDns = false;
   let sourceResponse = "workerd 中的真实路由回复（上游为隔离 fixture）";
   let lastChatInstructions = "";
+  let streamingBody: ReadableStream<Uint8Array> | undefined;
   let videoCompleted = false;
   const outboundUrls: string[] = [];
   const provider: AiProviderInput = { name: "Workerd fixture", baseUrl: "https://ai-fixture.example.com", apiKey: TEST_API_KEY, protocol: "responses", quickModel: "fixture-fast", deepModel: "fixture-deep", maxOutputTokens: 2048, reasoningEffort: "", enabled: true, imageModel: "fixture-image", imageQuotaTokens: 1000 };
@@ -79,6 +80,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     }
     expect(url.pathname).toBe("/v1/responses");
     lastChatInstructions = String((await request.json() as { instructions?: string }).instructions ?? "");
+    if (streamingBody) { const body = streamingBody; streamingBody = undefined; return new MfResponse(body, { headers: { "Content-Type": "text/event-stream" } }); }
     return MfResponse.json({ status: "completed", output_text: sourceResponse, usage: { input_tokens: 24, output_tokens: 48, total_tokens: 72 } });
   };
   const start = () => new Miniflare({ ...convertV4MiniflareOptions({
@@ -196,6 +198,49 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     expect(postCount).toBe(before + 1);
     await api(`/api/ai/requests/${request.requestId}`, other, undefined, "GET", 404);
     expect((await api<AiStatus>("/api/ai/status", other)).quota.usedTokens).toBe(0);
+  });
+  it("flushes real Worker SSE before provider EOF and replays SQLite events without another generation", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    streamingBody = new ReadableStream({ start(value) { controller = value; } });
+    const body = requestBody(), before = postCount;
+    const response = await mf.dispatchFetch("http://tongpin-fixture.local/api/ai/chat/stream", {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${member.accessToken}`, "X-Tongpin-Account": member.user.id }, body: JSON.stringify(body),
+    });
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const reader = response.body!.getReader(), decoder = new TextDecoder();
+    let received = decoder.decode((await reader.read()).value);
+    expect(received).toContain("run_started");
+    await vi.waitFor(() => expect(postCount).toBe(before + 1));
+    controller.enqueue(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"真实传输首段"}\n\n'));
+    while (!received.includes("answer_delta")) received += decoder.decode((await reader.read()).value);
+    expect(received).toContain("真实传输首段");
+    expect(received).not.toContain("run_finished");
+    controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed","response":{"status":"completed","output_text":"真实传输首段","usage":{"input_tokens":24,"output_tokens":48,"total_tokens":72}}}\n\n'));
+    controller.close();
+    while (true) { const chunk = await reader.read(); if (chunk.done) break; received += decoder.decode(chunk.value); }
+    expect(received).toContain("run_finished");
+    const replay = await api<{ events: Array<{ seq: number; type: string }> }>(`/api/ai/requests/${body.requestId}/events?after=1`, member);
+    expect(replay.events.map(event => event.type)).toEqual(["answer_delta", "run_finished"]);
+    await api(`/api/ai/requests/${body.requestId}/events`, other, undefined, "GET", 403);
+    await api(`/api/ai/requests/${body.requestId}/events?after=-1`, member, undefined, "GET", 400);
+    expect((await api<AiRequestResult>(`/api/ai/requests/${body.requestId}`, member)).result?.content).toBe("真实传输首段");
+    expect(postCount).toBe(before + 1);
+  });
+  it("finishes an accepted Worker generation after the member leaves its stream", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    streamingBody = new ReadableStream({ start(value) { controller = value; } });
+    const body = requestBody(), before = postCount;
+    const response = await mf.dispatchFetch("http://tongpin-fixture.local/api/ai/chat/stream", {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${member.accessToken}`, "X-Tongpin-Account": member.user.id }, body: JSON.stringify(body),
+    });
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("run_started");
+    await reader.cancel();
+    await vi.waitFor(() => expect(postCount).toBe(before + 1));
+    controller.enqueue(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"用户离开后完成"}\n\ndata: {"type":"response.completed","response":{"status":"completed","output_text":"用户离开后完成","usage":{"input_tokens":24,"output_tokens":48,"total_tokens":72}}}\n\n'));
+    controller.close();
+    await vi.waitFor(async () => expect((await api<AiRequestResult>(`/api/ai/requests/${body.requestId}`, member)).result?.content).toBe("用户离开后完成"));
+    expect(postCount).toBe(before + 1);
   });
   it("does not follow redirects with credentials and rejects a private DNS answer inside workerd", async () => {
     redirectNextModels = true;

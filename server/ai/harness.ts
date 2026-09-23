@@ -20,6 +20,8 @@ import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import type { AiStore, StoredHarnessConfig, StoredHarnessProvider, StoredProvider } from "./storage";
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
 import { legacyHarnessDraft } from "./harnessMigration";
+import { parseImageEditCapability } from "./imageCapabilities";
+import type { AiImageEditCapability } from "../../shared/aiImageCapabilities";
 
 const CAPABILITIES = new Set<AiHarnessCapability>(["chat", "vision", "web_search", "image", "video", "presentation", "computer"]);
 const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]{1,47}$/;
@@ -124,6 +126,7 @@ export interface ResolvedHarnessMediaRoute {
   encryptedKey: string;
   modelId: string;
   legacy: boolean;
+  imageEditCapability?: AiImageEditCapability;
 }
 
 export function requestCapability(request: AiChatRequest): AiHarnessCapability {
@@ -199,7 +202,9 @@ export class AiHarness {
     const video = media("video");
     if (capabilities.includes("image") && !image.imageModelId) throw new AiError(400, "AI_HARNESS_IMAGE_ROUTE_REQUIRED", "开放图片生成前，请为此档位选择图片服务和模型");
     if (capabilities.includes("video") && !video.videoModelId) throw new AiError(400, "AI_HARNESS_VIDEO_ROUTE_REQUIRED", "开放视频生成前，请为此档位选择视频服务和模型");
-    return { providerId, modelId, protocol, maxOutputTokens: Number(route.maxOutputTokens), reasoningEffort, capabilities, enabled: route.enabled, ...image, ...video };
+    const imageEditCapability = parseImageEditCapability(route.imageEditCapability);
+    if (imageEditCapability && imageEditCapability.modelId !== image.imageModelId) throw new AiError(400, "AI_IMAGE_EDIT_CAPABILITY_INVALID", "图片编辑协议与所选模型不一致，请重新选择");
+    return { providerId, modelId, protocol, maxOutputTokens: Number(route.maxOutputTokens), reasoningEffort, capabilities, enabled: route.enabled, ...image, ...video, ...(imageEditCapability ? { imageEditCapability } : {}) };
   }
 
   async save(value: unknown): Promise<AiHarnessConfig> {
@@ -235,6 +240,10 @@ export class AiHarness {
     }
     const tiersObject = object(input.tiers);
     const tiers = Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, this.parseTier(tiersObject[tier], ids)])) as Record<AiMode, AiHarnessTierRoute>;
+    for (const tier of AI_BUSINESS_TIERS) {
+      const route = tiers[tier];
+      if (route.imageEditCapability && route.imageEditCapability.baseUrl !== prepared.find(provider => provider.id === route.imageProviderId)?.baseUrl) throw new AiError(400, "AI_IMAGE_EDIT_CAPABILITY_INVALID", "图片服务地址已改变，请重新确认编辑协议");
+    }
     const policy = object(input.policy);
     if (!['direct', 'react', 'plan_execute'].includes(String(policy.strategy))) throw new AiError(400, "AI_HARNESS_INVALID", "代理策略不正确");
     if (!Number.isInteger(policy.maxToolSteps) || Number(policy.maxToolSteps) < 1 || Number(policy.maxToolSteps) > 8) throw new AiError(400, "AI_HARNESS_INVALID", "工具步骤上限需为 1 到 8");
@@ -340,7 +349,8 @@ export class AiHarness {
         throw new AiError(503, "AI_VIDEO_PROTOCOL_UNSUPPORTED", "当前仅对已验证的 75API 视频协议开放执行；其他服务只能保存，不能发起付费生成");
       }
     }
-    return { tier, capability, providerId: provider.id, providerName: provider.name, baseUrl: provider.baseUrl, encryptedKey: provider.encryptedKey, modelId, legacy: false };
+    return { tier, capability, providerId: provider.id, providerName: provider.name, baseUrl: provider.baseUrl, encryptedKey: provider.encryptedKey, modelId, legacy: false,
+      ...(capability === "image" && tierRoute.imageEditCapability ? { imageEditCapability: tierRoute.imageEditCapability } : {}) };
   }
 
   asProvider(route: ResolvedHarnessRoute, legacy: StoredProvider | null): StoredProvider {

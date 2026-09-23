@@ -5,7 +5,7 @@ import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, provid
 import { chatInputReserve, parseChatCapabilities, parseComputerPlan, parsePresentation, parseToolPlan, parseToolClarification, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
-import { imageProviderBody, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse } from "./imageProvider";
+import { prepareImageProviderRequest, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse } from "./imageProvider";
 import { searchCallLimit } from "./searchPolicy";
 import { AiVideoService } from "./videoService";
 import { AvailabilityProbe } from "./availability";
@@ -16,8 +16,12 @@ import { AI_CHAT_CONTEXT_LIMITS, AiCurrentContextTooLongError, fitAiChatMessages
 import { claimToolPlan, toolPlanContextFingerprint, toolPlanExpiry, validateToolPlan } from "./toolPlans";
 import { verifiedBaiAgentModels } from "./modelVerification";
 import { AiHarness, parseHarnessContinuationDecision, requestCapability, validConversationId, type ResolvedHarnessRoute } from "./harness";
-import { parsePublicExplanation, supportsPublicExplanation } from "./publicExplanation";
+import { parsePublicExplanation, parsePublicAnalysisSummary, supportsPublicExplanation } from "./publicExplanation";
 import { parseAiDispatchDecision } from "./dispatch";
+import type { AiRunEvent, AiRunEventPayload } from "../../shared/aiRunEvents";
+import { createVisibleStream } from "./visibleStream";
+import { generationDiagnostic } from "./generationDiagnostic";
+import { createAiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -33,6 +37,16 @@ export interface AiBackgroundAgentCycle {
   completed: number;
   waitingApproval: number;
   pending: number;
+  skippedInactive: number;
+  failed: number;
+}
+
+export interface AiBackgroundMediaCycle {
+  scanned: number;
+  advanced: number;
+  completed: number;
+  awaitingInput: number;
+  awaitingAuthorization: number;
   skippedInactive: number;
   failed: number;
 }
@@ -142,12 +156,13 @@ function parseChat(value: unknown): AiChatRequest {
   });
   if (messages[messages.length - 1].role !== "user") throw new AiError(400, "AI_INPUT_INVALID", "最后一条消息必须是你的提问");
   const capabilities = parseChatCapabilities(p);
+  if ((p.retryOf !== undefined || p.retryMode !== undefined) && (typeof p.retryOf !== "string" || !/^[a-zA-Z0-9_-]{16,100}$/.test(p.retryOf) || p.retryOf === p.requestId || !["regenerate", "continue"].includes(String(p.retryMode)))) throw new AiError(400, "AI_RETRY_INVALID", "重新生成必须使用新的请求标识");
   const textContext: AiChatTextContext = {
     ...(capabilities.projectContext ? { projectContext: capabilities.projectContext } : {}),
     ...(capabilities.attachments?.length ? { attachments: capabilities.attachments.map(({ dataUrl: _image, ...text }) => text) } : {}),
   };
   try {
-    return { requestId: p.requestId, mode: p.mode as AiChatRequest["mode"], conversationId: validConversationId(p.conversationId, p.requestId), messages: fitAiChatMessages(messages, textContext), ...capabilities };
+    return { requestId: p.requestId, mode: p.mode as AiChatRequest["mode"], conversationId: validConversationId(p.conversationId, p.requestId), messages: fitAiChatMessages(messages, textContext), ...capabilities, ...(p.retryOf ? { retryOf: p.retryOf as string, retryMode: p.retryMode as "regenerate" | "continue" } : {}) };
   } catch (error) {
     if (error instanceof AiCurrentContextTooLongError) throw new AiError(400, "AI_CONTEXT_TOO_LONG", error.message);
     throw error;
@@ -457,6 +472,38 @@ export class AiService {
     }
     return result;
   }
+  /** Resume only persisted media steps. A task with an uncertain provider
+   * outcome is observed, never submitted again by this maintenance path. */
+  async runBackgroundMediaCycle(limit = 4): Promise<AiBackgroundMediaCycle> {
+    const bounded = Number.isInteger(limit) ? Math.max(1, Math.min(8, limit)) : 4;
+    const candidates = createAiServiceMediaTaskOrchestrator(this).dueCandidates(32);
+    const result: AiBackgroundMediaCycle = {
+      scanned: 0, advanced: 0, completed: 0, awaitingInput: 0,
+      awaitingAuthorization: 0, skippedInactive: 0, failed: 0,
+    };
+    for (const candidate of candidates) {
+      if (result.advanced >= bounded) break;
+      result.scanned += 1;
+      try {
+        if (!await this.isBackgroundPrincipalActive(candidate.tenantId, candidate.userId)) {
+          createAiServiceMediaTaskOrchestrator(this.forTenant(candidate.tenantId)).runtime
+            .deferInactive(candidate.userId, candidate.runId);
+          result.skippedInactive += 1;
+          continue;
+        }
+        const run = await createAiServiceMediaTaskOrchestrator(this.forTenant(candidate.tenantId))
+          .advance(candidate.userId, candidate.runId);
+        result.advanced += 1;
+        if (run.status === "completed") result.completed += 1;
+        else if (run.status === "awaiting_input") result.awaitingInput += 1;
+        else if (run.status === "awaiting_authorization") result.awaitingAuthorization += 1;
+      } catch {
+        // Never replay a paid submission because one tenant's step failed.
+        result.failed += 1;
+      }
+    }
+    return result;
+  }
   cancelHarnessRun(userId: string, requestId: string): AiHarnessTrace { return this.harness.cancelWaitingRun(userId, requestId); }
   quota(userId: string): AiQuota { this.recover(userId); return this.store.quota(userId); }
   status(userId: string): AiStatus {
@@ -471,7 +518,14 @@ export class AiService {
       return route.enabled && route.capabilities.includes("image") && Boolean(route.imageModelId && provider?.enabled && provider.modelsVerified && provider.availableModels.includes(route.imageModelId));
     }));
     const quota = this.quota(userId);
+    const imageEditTiers = harness ? AI_BUSINESS_TIERS.filter(tier => {
+      const route = harness.tiers[tier], capability = route.imageEditCapability;
+      const connection = harness.providers.find(item => item.id === route.imageProviderId);
+      return Boolean(route.enabled && route.capabilities.includes("image") && capability && connection?.enabled && connection.modelsVerified
+        && connection.availableModels.includes(route.imageModelId ?? "") && capability.modelId === route.imageModelId && capability.baseUrl === connection.baseUrl);
+    }) : [];
     return { accessGranted: this.store.hasAccess(userId), configured, quickModel: "quick", deepModel: "deep", maxOutputTokens: harness?.tiers.quick.maxOutputTokens ?? p?.maxOutputTokens ?? 0, quota,
+      imageEditTiers,
       availableTiers: harness ? AI_BUSINESS_TIERS.filter(tier => harness.tiers[tier].enabled) : ["quick", "deep"], quickAgent: Boolean(p && isTongpinQuickAgent(p.quickModel)),
       imageEnabled: Boolean(configured && p?.imageQuotaTokens && (this.store.harness() ? harnessImageConfigured : p.imageModel && p.imageApiKeyConfigured)), imageQuotaTokens: p?.imageQuotaTokens ?? 0,
       visionEnabled: Boolean(configured && (this.store.harness() ? AI_BUSINESS_TIERS.some(tier => harness!.tiers[tier].enabled && harness!.tiers[tier].capabilities.includes("vision")) : p?.visionEnabled)),
@@ -479,7 +533,7 @@ export class AiService {
   }
   members(users: MemberIdentity[]): AiMember[] { return users.map(user => ({ ...user, quota: this.quota(user.id) })); }
   memberUsage(userId: string) {
-    return this.store.usage(userId).map(entry => ({ ...entry, model: entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
+    return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
   }
   private chatSelection(request: AiChatRequest): { provider: StoredProvider; route: ResolvedHarnessRoute } {
     const saved = this.store.provider();
@@ -496,7 +550,14 @@ export class AiService {
       request.webSearch = Boolean((route.legacy || route.policy.strategy !== "direct") && route.policy.autoWebSearch && needsOnlineEvidence(latestUserText) && provider.protocol === "responses" && provider.webSearchEnabled && provider.webSearchQuotaTokens);
     }
     if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
-    if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) throw new AiError(403, "AI_VISION_DISABLED", "管理员尚未启用图片理解，请上传可提取文字的文档");
+    if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) {
+      if (request.outputFormat !== "image_plan") throw new AiError(403, "AI_VISION_DISABLED", "管理员尚未启用图片理解，请上传可提取文字的文档");
+      const media = this.harness.resolveMedia(request.mode, saved, "image");
+      // Editing can preserve opaque reference bytes without asking a text-only
+      // planner to pretend it has seen them. Validate that tool route separately.
+      if (!media) throw new AiError(403, "AI_IMAGE_EDIT_UNSUPPORTED", "此档位尚未配置参考图编辑接口");
+      prepareImageProviderRequest({ baseUrl: media.baseUrl, modelId: media.modelId, prompt: "参考图编辑能力检查", attachments: request.attachments, editCapability: media.imageEditCapability });
+    }
     return { provider, route };
   }
   private bindVideoTierParameters(request: AiChatRequest): void {
@@ -577,7 +638,7 @@ export class AiService {
       }
     });
   }
-  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "trace">, images?: AiImageResponse["images"]): boolean {
+  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "completion" | "attempt" | "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "trace">, images?: AiImageResponse["images"]): boolean {
     if (this.store.request(request.userId, request.requestId)?.status !== "pending") return false;
     if (!extras?.trace && this.store.harnessRun(request.userId, request.requestId)?.status === "running") {
       const trace = this.harness.finishRun(request.userId, request.requestId, status === "completed" ? "succeeded" : status);
@@ -587,22 +648,28 @@ export class AiService {
     q.reservedTokens = Math.max(0, q.reservedTokens - totalReserved(request));
     q.usedTokens += usage.totalTokens; q.inputTokens += usage.inputTokens; q.outputTokens += usage.outputTokens;
     request.status = status;
-    if (content !== undefined) request.result = { requestId: request.requestId, model: AI_BUSINESS_TIER_LABELS[request.mode], content, usage, ...extras };
+    if (content !== undefined) request.result = { requestId: request.requestId, model: AI_BUSINESS_TIER_LABELS[request.mode], content, usage, ...(request.attempt ? { attempt: request.attempt } : {}), ...extras };
     if (extras?.toolPlan) request.toolPlanExpiresAt = toolPlanExpiry();
     if (images !== undefined) request.imageResult = { requestId: request.requestId, model: "图片生成", images, usage };
     if (error) request.error = { status: error.status, code: error.code, message: error.message, ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}) };
     this.store.saveQuota(request.userId, q);
     this.store.saveRequest(request);
-    this.store.addUsage({ id: crypto.randomUUID(), userId: request.userId, actorId: null, requestId: request.requestId, kind: request.kind ?? "chat", status, model: request.model, mode: request.mode, createdAt: new Date().toISOString(), reason, limitTokens: null, ...usage, ...(error?.diagnostic ? { diagnostic: error.diagnostic } : {}) });
+    this.store.addUsage({ id: crypto.randomUUID(), userId: request.userId, actorId: null, requestId: request.requestId, kind: request.kind ?? "chat", status, model: request.model, mode: request.mode, createdAt: new Date().toISOString(), reason, limitTokens: null, ...usage, ...(request.generation ? { generation: request.generation } : {}), ...(error?.diagnostic ? { diagnostic: error.diagnostic } : {}) });
     const run = this.store.harnessRun(request.userId, request.requestId);
     const capability = run?.capability ?? (request.kind === "image" ? "image" : "chat");
     const operation = request.kind === "image" || (capability === "presentation" && Boolean(request.toolPlanRequestId)) ? "execution" : capability === "image" || capability === "video" || capability === "presentation" || capability === "computer" ? "planning" : "execution";
     this.store.addObservability({ userId: request.userId, tier: request.mode, providerId: request.providerId ?? run?.providerId ?? "legacy", capability, operation, success: status === "completed", latencyMs: Date.now() - Date.parse(request.createdAt), ...(error ? { errorCode: error.code } : {}) });
     return true;
   }
-  async chat(userId: string, value: unknown): Promise<AiChatResponse> {
+  getRunEvents(userId: string, requestId: string, after = 0): AiRunEvent[] {
     this.store.assertAccess(userId);
-    const request = parseChat(value);
+    if (!Number.isSafeInteger(after) || after < 0) throw new AiError(400, "AI_EVENT_CURSOR_INVALID", "事件游标无效");
+    if (!this.store.request(userId, requestId)) throw new AiError(404, "AI_REQUEST_NOT_FOUND", "没有找到这条请求");
+    return this.store.runEvents(userId, requestId, after);
+  }
+  async chat(userId: string, value: unknown, options: { stream?: boolean; onEvent?: (event: AiRunEvent) => void } = {}): Promise<AiChatResponse> {
+    this.store.assertAccess(userId);
+    let request = parseChat(value);
     this.bindVideoTierParameters(request);
     const { requestId: _requestId, ...hashable } = request;
     const hash = await requestHash(hashable);
@@ -619,6 +686,18 @@ export class AiService {
       if (prior.result) return { ...memberChatResult(prior.result), model: AI_BUSINESS_TIER_LABELS[prior.mode], quota: this.quota(userId) };
       if (prior.error) throw new AiError(prior.error.status, prior.error.code, prior.error.message, false, undefined, prior.error.diagnostic);
       throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "AI 正在处理这条消息，请稍候");
+    }
+    let parentAttempt: StoredRequest | undefined;
+    if (request.retryOf) {
+      parentAttempt = this.store.request(userId, request.retryOf);
+      if (!parentAttempt || parentAttempt.conversationId !== request.conversationId) throw new AiError(404, "AI_RETRY_NOT_FOUND", "没有找到本对话的原请求");
+      const snapshot = this.store.requestSnapshot(userId, request.retryOf);
+      if (!snapshot || parentAttempt.kind !== "chat" || parentAttempt.status === "pending" || parentAttempt.status === "uncertain" && (!parentAttempt.result || parentAttempt.result.usage.estimated)) throw new AiError(409, "AI_RETRY_UNSAFE", "原请求仍在处理或用量待核对，请先获取原请求结果");
+      const original = parseChat(snapshot);
+      if (original.outputFormat && !["text", "dispatch"].includes(original.outputFormat) || original.skillIds?.includes("agent-continuation-v1") || parentAttempt.result?.dispatch && parentAttempt.result.dispatch.kind !== "text") throw new AiError(409, "AI_RETRY_UNSAFE", "工具任务需要重新确认，不能作为文字回复重试");
+      if (request.retryMode === "continue" && !parentAttempt.result?.completion?.canContinue) throw new AiError(409, "AI_RETRY_UNSAFE", "这条回复当前不能续写");
+      const retry = { requestId: request.requestId, retryOf: request.retryOf, retryMode: request.retryMode };
+      request = { ...original, ...retry, ...(retry.retryMode === "continue" ? { messages: fitAiChatMessages([...original.messages, { role: "assistant", content: parentAttempt.result!.content }, { role: "user", content: "继续刚才未完成的回复，不重复已有内容。" }]) } : {}) };
     }
     if (request.outputFormat === "presentation") {
       const prompt = request.messages.at(-1)?.content ?? "";
@@ -647,24 +726,69 @@ export class AiService {
       q.reservedTokens += totalReserved(pending);
       this.store.saveQuota(userId, q); this.store.saveRequest(pending);
       pending.harnessRunId = this.harness.startRun(userId, request, route);
+      pending.attempt = { runId: parentAttempt?.attempt?.runId ?? parentAttempt?.harnessRunId ?? pending.harnessRunId ?? request.requestId, attemptId: request.requestId, ...(request.retryOf ? { parentAttemptId: request.retryOf } : {}) };
+      this.store.saveRequestSnapshot(userId, request.requestId, request);
       this.store.saveRequest(pending);
       return pending;
     });
     let knownRejection = false;
+    const emit = (payload: AiRunEventPayload) => {
+      if (!options.stream) return;
+      const event = this.store.appendRunEvent(userId, request.requestId, payload);
+      try { options.onEvent?.(event); } catch { /* A closed subscriber cannot change billing or cancel an accepted task. */ }
+    };
+    let deltaBuffer = "", lastFlush = 0;
+    const flush = () => { if (deltaBuffer) { emit({ type: "answer_delta", data: { delta: deltaBuffer } }); deltaBuffer = ""; lastFlush = Date.now(); } };
+    const visible = createVisibleStream(request.mode, delta => { deltaBuffer += delta; if (deltaBuffer.length >= 256 || Date.now() - lastFlush >= 80) flush(); }, delta => emit({ type: "public_summary_delta", data: { delta } }));
+    const canStream = (!request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch") && !request.skillIds?.includes("agent-continuation-v1");
+    let providerSummary = "", summaryRejected = false;
+    const publicSummary = (delta: string) => {
+      if (summaryRejected) return;
+      if (!providerSummary) { delta = delta.trimStart(); if (!delta) return; }
+      providerSummary += delta;
+      if (/[<>]/.test(providerSummary) || !parsePublicAnalysisSummary(providerSummary, request.mode)) { summaryRejected = true; providerSummary = ""; return; }
+      emit({ type: "public_summary_delta", data: { delta } });
+    };
     try {
+      emit({ type: "run_started", data: { startedAt: Date.parse(reserved.createdAt) } });
       const response = await this.transport(`${provider.baseUrl}/${provider.protocol === "responses" ? "responses" : "chat/completions"}`, {
         method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: provider.protocol === "responses" ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify(providerBody(provider, request, model, reserved.outputReserve, persona)), signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+        body: JSON.stringify(providerBody(provider, request.outputFormat === "image_plan" && !provider.visionEnabled && request.attachments?.some(item => item.dataUrl)
+          ? { ...request, attachments: request.attachments.map(({ dataUrl: _visual, ...item }) => ({ ...item, text: `${item.text ?? item.name}\n此参考图仅交给图片编辑服务，本次文字规划未看到画面。仅组织用户要求，不描述或猜测图中内容。` })) }
+          : request, model, reserved.outputReserve, persona, { stream: options.stream && canStream })), signal: AbortSignal.timeout(AI_TIMEOUT_MS),
       });
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "chat"); }
       const maxSearchCalls = request.webSearch ? searchCallLimit(provider) : 0;
-      const result = parseProviderResult(await readProviderResponse(response, { maxSearchCalls }), provider.protocol);
+      const rawResult = await readProviderResponse(response, { maxSearchCalls, ...(options.stream && canStream ? { onTextDelta: (delta: string) => visible.feed(delta), onPublicSummaryDelta: publicSummary } : {}) });
+      const result = parseProviderResult(rawResult, provider.protocol);
+      reserved.generation = generationDiagnostic(rawResult, response.headers, provider.protocol, reserved.outputReserve, Date.parse(reserved.createdAt), result.usage);
+      flush();
       const publicExplanation = supportsPublicExplanation(request)
         ? parsePublicExplanation(result.content, request.mode)
         : { content: result.content };
+      if (!summaryRejected && providerSummary && supportsPublicExplanation(request)) publicExplanation.analysisSummary ??= providerSummary;
       const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= maxSearchCalls);
       const convertedTokens = request.webSearch ? provider.webSearchQuotaTokens! * result.searchCalls : 0;
       const usage: AiUsage = validUsage ? { ...result.usage!, ...(request.webSearch ? { searchCalls: result.searchCalls, tokenUsageEstimated: false } : {}), ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind: "tokens_with_search" } : {}) } : conservativeUsage(reserved);
+      const ordinaryOutput = (!request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch") && !request.skillIds?.includes("agent-continuation-v1");
+      let partialText: string | undefined;
+      if (result.status === "incomplete" && publicExplanation.content.trim() && ordinaryOutput) {
+        try {
+          const decision = parseAiDispatchDecision(publicExplanation.content, request.mode, { allowPlainText: true });
+          if (decision.kind === "text") partialText = decision.content;
+        } catch { /* Never salvage a truncated action envelope. */ }
+      }
+      if (partialText && (!request.webSearch || result.searchCalls <= maxSearchCalls && result.completedSearchCalls === result.searchCalls)) {
+        const completion: AiChatResponse["completion"] = { state: "partial", reason: result.incompleteReason ?? "output_limit", canContinue: validUsage };
+        const extras = { completion, ...(publicExplanation.analysisSummary ? { analysisSummary: publicExplanation.analysisSummary } : {}) };
+        this.store.sql.transaction(() => {
+          const trace = this.harness.finishRun(userId, request.requestId, "uncertain");
+          this.settle(reserved, usage, "uncertain", validUsage ? "回复截断，保留正文并按实际用量记录" : "数据流中断，保留正文，用量待核对", partialText, undefined, { ...extras, ...(trace ? { trace } : {}) });
+        });
+        const partialResponse = { ...memberChatResult(this.store.request(userId, request.requestId)!.result!), quota: this.store.quota(userId) };
+        emit({ type: "run_finished", data: { response: partialResponse } });
+        return partialResponse;
+      }
       if (!publicExplanation.content.trim() || (result.status !== undefined && result.status !== "completed")) {
         const error = result.status === "incomplete"
           ? new AiError(502, "AI_RESPONSE_INCOMPLETE", "AI 未能完成回复，可能达到输出上限，请管理员调整模型或单次输出上限")
@@ -689,7 +813,7 @@ export class AiService {
       let dispatch: AiChatResponse["dispatch"];
       let computerPlan: AiChatResponse["computerPlan"];
       if (request.outputFormat === "dispatch") {
-        try { dispatch = parseAiDispatchDecision(publicExplanation.content, request.mode); }
+        try { dispatch = parseAiDispatchDecision(publicExplanation.content, request.mode, { allowPlainText: true }); }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_DISPATCH_INVALID", "同频 AI 返回的任务类型不正确");
           this.store.sql.transaction(() => this.settle(reserved, usage, validUsage ? "failed" : "uncertain", "任务分派结果未通过应用校验，已记录模型生成用量", undefined, safe));
@@ -741,7 +865,9 @@ export class AiService {
         throw new AiError(final?.error?.status ?? 502, final?.error?.code ?? "AI_REQUEST_UNCERTAIN", final?.error?.message ?? "请求已按中断记录，请管理员核对用量");
       }
       if (request.outputFormat === "presentation" && request.toolPlanRequestId) this.store.sql.transaction(() => this.harness.finishApprovedTool(userId, request.toolPlanRequestId!, "presentation", validUsage ? "succeeded" : "uncertain"));
-      return { ...memberChatResult({ requestId: request.requestId, content, model: AI_BUSINESS_TIER_LABELS[request.mode], usage, ...extras }), quota: this.store.quota(userId) };
+      const finalResponse = { ...memberChatResult({ requestId: request.requestId, content, model: AI_BUSINESS_TIER_LABELS[request.mode], usage, attempt: reserved.attempt, ...extras }), quota: this.store.quota(userId) };
+      emit({ type: "run_finished", data: { response: finalResponse } });
+      return finalResponse;
     } catch (error) {
       const safe = error instanceof AiError ? error : new AiError(502, "AI_CONNECTION_FAILED", "AI 服务连接失败或超时，请稍后重试；不确定用量已记录，请管理员核对");
       this.availabilityProbe.invalidate("chat");
@@ -754,6 +880,7 @@ export class AiService {
         }
         if (request.outputFormat === "presentation" && request.toolPlanRequestId) this.harness.finishApprovedTool(userId, request.toolPlanRequestId, "presentation", knownRejection ? "failed" : "uncertain");
       });
+      emit({ type: "run_failed", data: { error: { code: safe.code, message: safe.message } } });
       throw safe;
     }
   }
@@ -783,6 +910,9 @@ export class AiService {
     const key = await (await this.box()).decrypt(encryptedKey);
     const idempotencyKey = await providerIdempotencyKey(this.store.tenantId, userId, request.requestId, "image");
     const model = mediaRoute?.modelId ?? provider.imageModel!;
+    // Preparation validates both the input and configured adapter before any
+    // quota reservation or one-time plan consumption. No text-only fallback.
+    const preparedImage = prepareImageProviderRequest({ baseUrl, modelId: model, prompt: request.prompt, stream: provider.imageStream, attachments: request.attachments, editCapability: mediaRoute?.imageEditCapability });
     const reserved = this.store.sql.transaction(() => {
       const conversationId = validConversationId(request.conversationId, request.requestId);
       const pendingForUser = this.store.pending(userId);
@@ -803,9 +933,9 @@ export class AiService {
     });
     let knownRejection = false;
     try {
-      const response = await this.transport(`${baseUrl}/images/generations`, {
-        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: provider.imageStream ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify(imageProviderBody({ ...provider, imageModel: model }, request.prompt)),
+      const response = await this.transport(`${baseUrl}${preparedImage.endpoint}`, {
+        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": preparedImage.contentType, Accept: provider.imageStream ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": idempotencyKey },
+        ...(preparedImage.body !== undefined ? { body: preparedImage.body } : {}), ...(preparedImage.binaryBody ? { binaryBody: preparedImage.binaryBody } : {}),
         signal: AbortSignal.timeout(AI_TIMEOUT_MS), maxResponseBytes: MAX_IMAGE_RESPONSE_BYTES,
       });
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "image"); }

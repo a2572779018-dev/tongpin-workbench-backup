@@ -9,7 +9,8 @@ describe("Cloudflare AI agent scheduling policy", () => {
     const scheduled = indexSource.slice(indexSource.indexOf("scheduled("));
     expect(scheduled).toContain("AI_INTERNAL_AGENT_TICK_PATH");
     expect(scheduled).toContain('invoke(AI_INTERNAL_AGENT_TICK_PATH, "AI agent")');
-    expect(coreSource).toContain("await this.ai.service.runBackgroundAgentCycle(4)");
+    expect(coreSource).toContain("this.ai.service.runBackgroundAgentCycle(4)");
+    expect(coreSource).toContain("this.ai.service.runBackgroundMediaCycle(4)");
   });
 
   it("blocks the private tick path before public API forwarding", () => {
