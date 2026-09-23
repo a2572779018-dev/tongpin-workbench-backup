@@ -137,7 +137,7 @@ describe("Cloudflare authenticated media-task routes", () => {
   it("validates answer JSON and supports explicit advance plus owner-only cancellation", async () => {
     const kept: Promise<void>[] = [];
     transport.mockResolvedValueOnce(clarification());
-    const input = taskInput({ requestText: "帮我生成一张图片" });
+    const input = taskInput({ requestText: "帮我画一张宠物图片" });
     const response = await invoke("/api/ai/media-tasks", "POST", principal(), input, task => { kept.push(task); });
     const submitted = await jsonTask(response);
     await kept[0];

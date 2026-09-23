@@ -142,7 +142,7 @@ describe("Node authenticated media-task routes", () => {
 
   it("validates answer JSON, supports explicit advance, and cancels without a paid call", async () => {
     transport.mockResolvedValueOnce(clarification());
-    const input = taskInput({ requestText: "帮我生成一张图片" });
+    const input = taskInput({ requestText: "帮我画一张宠物图片" });
     const submitted = await post("/api/ai/media-tasks", input).expect(202);
     const waiting = await waitForStatus(input.requestId, "awaiting_input");
     const questionId = (waiting.freeQuestion as { questionId: string }).questionId;
