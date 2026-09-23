@@ -8,6 +8,8 @@ import type {
 
 export interface WorkerEnv extends WorkerBindings {
   JWT_SECRET: string;
+  DIFY_TOOL_ENABLED?: string;
+  DIFY_APP_ID?: string;
   TONGPIN_H3_API_KEY?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM?: string;

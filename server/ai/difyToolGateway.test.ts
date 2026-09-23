@@ -49,7 +49,7 @@ describe("Dify controlled tool gateway", () => {
     const replay = await runtime.gateway.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" });
     expect(replay).toEqual(first);
     expect(runtime.execute).toHaveBeenCalledTimes(1);
-    expect(first.ledger.chargedPoints).toBe(1);
+    expect(first.ledger?.chargedPoints).toBe(1);
   });
 
   it("isolates identical user and tool call ids in two tenants", async () => {
@@ -90,5 +90,19 @@ describe("Dify controlled tool gateway", () => {
     await expect(runtime.gateway.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "TOOL_BUDGET_EXHAUSTED", status: 422 });
     await expect(runtime.gateway.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "TOOL_BUDGET_EXHAUSTED", status: 409 });
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a reservation for another request and any charged result from a read-only tool", async () => {
+    const wrongReservation = new DifyToolGateway({
+      store: new MemoryToolStore(), now: () => 1_000, verifyAuthorization: async token => claims(token),
+      execute: async () => ({ output: { status: "queued" }, accounting: { kind: "reserved", requestId: "another-attempt", reservedPoints: 1 } }),
+    });
+    await expect(wrongReservation.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "DIFY_TOOL_LEDGER_INVALID" });
+    const readOnly = new DifyToolGateway({
+      store: new MemoryToolStore(), now: () => 1_000, verifyAuthorization: async token => claims(token),
+      isReadOnly: name => name === "lookup",
+      execute: async request => ({ output: { status: "found" }, ledger: { ledgerEntryId: "improper-charge", tenantId: request.tenantId, userId: request.userId, runId: request.runId, toolCallId: request.toolCallId, chargedPoints: 1 } }),
+    });
+    await expect(readOnly.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "DIFY_TOOL_LEDGER_INVALID" });
   });
 });

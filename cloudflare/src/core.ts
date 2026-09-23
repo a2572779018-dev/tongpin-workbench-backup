@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { createWorkerAi } from "./ai/runtime";
 import { handleAiRequest } from "./ai/routes";
+import { createDifyToolResponse, type DifyRouteOptions } from "../../server/ai/difyRuntimeRoutes";
 import { AiWorkspaceRepository } from "../../server/ai/workspace";
 import { handleAiWorkspaceRequest } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "../../server/ai/persona";
@@ -841,6 +842,17 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     );
   }
 
+  private difyRouteOptions(): DifyRouteOptions {
+    return {
+      config: { enabled: this.env.DIFY_TOOL_ENABLED === "true", appId: this.env.DIFY_APP_ID ?? "" },
+      principalActive: (tenantId, userId) => this.sql.exec<{ id: string }>(
+        "SELECT id FROM users WHERE tenant_id=? AND id=? AND status='active' AND role IN ('member','boss') LIMIT 1",
+        tenantId,
+        userId,
+      ).toArray().length === 1,
+    };
+  }
+
   async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -851,12 +863,16 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         this.ensureAiSchemaReady();
         return await this.ai.service.video.referenceContent(path.split("/").pop()!);
       }
+      if (path === "/api/dify/tools/invoke") {
+        this.ensureAiSchemaReady();
+        return createDifyToolResponse(this.ai.service, request, this.difyRouteOptions());
+      }
       if (path.startsWith("/api/ai/") || path.startsWith("/api/admin/ai/")) {
         this.ensureAiSchemaReady();
         const user = await this.requireUser(request, path.startsWith("/api/admin/") ? ["admin"] : undefined);
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
         if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);
-        return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray());
+        return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray(), this.difyRouteOptions());
       }
 
       if (path === AI_INTERNAL_AGENT_TICK_PATH) {

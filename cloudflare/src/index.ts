@@ -54,7 +54,7 @@ async function bufferedApiRequest(request: Request): Promise<Request> {
     return request;
   }
   const path = new URL(request.url).pathname;
-  const limit = path === "/api/ai/workspace" ? AI_WORKSPACE_LIMITS.requestBytes : ["/api/ai/chat", "/api/ai/preflight"].includes(path) ? 1600 * 1024 : 768 * 1024;
+  const limit = path === "/api/dify/tools/invoke" ? 16_384 : path === "/api/ai/workspace" ? AI_WORKSPACE_LIMITS.requestBytes : ["/api/ai/chat", "/api/ai/preflight"].includes(path) ? 1600 * 1024 : 768 * 1024;
   if (Number(request.headers.get("Content-Length")) > limit) throw new RangeError("API request body is too large");
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];

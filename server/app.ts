@@ -35,6 +35,8 @@ import { AiPersonaRepository } from "./ai/persona";
 import { createAiPersonaRouter } from "./ai/personaRoutes";
 import { createAiAgentScheduler, type AiAgentScheduler } from "./ai/backgroundAgent";
 import { aiTenantIdFromPrincipal } from "./ai/tenant";
+import { createDifyToolResponse, type DifyRouteOptions } from "./ai/difyRuntimeRoutes";
+import type { DifyRuntimeConfig } from "./ai/difyRuntime";
 
 export interface AppRuntime {
   app: express.Express;
@@ -88,6 +90,7 @@ export async function createRuntime(
     startLoraCollector?: boolean;
     startAiAgentScheduler?: boolean;
     aiTransport?: AiTransport;
+    difyConfig?: DifyRuntimeConfig;
   } = {},
 ): Promise<AppRuntime> {
   const store = await JsonStore.open(config.dataFile);
@@ -99,6 +102,12 @@ export async function createRuntime(
   aiWorkspace.initialize();
   const aiPersona = new AiPersonaRepository(ai.store.sql);
   aiPersona.initialize();
+  const dify: DifyRouteOptions = {
+    config: options.difyConfig ?? { enabled: process.env.DIFY_TOOL_ENABLED === "true", appId: process.env.DIFY_APP_ID ?? "" },
+    principalActive: (tenantId, userId) => store.read(database => database.users.some(user =>
+      user.id === userId && user.status === "active" && (user.role === "member" || user.role === "boss") && aiTenantIdFromPrincipal(user) === tenantId,
+    )),
+  };
 
   const app = express();
   const server = createServer(app);
@@ -137,6 +146,19 @@ export async function createRuntime(
   app.use("/api/ai/persona", createAiPersonaRouter(aiPersona, requireAuth));
   app.use("/api/ai/chat", express.json({ limit: 1600 * 1024 }));
   app.use("/api/ai/preflight", express.json({ limit: 1600 * 1024 }));
+  app.post("/api/dify/tools/invoke", express.raw({ type: "application/json", limit: "16kb" }), async (request, response) => {
+    const result = await createDifyToolResponse(ai.service, new Request("http://localhost/api/dify/tools/invoke", {
+      method: "POST",
+      headers: { Authorization: request.get("Authorization") ?? "" },
+      ...(Buffer.isBuffer(request.body) ? { body: request.body.toString("utf8") } : {}),
+    }), dify);
+    result.headers.forEach((value, key) => response.set(key, value));
+    response.status(result.status).send(await result.text());
+  });
+  app.use("/api/dify/tools/invoke", (error: unknown, _request: express.Request, response: express.Response, next: express.NextFunction) => {
+    if ((error as { type?: string })?.type !== "entity.too.large") { next(error); return; }
+    response.set("Cache-Control", "no-store").status(413).json({ error: { code: "DIFY_TOOL_INPUT_INVALID", message: "Dify 请求内容过大" } });
+  });
   app.use(express.json({ limit: "768kb" }));
 
   app.get("/api/health", (_request, response) => {
@@ -167,7 +189,7 @@ export async function createRuntime(
     response.status(image.status).send(Buffer.from(await image.arrayBuffer()));
   });
   app.use("/api/admin/ai", createAiRouter(ai.service, store, requireAuth, true));
-  app.use("/api/ai", createAiRouter(ai.service, store, requireAuth));
+  app.use("/api/ai", createAiRouter(ai.service, store, requireAuth, false, dify));
   app.use("/api/admin", createAdminRouter(store, requireAuth));
   app.use(
     "/api/boss/lora-chain",

@@ -44,7 +44,9 @@ export interface DifyToolLedgerResult {
 
 export interface DifyToolExecutionResult {
   output: Record<string, unknown>;
-  ledger: DifyToolLedgerResult;
+  ledger?: DifyToolLedgerResult;
+  /** Queries have no charge; an asynchronous submission references its real reservation. */
+  accounting?: { kind: "read_only" } | { kind: "reserved"; requestId: string; reservedPoints: number };
 }
 
 export interface DifyToolCallRecord {
@@ -68,7 +70,7 @@ export interface DifyToolCallStore {
    * Must atomically enforce both the (tenantId, userId, toolCallId) reservation
    * and the run-level unknown-outcome freeze across processes.
    */
-  reserve(scope: string, runScope: string, requestHash: string): Promise<DifyToolReservation>;
+  reserve(scope: string, runScope: string, requestHash: string, options?: { readOnly: boolean }): Promise<DifyToolReservation>;
   finish(scope: string, requestHash: string, update: Pick<DifyToolCallRecord, "status" | "result" | "errorCode">): Promise<void>;
 }
 
@@ -77,6 +79,7 @@ export interface DifyToolGatewayDependencies {
   store: DifyToolCallStore;
   execute(request: Omit<DifyToolInvocation, "authorization">, claims: DifyToolGrantClaims): Promise<DifyToolExecutionResult>;
   now?: () => number;
+  isReadOnly?: (toolName: string) => boolean;
 }
 
 export class DifyToolGatewayError extends Error {
@@ -110,7 +113,7 @@ function requestHash(request: Omit<DifyToolInvocation, "authorization">): string
 }
 
 function safeId(value: string, label: string) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) throw new DifyToolGatewayError("DIFY_TOOL_INPUT_INVALID", `${label} 无效`, 400);
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) throw new DifyToolGatewayError("DIFY_TOOL_INPUT_INVALID", `${label} 无效`, 400);
 }
 
 function sameSet(left: readonly string[], right: readonly string[]) {
@@ -142,13 +145,14 @@ export class DifyToolGateway {
       if (claims[key] !== invocation[key]) throw new DifyToolGatewayError("DIFY_TOOL_SCOPE_MISMATCH", "Dify 工具授权与任务快照不匹配", 403);
     }
     if (!claims.allowedTools.includes(invocation.toolName)) throw new DifyToolGatewayError("DIFY_TOOL_NOT_ALLOWED", "该工具不在本次授权范围内", 403);
-    if (!Number.isInteger(claims.maxPoints) || claims.maxPoints < 0 || !claims.budgetVersion) throw new DifyToolGatewayError("DIFY_TOOL_AUTH_INVALID", "Dify 工具授权缺少预算快照", 403);
+    if (!Number.isSafeInteger(claims.maxPoints) || claims.maxPoints < 0 || !claims.budgetVersion) throw new DifyToolGatewayError("DIFY_TOOL_AUTH_INVALID", "Dify 工具授权缺少预算快照", 403);
     if (!sameSet(invocation.sourceAssetIds, claims.sourceAssetIds)) throw new DifyToolGatewayError("DIFY_TOOL_ASSET_SCOPE_MISMATCH", "Dify 工具素材与已授权素材不匹配", 403);
     const { authorization: _authorization, ...request } = invocation;
     const hash = requestHash(request);
     const scope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.toolCallId}`;
     const runScope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.runId}`;
-    const reservation = await this.dependencies.store.reserve(scope, runScope, hash);
+    const readOnly = this.dependencies.isReadOnly?.(invocation.toolName) === true;
+    const reservation = await this.dependencies.store.reserve(scope, runScope, hash, { readOnly });
     if (reservation.kind === "run_blocked") throw new DifyToolGatewayError("DIFY_RUN_OUTCOME_UNKNOWN", "父任务存在结果未知的工具调用，调和前禁止新执行", 409);
     if (reservation.kind === "conflict") throw new DifyToolGatewayError("DIFY_TOOL_IDEMPOTENCY_CONFLICT", "相同 toolCallId 已绑定其他参数", 409);
     if (reservation.kind === "in_progress") throw new DifyToolGatewayError("DIFY_TOOL_IN_PROGRESS", "该工具调用正在执行，请只查询原任务", 409);
@@ -161,7 +165,11 @@ export class DifyToolGateway {
       const result = await this.dependencies.execute(request, claims);
       const encodedOutput = canonical(result.output);
       if (new TextEncoder().encode(encodedOutput).byteLength > 256 * 1024) throw new DifyToolExecutionError("DIFY_TOOL_RESULT_TOO_LARGE", "工具结果超出 Dify 回流限制", "unknown");
-      if (result.ledger.tenantId !== invocation.tenantId || result.ledger.userId !== invocation.userId || result.ledger.runId !== invocation.runId || result.ledger.toolCallId !== invocation.toolCallId || result.ledger.chargedPoints < 0 || result.ledger.chargedPoints > claims.maxPoints) {
+      const ledger = result.ledger;
+      const accounting = result.accounting;
+      const validLedger = !readOnly && ledger && !accounting && Boolean(ledger.ledgerEntryId) && ledger.tenantId === invocation.tenantId && ledger.userId === invocation.userId && ledger.runId === invocation.runId && ledger.toolCallId === invocation.toolCallId && Number.isSafeInteger(ledger.chargedPoints) && ledger.chargedPoints >= 0 && ledger.chargedPoints <= claims.maxPoints;
+      const validAccounting = !ledger && (readOnly && accounting?.kind === "read_only" || !readOnly && accounting?.kind === "reserved" && accounting.requestId === invocation.attemptId && Number.isSafeInteger(accounting.reservedPoints) && accounting.reservedPoints > 0 && accounting.reservedPoints <= claims.maxPoints);
+      if (!validLedger && !validAccounting) {
         throw new DifyToolExecutionError("DIFY_TOOL_LEDGER_INVALID", "工具执行未返回与父任务一致的账本记录", "unknown");
       }
       await this.dependencies.store.finish(scope, hash, { status: "succeeded", result });
