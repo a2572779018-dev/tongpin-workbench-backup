@@ -5,6 +5,7 @@ import {
   type AiHarnessCapability, type AiHarnessConfig, type AiHarnessInput, type AiHarnessProviderConfig,
   type AiHarnessProviderInput, type AiHarnessTierRoute, type AiMode,
 } from "../../../shared/ai";
+import { AI_IMAGE_GENERATION_PROFILE_SPECS, type AiImageGenerationProfile } from "../../../shared/aiImageCapabilities";
 import { useAuth } from "../../auth/AuthContext";
 import { adminAiErrorMessage, normalizeAiBaseUrl } from "./adminAiForms";
 import { planModelDiscovery } from "./adminAiModels";
@@ -59,7 +60,7 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
       providers: current.providers.map(provider => provider.id === providerId ? { ...provider, ...patch } : provider),
       tiers: Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, { ...current.tiers[tier],
         ...(patch.protocol !== undefined && current.tiers[tier].providerId === providerId ? { protocol: patch.protocol } : {}),
-        ...(patch.baseUrl !== undefined && current.tiers[tier].imageProviderId === providerId ? { imageEditCapability: undefined } : {}),
+        ...(patch.baseUrl !== undefined && current.tiers[tier].imageProviderId === providerId ? { imageEditCapability: undefined, imageGenerationCapability: undefined } : {}),
       }])) as Record<AiMode, AiHarnessTierRoute>,
     }));
     if (patch.baseUrl !== undefined) {
@@ -70,7 +71,7 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
   }
   function updateTier(tier: AiMode, patch: Partial<AiHarnessTierRoute>) {
     setDraft(current => ({ ...current, tiers: { ...current.tiers, [tier]: { ...current.tiers[tier], ...patch,
-      ...(Object.hasOwn(patch, "imageProviderId") || Object.hasOwn(patch, "imageModelId") ? { imageEditCapability: undefined } : {}),
+      ...(Object.hasOwn(patch, "imageProviderId") || Object.hasOwn(patch, "imageModelId") ? { imageEditCapability: undefined, imageGenerationCapability: undefined } : {}),
     } } }));
     setNotice(""); setError("");
   }
@@ -193,6 +194,19 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
             <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={route.enabled} onChange={event => updateTier(activeTier, { enabled: event.target.checked })} />启用{AI_BUSINESS_TIER_LABELS[activeTier]}档</label>
             <div className="is-wide tp-ai-admin-actions"><span className="tp-ai-admin-hint">开放能力</span>{CAPABILITIES.map(([capability, label]) => <label className="tp-ai-admin-toggle" key={capability}><input type="checkbox" checked={route.capabilities.includes(capability)} onChange={event => updateTier(activeTier, { capabilities: event.target.checked ? [...route.capabilities, capability] : route.capabilities.filter(item => item !== capability) })} />{label}</label>)}</div>
             <details className="is-wide tp-ai-provider-capabilities"><summary>高级参数</summary><div className="tp-ai-admin-fields">
+              <label className="tp-ai-admin-field">图片生成协议<select disabled={!route.imageModelId || !route.imageProviderId} value={route.imageGenerationCapability?.profile ?? ""} onChange={event => {
+                const provider = draft.providers.find(item => item.id === route.imageProviderId);
+                const profile = event.target.value as AiImageGenerationProfile | "";
+                if (!profile) { updateTier(activeTier, { imageGenerationCapability: undefined }); return; }
+                if (!provider || !route.imageModelId || !Object.hasOwn(AI_IMAGE_GENERATION_PROFILE_SPECS, profile)) return;
+                try {
+                  updateTier(activeTier, { imageGenerationCapability: { baseUrl: normalizeAiBaseUrl(provider.baseUrl), modelId: route.imageModelId, profile, size: "1024x1024" } });
+                } catch { setError("请先填写有效的图片服务 HTTPS 地址，再选择生成协议。"); }
+              }}><option value="">旧版兼容 · 参数能力未验证</option>{Object.entries(AI_IMAGE_GENERATION_PROFILE_SPECS).map(([profile, spec]) => <option value={profile} key={profile}>{spec.label}</option>)}</select></label>
+              {route.imageGenerationCapability ? <label className="tp-ai-admin-field">生成图片尺寸<select value={route.imageGenerationCapability.size} onChange={event => updateTier(activeTier, { imageGenerationCapability: { ...route.imageGenerationCapability!, size: event.target.value } })}>
+                {AI_IMAGE_GENERATION_PROFILE_SPECS[route.imageGenerationCapability.profile].sizes.map(size => <option value={size} key={size}>{size}</option>)}
+              </select></label> : null}
+              <small className="tp-ai-admin-hint is-wide">模型列表只验证当前密钥能看到模型，不验证图片参数。请按服务商实际协议选择；更换地址或模型后需重新确认。旧配置可继续按原参数运行。</small>
               <label className="tp-ai-admin-field">参考图编辑协议<select disabled={!route.imageModelId || !route.imageProviderId} value={route.imageEditCapability?.profile ?? ""} onChange={event => {
                 const provider = draft.providers.find(item => item.id === route.imageProviderId);
                 const profile = event.target.value;

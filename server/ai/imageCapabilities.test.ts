@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseImageEditCapability } from "./imageCapabilities";
+import { parseImageEditCapability, parseImageGenerationCapability } from "./imageCapabilities";
 
 const valid = { baseUrl: "https://images.example.com/v1", modelId: "custom-edit-alias", profile: "openai-gpt-image-edits-v1" };
 
@@ -18,5 +18,21 @@ describe("Image editing capability configuration", () => {
     { ...valid, baseUrl: "https://images.example.com/v1/images/edits" }, { ...valid, extra: true },
   ])("rejects unsafe, unknown or malformed declarations: %j", input => {
     expect(() => parseImageEditCapability(input)).toThrowError(expect.objectContaining({ code: "AI_IMAGE_EDIT_CAPABILITY_INVALID" }));
+  });
+});
+
+describe("Image generation capability configuration", () => {
+  const generated = { baseUrl: valid.baseUrl, modelId: "relay-image-alias", profile: "openai-gpt-image-generations-v1", size: "1536x1024" };
+  it("normalizes an explicitly declared provider, model, profile and supported size", () => {
+    expect(parseImageGenerationCapability({ ...generated, baseUrl: `${generated.baseUrl}/` })).toEqual(generated);
+    expect(parseImageGenerationCapability(undefined)).toBeUndefined();
+  });
+  it.each([
+    null, {}, [], { ...generated, profile: "unknown" }, { ...generated, size: "4096x4096" },
+    { ...generated, profile: "openai-dall-e-2-generations-v1", size: "1536x1024" },
+    { ...generated, modelId: "wrong\r\nHeader: x" }, { ...generated, baseUrl: "http://images.example.com/v1" },
+    { ...generated, baseUrl: "https://images.example.com/v1/images/generations" }, { ...generated, extra: true },
+  ])("rejects unknown, incompatible or malformed declarations: %j", value => {
+    expect(() => parseImageGenerationCapability(value)).toThrowError(expect.objectContaining({ code: "AI_IMAGE_GENERATION_CAPABILITY_INVALID", definitelyNotSent: true }));
   });
 });

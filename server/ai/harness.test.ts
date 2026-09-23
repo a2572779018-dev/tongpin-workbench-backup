@@ -188,6 +188,77 @@ describe("AI Harness", () => {
     expect(runtime.store.usage("member").find(entry => entry.kind === "image")).toMatchObject({ mode: "standard", model: "image-model" });
   });
 
+  it("uses an exact admin-declared generation protocol for an aliased image model", async () => {
+    await runtime.service.saveProvider({
+      name: "Legacy quota settings", baseUrl: "https://legacy.example.com/v1", protocol: "chat_completions",
+      apiKey: "legacy-key", quickModel: "legacy-quick", deepModel: "legacy-deep", maxOutputTokens: 1024,
+      reasoningEffort: "", enabled: true, imageModel: "legacy-image", imageQuotaTokens: 1000,
+    });
+    const input = harnessInput();
+    input.tiers.standard.imageGenerationCapability = {
+      baseUrl: "https://gateway.example.com/v1", modelId: "image-model",
+      profile: "openai-gpt-image-generations-v1", size: "1024x1536",
+    };
+    await runtime.service.saveHarness(input);
+    await runtime.service.discoverHarnessProvider("primary");
+    runtime.service.setQuota("member", "admin", { limitTokens: 20_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "image", summary: "绘制海报", prompt: "蓝色科技海报" })));
+    const plan = await runtime.service.chat("member", {
+      requestId: crypto.randomUUID(), conversationId: "declared-image-profile", mode: "standard", outputFormat: "image_plan",
+      messages: [{ role: "user", content: "生成一张蓝色科技海报" }],
+    });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    await runtime.service.generateImage("member", {
+      requestId: crypto.randomUUID(), conversationId: "declared-image-profile", prompt: plan.toolPlan!.prompt, planRequestId: plan.requestId,
+    });
+    expect(JSON.parse(transport.mock.calls.at(-1)![1].body!)).toEqual({
+      model: "image-model", prompt: "蓝色科技海报", n: 1, size: "1024x1536", output_format: "jpeg",
+    });
+  });
+
+  it("rejects invalid admin image generation declarations without saving or making a paid request", async () => {
+    const input = harnessInput();
+    input.tiers.standard.imageGenerationCapability = {
+      baseUrl: "https://gateway.example.com/v1", modelId: "image-model",
+      profile: "openai-gpt-image-generations-v1", size: "4096x4096",
+    };
+    await expect(runtime.service.saveHarness(input)).rejects.toMatchObject({ code: "AI_IMAGE_GENERATION_CAPABILITY_INVALID", definitelyNotSent: true });
+    expect(runtime.store.harness()).toBeNull();
+    expect(transport).not.toHaveBeenCalled();
+    input.tiers.standard.imageGenerationCapability.size = "1024x1024";
+    input.tiers.standard.imageGenerationCapability.baseUrl = "https://other.example.com/v1";
+    await expect(runtime.service.saveHarness(input)).rejects.toMatchObject({ code: "AI_IMAGE_GENERATION_CAPABILITY_MISMATCH" });
+    expect(runtime.store.harness()).toBeNull();
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("rechecks a stored generation binding before plan consumption, quota reservation or upstream POST", async () => {
+    await runtime.service.saveProvider({
+      name: "Legacy quota settings", baseUrl: "https://legacy.example.com/v1", protocol: "chat_completions",
+      apiKey: "legacy-key", quickModel: "legacy-quick", deepModel: "legacy-deep", maxOutputTokens: 1024,
+      reasoningEffort: "", enabled: true, imageModel: "legacy-image", imageQuotaTokens: 1000,
+    });
+    await configure();
+    runtime.service.setQuota("member", "admin", { limitTokens: 20_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "image", summary: "绘制海报", prompt: "蓝色科技海报" })));
+    const plan = await runtime.service.chat("member", {
+      requestId: crypto.randomUUID(), conversationId: "stale-image-profile", mode: "standard", outputFormat: "image_plan",
+      messages: [{ role: "user", content: "生成一张蓝色科技海报" }],
+    });
+    const stored = runtime.store.harness()!;
+    stored.tiers.standard.imageGenerationCapability = {
+      baseUrl: "https://other.example.com/v1", modelId: "image-model",
+      profile: "openai-gpt-image-generations-v1", size: "1024x1024",
+    };
+    runtime.store.saveHarness(stored);
+    transport.mockClear();
+    await expect(runtime.service.generateImage("member", {
+      requestId: crypto.randomUUID(), conversationId: "stale-image-profile", prompt: plan.toolPlan!.prompt, planRequestId: plan.requestId,
+    })).rejects.toMatchObject({ code: "AI_IMAGE_GENERATION_CAPABILITY_MISMATCH", definitelyNotSent: true });
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.service.quota("member").reservedTokens).toBe(0);
+  });
+
   it("invalidates model verification after a config or key change", async () => {
     await configure();
     const changed = harnessInput("");

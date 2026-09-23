@@ -1,7 +1,10 @@
 import type { StoredProvider } from "./storage";
 import type { AiAttachment } from "../../shared/ai";
-import { AI_IMAGE_EDIT_MAX_INPUT_BYTES, AI_IMAGE_EDIT_PROFILE_SPECS, type AiImageEditCapability } from "../../shared/aiImageCapabilities";
-import { parseImageEditCapability } from "./imageCapabilities";
+import {
+  AI_IMAGE_EDIT_MAX_INPUT_BYTES, AI_IMAGE_EDIT_PROFILE_SPECS, AI_IMAGE_GENERATION_PROFILE_SPECS,
+  type AiImageEditCapability, type AiImageGenerationCapability,
+} from "../../shared/aiImageCapabilities";
+import { parseImageEditCapability, parseImageGenerationCapability } from "./imageCapabilities";
 import { validateImageBase64 } from "./capabilities";
 import { object, readBoundedText } from "./provider";
 import { AiError } from "./security";
@@ -9,7 +12,18 @@ import { AiError } from "./security";
 export const MAX_IMAGE_RESPONSE_BYTES = 6_000_000;
 
 /** Images API streaming is separate from Responses/chat reasoning. Never probe by sending an extra generation. */
-export function imageProviderBody(provider: Pick<StoredProvider, "imageModel" | "imageStream">, prompt: string): Record<string, unknown> {
+export function imageProviderBody(provider: Pick<StoredProvider, "imageModel" | "imageStream">, prompt: string, declared?: AiImageGenerationCapability): Record<string, unknown> {
+  if (declared) {
+    const spec = AI_IMAGE_GENERATION_PROFILE_SPECS[declared.profile];
+    return {
+      model: provider.imageModel, prompt, n: 1, size: declared.size,
+      [spec.outputField]: spec.outputFormat,
+      ...(provider.imageStream && spec.stream ? { stream: true, partial_images: 0 } : {}),
+    };
+  }
+  // Historical saved configurations did not contain a generation capability.
+  // Keep their exact on-wire request until an administrator explicitly binds a
+  // protocol; this path is not evidence that a new alias supports GPT options.
   return {
     model: provider.imageModel, prompt, n: 1, size: "1024x1024",
     ...(/^gpt-image/i.test(provider.imageModel ?? "") ? { output_format: "jpeg" } : { response_format: "b64_json" }),
@@ -102,8 +116,12 @@ function validateImageContainer(bytes: Uint8Array, mimeType: string): void {
 /** Pure preflight: validate before claiming an approval or reserving quota. No network request. */
 export function prepareImageProviderRequest(input: {
   baseUrl: string; modelId: string; prompt: string; stream?: boolean;
-  attachments?: AiAttachment[]; editCapability?: AiImageEditCapability;
+  attachments?: AiAttachment[]; editCapability?: AiImageEditCapability; generationCapability?: AiImageGenerationCapability;
 }): PreparedImageProviderRequest {
+  const generationCapability = parseImageGenerationCapability(input.generationCapability);
+  if (generationCapability && (generationCapability.baseUrl !== input.baseUrl.replace(/\/+$/, "") || generationCapability.modelId !== input.modelId)) {
+    throw new AiError(400, "AI_IMAGE_GENERATION_CAPABILITY_MISMATCH", "图片生成协议与当前服务地址或模型不匹配，请管理员重新确认；图片未发送", true);
+  }
   // Text documents already contributed to the approved plan prompt. Preserve that
   // text-generation path, but never discard a declared visual or its missing bytes.
   const attachments = (input.attachments ?? []).filter(attachment => {
@@ -111,10 +129,15 @@ export function prepareImageProviderRequest(input: {
     if (typeof attachment.text === "string" && attachment.text.trim()) return false;
     return invalidReference();
   });
-  if (!attachments.length) return {
-    endpoint: "/images/generations", contentType: "application/json",
-    body: JSON.stringify(imageProviderBody({ imageModel: input.modelId, imageStream: input.stream }, input.prompt)),
-  };
+  if (!attachments.length) {
+    if (generationCapability && (!input.prompt.trim() || Array.from(input.prompt).length > AI_IMAGE_GENERATION_PROFILE_SPECS[generationCapability.profile].maxPromptCharacters)) {
+      throw new AiError(400, "AI_IMAGE_PROMPT_INVALID", `当前图片生成提示词不能为空或超过 ${AI_IMAGE_GENERATION_PROFILE_SPECS[generationCapability.profile].maxPromptCharacters} 字`, true);
+    }
+    return {
+      endpoint: "/images/generations", contentType: "application/json",
+      body: JSON.stringify(imageProviderBody({ imageModel: input.modelId, imageStream: input.stream }, input.prompt, generationCapability)),
+    };
+  }
   const capability = parseImageEditCapability(input.editCapability);
   // Matching the full configured path prevents a capability surviving provider or model changes.
   if (!capability || capability.baseUrl !== input.baseUrl.replace(/\/+$/, "") || capability.modelId !== input.modelId) {

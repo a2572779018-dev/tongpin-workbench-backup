@@ -1,5 +1,5 @@
 import type { AiWorkflowId } from "./aiWorkflows";
-import type { AiImageEditCapability } from "./aiImageCapabilities";
+import type { AiImageEditCapability, AiImageGenerationCapability } from "./aiImageCapabilities";
 
 /** Browser-safe contract. API credentials and prompts never appear in admin usage records. */
 export type AiProtocol = "chat_completions" | "responses";
@@ -41,6 +41,8 @@ export interface AiHarnessTierRoute {
   /** OpenAI-compatible Images API route for this business tier. */
   imageProviderId?: string;
   imageModelId?: string;
+  /** Admin-confirmed generation request shape bound to the exact media URL and model. */
+  imageGenerationCapability?: AiImageGenerationCapability;
   /** Admin-confirmed edit protocol bound to this exact media URL and model. */
   imageEditCapability?: AiImageEditCapability;
   /** 75API video route for this business tier. Other video protocols fail closed. */

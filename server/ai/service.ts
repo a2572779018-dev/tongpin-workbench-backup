@@ -913,7 +913,11 @@ export class AiService {
     const model = mediaRoute?.modelId ?? provider.imageModel!;
     // Preparation validates both the input and configured adapter before any
     // quota reservation or one-time plan consumption. No text-only fallback.
-    const preparedImage = prepareImageProviderRequest({ baseUrl, modelId: model, prompt: request.prompt, stream: provider.imageStream, attachments: request.attachments, editCapability: mediaRoute?.imageEditCapability });
+    const preparedImage = prepareImageProviderRequest({ baseUrl, modelId: model, prompt: request.prompt, stream: provider.imageStream,
+      attachments: request.attachments, editCapability: mediaRoute?.imageEditCapability, generationCapability: mediaRoute?.imageGenerationCapability });
+    const acceptsImageEvents = Boolean(provider.imageStream && (preparedImage.endpoint === "/images/edits"
+      ? mediaRoute?.imageEditCapability?.profile === "openai-gpt-image-edits-v1"
+      : !mediaRoute?.imageGenerationCapability || mediaRoute.imageGenerationCapability.profile === "openai-gpt-image-generations-v1"));
     const reserved = this.store.sql.transaction(() => {
       const conversationId = validConversationId(request.conversationId, request.requestId);
       const pendingForUser = this.store.pending(userId);
@@ -935,7 +939,7 @@ export class AiService {
     let knownRejection = false;
     try {
       const response = await this.transport(`${baseUrl}${preparedImage.endpoint}`, {
-        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": preparedImage.contentType, Accept: provider.imageStream ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": idempotencyKey },
+        method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": preparedImage.contentType, Accept: acceptsImageEvents ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": idempotencyKey },
         ...(preparedImage.body !== undefined ? { body: preparedImage.body } : {}), ...(preparedImage.binaryBody ? { binaryBody: preparedImage.binaryBody } : {}),
         signal: AbortSignal.timeout(AI_TIMEOUT_MS), maxResponseBytes: MAX_IMAGE_RESPONSE_BYTES,
       });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { imageProviderBody, prepareImageProviderRequest, readImageProviderResponse } from "./imageProvider";
 import type { AiAttachment } from "../../shared/ai";
-import type { AiImageEditCapability } from "../../shared/aiImageCapabilities";
+import type { AiImageEditCapability, AiImageGenerationCapability } from "../../shared/aiImageCapabilities";
 import { AiError } from "./security";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -24,6 +24,44 @@ async function multipart(request: ReturnType<typeof prepareImageProviderRequest>
   expect(request.binaryBody).toBeInstanceOf(Uint8Array);
   return new Response(request.binaryBody!.slice().buffer as ArrayBuffer, { headers: { "content-type": request.contentType } }).formData();
 }
+
+describe("Administrator-declared image generation profiles", () => {
+  const generationCapability: AiImageGenerationCapability = {
+    baseUrl, modelId: "relay-alias-with-no-gpt-name", profile: "openai-gpt-image-generations-v1", size: "1536x1024",
+  };
+  const generate = (overrides: Partial<Parameters<typeof prepareImageProviderRequest>[0]> = {}) => prepareImageProviderRequest({
+    baseUrl, modelId: generationCapability.modelId, prompt: "画一个蓝色方形徽标", stream: true,
+    generationCapability, ...overrides,
+  });
+  it("uses the selected GPT-compatible wire shape and size for an alias regardless of its name", () => {
+    const request = generate();
+    expect(request.endpoint).toBe("/images/generations");
+    expect(JSON.parse(request.body!)).toEqual({
+      model: generationCapability.modelId, prompt: "画一个蓝色方形徽标", n: 1, size: "1536x1024",
+      output_format: "jpeg", stream: true, partial_images: 0,
+    });
+  });
+  it.each([
+    ["openai-dall-e-2-generations-v1", "256x256"],
+    ["openai-dall-e-3-generations-v1", "1024x1792"],
+  ] as const)("uses %s b64 contract without unsupported GPT-only streaming fields", (profile, size) => {
+    const request = generate({ generationCapability: { ...generationCapability, profile, size } });
+    expect(JSON.parse(request.body!)).toEqual({
+      model: generationCapability.modelId, prompt: "画一个蓝色方形徽标", n: 1, size, response_format: "b64_json",
+    });
+  });
+  it.each([
+    { modelId: "different-model" }, { baseUrl: "https://other.example.com/v1" },
+    { generationCapability: { ...generationCapability, profile: "unknown" } },
+    { generationCapability: { ...generationCapability, size: "4096x4096" } },
+  ])("rejects mismatched or unknown configurations before any network request: %j", change => {
+    expect(() => generate(change as never)).toThrowError(expect.objectContaining({ definitelyNotSent: true }));
+  });
+  it("enforces the selected protocol's prompt bound before generation", () => {
+    expect(() => generate({ generationCapability: { ...generationCapability, profile: "openai-dall-e-2-generations-v1", size: "1024x1024" }, prompt: "x".repeat(1001) }))
+      .toThrowError(expect.objectContaining({ code: "AI_IMAGE_PROMPT_INVALID", definitelyNotSent: true }));
+  });
+});
 
 describe("Explicitly configured reference image request", () => {
   it.each(["gpt-image-1", "legacy-image"])("preserves existing text-only generation for %s", modelId => {
