@@ -104,7 +104,11 @@ describe("computer plan capability", () => {
         { kind: "type", elementToken: "body-token", text: "hello" },
       ],
     }))).toThrow(expect.objectContaining({ code: "AI_COMPUTER_PLAN_INVALID" }));
-    expect(chatInstructions(request())).toContain("不输出坐标、回车、快捷键、Shell、剪贴板");
+    expect(chatInstructions(request())).toContain("不输出坐标、回车、Tab、删除、修饰键、组合快捷键、Shell、剪贴板");
     expect(chatInstructions(request())).toContain("不得依赖窗口当前焦点");
+    expect(parseComputerPlan(JSON.stringify({ kind: "computer", summary: "下滚", action: { kind: "scroll", elementToken: "list-token", direction: "down", amount: 1 } })).action).toMatchObject({ kind: "scroll", direction: "down", amount: 1 });
+    expect(parseComputerPlan(JSON.stringify({ kind: "computer", summary: "退出", action: { kind: "key", elementToken: "list-token", key: "escape" } })).action).toMatchObject({ kind: "key", key: "escape" });
+    expect(() => parseComputerPlan(JSON.stringify({ kind: "computer", summary: "提交", action: { kind: "key", elementToken: "list-token", key: "return" } }))).toThrow(expect.objectContaining({ code: "AI_COMPUTER_PLAN_INVALID" }));
+    expect(() => parseComputerPlan(JSON.stringify({ kind: "computer", summary: "过度滚动", action: { kind: "scroll", elementToken: "list-token", direction: "down", amount: 50 } }))).toThrow(expect.objectContaining({ code: "AI_COMPUTER_PLAN_INVALID" }));
   });
 });

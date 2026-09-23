@@ -17,12 +17,14 @@ const directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-native-task-"));
 const taskBundle = path.join(directory, "computer-task.cjs");
 await build({ entryPoints: [path.join(root, "src/features/tongpin-ai/computerUseTask.ts")], bundle: true, platform: "node", format: "cjs", outfile: taskBundle });
 const title = `Tongpin isolated editor ${Date.now()}`;
+const testNavigation = process.argv.includes("--navigation");
+const expectScrollBlocked = process.argv.includes("--expect-scroll-blocked");
 const useNativeEditor = process.platform === "darwin" && !process.argv.includes("--chromium-editor");
 const editorBinary = path.join(directory, "TongpinComputerSmoke");
 if (useNativeEditor) execFileSync("xcrun", ["swiftc", path.join(root, "scripts/computer-use-test-editor.swift"), "-o", editorBinary]);
 const server = http.createServer((_request, response) => {
   response.setHeader("Content-Type", "text/html; charset=utf-8");
-  response.end(`<!doctype html><title>${title}</title><body style="padding:30px"><button aria-label="Open test editor" onclick="this.remove();document.getElementById('document').hidden=false">Open test editor</button><textarea id="document" aria-label="Test document" hidden style="width:400px;height:200px"></textarea></body>`);
+  response.end(`<!doctype html><title>${title}</title><body style="padding:30px"><button aria-label="Open test editor" onclick="this.remove();document.getElementById('document').hidden=false">Open test editor</button><textarea id="document" aria-label="Test document" hidden style="width:400px;height:200px"></textarea><div role="region" tabindex="0" aria-label="Test scroll region" style="width:350px;height:100px;overflow:auto;border:1px solid #888">${Array.from({ length: 40 }, (_, index) => `<p>Line ${index + 1}</p>`).join("")}</div><output aria-label="Scroll position" id="scroll-position">0</output><script>document.querySelector('[role=region]').addEventListener('scroll', event => document.getElementById('scroll-position').textContent = String(Math.round(event.target.scrollTop)))</script></body>`);
 });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
@@ -54,13 +56,24 @@ function report(process, prefix) {
 try {
   const editor = child("editor");
   const ready = await report(editor, "EDITOR_READY ");
-  const controller = child("controller", { TONGPIN_NATIVE_TEST_TARGET_PID: String(ready.pid) });
+  const controller = child("controller", { TONGPIN_NATIVE_TEST_TARGET_PID: String(ready.pid), TONGPIN_NATIVE_TEST_NAVIGATION: testNavigation ? "1" : "0" });
   const result = await report(controller, "NATIVE_TASK_RESULT ");
   console.log(JSON.stringify({ ...result, isolatedDirectory: directory }, null, 2));
   assert.equal(result.status, "completed", "Native task did not complete; do not claim acceptance");
   assert.equal(result.steps, 2);
   assert.equal(result.verifiedLiteral, true);
-  assert.equal(result.nativeActions, 2);
+  assert.equal(result.nativeActions, testNavigation ? 4 : 2);
+  if (testNavigation) {
+    assert.equal(result.navigation?.scroll?.ok, !expectScrollBlocked,
+      "Isolated scroll outcome did not match the declared platform boundary");
+    assert.equal(result.navigation?.key?.ok, true, "Isolated safe key did not reach the native driver");
+    assert.equal(result.navigation?.scrollMoved, !expectScrollBlocked,
+      "Isolated scroll state change did not match the declared platform boundary");
+    if (expectScrollBlocked) {
+      assert.equal(result.navigation.scroll.error?.code, "background_unavailable");
+      assert.match(JSON.stringify(result.navDiagnostics), /background_unavailable/);
+    }
+  }
 } finally {
   for (const process of children) process.kill("SIGTERM");
   server.close();

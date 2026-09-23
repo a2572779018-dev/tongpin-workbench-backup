@@ -86,7 +86,8 @@ export async function runComputerUseTask(options: ComputerTaskOptions): Promise<
       const plan = validated ? buildComputerUsePlan(snapshot, validated.action) : null;
       if (!plan) return result("failed", "下一步未通过本机安全校验，未执行操作。");
       const element = snapshot.elements.find(item => item.elementToken === plan.action.elementToken);
-      const identity = JSON.stringify([plan.action.kind, element?.role, element?.label, plan.action.kind === "type" ? plan.action.text : null]);
+      const identity = JSON.stringify([plan.action.kind, element?.role, element?.label,
+        plan.action.kind === "type" ? plan.action.text : plan.action.kind === "scroll" ? [plan.action.direction, plan.action.amount] : plan.action.kind === "key" ? plan.action.key : null]);
       if (attempted.has(identity)) return result("paused", "下一步重复了已尝试的动作，已暂停，避免重复输入或重复提交。");
       onProgress?.({ phase: "awaiting_approval", step: steps + 1, summary: plan.summary });
       const approval = await bounded(() => bridge.requestActionApproval(plan.action));

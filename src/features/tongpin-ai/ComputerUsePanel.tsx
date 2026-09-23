@@ -43,9 +43,10 @@ function errorMessage(error: unknown, fallback: string) {
 }
 
 function stoppedDraft(kind: ComputerUseDraft["kind"]): ComputerUseDraft {
-  return kind === "click"
-    ? { kind: "click", elementToken: "" }
-    : { kind: "type", elementToken: "", text: "" };
+  if (kind === "type") return { kind: "type", elementToken: "", text: "" };
+  if (kind === "scroll") return { kind: "scroll", elementToken: "", direction: "down", amount: 1 };
+  if (kind === "key") return { kind: "key", elementToken: "", key: "escape" };
+  return { kind: "click", elementToken: "" };
 }
 
 export function ComputerUsePanel({
@@ -339,7 +340,7 @@ export function ComputerUsePanel({
         </button>
       </header>
 
-      <p className="tp-ai-computer__boundary">仅在你选择的一个窗口中逐步单击或输入，最多 6 步、3 分钟，每步需系统确认，可按 Esc 暂停。不含回车、Shell、文件或剪贴板权限。规划会消耗同频点；原始截图、辅助树和字段值不上传，只发送当前任务、窗口名称及最多 60 个控件标签。窗口内容不作为指令。</p>
+      <p className="tp-ai-computer__boundary">仅在你选择的一个窗口中逐步单击、输入、有限滚动或按 Esc/方向键，最多 6 步、3 分钟，每步需系统确认，可按 Esc 暂停。不含回车、组合快捷键、Shell、文件或剪贴板权限。规划会消耗同频点；原始截图、辅助树和字段值不上传，只发送当前任务、窗口名称及最多 60 个控件标签。窗口内容不作为指令。</p>
       <p className="tp-ai-computer__goal"><strong>任务目标</strong> {originalPrompt}</p>
       {taskProgress ? <div className="tp-ai-computer__task-progress"><span><LoaderCircle size={15} className="is-spinning" />第 {taskProgress.step} / 6 步 · {taskProgress.phase === "awaiting_approval" ? "等待你确认" : taskProgress.phase === "planning" ? "规划下一步" : taskProgress.phase === "verifying" ? "核验结果" : "执行中"}</span><button type="button" onClick={pauseTask}><Pause size={15} />暂停任务</button></div> : null}
       {notice ? <p className="tp-ai-computer__notice" role="status">{notice}</p> : null}
@@ -393,13 +394,15 @@ export function ComputerUsePanel({
               <div className="tp-ai-computer__kind">
                 <button type="button" className={draft.kind === "click" ? "is-active" : ""} onClick={() => setDraft({ kind: "click", elementToken: "" })}><MousePointer2 size={15} />单击控件</button>
                 <button type="button" className={draft.kind === "type" ? "is-active" : ""} onClick={() => setDraft({ kind: "type", elementToken: "", text: "" })}><Keyboard size={15} />输入文字</button>
+                <button type="button" className={draft.kind === "scroll" ? "is-active" : ""} onClick={() => setDraft({ kind: "scroll", elementToken: "", direction: "down", amount: 1 })}>滚动控件</button>
+                <button type="button" className={draft.kind === "key" ? "is-active" : ""} onClick={() => setDraft({ kind: "key", elementToken: "", key: "escape" })}>安全按键</button>
               </div>
               {draft.kind === "click" ? <label>精确控件
                 <select value={draft.elementToken} onChange={event => setDraft({ kind: "click", elementToken: event.target.value })}>
                   <option value="">选择快照中的控件</option>
                   {elements.map(element => <option key={element.elementToken} value={element.elementToken}>{element.label} · {element.role}</option>)}
                 </select>
-              </label> : <div className="tp-ai-computer__type-fields">
+              </label> : draft.kind === "type" ? <div className="tp-ai-computer__type-fields">
                 <label>精确可编辑控件
                   <select value={draft.elementToken} onChange={event => setDraft({ ...draft, elementToken: event.target.value })}>
                     <option value="">选择快照中的输入框</option>
@@ -410,6 +413,23 @@ export function ComputerUsePanel({
                   <textarea rows={2} maxLength={200} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value.replace(/[\r\n]/g, "") })} />
                   <small>只会定向写入上面所选控件，不使用未知当前焦点。请勿输入密码、验证码、API 密钥或其他敏感信息。聊天和执行结果只记录字符数，但 AI 规划时仍需处理你的当前请求。</small>
                 </label>
+              </div> : <div className="tp-ai-computer__type-fields">
+                <label>精确控件
+                  <select value={draft.elementToken} onChange={event => setDraft({ ...draft, elementToken: event.target.value })}>
+                    <option value="">选择快照中的控件</option>
+                    {elements.map(element => <option key={element.elementToken} value={element.elementToken}>{element.label} · {element.role}</option>)}
+                  </select>
+                </label>
+                {draft.kind === "scroll" ? <>
+                  <label>方向<select value={draft.direction} onChange={event => setDraft({ ...draft, direction: event.target.value as "up" | "down" | "left" | "right" })}>
+                    <option value="up">上</option><option value="down">下</option><option value="left">左</option><option value="right">右</option>
+                  </select></label>
+                  <label>幅度<select value={draft.amount} onChange={event => setDraft({ ...draft, amount: Number(event.target.value) as 1 | 2 | 3 })}>
+                    <option value={1}>1 格</option><option value={2}>2 格</option><option value={3}>3 格</option>
+                  </select></label>
+                </> : <label>按键<select value={draft.key} onChange={event => setDraft({ ...draft, key: event.target.value as "escape" | "up" | "down" | "left" | "right" })}>
+                  <option value="escape">Esc</option><option value="up">上方向键</option><option value="down">下方向键</option><option value="left">左方向键</option><option value="right">右方向键</option>
+                </select></label>}
               </div>}
               {plan ? <div className="tp-ai-computer__plan"><strong>将只执行 1 个动作</strong><p>{plan.summary}</p><small>下一步会打开原生确认框；取消即不执行。</small></div> : <p className="tp-ai-computer__empty-plan">请选择完整的单动作，确认按钮才会启用。</p>}
               <button type="button" className="tp-ai-computer__primary" disabled={!plan || Boolean(busy)} onClick={() => void executePlan()}>

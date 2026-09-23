@@ -19,6 +19,8 @@ export interface ComputerUseCapabilities {
   sessions: boolean;
   click: boolean;
   typeText: boolean;
+  scroll: boolean;
+  safeKeys: boolean;
   perActionNativeConfirmation: true;
   shell: false;
   arbitraryTools: false;
@@ -79,6 +81,24 @@ export type ComputerUseAction =
       elementToken: string;
       /** Literal text only. Control characters, Enter and hotkeys are rejected. */
       text: string;
+    }
+  | {
+      kind: "scroll";
+      target: ComputerUseWindowTarget;
+      snapshotId: string;
+      /** The wheel is delivered over this element in the exact window. */
+      elementToken: string;
+      direction: "up" | "down" | "left" | "right";
+      /** A single bounded wheel action, never an unbounded page scroll. */
+      amount: 1 | 2 | 3;
+    }
+  | {
+      kind: "key";
+      target: ComputerUseWindowTarget;
+      snapshotId: string;
+      /** No ambient-focus key delivery: bind to a fresh AX element. */
+      elementToken: string;
+      key: "escape" | "up" | "down" | "left" | "right";
     };
 
 export type ComputerUseErrorCode =
@@ -100,6 +120,7 @@ export type ComputerUseErrorCode =
   | "target_changed"
   | "target_not_found"
   | "snapshot_expired"
+  | "background_unavailable"
   | "action_failed"
   | "action_outcome_unknown"
   | "window_list_failed"

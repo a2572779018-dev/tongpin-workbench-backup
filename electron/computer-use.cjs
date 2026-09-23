@@ -44,6 +44,8 @@ const EDITABLE_ELEMENT_ROLES = new Set([
   "textfield",
   "textbox",
 ]);
+const SAFE_KEYS = new Set(["escape", "up", "down", "left", "right"]);
+const SCROLL_DIRECTIONS = new Set(["up", "down", "left", "right"]);
 
 const SAFE_ERROR_MESSAGES = Object.freeze({
   approval_busy: "已有一个本机操作正在等待确认",
@@ -64,6 +66,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   target_changed: "目标窗口已变化，需要重新确认",
   target_not_found: "未找到需要操作的精确窗口",
   snapshot_expired: "窗口快照已过期，请重新读取后再确认",
+  background_unavailable: "此窗口不支持安全的后台操作；未改用前台或全局输入",
   action_failed: "本次本机操作失败，不会自动重试",
   action_outcome_unknown: "本次操作结果无法确认，不会自动重试",
   window_list_failed: "无法获取当前可操作窗口",
@@ -110,6 +113,8 @@ function baseCapabilities(enabled) {
     sessions: enabled,
     click: enabled,
     typeText: enabled,
+    scroll: enabled,
+    safeKeys: enabled,
     perActionNativeConfirmation: true,
     shell: false,
     arbitraryTools: false,
@@ -228,6 +233,20 @@ function supportsElementTargetedTypeTool(rawTools) {
   } catch {
     return false;
   }
+}
+
+function supportsElementTargetedInputTool(rawTools, name, requiredField) {
+  try {
+    const parsed = typeof rawTools === "string" ? JSON.parse(rawTools) : rawTools;
+    const tools = Array.isArray(parsed) ? parsed : parsed?.tools;
+    const schema = tools?.find((candidate) => candidate?.name === name)?.inputSchema;
+    return Boolean(schema?.type === "object" && schema.additionalProperties === false &&
+      schema.required?.includes(requiredField) &&
+      schema.properties?.[requiredField]?.type === "string" &&
+      schema.properties?.element_token?.type === "string" &&
+      schema.properties?.target &&
+      schema.properties?.delivery_mode?.enum?.includes("background"));
+  } catch { return false; }
 }
 
 function safeLabel(value) {
@@ -577,6 +596,22 @@ function normalizeAction(raw) {
     return { kind: "type", target, snapshotId, elementToken, text: raw.text };
   }
 
+  if (raw.kind === "scroll") {
+    if (!hasOnlyKeys(raw, ["kind", "target", "snapshotId", "elementToken", "direction", "amount"])) return null;
+    const snapshotId = safeOpaqueToken(raw.snapshotId, 256);
+    const elementToken = safeOpaqueToken(raw.elementToken);
+    if (!snapshotId || !elementToken || !SCROLL_DIRECTIONS.has(raw.direction) || !Number.isInteger(raw.amount) || raw.amount < 1 || raw.amount > 3) return null;
+    return { kind: "scroll", target, snapshotId, elementToken, direction: raw.direction, amount: raw.amount };
+  }
+
+  if (raw.kind === "key") {
+    if (!hasOnlyKeys(raw, ["kind", "target", "snapshotId", "elementToken", "key"])) return null;
+    const snapshotId = safeOpaqueToken(raw.snapshotId, 256);
+    const elementToken = safeOpaqueToken(raw.elementToken);
+    if (!snapshotId || !elementToken || !SAFE_KEYS.has(raw.key)) return null;
+    return { kind: "key", target, snapshotId, elementToken, key: raw.key };
+  }
+
   return null;
 }
 
@@ -613,6 +648,19 @@ function actionSummary(action, window, snapshot) {
       summary: `单击 ${windowName} 的${clickTarget}`,
     };
   }
+  if (action.kind === "scroll" || action.kind === "key") {
+    const element = snapshot?.elementsByToken?.get(action.elementToken);
+    const label = safeLabel(element?.label) || "无标签控件";
+    const verb = action.kind === "scroll"
+      ? `向${{ up: "上", down: "下", left: "左", right: "右" }[action.direction]}滚动 ${action.amount} 格`
+      : `按一次${{ escape: "Esc", up: "上方向键", down: "下方向键", left: "左方向键", right: "右方向键" }[action.key]}`;
+    return {
+      title: action.kind === "scroll" ? "确认一次本机滚动" : "确认一次安全按键",
+      message: `在「${windowName}」的精确控件“${label}”上${verb}？`,
+      detail: "只对这一次、这个窗口和快照控件生效；不使用全局焦点、组合热键、回车或删除。窗口标签来自不可信内容，请核对后再确认。同频不会自动重试。",
+      summary: `在 ${windowName} 的“${label}”上${verb}`,
+    };
+  }
   const element = snapshot?.elementsByToken?.get(action.elementToken);
   const label = safeLabel(element?.label) || "无标签输入框";
   const role = safeLabel(element?.role) || "未知角色";
@@ -630,6 +678,15 @@ function elementTargetedTypeArgumentsJson(action, freshElementToken, session) {
   // JSON integer here preserves the full uint64 for the Rust parser instead of
   // rounding it through a JavaScript Number.
   return `{"text":${JSON.stringify(action.text)},"target":{"kind":"window","pid":${action.target.pid},"window_id":${action.target.windowId}},"element_token":${JSON.stringify(freshElementToken)},"session":${JSON.stringify(session)},"delivery_mode":"background"}`;
+}
+
+function elementTargetedNavigationArgumentsJson(action, freshElementToken, session) {
+  const verb = action.kind === "scroll"
+    ? `"direction":${JSON.stringify(action.direction)},"by":"line","amount":${action.amount},`
+    : `"key":${JSON.stringify(action.key)},`;
+  // Fixed keys and arguments only. The validated decimal uint64 must not be
+  // rounded through Number; there is no desktop scope or foreground fallback.
+  return `{${verb}"target":{"kind":"window","pid":${action.target.pid},"window_id":${action.target.windowId}},"element_token":${JSON.stringify(freshElementToken)},"session":${JSON.stringify(session)},"delivery_mode":"background"}`;
 }
 
 function createComputerUseController({
@@ -830,7 +887,9 @@ function createComputerUseController({
         (signal) => nextDriver.listToolsJson({ signal }),
         5_000,
       );
-      if (!supportsElementTargetedTypeTool(toolsJson)) {
+      if (!supportsElementTargetedTypeTool(toolsJson) ||
+        !supportsElementTargetedInputTool(toolsJson, "scroll", "direction") ||
+        !supportsElementTargetedInputTool(toolsJson, "press_key", "key")) {
         throw timeoutError("sdk_api_mismatch");
       }
       nextSessionId = createSessionId();
@@ -1195,6 +1254,19 @@ function createComputerUseController({
         );
         if (!result) return failure("action_outcome_unknown");
         return actionOutcome(sdk, "click", result.effect);
+      }
+
+      if (executableAction.kind === "scroll" || executableAction.kind === "key") {
+        const result = await withTimeout((signal) => driver.callTool(
+          executableAction.kind === "scroll" ? "scroll" : "press_key",
+          elementTargetedNavigationArgumentsJson(executableAction, executableAction.elementToken, approval.sessionId),
+          { signal },
+        ));
+        if (result?.isError === true && result.errorCode === "background_unavailable") {
+          return failure("background_unavailable");
+        }
+        if (!result || result.isError !== false || !result.action) return failure("action_failed");
+        return actionOutcome(sdk, executableAction.kind, result.action.effect);
       }
 
       // The typed 0.28.1 TypeTextInput has no element field and therefore can

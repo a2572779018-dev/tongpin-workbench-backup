@@ -7,7 +7,9 @@ import type { AiComputerPlan } from "../../../shared/ai";
 
 export type ComputerUseDraft =
   | { kind: "click"; elementToken: string }
-  | { kind: "type"; elementToken: string; text: string };
+  | { kind: "type"; elementToken: string; text: string }
+  | { kind: "scroll"; elementToken: string; direction: "up" | "down" | "left" | "right"; amount: 1 | 2 | 3 }
+  | { kind: "key"; elementToken: string; key: "escape" | "up" | "down" | "left" | "right" };
 
 export interface ComputerUsePlan {
   action: ComputerUseAction;
@@ -144,6 +146,18 @@ export function validateComputerUseModelPlan(
       action: { kind: "type", elementToken: action.elementToken, text: action.text },
     };
   }
+  if (action.kind === "scroll") {
+    if (!onlyKeys(action, ["kind", "elementToken", "direction", "amount"]) || typeof action.elementToken !== "string" ||
+      !["up", "down", "left", "right"].includes(String(action.direction)) || !Number.isInteger(action.amount) || Number(action.amount) < 1 || Number(action.amount) > 3) return null;
+    if (!actionableComputerElements(state).some(element => element.elementToken === action.elementToken)) return null;
+    return { kind: "computer", summary: root.summary.trim(), action: { kind: "scroll", elementToken: action.elementToken, direction: action.direction as "up" | "down" | "left" | "right", amount: action.amount as 1 | 2 | 3 } };
+  }
+  if (action.kind === "key") {
+    if (!onlyKeys(action, ["kind", "elementToken", "key"]) || typeof action.elementToken !== "string" ||
+      !["escape", "up", "down", "left", "right"].includes(String(action.key))) return null;
+    if (!actionableComputerElements(state).some(element => element.elementToken === action.elementToken)) return null;
+    return { kind: "computer", summary: root.summary.trim(), action: { kind: "key", elementToken: action.elementToken, key: action.key as "escape" | "up" | "down" | "left" | "right" } };
+  }
   return null;
 }
 
@@ -169,6 +183,24 @@ export function buildComputerUsePlan(
         text: draft.text,
       },
       summary: `在「${windowName}」的“${cleanLabel(element.label ?? element.role)}”中输入 ${[...draft.text].length} 个字符（不含回车）`,
+    };
+  }
+
+  if (draft.kind === "scroll" || draft.kind === "key") {
+    const element = actionableComputerElements(state).find(candidate => candidate.elementToken === draft.elementToken);
+    if (!element) return null;
+    const label = cleanLabel(element.label ?? element.role);
+    if (draft.kind === "scroll") {
+      if (!["up", "down", "left", "right"].includes(draft.direction) || ![1, 2, 3].includes(draft.amount)) return null;
+      return {
+        action: { kind: "scroll", target: state.target, snapshotId: state.snapshotId, elementToken: element.elementToken, direction: draft.direction, amount: draft.amount },
+        summary: `在「${windowName}」的“${label}”上向${{ up: "上", down: "下", left: "左", right: "右" }[draft.direction]}滚动 ${draft.amount} 格`,
+      };
+    }
+    if (!["escape", "up", "down", "left", "right"].includes(draft.key)) return null;
+    return {
+      action: { kind: "key", target: state.target, snapshotId: state.snapshotId, elementToken: element.elementToken, key: draft.key },
+      summary: `在「${windowName}」的“${label}”上按一次${{ escape: "Esc", up: "上方向键", down: "下方向键", left: "左方向键", right: "右方向键" }[draft.key]}`,
     };
   }
 

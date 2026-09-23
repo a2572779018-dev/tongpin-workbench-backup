@@ -97,7 +97,20 @@ function makeFakeSdk(options = {}) {
           delivery_mode: { type: "string", enum: ["background", "foreground"] },
         },
       },
-    }])),
+    }, ...["scroll", "press_key"].map(name => ({
+      name,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: [name === "scroll" ? "direction" : "key"],
+        properties: {
+          [name === "scroll" ? "direction" : "key"]: { type: "string" },
+          element_token: { type: "string" },
+          target: { type: ["object", "null"] },
+          delivery_mode: { type: "string", enum: ["background", "foreground"] },
+        },
+      },
+    }))])),
     callTool: vi.fn(async (name, argumentsJson) => {
       calls.callTool.push({ name, argumentsJson });
       return options.typeResult ?? { isError: false, action: { effect: 0 } };
@@ -188,6 +201,8 @@ describe("computer-use platform and capability gate", () => {
       listWindows: true,
       click: true,
       typeText: true,
+      scroll: true,
+      safeKeys: true,
       shell: false,
       arbitraryTools: false,
       clipboard: false,
@@ -656,6 +671,77 @@ describe("computer-use one-time action approval", () => {
     await controller.stopSession();
   });
 
+  it("scrolls and presses only allowlisted keys against a fresh element in the exact window", async () => {
+    let capture = 0;
+    const fake = makeFakeSdk({ windowState: input => ({
+      pid: input.pid, windowId: input.windowId, snapshotId: `snapshot-${++capture}`,
+      appName: "Notes", windowTitle: "Draft", treeMarkdown: "- list: Results",
+      elements: [{ elementIndex: 1n, role: "list", depth: 1, elementToken: `list-${capture}`, label: "Results", enabled: true }],
+      elementCount: 1n, elementsComplete: true, images: [],
+    }) });
+    const confirmAction = vi.fn(async () => true);
+    const controller = makeController(fake, { confirmAction });
+    expect((await controller.startSession()).ok).toBe(true);
+    const target = { pid: 42, windowId: "9007199254740993" };
+    await controller.getWindowState(target);
+    const scroll = await controller.requestActionApproval({ kind: "scroll", target, snapshotId: "snapshot-1", elementToken: "list-1", direction: "down", amount: 2 });
+    expect(scroll.ok).toBe(true);
+    expect(confirmAction.mock.calls[0][0].message).toContain("滚动 2 格");
+    expect(await controller.executeApprovedAction(scroll.value.token)).toMatchObject({ ok: true, value: { kind: "scroll" } });
+    expect(fake.calls.callTool[0].name).toBe("scroll");
+    expect(fake.calls.callTool[0].argumentsJson).toContain('"window_id":9007199254740993');
+    expect(JSON.parse(fake.calls.callTool[0].argumentsJson)).toMatchObject({ direction: "down", by: "line", amount: 2,
+      element_token: "list-2", delivery_mode: "background", target: { kind: "window", pid: 42 } });
+    expect(await controller.executeApprovedAction(scroll.value.token)).toMatchObject({ ok: false, error: { code: "approval_required" } });
+    await controller.getWindowState(target);
+    const key = await controller.requestActionApproval({ kind: "key", target, snapshotId: "snapshot-3", elementToken: "list-3", key: "escape" });
+    expect(key.ok).toBe(true);
+    expect(await controller.executeApprovedAction(key.value.token)).toMatchObject({ ok: true, value: { kind: "key" } });
+    expect(fake.calls.callTool[1].name).toBe("press_key");
+    expect(JSON.parse(fake.calls.callTool[1].argumentsJson)).toMatchObject({ key: "escape", element_token: "list-4", delivery_mode: "background" });
+    expect(fake.calls.callTool[1].argumentsJson).not.toContain("modifiers");
+    await controller.stopSession();
+  });
+
+  it("fails closed when navigation tool schema, target or allowed key changes", async () => {
+    const fake = makeFakeSdk({ tools: [{ name: "type_text", inputSchema: { type: "object", additionalProperties: false, required: ["text"], properties: { text: { type: "string" }, element_token: { type: "string" }, target: {}, delivery_mode: { enum: ["background"] } } } }] });
+    expect(await makeController(fake).startSession()).toMatchObject({ ok: false, error: { code: "sdk_api_mismatch" } });
+    const valid = makeFakeSdk();
+    const confirmAction = vi.fn(async () => true);
+    const controller = makeController(valid, { confirmAction });
+    await controller.startSession();
+    const target = { pid: 42, windowId: "9007199254740993" };
+    await controller.getWindowState(target);
+    for (const action of [
+      { kind: "key", target, snapshotId: "snapshot-1", elementToken: "element-token-1", key: "return" },
+      { kind: "key", target, snapshotId: "snapshot-1", elementToken: "element-token-1", key: "down", modifiers: ["cmd"] },
+      { kind: "scroll", target, snapshotId: "snapshot-1", elementToken: "element-token-1", direction: "down", amount: 50 },
+      { kind: "scroll", target, snapshotId: "snapshot-1", elementToken: "element-token-1", direction: "down", amount: 1, scope: "desktop" },
+    ]) expect(await controller.requestActionApproval(action)).toMatchObject({ ok: false, error: { code: "invalid_action" } });
+    expect(confirmAction).not.toHaveBeenCalled();
+    expect(valid.driver.callTool).not.toHaveBeenCalled();
+    await controller.stopSession();
+  });
+
+  it("reports unavailable background delivery without foreground fallback or retry", async () => {
+    const fake = makeFakeSdk({ typeResult: { isError: true, errorCode: "background_unavailable" } });
+    const controller = makeController(fake, { confirmAction: async () => true });
+    await controller.startSession();
+    const target = { pid: 42, windowId: "9007199254740993" };
+    await controller.getWindowState(target);
+    const approval = await controller.requestActionApproval({
+      kind: "scroll", target, snapshotId: "snapshot-1", elementToken: "element-token-1", direction: "down", amount: 1,
+    });
+    expect(approval.ok).toBe(true);
+    expect(await controller.executeApprovedAction(approval.value.token)).toMatchObject({
+      ok: false, error: { code: "background_unavailable" },
+    });
+    expect(fake.calls.callTool).toHaveLength(1);
+    expect(JSON.parse(fake.calls.callTool[0].argumentsJson).delivery_mode).toBe("background");
+    expect(fake.driver.click).not.toHaveBeenCalled();
+    await controller.stopSession();
+  });
+
   it("rejects typing into a non-editable snapshot element before confirmation", async () => {
     const fake = makeFakeSdk();
     const confirmAction = vi.fn(async () => true);
@@ -794,7 +880,7 @@ describe("computer-use one-time action approval", () => {
 });
 
 describe("computer-use action schema", () => {
-  it("accepts only exact element clicks and literal typing, rejecting coordinates and extra authority", () => {
+  it("accepts only exact element actions, rejecting coordinates and extra authority", () => {
     const target = { pid: 42, windowId: "9" };
     expect(normalizeAction({ kind: "click", target, snapshotId: "snapshot-1", x: 1, y: 2 })).toBeNull();
     expect(normalizeAction({ kind: "type", target, snapshotId: "snapshot-1", elementToken: "field-1", text: "hello" })).toEqual({
@@ -817,6 +903,8 @@ describe("computer-use action schema", () => {
       elementToken: "element-1",
     });
     expect(normalizeAction({ kind: "shell", target, command: "whoami" })).toBeNull();
+    expect(normalizeAction({ kind: "scroll", target, snapshotId: "snapshot-1", elementToken: "list-1", direction: "down", amount: 1 })).toMatchObject({ kind: "scroll", direction: "down", amount: 1 });
+    expect(normalizeAction({ kind: "key", target, snapshotId: "snapshot-1", elementToken: "list-1", key: "left" })).toMatchObject({ kind: "key", key: "left" });
     expect(normalizeAction({
       kind: "click",
       target,
@@ -860,8 +948,9 @@ describe("computer-use Electron boundary", () => {
       expect(preload).toContain(`ipcRenderer.invoke("computer-use:${channel}"`);
     }
     expect(Object.keys(createComputerUseController())).not.toContain("callTool");
-    expect(controller.match(/\.callTool\(/g)).toHaveLength(1);
+    expect(controller.match(/\.callTool\(/g)).toHaveLength(2);
     expect(controller).toContain('"type_text",');
+    expect(controller).toContain('"scroll" : "press_key"');
     expect(controller).not.toContain('require("node:child_process")');
     expect(preload).not.toContain("computer-use:call-tool");
     expect(preload).not.toContain("computer-use:shell");

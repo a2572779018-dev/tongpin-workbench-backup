@@ -296,7 +296,9 @@ export interface AiVideoPlanParameters {
 }
 export type AiComputerPlanAction =
   | { kind: "click"; elementToken: string }
-  | { kind: "type"; elementToken: string; text: string };
+  | { kind: "type"; elementToken: string; text: string }
+  | { kind: "scroll"; elementToken: string; direction: "up" | "down" | "left" | "right"; amount: 1 | 2 | 3 }
+  | { kind: "key"; elementToken: string; key: "escape" | "up" | "down" | "left" | "right" };
 export interface AiComputerPlan {
   kind: "computer";
   summary: string;

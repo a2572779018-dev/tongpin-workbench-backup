@@ -31,8 +31,9 @@ describe("@computer desktop integration", () => {
     expect(observeAt).toBeGreaterThan(actionAt);
     expect(execute.match(/executeApprovedAction/g)).toHaveLength(1);
     expect(panel).not.toContain("kind: \"shell\"");
-    expect(panel).not.toContain("x:");
-    expect(panel).not.toContain("y:");
+    // Check coordinate object fields, not ordinary UI text that happens to
+    // contain the same character pair (for example, a scroll direction).
+    expect(panel).not.toMatch(/(?:^|[,{]\s*)[xy]\s*:/m);
   });
 
   it("does not send observed screenshots or trees to chat/backend persistence", () => {
