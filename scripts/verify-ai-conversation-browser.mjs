@@ -170,6 +170,74 @@ try {
     await context.close();
   }
   {
+    const { page, context, errors } = await fixture("&multiImage&fast");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.getByRole("region", { name: "选择视频参考图片" }).waitFor();
+    assert.equal((await evidence(page).innerText()).includes("media-task-post:video:"), false, "multi-image ambiguity must not start a paid task");
+    await row(page, "B 编辑中").click();
+    assert.equal(await page.locator("textarea").inputValue(), "B 的草稿不能丢");
+    await row(page, "A 异步任务").click();
+    await page.reload();
+    await page.getByRole("region", { name: "选择视频参考图片" }).waitFor();
+    assert.equal((await evidence(page).innerText()).includes("media-task-post:video:"), false, "reload must not auto-submit a video");
+    await page.screenshot({ path: "/tmp/tongpin-multi-image-choice-card.png" });
+    await page.getByRole("button", { name: "选择第 2 张图片用于视频" }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-post:video:a:refs=1"), null, { timeout: 15000 });
+    const events = await evidence(page).innerText();
+    assert.ok(events.includes("generated-asset:a:22222222-2222-4222-8222-222222222222"));
+    assert.ok(!events.includes("generated-asset:a:11111111-1111-4111-8111-111111111111"));
+    assert.equal((events.match(/media-task-post:video:a:refs=1/g) ?? []).length, 1);
+    assert.ok(events.includes("media-task-grant:video:no"), "thumbnail selection does not authorize spend");
+    assert.equal(await page.locator(".tp-ai-message.is-user").count(), 1, "choosing a thumbnail continues the original user turn");
+    await page.screenshot({ path: "/tmp/tongpin-multi-image-selection.png" });
+    assert.deepEqual(errors, []);
+    results.multiImageSelection = { sameConversationChoiceSurvivesSwitchAndReload: true, paidTaskWaitedForSelection: true, exactSecondAssetBound: true, noAutomaticPaidGrant: true, oneOriginalTurn: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&multiImage&fast");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.getByRole("region", { name: "选择视频参考图片" }).waitFor();
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await page.waitForFunction(() => document.body.textContent?.includes("已取消选择，本次未生成视频。"));
+    assert.equal((await evidence(page).innerText()).includes("media-task-post:video:"), false);
+    await page.reload();
+    assert.equal(await page.getByRole("region", { name: "选择视频参考图片" }).count(), 0);
+    assert.ok((await page.locator("body").innerText()).includes("已取消选择，本次未生成视频。"));
+    assert.deepEqual(errors, []);
+    results.multiImageCancel = { cancellationSaved: true, noProviderGeneration: true, noReopenedChoiceAfterReload: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&multiImage&slowSelection&fast");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.getByRole("region", { name: "选择视频参考图片" }).waitFor();
+    await page.getByRole("button", { name: "选择第 1 张图片用于视频" }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("generated-asset-read-start"));
+    await page.getByRole("button", { name: "停止等待回复" }).click();
+    await page.waitForTimeout(1600);
+    assert.equal((await evidence(page).innerText()).includes("media-task-post:video:"), false, "stop before paid POST must not call the video provider");
+    assert.deepEqual(errors, []);
+    results.multiImageStop = { stopDuringSourceReadPreventedPaidTask: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&multiImage&failSelectionSaveOnce&fast");
+    const original = await page.locator("textarea").inputValue();
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("workspace-selection-save-rejected"));
+    await page.waitForFunction(value => (document.querySelector("textarea")?.value ?? "") === value, original);
+    await page.getByRole("region", { name: "选择视频参考图片" }).waitFor({ state: "hidden" });
+    assert.equal(await page.getByRole("region", { name: "选择视频参考图片" }).count(), 0);
+    assert.equal((await evidence(page).innerText()).includes("media-task-post:video:"), false);
+    await page.reload();
+    assert.equal(await page.locator("textarea").inputValue(), original);
+    assert.equal(await page.getByRole("region", { name: "选择视频参考图片" }).count(), 0);
+    assert.deepEqual(errors, []);
+    results.multiImageSaveFailure = { originalDraftRestoredAfterReload: true, noPrematurePaidPost: true };
+    await context.close();
+  }
+  {
     const { page, context, errors } = await fixture("&failMediaSave");
     const original = await page.locator("textarea").inputValue();
     assert.ok(original.startsWith("@image "));

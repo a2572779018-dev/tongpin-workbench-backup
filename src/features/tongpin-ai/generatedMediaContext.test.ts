@@ -17,7 +17,7 @@ describe("generated media continuity", () => {
     const c = { ...conversation, messages: [{ ...conversation.messages[0], artifactId: "p" }, { id: "question", role: "assistant" as const, content: "沿用刚才这张人物图，生成竖屏视频？", time: "" }] };
     expect(generatedMediaForFollowup(c, [picture], "是的")).toBe(picture);
     expect(generatedMediaForFollowup({ ...c, messages: [{ ...c.messages[1], content: "要写一封邮件吗？" }] }, [picture], "是的")).toBeUndefined();
-    expect(() => generatedMediaForFollowup(c, [{ ...picture, data: { images: [{ assetId: "first" }, { assetId: "second" }] } }], "是的")).toThrow("多张图片");
+    expect(generatedMediaForFollowup(c, [{ ...picture, data: { images: [{ assetId: "first" }, { assetId: "second" }] } }], "是的")?.id).toBe("p");
   });
   it("does not try to watch an unfinished video when discussing its prompt", () => {
     expect(generatedMediaForFollowup(conversation, [video], "你能把上面的视频生成提示词优化一下吗？")).toBeUndefined();

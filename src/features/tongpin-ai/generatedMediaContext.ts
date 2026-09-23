@@ -39,7 +39,6 @@ export function generatedMediaForFollowup(conversation: TongpinAIConversation | 
       return artifact;
     }
     if (Array.isArray(artifact.data?.images) && kind !== "video") {
-      if (imageToVideo && artifact.data.images.length !== 1) throw Error("刚才的成果有多张图片，请先选择要沿用的参考图。草稿已保留。");
       return artifact;
     }
   }

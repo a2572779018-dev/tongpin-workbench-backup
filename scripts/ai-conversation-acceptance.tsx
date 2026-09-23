@@ -35,6 +35,20 @@ type SyntheticTask = {
 };
 const taskStorageKey = `${storageKey}:media-tasks`;
 const tasks = new Map<string, SyntheticTask>(JSON.parse(localStorage.getItem(taskStorageKey) ?? "[]"));
+if (parameters.has("multiImage") && !snapshot.state?.artifacts.some(item => item.id === "multi-image-source")) {
+  const sourceIds = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+  const conversation = snapshot.state?.conversations.find(item => item.id === "a");
+  if (!snapshot.state || !conversation) throw Error("Multi-image fixture has no source conversation");
+  conversation.messages.push({ id: "multi-image-source-message", role: "assistant", content: "已经生成两张人物图片。", artifactId: "multi-image-source", status: "ready", time: "" });
+  snapshot.state.artifacts.unshift({ id: "multi-image-source", conversationId: "a", projectId: "project-a", title: "两张人物图片", kind: "图片", summary: "人物图片", updatedLabel: "", sections: [], data: { images: sourceIds.map(assetId => ({ assetId })) } });
+  snapshot.state.drafts.a = "用刚才同一个人物做视频";
+  const now = Date.now();
+  tasks.set("multi-image-source-request", { tenantId: "fixture-tenant", userId: account, requestId: "multi-image-source-request", runId: "multi-image-source-run", conversationId: "a",
+    version: 2, status: "completed", createdAt: now - 10_000, updatedAt: now - 9_000, deadlineAt: now + 60_000, dueAt: null,
+    requestText: "生成两张人物图片", hasGrant: true, tool: { capability: "image", estimatedPoints: 120, sourceAssetIds: [], artifactIds: sourceIds } });
+  localStorage.setItem(storageKey, JSON.stringify(snapshot));
+  localStorage.setItem(taskStorageKey, JSON.stringify([...tasks]));
+}
 const references = new Map<string, { conversationId: string; generatedAssetId?: string; sourceVideo?: { documentId: string; name: string; timeSeconds: number } }>();
 let referenceSequence = 0;
 const nativeFetch = window.fetch.bind(window);
@@ -71,6 +85,12 @@ window.fetch = async (target, init) => {
   if (url.pathname === "/api/ai/persona") return Response.json({ revision: 1, profile: { ...defaultAiPersonaProfile(), name: "验收 AI", onboardingComplete: true, expression: "none" } });
   if (url.pathname === "/api/ai/workspace") {
     if (method === "PUT") {
+      if (parameters.has("failSelectionSaveOnce") && !localStorage.getItem(`${storageKey}:selection-save-failed`)
+        && body.state?.artifacts?.some((item: { data?: { generatedImageSelection?: unknown } }) => item.data?.generatedImageSelection)) {
+        localStorage.setItem(`${storageKey}:selection-save-failed`, "1");
+        record("workspace-selection-save-rejected");
+        return Response.json({ error: { code: "AI_WORKSPACE_WRITE_FAILED", message: "合成验收：选图任务保存失败" } }, { status: 503 });
+      }
       if (parameters.has("failMediaSave") && body.state?.artifacts?.some((item: { data?: { mediaTaskRequestId?: string; mediaTaskSubmitError?: string } }) => item.data?.mediaTaskRequestId && !item.data?.mediaTaskSubmitError)) {
         record("workspace-media-save-rejected");
         return Response.json({ error: { code: "AI_WORKSPACE_WRITE_FAILED", message: "合成验收：媒体提交前保存失败" } }, { status: 503 });
@@ -100,7 +120,7 @@ window.fetch = async (target, init) => {
     } else throw Error("Fixture received unsupported media intent");
     const hasGrant = body.confirmedMediaExecution?.confirmed === true;
     if (hasGrant && (!Number.isSafeInteger(body.confirmedMediaExecution.maxPointsPerTool) || body.confirmedMediaExecution.maxPointsPerTool < (body.intent === "image" ? 120 : 250))) throw Error("Media task confirmed budget below fixture cost");
-    if (!hasGrant && (!parameters.has("dispatch") || body.entrypoint !== "natural")) throw Error("Direct media submission lacked click-scoped persisted grant");
+    if (!hasGrant && (!(parameters.has("dispatch") || parameters.has("multiImage")) || body.entrypoint !== "natural")) throw Error("Direct media submission lacked click-scoped persisted grant");
     let task = tasks.get(body.requestId);
     if (!task) {
       const now = Date.now();
@@ -153,6 +173,7 @@ window.fetch = async (target, init) => {
     return job ? Response.json({ job }) : Response.json({ error: { code: "AI_VIDEO_NOT_FOUND", message: "尚未提交" } }, { status: 404 });
   }
   if (url.pathname === "/api/ai/video-references/generated-asset" && method === "POST") {
+    if (parameters.has("slowSelection")) { record("generated-asset-read-start"); await new Promise(resolve => setTimeout(resolve, 1200)); }
     const task = [...tasks.values()].find(item => item.conversationId === body.conversationId && item.tool.capability === "image" && item.tool.artifactIds?.includes(body.assetId));
     if (!task || taskOnRead(task).status !== "completed") throw Error("Generated image reference is not owned by this conversation");
     record(`generated-asset:${body.conversationId}:${body.assetId}`);

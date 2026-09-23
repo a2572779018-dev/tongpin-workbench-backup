@@ -126,6 +126,8 @@ interface ChatWorkspaceProps {
   onSubmitVideoTask?: (request: VideoChatRequest, maxPointsPerTool: number) => Promise<boolean>;
   onUseVideoHistory?: (jobId: string) => Promise<boolean>;
   onMediaTask?: (conversationId: string, requestId: string, task: MediaTaskRun) => void;
+  onSelectGeneratedImage?: (artifactId: string, assetId: string) => Promise<boolean>;
+  onCancelGeneratedImageSelection?: (artifactId: string) => Promise<void>;
   videoDispatchRequest?: { id: string; prompt: string; request?: VideoChatRequest };
   computerAvailable?: boolean;
   computerRequest?: { id: string; originalPrompt: string };
@@ -196,6 +198,8 @@ export function ChatWorkspace({
   onSubmitVideoTask,
   onUseVideoHistory,
   onMediaTask,
+  onSelectGeneratedImage,
+  onCancelGeneratedImageSelection,
   videoDispatchRequest,
   computerAvailable = false,
   computerRequest,
@@ -735,6 +739,8 @@ export function ChatWorkspace({
                 onTraceChange={onTraceChange}
                 onVideoSettled={isVideoArtifact ? videoSettled : undefined}
                 onMediaTask={artifact?.data?.mediaTaskRequestId && onMediaTask ? task => onMediaTask(artifact.conversationId, String(artifact.data!.mediaTaskRequestId), task) : undefined}
+                onSelectGeneratedImage={onSelectGeneratedImage}
+                onCancelGeneratedImageSelection={onCancelGeneratedImageSelection}
                 videoEditDisabled={isVideoArtifact ? responding || videoBusy || videoOpen || Boolean(draft.trim()) || Boolean(attachments.length) : undefined}
                 onEditVideo={isVideoArtifact && onSubmitVideo ? editVideo : undefined}
               />;

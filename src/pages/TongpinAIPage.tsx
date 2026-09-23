@@ -32,6 +32,8 @@ import { AI_DOWNLOAD_FEEDBACK_EVENT, saveBlobWithFeedback, type AiDownloadFeedba
 import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "../features/tongpin-ai/videoReferenceAttachments";
 import { imageReferencesForGeneration } from "../features/tongpin-ai/imageReferenceAttachments";
 import { generatedImageEditReferenceIds } from "../features/tongpin-ai/generatedImageEditReference";
+import { generatedVideoReferenceCandidates } from "../features/tongpin-ai/generatedVideoReference";
+import { readGeneratedImageSelection, type GeneratedImageSelection } from "../features/tongpin-ai/generatedImageSelection";
 import { persistedVideoChatRequest, type VideoChatRequest } from "../features/tongpin-ai/videoChat";
 import { naturalVideoRequest } from "../features/tongpin-ai/naturalVideoRequest";
 import { parseMediaTaskResponse, type MediaTaskRun } from "../features/tongpin-ai/mediaTaskClient";
@@ -169,6 +171,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const submissionSnapshotsRef = useRef(new Map<string, SubmissionSnapshot>());
   const pendingGenerationRef = useRef(new Set<string>());
   const pendingCancelledRef = useRef(new Set<string>());
+  const imageSelectionBusyRef = useRef(new Set<string>());
   const draftConversationIdsRef = useRef(new Map<string, string>());
   const fileImportRef = useRef(new Set<string>());
   const deletingConversationRef = useRef(new Set<string>());
@@ -1331,7 +1334,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
 
   async function submitMediaTask(kind: "image" | "video", prompt: string, videoRequest: VideoChatRequest | undefined,
     entrypoint: "natural" | "mention_image" | "mention_video" | "menu", suppliedVideoPoints?: number,
-    continuation?: TaskContinuation): Promise<boolean> {
+    continuation?: TaskContinuation,
+    selectedImage?: { artifactId: string; requestId: string; sourceArtifactId: string; assetId: string; previousSettings?: AiWorkspaceVideoDraftSettings }): Promise<boolean> {
     const conversationId = continuation?.conversationId ?? requestConversationId();
     if (!prompt.trim() || !persona.profile.onboardingComplete || !continuation && conversationBusy(conversationId) || !serviceConnected || quotaInsufficient || !continuation && fileImportRef.current.has(draftKey)) return false;
     if (persistenceRef.current.status === "error" || persistenceRef.current.status === "conflict") { showAnnouncement("请先完成记录同步，再提交媒体任务"); return false; }
@@ -1350,13 +1354,92 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       const migration = videoReferencesFromAttachments(origin.attachments);
       if (!migration.ok) { showAnnouncement(migration.message); return false; }
     }
-    const requestId = videoRequest?.requestId ?? crypto.randomUUID();
+    const candidates = kind === "video" && !selectedImage && !origin.attachments.length && !videoRequest?.referenceImages?.length && !videoRequest?.referenceIds?.length
+      ? generatedVideoReferenceCandidates(origin.conversation, workspaceRef.current.artifacts, prompt) : undefined;
+    if (candidates && candidates.assetIds.length > 20) { showAnnouncement("上一条成果图片过多，请先手动上传要用的参考图片；本次未提交生成。"); return false; }
+    if (candidates && candidates.assetIds.length > 1) {
+      const requestId = videoRequest?.requestId ?? crypto.randomUUID();
+      const messageId = continuation?.messageId ?? createLocalId("assistant");
+      const artifactId = `artifact-${requestId}`;
+      const current = workspaceRef.current;
+      const ownedConversation = current.conversations.find(item => item.id === conversationId) ?? origin.conversation;
+      const selection: GeneratedImageSelection = {
+        requestId, sourceArtifactId: candidates.sourceArtifactId, assetIds: candidates.assetIds, mode: origin.mode, entrypoint,
+        status: "awaiting_selection",
+        ...(videoRequest ? { videoOptions: { ...(videoRequest.model ? { model: videoRequest.model } : {}), seconds: videoRequest.seconds, resolution: videoRequest.resolution, aspectRatio: videoRequest.aspectRatio } } : {}),
+        ...(current.videoDraftSettings[origin.draftKey] ? { previousSettings: current.videoDraftSettings[origin.draftKey] } : {}),
+      };
+      const conversation: TongpinAIConversation = {
+        ...(ownedConversation ?? { id: conversationId, projectId: origin.project?.id, title: Array.from(prompt).slice(0, 28).join("") }),
+        timeLabel: "刚刚",
+        messages: continuation ? (ownedConversation?.messages ?? []).map(message => message.id === messageId
+          ? { ...message, content: "请选择要用于视频的图片。", status: "ready" as const, taskPhase: "awaiting_input" as const, artifactId, startedAt: undefined }
+          : message) : [...(ownedConversation?.messages ?? []),
+          { id: createLocalId("user"), role: "user", content: prompt, time: currentTimeLabel() },
+          { id: messageId, role: "assistant", content: "请选择要用于视频的图片。", status: "ready", taskPhase: "awaiting_input", artifactId, time: currentTimeLabel() }],
+      };
+      const artifact: TongpinAIArtifact = { id: artifactId, conversationId, projectId: conversation.projectId, title: "选择视频参考图片", kind: "参考图片选择", updatedLabel: "刚刚", summary: prompt, sections: [], data: {
+        generatedImageSelection: selection as unknown as import("../../shared/aiWorkspace").AiWorkspaceJson,
+      } };
+      const currentState = { ...persistentStateRef.current, conversations: current.conversations, projects: current.projects,
+        artifacts: [artifact, ...current.artifacts], drafts: current.drafts, draftAttachments: current.draftAttachments,
+        videoDraftSettings: current.videoDraftSettings, activeProjectId: current.activeProjectId };
+      const next = continuation ? { ...currentState, conversations: current.conversations.map(item => item.id === conversationId ? conversation : item) }
+        : withPreparedChatSend(currentState, conversation, origin.draftKey);
+      try { ensureAttachmentWorkspaceCapacity(next, "video"); }
+      catch (error) { showAnnouncement(error instanceof Error ? error.message : "无法保存选图任务，原输入已保留"); return false; }
+      pendingGenerationRef.current.add(conversationId);
+      workspaceRef.current = { ...current, conversations: next.conversations, artifacts: next.artifacts, drafts: next.drafts,
+        draftAttachments: next.draftAttachments ?? {}, videoDraftSettings: next.videoDraftSettings ?? {},
+        ...(!continuation ? { activeConversationId: conversationId, view: "chat" as const } : {}) };
+      persistentStateRef.current = next;
+      setConversations(next.conversations); setArtifacts(next.artifacts); setDrafts(next.drafts);
+      setDraftAttachments(next.draftAttachments ?? {}); setVideoDraftSettings(next.videoDraftSettings ?? {});
+      if (!continuation) { setActiveConversationId(conversationId); setView("chat"); draftConversationIdsRef.current.delete(origin.draftKey); }
+      const restoreUnrecordedSelection = async () => {
+        if (!mountedRef.current) return;
+        const latest = workspaceRef.current;
+        const originalConversation = current.conversations.find(item => item.id === conversationId);
+        const restoredConversations = originalConversation
+          ? latest.conversations.map(item => item.id === conversationId ? originalConversation : item)
+          : latest.conversations.filter(item => item.id !== conversationId);
+        const restoredArtifacts = latest.artifacts.filter(item => item.id !== artifactId);
+        const restoredDrafts = { ...latest.drafts, [origin.draftKey]: prompt };
+        const restoredDraftAttachments = { ...latest.draftAttachments,
+          ...(current.draftAttachments[origin.draftKey] ? { [origin.draftKey]: current.draftAttachments[origin.draftKey] } : {}) };
+        const restoredVideoDraftSettings = { ...latest.videoDraftSettings,
+          ...(current.videoDraftSettings[origin.draftKey] ? { [origin.draftKey]: current.videoDraftSettings[origin.draftKey] } : {}) };
+        const backToDraft = !continuation && !originalConversation && latest.activeConversationId === conversationId;
+        const restored = { ...persistentStateRef.current, conversations: restoredConversations, artifacts: restoredArtifacts,
+          drafts: restoredDrafts, draftAttachments: restoredDraftAttachments, videoDraftSettings: restoredVideoDraftSettings,
+          ...(backToDraft ? { activeConversationId: current.activeConversationId, view: current.view } : {}) };
+        workspaceRef.current = { ...latest, ...restored };
+        persistentStateRef.current = restored;
+        setConversations(restoredConversations); setArtifacts(restoredArtifacts); setDrafts(restoredDrafts);
+        setDraftAttachments(restoredDraftAttachments); setVideoDraftSettings(restoredVideoDraftSettings);
+        if (backToDraft) { setActiveConversationId(current.activeConversationId); setView(current.view); draftConversationIdsRef.current.set(origin.draftKey, conversationId); }
+        try { await persistenceRef.current.saveNow(restored); } catch { /* Keep the original draft locally if sync remains unavailable. */ }
+      };
+      try {
+        if (!await persistenceRef.current.saveNow(next)) {
+          await restoreUnrecordedSelection();
+          showAnnouncement("选图任务尚未保存，原输入已保留；请先恢复同步。只选图片不会生成视频。");
+          return false;
+        }
+        return true;
+      } catch (error) {
+        await restoreUnrecordedSelection();
+        showAnnouncement(error instanceof Error ? error.message : "选图任务尚未保存，原输入已保留。");
+        return false;
+      } finally { pendingGenerationRef.current.delete(conversationId); }
+    }
+    const requestId = selectedImage?.requestId ?? videoRequest?.requestId ?? crypto.randomUUID();
     // Explicit composer references are part of this user turn too. Persist
     // the selected frame (or added image) before uploading a scoped reference.
     const submittedAttachments = kind === "video" && videoRequest?.referenceImages !== undefined
       ? videoReferenceDraftAttachments(videoRequest.referenceImages, `video-reference-${requestId}`, origin.attachments)
       : origin.attachments;
-    const messageId = continuation?.messageId ?? createLocalId("assistant"), artifactId = `artifact-${requestId}`;
+    const messageId = continuation?.messageId ?? createLocalId("assistant"), artifactId = selectedImage?.artifactId ?? `artifact-${requestId}`;
     const latest = workspaceRef.current;
     const ownedConversation = latest.conversations.find(item => item.id === conversationId) ?? origin.conversation;
     const conversation: TongpinAIConversation = {
@@ -1372,9 +1455,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     };
     const artifact: TongpinAIArtifact = { id: artifactId, conversationId, projectId: conversation.projectId,
       title: kind === "video" ? "生成的视频" : "生成的图片", kind: kind === "video" ? "视频" : "图片", updatedLabel: "刚刚", summary: prompt, sections: [],
-      data: { mediaTaskRequestId: requestId, mediaTaskStatus: "queued", ...(priorImageIds.length ? { mediaTaskSourceAssetIds: priorImageIds } : {}) } };
+      data: { mediaTaskRequestId: requestId, mediaTaskStatus: "queued", ...(priorImageIds.length ? { mediaTaskSourceAssetIds: priorImageIds } : {}),
+        ...(selectedImage ? { selectedGeneratedImage: { sourceArtifactId: selectedImage.sourceArtifactId, assetId: selectedImage.assetId } } : {}) } };
     const currentState = { ...persistentStateRef.current,
-      conversations: latest.conversations, projects: latest.projects, artifacts: [artifact, ...latest.artifacts], drafts: latest.drafts,
+      conversations: latest.conversations, projects: latest.projects, artifacts: selectedImage
+        ? latest.artifacts.map(item => item.id === artifactId ? artifact : item) : [artifact, ...latest.artifacts], drafts: latest.drafts,
       draftAttachments: latest.draftAttachments, videoDraftSettings: latest.videoDraftSettings, activeProjectId: latest.activeProjectId,
     };
     const next = continuation ? { ...currentState, conversations: latest.conversations.map(item => item.id === conversationId ? conversation : item) }
@@ -1382,6 +1467,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     try { ensureAttachmentWorkspaceCapacity(next, kind === "video" ? "video" : "reply"); }
     catch (error) { showAnnouncement(error instanceof Error ? error.message : "记录空间不足，未提交生成"); return false; }
     pendingGenerationRef.current.add(conversationId);
+    pendingCancelledRef.current.delete(conversationId);
     setReplyActivity(conversationId, messageId, "waiting");
     workspaceRef.current = { ...latest, conversations: next.conversations, artifacts: next.artifacts, drafts: next.drafts,
       draftAttachments: next.draftAttachments ?? {}, videoDraftSettings: next.videoDraftSettings ?? {},
@@ -1394,6 +1480,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     try {
       // A successful workspace CAS is required before any media source or paid task POST.
       if (!await persistenceRef.current.saveNow(next)) throw new Error("记录尚未保存，本次没有提交媒体任务。请恢复同步后重试。");
+      if (pendingCancelledRef.current.has(conversationId)) throw new Error("已停止，本次未提交生成。");
       if (!mountedRef.current || !liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) return true;
       let sourceAssetIds: string[];
       let parameters: { model: NonNullable<VideoChatRequest["model"]>; seconds: number; resolution: VideoChatRequest["resolution"]; aspectRatio: VideoChatRequest["aspectRatio"]; referenceIds: string[] } | undefined;
@@ -1407,7 +1494,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         const migration = videoReferencesFromAttachments(origin.attachments);
         if (!migration.ok) throw new Error(migration.message);
         let references = videoRequest?.referenceImages ?? migration.images;
-        if (!references.length && !origin.attachments.length && origin.conversation) {
+        if (selectedImage && origin.conversation) {
+          const { generatedVideoReference } = await import("../features/tongpin-ai/generatedVideoReference");
+          const { extractMediaAttachment } = await import("../features/tongpin-ai/mediaAttachments");
+          const generated = await generatedVideoReference(origin.conversation, workspaceRef.current.artifacts, prompt, api, user.id, new AbortController().signal, extractMediaAttachment,
+            { sourceArtifactId: selectedImage.sourceArtifactId, assetId: selectedImage.assetId });
+          if (!generated) throw new Error("选中的图片无法恢复，本次未提交视频生成。");
+          references = [generated];
+        } else if (!references.length && !origin.attachments.length && origin.conversation) {
           const { generatedVideoReference } = await import("../features/tongpin-ai/generatedVideoReference");
           const { extractMediaAttachment } = await import("../features/tongpin-ai/mediaAttachments");
           const generated = await generatedVideoReference(origin.conversation, workspaceRef.current.artifacts, prompt, api, user.id, new AbortController().signal, extractMediaAttachment);
@@ -1415,11 +1509,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           else if (/同一个人物|同一位人物|这张|上张|刚才.{0,8}(?:图|人物)|把[她他它]动起来/.test(prompt)) throw new Error("没有找到可验证的上一张图片，请先选择参考图；本次未生成视频。");
         }
         const prepared = videoRequest ? { ...videoRequest, ...(references.length ? { referenceImages: references } : {}) }
-          : naturalVideoRequest(requestId, prompt, list.settings, latest.videoDraftSettings[origin.draftKey], references);
+          : naturalVideoRequest(requestId, prompt, list.settings, selectedImage?.previousSettings ?? latest.videoDraftSettings[origin.draftKey], references);
         if (!prepared.model || !list.settings.availableModels.includes(prepared.model)) throw new Error("当前档位没有可用的视频模型，请重新选择");
         if (!continuation && (!Number.isSafeInteger(maxPointsPerTool) || Number(maxPointsPerTool) <= 0)) maxPointsPerTool = list.settings.quotaPoints;
         sourceAssetIds = [...(prepared.referenceIds ?? [])];
         for (const image of prepared.referenceImages ?? []) {
+          if (pendingCancelledRef.current.has(conversationId)) throw new Error("已停止，本次未提交生成。");
           if (!liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) return true;
           const { videoReferenceUploadBody } = await import("../features/tongpin-ai/generatedVideoReference");
           const ref = await api<{ id: string }>("/api/ai/video-references", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(videoReferenceUploadBody(image, conversationId)) });
@@ -1434,6 +1529,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         workspaceRef.current = { ...current, artifacts: nextArtifacts }; persistentStateRef.current = preparedState; setArtifacts(nextArtifacts);
         if (!await persistenceRef.current.saveNow(preparedState)) throw new Error("参考图片记录尚未保存，本次没有提交媒体任务");
       }
+      if (pendingCancelledRef.current.has(conversationId)) throw new Error("已停止，本次未提交生成。");
       if (!mountedRef.current || !liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId)) return true;
       const body = { requestId, conversationId, entrypoint, tier: origin.mode, intent: kind, requestText: prompt,
         sourceAssetIds, ...(parameters ? { videoParameters: parameters } : {}),
@@ -1471,8 +1567,70 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       return true;
     } finally {
       pendingGenerationRef.current.delete(conversationId);
+      pendingCancelledRef.current.delete(conversationId);
       if (mountedRef.current) { clearReplyActivity(conversationId, messageId); void refreshStatus(); }
     }
+  }
+
+  async function selectGeneratedImageForVideo(artifactId: string, assetId: string): Promise<boolean> {
+    if (imageSelectionBusyRef.current.has(artifactId)) return false;
+    const current = workspaceRef.current;
+    const artifact = current.artifacts.find(item => item.id === artifactId);
+    const selection = readGeneratedImageSelection(artifact);
+    const conversation = current.conversations.find(item => item.id === artifact?.conversationId);
+    const messageIndex = conversation?.messages.findIndex(item => item.role === "assistant" && item.artifactId === artifactId) ?? -1;
+    const message = messageIndex < 0 ? undefined : conversation?.messages[messageIndex];
+    const source = current.artifacts.find(item => item.id === selection?.sourceArtifactId && item.conversationId === conversation?.id && item.kind === "图片");
+    if (!artifact || !conversation || current.activeConversationId !== conversation.id || !selection || selection.status !== "awaiting_selection"
+      || !message || !selection.assetIds.includes(assetId) || !source || !conversation.messages.some(item => item.role === "assistant" && item.artifactId === source.id)
+      || !Array.isArray(source.data?.images) || !source.data.images.some(item => item && typeof item === "object" && !Array.isArray(item) && !item.deleted && item.assetId === assetId)) {
+      throw new Error("选中的图片已删除或不属于当前对话，本次未生成视频。");
+    }
+    if (conversationBusy(conversation.id)) throw new Error("这段对话正在处理其他任务，请稍后再选图片。");
+    const userMessage = [...conversation.messages.slice(0, messageIndex)].reverse().find(item => item.role === "user");
+    const snapshot = captureSubmission({ conversationId: conversation.id, draftKey: conversation.id, conversation,
+      project: current.projects.find(item => item.id === conversation.projectId) ?? null,
+      attachments: userMessage?.attachments ?? [], mode: selection.mode, skillIds: [], webSearch: false });
+    const videoRequest: VideoChatRequest | undefined = selection.videoOptions ? {
+      requestId: selection.requestId, prompt: artifact.summary, originalPrompt: artifact.summary,
+      ...selection.videoOptions,
+    } : undefined;
+    imageSelectionBusyRef.current.add(artifactId);
+    try {
+      return await submitMediaTask("video", artifact.summary, videoRequest, selection.entrypoint, undefined,
+        { conversationId: conversation.id, messageId: message.id, originalPrompt: artifact.summary, snapshot },
+        { artifactId, requestId: selection.requestId, sourceArtifactId: selection.sourceArtifactId, assetId, previousSettings: selection.previousSettings });
+    } finally { imageSelectionBusyRef.current.delete(artifactId); }
+  }
+
+  async function cancelGeneratedImageSelection(artifactId: string): Promise<void> {
+    if (imageSelectionBusyRef.current.has(artifactId)) return;
+    const current = workspaceRef.current;
+    const artifact = current.artifacts.find(item => item.id === artifactId);
+    const selection = readGeneratedImageSelection(artifact);
+    const conversation = current.conversations.find(item => item.id === artifact?.conversationId);
+    const message = conversation?.messages.find(item => item.role === "assistant" && item.artifactId === artifactId);
+    if (!artifact || !selection || selection.status !== "awaiting_selection" || !conversation || !message || current.activeConversationId !== conversation.id) return;
+    imageSelectionBusyRef.current.add(artifactId);
+    try {
+      const nextArtifacts = current.artifacts.map(item => item.id === artifactId ? {
+        ...item, data: { ...item.data, generatedImageSelection: { ...selection, status: "cancelled" } as unknown as import("../../shared/aiWorkspace").AiWorkspaceJson },
+      } : item);
+      const nextConversations = replaceChatMessage(current.conversations, conversation.id, message.id, { content: "已取消选择，本次未生成视频。", taskPhase: "cancelled", status: "ready" });
+      const next = { ...persistentStateRef.current, conversations: nextConversations, artifacts: nextArtifacts };
+      workspaceRef.current = { ...current, conversations: nextConversations, artifacts: nextArtifacts };
+      persistentStateRef.current = next;
+      setConversations(nextConversations); setArtifacts(nextArtifacts);
+      if (!await persistenceRef.current.saveNow(next)) {
+        const latest = workspaceRef.current;
+        const restoredArtifacts = latest.artifacts.map(item => item.id === artifactId ? artifact : item);
+        const restoredConversations = replaceChatMessage(latest.conversations, conversation.id, message.id, { content: message.content, taskPhase: "awaiting_input", status: "ready" });
+        workspaceRef.current = { ...latest, artifacts: restoredArtifacts, conversations: restoredConversations };
+        persistentStateRef.current = { ...persistentStateRef.current, artifacts: restoredArtifacts, conversations: restoredConversations };
+        setArtifacts(restoredArtifacts); setConversations(restoredConversations);
+        throw new Error("取消选择尚未保存，请恢复同步后重试。");
+      }
+    } finally { imageSelectionBusyRef.current.delete(artifactId); }
   }
 
   async function sendVideo(request: import("../features/tongpin-ai/videoChat").VideoChatRequest, importOnly = false, continuation?: TaskContinuation): Promise<boolean> {
@@ -2048,6 +2206,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onSubmitVideoTask={(request, maxPointsPerTool) => submitToolTask("video", request.originalPrompt ?? request.prompt, request, "menu", maxPointsPerTool)}
           onUseVideoHistory={useVideoHistory}
           onMediaTask={recordMediaTask}
+          onSelectGeneratedImage={selectGeneratedImageForVideo}
+          onCancelGeneratedImageSelection={cancelGeneratedImageSelection}
           videoDispatchRequest={activeVideoDispatchRequest}
           computerAvailable={computerBridgeAvailable}
           computerRequest={computerRequest ? { id: computerRequest.id, originalPrompt: computerRequest.originalPrompt } : undefined}
@@ -2085,7 +2245,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onClose={() => setArtifactOpen(false)}
           onImageDeleted={assetId => setArtifacts(current => current.map(artifact => !Array.isArray(artifact.data?.images) ? artifact : { ...artifact, data: { ...artifact.data, images: artifact.data.images.map(image => image && typeof image === "object" && !Array.isArray(image) && image.assetId === assetId ? { ...image, deleted: true } : image) } }))}
         />
-      ) : view === "chat" && latestConversationArtifact && latestConversationArtifact.kind !== "视频" ? (
+      ) : view === "chat" && latestConversationArtifact && latestConversationArtifact.kind !== "视频" && latestConversationArtifact.kind !== "参考图片选择" ? (
         <button
           type="button"
           className="tp-ai-preview-reopen"

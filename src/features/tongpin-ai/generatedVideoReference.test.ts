@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { generatedVideoReference, videoReferenceUploadBody } from "./generatedVideoReference";
+import { generatedVideoReference, generatedVideoReferenceCandidates, videoReferenceUploadBody } from "./generatedVideoReference";
 import type { TongpinAIArtifact, TongpinAIConversation } from "./types";
 const conversation: TongpinAIConversation = { id: "conversation-a", title: "A", timeLabel: "", messages: [{ id: "reply", role: "assistant", artifactId: "artifact", content: "图片", time: "" }] };
 const artifact: TongpinAIArtifact = { id: "artifact", conversationId: conversation.id, title: "图片", kind: "图片", summary: "", sections: [], updatedLabel: "", data: { images: [{ assetId: "asset-original" }] } };
@@ -28,7 +28,19 @@ describe("generated image becomes a bound video reference", () => {
   it("does not guess a source across conversations or multiple images", async () => {
     const api = vi.fn(async () => source);
     expect(await generatedVideoReference(conversation, [{ ...artifact, conversationId: "b" }], "沿用这张图片做视频", api as never, "member-a", new AbortController().signal, extract)).toBeUndefined();
-    await expect(generatedVideoReference(conversation, [{ ...artifact, data: { images: [{ assetId: "a" }, { assetId: "b" }] } }], "沿用这张图片做视频", api as never, "member-a", new AbortController().signal, extract)).rejects.toThrow("多张图片");
+    await expect(generatedVideoReference(conversation, [{ ...artifact, data: { images: [{ assetId: "asset-one" }, { assetId: "asset-two" }] } }], "沿用这张图片做视频", api as never, "member-a", new AbortController().signal, extract)).rejects.toThrow("多张图片");
     expect(api).not.toHaveBeenCalled();
+  });
+  it("returns only live image IDs attached to this conversation, then authorizes the exact selected image", async () => {
+    const multi: TongpinAIArtifact = { ...artifact, data: { images: [{ assetId: "asset-first" }, { assetId: "asset-deleted", deleted: true }, { assetId: "asset-second" }] } };
+    expect(generatedVideoReferenceCandidates(conversation, [multi], "沿用这张图片做视频")).toEqual({ sourceArtifactId: "artifact", assetIds: ["asset-first", "asset-second"] });
+    expect(generatedVideoReferenceCandidates(conversation, [{ ...multi, conversationId: "other" }], "沿用这张图片做视频")).toBeUndefined();
+    const api = vi.fn(async (_path: string, _init?: RequestInit) => ({ ...source, assetId: "asset-second" }));
+    const ref = await generatedVideoReference(conversation, [multi], "沿用这张图片做视频", api as never, "member-a", new AbortController().signal, extract, { sourceArtifactId: "artifact", assetId: "asset-second" });
+    expect(JSON.parse(api.mock.calls[0]?.[1]?.body as string)).toEqual({ conversationId: "conversation-a", assetId: "asset-second" });
+    expect(ref?.generatedAsset?.assetId).toBe("asset-second");
+    await expect(generatedVideoReference(conversation, [multi], "沿用这张图片做视频", api as never, "member-a", new AbortController().signal, extract, { sourceArtifactId: "artifact", assetId: "asset-deleted" })).rejects.toThrow("已删除");
+    await expect(generatedVideoReference(conversation, [{ ...multi, conversationId: "other" }], "沿用这张图片做视频", api as never, "member-a", new AbortController().signal, extract, { sourceArtifactId: "artifact", assetId: "asset-second" })).rejects.toThrow("不属于");
+    expect(api).toHaveBeenCalledTimes(1);
   });
 });
