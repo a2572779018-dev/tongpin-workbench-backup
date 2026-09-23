@@ -66,6 +66,59 @@ describe("real AiService media orchestration", () => {
     expect(node.service.quota("member")).toMatchObject({ usedTokens: 1040, reservedTokens: 0 });
   });
 
+  it("freezes an explicit Send grant and automatically executes exactly one image call after planning", async () => {
+    transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    const submission = { ...input(), requestText: "帮我生成一张图片", confirmedMediaExecution: { confirmed: true as const, maxPointsPerTool: 1000 } };
+    const run = await orchestrator.submit("member", submission);
+    const frozen = orchestrator.runtime.snapshot("member", run.runId)!;
+    expect(frozen.authorizationScope).toMatchObject({ capabilities: ["image"], sourceAssetIds: [], maxPointsPerTool: 1000 });
+    expect(orchestrator.dueCandidates().some(item => item.runId === run.runId)).toBe(true);
+    const finished = await orchestrator.advance("member", run.runId);
+    expect(finished.status).toBe("completed");
+    expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
+    // Duplicate HTTP delivery with a changed confirmation cannot mint a new grant.
+    expect((await orchestrator.submit("member", { ...submission, confirmedMediaExecution: undefined })).runId).toBe(run.runId);
+    await orchestrator.advance("member", run.runId);
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["不要生成图片", "为什么生成图片失败", "如何生成图片？", "帮我写生成图片的提示词"])(
+    "does not treat a discussion or negation as an authorized image send: %s",
+    async requestText => {
+      transport.mockResolvedValueOnce(planResponse("image", "安全的蓝色科技海报"));
+      const run = await orchestrator.submit("member", {
+        ...input(), requestText, confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
+      });
+      expect(orchestrator.runtime.snapshot("member", run.runId)?.authorizationScope).toBeNull();
+      expect((await orchestrator.advance("member", run.runId)).status).toBe("awaiting_authorization");
+      expect(transport).toHaveBeenCalledTimes(1);
+      expect(node.store.usage("member").filter(item => item.kind === "image")).toHaveLength(0);
+    },
+  );
+
+  it("keeps the Send grant through clarification, but rechecks current budget before paid execution", async () => {
+    transport.mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: '{"kind":"clarification","question":"想画什么主题？"}' } }],
+      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+    }));
+    transport.mockResolvedValueOnce(planResponse("image", "一只蓝色的猫"));
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    const run = await orchestrator.submit("member", {
+      ...input(), requestText: "帮我生成一张图片", confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
+    });
+    const question = await orchestrator.advance("member", run.runId);
+    expect(question.status).toBe("awaiting_input");
+    orchestrator.answer("member", run.runId, question.freeQuestion!.questionId, "一只蓝色的猫");
+    node.service.setQuota("member", "admin", { limitTokens: 30_000 });
+    const paused = await orchestrator.advance("member", run.runId);
+    expect(paused).toMatchObject({ status: "awaiting_authorization", dueAt: null, errorCode: "AI_MEDIA_GRANT_BUDGET_CHANGED" });
+    expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(0);
+    const completed = await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 });
+    expect(completed.status).toBe("completed");
+    expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
+  });
+
   it("rejects a changed model or billing policy before beginning a paid step", async () => {
     transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
     const run = await orchestrator.submit("member", input());

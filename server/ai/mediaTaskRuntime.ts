@@ -39,6 +39,8 @@ export interface MediaTaskCreateInput {
   contextRevision?: number;
   modelConfigVersion: string;
   sourceAssetIds: string[];
+  /** Immutable source-content fingerprints captured before the grant. */
+  sourceFingerprints?: string[];
   /** Resolved on the server before submission. Reference IDs belong to the
    * existing scoped video-reference store, and must be revalidated on use. */
   videoParameters?: MediaTaskVideoParameters;
@@ -247,13 +249,18 @@ function createInput(value: MediaTaskCreateInput): MediaTaskCreateInput {
     return { sourceMessageId: item.sourceMessageId, role: item.role, content: item.content.trim() };
   });
   if (contextLength > 6000 || (contextMessages && new Set(contextMessages.map(item => item.sourceMessageId)).size !== contextMessages.length)) invalid("会话上下文过长或重复");
+  const sourceAssetIds = ids(value.sourceAssetIds, "参考素材");
+  if (value.sourceFingerprints !== undefined && (!Array.isArray(value.sourceFingerprints)
+    || value.sourceFingerprints.length !== sourceAssetIds.length
+    || value.sourceFingerprints.some(item => typeof item !== "string" || !/^[a-f0-9]{64}$/.test(item)))) invalid("参考素材指纹无效");
   return {
     requestId: validId(value.requestId, "请求标识"), conversationId: validId(value.conversationId, "会话标识"),
     entrypoint: value.entrypoint, tier: value.tier, intent: value.intent, requestText: value.requestText.trim(),
     ...(contextMessages?.length ? { contextMessages } : {}),
     ...(value.contextRevision !== undefined ? { contextRevision: value.contextRevision } : {}),
     modelConfigVersion: validVersion(value.modelConfigVersion, "模型配置版本"),
-    sourceAssetIds: ids(value.sourceAssetIds, "参考素材"),
+    sourceAssetIds,
+    ...(value.sourceFingerprints !== undefined ? { sourceFingerprints: [...value.sourceFingerprints] } : {}),
     ...(value.videoParameters !== undefined ? { videoParameters: videoParameters(value.videoParameters) } : {}),
     authorizationScope: value.authorizationScope === null ? null : grant(value.authorizationScope),
     deadlineAt: timestamp(value.deadlineAt, "任务截止时间"),
@@ -366,7 +373,7 @@ export class MediaTaskRuntime {
   due(limit = 8, at = this.now()): MediaTaskRun[] {
     const bounded = Math.max(1, Math.min(32, Math.trunc(limit) || 8));
     return this.store.sql.all<{ data: string }>(
-      "SELECT data FROM ai_media_task_runs WHERE tenant_id=? AND due_at<=? AND status IN ('queued','planning','awaiting_input','running','partial') ORDER BY due_at ASC LIMIT ?",
+      "SELECT data FROM ai_media_task_runs WHERE tenant_id=? AND due_at<=? AND status IN ('queued','planning','awaiting_input','awaiting_authorization','running','partial') ORDER BY due_at ASC LIMIT ?",
       this.store.tenantId, at, bounded,
     ).map(row => JSON.parse(row.data) as MediaTaskRun);
   }
@@ -374,7 +381,7 @@ export class MediaTaskRuntime {
   dueCandidates(limit = 8, at = this.now()): Array<{ tenantId: string; userId: string; runId: string }> {
     const bounded = Math.max(1, Math.min(32, Math.trunc(limit) || 8));
     const rows = this.store.sql.all<{ tenant_id: string; user_id: string; run_id: string }>(
-      "SELECT tenant_id,user_id,run_id FROM ai_media_task_runs WHERE due_at<=? AND status IN ('queued','planning','awaiting_input','running','partial') ORDER BY due_at ASC LIMIT ?",
+      "SELECT tenant_id,user_id,run_id FROM ai_media_task_runs WHERE due_at<=? AND status IN ('queued','planning','awaiting_input','awaiting_authorization','running','partial') ORDER BY due_at ASC LIMIT ?",
       at, bounded,
     );
     const candidates: Array<{ tenantId: string; userId: string; runId: string }> = [];
@@ -471,6 +478,7 @@ export class MediaTaskRuntime {
       if (authorization.expiresAt <= this.now()) invalid("授权已过期");
       run.authorization = authorization;
       if (run.status === "awaiting_input" && run.question && run.question.deadlineAt <= this.now()) run.dueAt = this.now();
+      if (run.status === "awaiting_authorization") run.dueAt = this.now();
       return this.update(run);
     });
   }
@@ -523,6 +531,20 @@ export class MediaTaskRuntime {
       run.stepId = crypto.randomUUID();
       run.tool = spec;
       run.status = "awaiting_authorization";
+      // A grant frozen with an explicit submission may proceed after a
+      // scheduler restart. No grant means this task remains a proposal.
+      run.dueAt = run.authorization ? this.now() : null;
+      return this.update(run);
+    });
+  }
+  /** A stale explicit grant cannot keep a scheduler hot-looping. The tool
+   * remains a draft until the member confirms a fresh bound authorization. */
+  pauseAuthorization(userId: string, runId: string, reason: string): MediaTaskRun {
+    validVersion(reason, "授权暂停原因");
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      if (run.status !== "awaiting_authorization") return clone(run);
+      run.errorCode = reason;
       run.dueAt = null;
       return this.update(run);
     });

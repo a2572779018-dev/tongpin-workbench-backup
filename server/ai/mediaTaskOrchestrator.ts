@@ -35,6 +35,9 @@ export interface SubmitMediaTask {
   sourceAssetIds: string[];
   videoParameters?: MediaTaskVideoParameters;
   deadlineAt?: number;
+  /** Only the authenticated Send action may provide this. A natural-language
+   * request must independently pass the deterministic explicit-action gate. */
+  confirmedMediaExecution?: MediaTaskConfirmation;
 }
 
 /** Only a route that has authenticated the member and recorded an affirmative
@@ -64,6 +67,21 @@ function safeErrorCode(error: unknown): string {
   return error instanceof AiError && /^[a-zA-Z0-9._:-]{1,120}$/.test(error.code) ? error.code : "AI_MEDIA_TASK_FAILED";
 }
 function normalizedText(value: string): string { return value.replace(/\s+/g, " ").trim(); }
+function explicitMediaAction(intent: "image" | "video", requestText: string): boolean {
+  const statement = normalizedText(requestText);
+  if (/(?:不要|别|不想|不需要|无需|禁止|取消|停止|暂不|先不|稍后|以后|明天|为什么|为何|怎么|如何|是否|是不是|能否|可不可以|失败|报错|错误|问题|评价|讨论|分析|提示词|教程|方案|[?？])/.test(statement)) return false;
+  if (!/^(?:请\s*)?(?:帮我|给我|为我|直接|现在|马上|立刻)?\s*(?:生成|创建|制作|绘制|画|做)/.test(statement)) return false;
+  return intent === "image"
+    ? /(?:图片|图像|插画|海报|照片|画作)/.test(statement.slice(0, 100))
+    : /(?:视频|短片|动画|宣传片|影片)/.test(statement.slice(0, 100));
+}
+
+function submissionMayCarryGrant(input: SubmitMediaTask): boolean {
+  if (!input.confirmedMediaExecution || input.confirmedMediaExecution.confirmed !== true) return false;
+  if (input.entrypoint === "natural") return explicitMediaAction(input.intent, input.requestText);
+  return input.entrypoint === "menu" || input.entrypoint === "mention_image" && input.intent === "image"
+    || input.entrypoint === "mention_video" && input.intent === "video";
+}
 
 /** Capture only text from this account's already-saved conversation. A link
  * in historical content is untrusted input, not a fetch instruction. */
@@ -134,8 +152,10 @@ export class AiServiceMediaTaskOrchestrator {
     if (!snapshot) rejected("AI_MEDIA_TASK_SNAPSHOT_MISSING", "任务快照不存在");
     let sourceAssetsValid = false;
     try {
-      await this.scopedSources(userId, snapshot);
-      sourceAssetsValid = true;
+      const source = await this.scopedSources(userId, snapshot);
+      sourceAssetsValid = snapshot.sourceFingerprints === undefined
+        ? snapshot.sourceAssetIds.length === 0
+        : JSON.stringify(source.fingerprints) === JSON.stringify(snapshot.sourceFingerprints);
     } catch { /* A stale or foreign source never authorizes a paid call. */ }
     return {
       modelConfigVersion: await this.configurationVersion(snapshot.intent, snapshot.tier),
@@ -189,23 +209,43 @@ export class AiServiceMediaTaskOrchestrator {
       rejected("AI_MEDIA_TASK_SOURCE_MISMATCH", "视频参数与参考图不一致", 400);
     }
     if (input.intent === "image" && input.videoParameters) rejected("AI_MEDIA_TASK_INVALID", "图片任务不能携带视频参数", 400);
+    if (input.entrypoint === "mention_image" && input.intent !== "image" || input.entrypoint === "mention_video" && input.intent !== "video") {
+      rejected("AI_MEDIA_TASK_INTENT_MISMATCH", "所选能力与任务类型不一致", 400);
+    }
     const deadlineAt = input.deadlineAt ?? this.now() + MAX_TASK_LIFETIME_MS;
     if (!Number.isSafeInteger(deadlineAt) || deadlineAt <= this.now() || deadlineAt > this.now() + MAX_TASK_LIFETIME_MS) {
       rejected("AI_MEDIA_TASK_DEADLINE", "任务期限无效", 400);
     }
-    await this.scopedSources(userId, input);
-    this.estimatedPoints(userId, input.intent);
+    const source = await this.scopedSources(userId, input);
+    const cost = this.estimatedPoints(userId, input.intent);
     if (input.intent === "video") this.service.video.bindPlanModel(input.tier, input.videoParameters!.model);
     const context = frozenConversationContext(this.service, userId, input.conversationId, input.requestText);
+    const modelConfigVersion = await this.configurationVersion(input.intent, input.tier);
+    let authorizationScope: MediaTaskAuthorizationScope | null = null;
+    if (submissionMayCarryGrant(input)) {
+      const confirmed = input.confirmedMediaExecution!;
+      if (!Number.isSafeInteger(confirmed.maxPointsPerTool) || confirmed.maxPointsPerTool < cost || confirmed.maxPointsPerTool > 10_000_000) {
+        rejected("AI_MEDIA_TASK_BUDGET_INVALID", "确认额度不足或超出范围", 400);
+      }
+      if (this.service.store.quota(userId).remainingTokens < cost) rejected("AI_QUOTA_INSUFFICIENT", "可用额度不足", 402);
+      const expiresAt = Math.min(confirmed.expiresAt ?? this.now() + 5 * 60_000, deadlineAt, this.now() + 5 * 60_000);
+      if (!Number.isSafeInteger(expiresAt) || expiresAt <= this.now()) rejected("AI_MEDIA_TASK_GRANT_EXPIRED", "确认已过期", 400);
+      authorizationScope = {
+        grantId: crypto.randomUUID(), capabilities: [input.intent], sourceAssetIds: [...input.sourceAssetIds],
+        maxPointsPerTool: confirmed.maxPointsPerTool, budgetVersion: await this.budgetVersion(userId),
+        modelConfigVersion, automaticChoice: confirmed.automaticChoice === true, expiresAt,
+      };
+    }
     const snapshot: MediaTaskCreateInput = {
       requestId: input.requestId, conversationId: input.conversationId, entrypoint: input.entrypoint,
       tier: input.tier, intent: input.intent, requestText: input.requestText,
-      modelConfigVersion: await this.configurationVersion(input.intent, input.tier),
+      modelConfigVersion,
       sourceAssetIds: [...input.sourceAssetIds],
+      sourceFingerprints: source.fingerprints,
       ...(context.contextMessages.length ? { contextMessages: context.contextMessages } : {}),
       ...(context.contextRevision !== undefined ? { contextRevision: context.contextRevision } : {}),
       ...(input.videoParameters ? { videoParameters: { ...input.videoParameters, referenceIds: [...input.videoParameters.referenceIds] } } : {}),
-      authorizationScope: null, deadlineAt,
+      authorizationScope, deadlineAt,
     };
     return this.runtime.submit(userId, snapshot);
   }
@@ -248,6 +288,7 @@ export class AiServiceMediaTaskOrchestrator {
     const run = expectedRun(this.runtime, userId, runId);
     if (run.status === "queued") return this.plan(userId, runId);
     if (run.status === "awaiting_input" && run.freeQuestion) return this.runtime.expireInput(userId, runId);
+    if (run.status === "awaiting_authorization" && run.authorization) return this.executeAuthorized(userId, runId);
     if (run.status === "running" || run.status === "partial" || run.status === "unknown") return this.reconcile(userId, runId);
     return run;
   }
@@ -261,6 +302,13 @@ export class AiServiceMediaTaskOrchestrator {
       const currentConfig = await this.configurationVersion(snapshot.intent, snapshot.tier);
       if (currentConfig !== snapshot.modelConfigVersion) rejected("AI_CONFIG_CHANGED", "任务配置已改变，请重新提交");
       const source = await this.scopedSources(userId, snapshot);
+      if (snapshot.sourceAssetIds.length && snapshot.sourceFingerprints === undefined) {
+        rejected("AI_MEDIA_TASK_SOURCE_UNVERIFIED", "旧任务缺少素材校验信息，请重新提交任务");
+      }
+      if (snapshot.sourceFingerprints !== undefined
+        && JSON.stringify(source.fingerprints) !== JSON.stringify(snapshot.sourceFingerprints)) {
+        rejected("AI_MEDIA_TASK_SOURCE_CHANGED", "参考素材内容已改变，请重新提交任务");
+      }
       // Every answered question creates a new persisted attempt. Reusing the
       // original request ID would replay its old clarification forever.
       const planRequestId = `plan-${claimed.stepId}`;
@@ -284,10 +332,11 @@ export class AiServiceMediaTaskOrchestrator {
       const plan = response.toolPlan;
       if (!plan || plan.kind !== snapshot.intent) rejected("AI_MEDIA_TASK_PLAN_INVALID", "AI 未返回完整的媒体方案");
       const cost = this.estimatedPoints(userId, snapshot.intent);
-      return this.runtime.stageTool(userId, runId, {
+      const staged = this.runtime.stageTool(userId, runId, {
         capability: snapshot.intent, operationKey: planRequestId, estimatedPoints: cost,
         sourceAssetIds: [...snapshot.sourceAssetIds], planRequestId,
       });
+      return staged.authorization ? await this.executeAuthorized(userId, runId) : staged;
     } catch (error) {
       // A provider response may have been billed even when the application
       // did not receive a valid plan. Inspect the journaled request rather
@@ -328,9 +377,23 @@ export class AiServiceMediaTaskOrchestrator {
       modelConfigVersion: current.modelConfigVersion, automaticChoice: confirmation.automaticChoice === true,
       expiresAt,
     };
-    run = this.runtime.grantAuthorization(userId, runId, grant);
+    this.runtime.grantAuthorization(userId, runId, grant);
+    return this.executeAuthorized(userId, runId);
+  }
+
+  /** Consume only a persisted grant whose tenant, member, source, model and
+   * budget still match. A stale grant becomes a waiting draft, never payment. */
+  private async executeAuthorized(userId: string, runId: string): Promise<MediaTaskRun> {
+    const run = expectedRun(this.runtime, userId, runId);
+    const snapshot = this.runtime.snapshot(userId, runId);
+    if (!snapshot) rejected("AI_MEDIA_TASK_SNAPSHOT_MISSING", "任务快照不存在");
+    if (run.status !== "awaiting_authorization" || !run.tool || !run.authorization) return run;
     const started = this.runtime.beginTool(userId, runId, await this.guard(userId, run));
-    if (started.kind !== "started") return started.run;
+    if (started.kind === "already_started") return this.reconcile(userId, runId);
+    if (started.kind !== "started") {
+      if (started.kind === "expired" || started.kind === "unknown") return started.run;
+      return this.runtime.pauseAuthorization(userId, runId, `AI_MEDIA_GRANT_${started.kind.toUpperCase()}`);
+    }
     const tool = started.run.tool!;
     const toolCallId = tool.toolCallId!;
     try {
