@@ -78,6 +78,14 @@ function requiredId(value: string, label: string): string {
   return normalized;
 }
 
+function remoteEventId(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) {
+    throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 任务标识无效，结果需要核对", "unknown", false);
+  }
+  return value;
+}
+
 function endpoint(baseUrl: string, path: string): string {
   const normalized = baseUrl.replace(/\/+$/, "");
   return `${normalized}${normalized.endsWith("/v1") ? "" : "/v1"}${path}`;
@@ -120,9 +128,8 @@ async function* ssePayloads(body: ReadableStream<Uint8Array>, maxEventBytes: num
         yield data;
       }
     }
-    buffer += decoder.decode();
-    const data = buffer.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n");
-    if (data && data !== "[DONE]") yield data;
+    // SSE frames are committed only by a blank line. An unterminated tail may
+    // be a truncated message_end and cannot prove a successful remote run.
   } finally {
     reader.releaseLock();
   }
@@ -177,8 +184,10 @@ export class DifyEngineAdapter {
     let answer = "";
     let terminal = false;
     let seq = 0;
-    const startedTools = new Set<string>();
+    const startedTools = new Map<string, string>();
     const finishedTools = new Set<string>();
+    let terminalUsage: DifyEngineEvent["usage"];
+    let terminalTimestamp = "";
     const events: DifyEngineEvent[] = [];
     const emit = (event: Omit<DifyEngineEvent, "runId" | "seq">) => {
       const next = { ...event, runId, seq: ++seq };
@@ -221,10 +230,18 @@ export class DifyEngineAdapter {
         let item: Record<string, unknown>;
         try { item = JSON.parse(raw) as Record<string, unknown>; }
         catch { throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 返回了无效事件", remoteTaskId ? "unknown" : "not_started", false); }
+        // A contradictory event after message_end invalidates the purported
+        // success. Do not publish a terminal event until the stream ends.
+        if (terminal) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 终态后又返回事件，结果需要核对", "unknown", false);
         const event = bounded(item.event, 80);
-        remoteTaskId ||= bounded(item.task_id, 200);
-        remoteMessageId ||= bounded(item.message_id, 200);
-        remoteConversationId ||= bounded(item.conversation_id, 200);
+        const taskId = remoteEventId(item.task_id);
+        const conversationId = remoteEventId(item.conversation_id);
+        if ((taskId && remoteTaskId && taskId !== remoteTaskId) || (conversationId && remoteConversationId && conversationId !== remoteConversationId)) {
+          throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 任务标识在事件流中发生变化，结果需要核对", "unknown", false);
+        }
+        remoteTaskId ||= taskId;
+        remoteMessageId ||= remoteEventId(item.message_id);
+        remoteConversationId ||= conversationId;
         const common = { timestamp: eventTime(item.created_at), remoteTaskId: remoteTaskId || undefined, remoteMessageId: remoteMessageId || undefined, remoteConversationId: remoteConversationId || undefined };
         if (events.length === 0) emit({ type: "run_started", stepId: `dify:${attemptId}`, ...common });
         if (event === "message" || event === "agent_message") {
@@ -232,33 +249,40 @@ export class DifyEngineAdapter {
           if (delta) { answer += delta; emit({ type: "answer_delta", stepId: remoteMessageId || `dify:${attemptId}`, content: delta, ...common }); }
         } else if (event === "agent_thought") {
           const toolName = bounded(item.tool, 120);
-          const observation = bounded(item.observation, 1);
+          const observation = typeof item.observation === "string" && item.observation.length > 0;
+          const observedStepId = remoteEventId(item.id);
           if (toolName) {
-            const stepId = bounded(item.id, 200) || `dify-tool:${seq + 1}`;
+            const stepId = observedStepId || `dify-tool:${seq + 1}`;
+            const previousTool = startedTools.get(stepId);
+            if (previousTool && previousTool !== toolName) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 工具步骤标识冲突", "unknown", false);
             if (!startedTools.has(stepId)) {
-              startedTools.add(stepId);
+              startedTools.set(stepId, toolName);
               emit({ type: "tool_started", stepId, toolName, ...common });
             }
             if (observation) {
               if (!finishedTools.has(stepId)) { finishedTools.add(stepId); emit({ type: "tool_finished", stepId, toolName, ...common }); }
-            } else emit({ type: "tool_progress", stepId, toolName, ...common });
+            } else if (!finishedTools.has(stepId)) emit({ type: "tool_progress", stepId, toolName, ...common });
+          } else if (observation && observedStepId && startedTools.has(observedStepId) && !finishedTools.has(observedStepId)) {
+            finishedTools.add(observedStepId);
+            emit({ type: "tool_finished", stepId: observedStepId, toolName: startedTools.get(observedStepId), ...common });
           }
         } else if (event === "message_end") {
           const metadata = item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata as Record<string, unknown> : {};
-          const usage = usageFrom(metadata.usage);
-          if (usage) emit({ type: "usage_updated", stepId: remoteMessageId || `dify:${attemptId}`, usage, ...common });
+          terminalUsage = usageFrom(metadata.usage);
+          terminalTimestamp = common.timestamp;
           terminal = true;
-          emit({ type: "run_finished", stepId: remoteMessageId || `dify:${attemptId}`, ...common });
         } else if (event === "error") {
-          terminal = true;
           const errorCode = bounded(item.code, 120) || "DIFY_REMOTE_ERROR";
           emit({ type: "run_failed", stepId: remoteMessageId || `dify:${attemptId}`, content: bounded(item.message, 500), errorCode, ...common });
           throw new DifyEngineError(errorCode, bounded(item.message, 500) || "Dify 任务失败", "failed", false);
         }
       }
-      if (!terminal || !remoteTaskId || !remoteConversationId) {
-        throw new DifyEngineError("DIFY_OUTCOME_UNKNOWN", "Dify 事件流在终态前结束，不会自动切换引擎或重复执行", remoteTaskId ? "unknown" : "not_started", false);
+      if (!terminal || !remoteTaskId || !remoteConversationId || startedTools.size !== finishedTools.size) {
+        throw new DifyEngineError("DIFY_OUTCOME_UNKNOWN", "Dify 终态、任务标识或工具结果未能核实，不会自动切换引擎或重复执行", "unknown", false);
       }
+      const final = { timestamp: terminalTimestamp, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId };
+      if (terminalUsage) emit({ type: "usage_updated", stepId: remoteMessageId || `dify:${attemptId}`, usage: terminalUsage, ...final });
+      emit({ type: "run_finished", stepId: remoteMessageId || `dify:${attemptId}`, ...final });
       return { engine: "dify", status: "completed", answer, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId, events };
     } catch (error) {
       if (error instanceof DifyEngineError) throw error;

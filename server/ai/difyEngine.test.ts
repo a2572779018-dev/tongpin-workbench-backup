@@ -24,6 +24,8 @@ describe("Dify engine adapter", () => {
       return new Response(fragmentedSse([
         { event: "agent_thought", task_id: "task-remote", message_id: "message-remote", conversation_id: "conversation-remote", id: "tool-step-1", tool: "tongpin_lookup", tool_input: "{hidden}" },
         { event: "agent_thought", task_id: "task-remote", message_id: "message-remote", conversation_id: "conversation-remote", id: "tool-step-1", tool: "tongpin_lookup", observation: "private tool output" },
+        { event: "agent_thought", task_id: "task-remote", message_id: "message-remote", conversation_id: "conversation-remote", id: "tool-step-2", tool: "tongpin_summarize" },
+        { event: "agent_thought", task_id: "task-remote", message_id: "message-remote", conversation_id: "conversation-remote", id: "tool-step-2", observation: "second private output" },
         { event: "agent_message", task_id: "task-remote", message_id: "message-remote", conversation_id: "conversation-remote", answer: "已完成" },
         { event: "message_end", task_id: "task-remote", message_id: "message-remote", conversation_id: "conversation-remote", metadata: { usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } } },
       ], 7), { status: 200, headers: { "Content-Type": "text/event-stream" } });
@@ -39,10 +41,82 @@ describe("Dify engine adapter", () => {
       },
     });
     expect(result).toMatchObject({ engine: "dify", status: "completed", answer: "已完成", remoteTaskId: "task-remote", remoteConversationId: "conversation-remote" });
-    expect(emitted).toEqual(["run_started", "tool_started", "tool_progress", "tool_finished", "answer_delta", "usage_updated", "run_finished"]);
+    expect(emitted).toEqual(["run_started", "tool_started", "tool_progress", "tool_finished", "tool_started", "tool_progress", "tool_finished", "answer_delta", "usage_updated", "run_finished"]);
     expect(JSON.stringify(result.events)).not.toContain("private tool output");
+    expect(JSON.stringify(result.events)).not.toContain("second private output");
     expect(JSON.stringify(result.events)).not.toContain("{hidden}");
-    expect(result.events.map(event => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(result.events.map(event => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it("keeps terminal success and usage hidden when an observed tool never finishes", async () => {
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "agent_thought", task_id: "task-unresolved", message_id: "message-unresolved", conversation_id: "conversation-unresolved", id: "tool-1", tool: "tongpin_lookup" },
+      { event: "message_end", task_id: "task-unresolved", message_id: "message-unresolved", conversation_id: "conversation-unresolved", metadata: { usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } } },
+    ]), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const emitted: string[] = [];
+    await expect(new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type)))
+      .rejects.toMatchObject({ code: "DIFY_OUTCOME_UNKNOWN", outcome: "unknown", retryable: false });
+    expect(emitted).toEqual(["run_started", "tool_started", "tool_progress"]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["task ID", { message_id: "message-only", conversation_id: "conversation-only" }],
+    ["conversation ID", { task_id: "task-only", message_id: "message-only" }],
+    ["valid task ID", { task_id: "   ", message_id: "message-only", conversation_id: "conversation-only" }],
+  ])("rejects terminal success without the required remote %s", async (_label, ids) => {
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "agent_message", ...ids, answer: "不可提前视为完成" },
+      { event: "message_end", ...ids, metadata: { usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } } },
+    ]), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const emitted: string[] = [];
+    await expect(new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type)))
+      .rejects.toMatchObject({ outcome: "unknown", retryable: false });
+    expect(emitted).not.toContain("run_finished");
+    expect(emitted).not.toContain("usage_updated");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a post-terminal error without ever publishing success or usage", async () => {
+    const ids = { task_id: "task-remote", message_id: "message-remote", conversation_id: "conversation-remote" };
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "message_end", ...ids, metadata: { usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } } },
+      { event: "error", ...ids, code: "REMOTE_FAILED", message: "failed after terminal" },
+    ]), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const emitted: string[] = [];
+    await expect(new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type)))
+      .rejects.toMatchObject({ code: "DIFY_PROTOCOL_ERROR", outcome: "unknown", retryable: false });
+    expect(emitted).toEqual(["run_started"]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds terminal events until the accepted stream closes cleanly", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const fetchImpl = vi.fn(async () => new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const emitted: string[] = [];
+    const run = new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type));
+    controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ event: "message_end", task_id: "task-clean", message_id: "message-clean", conversation_id: "conversation-clean", metadata: { usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } } })}\n\n`));
+    await vi.waitFor(() => expect(emitted).toContain("run_started"));
+    expect(emitted).not.toContain("usage_updated");
+    expect(emitted).not.toContain("run_finished");
+    controller.close();
+    await expect(run).resolves.toMatchObject({ status: "completed", remoteTaskId: "task-clean" });
+    expect(emitted).toEqual(["run_started", "usage_updated", "run_finished"]);
+  });
+
+  it("does not accept an unterminated terminal SSE frame as completion", async () => {
+    const frame = `data: ${JSON.stringify({ event: "message_end", task_id: "task-tail", message_id: "message-tail", conversation_id: "conversation-tail", metadata: { usage: { total_tokens: 9 } } })}`;
+    const fetchImpl = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(frame));
+        controller.close();
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const emitted: string[] = [];
+    await expect(new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type)))
+      .rejects.toMatchObject({ code: "DIFY_OUTCOME_UNKNOWN", outcome: "unknown", retryable: false });
+    expect(emitted).toEqual([]);
   });
 
   it("marks a disconnected identified task unknown and never retries or falls back", async () => {
