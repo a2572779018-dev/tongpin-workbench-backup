@@ -210,4 +210,44 @@ describe("persisted media task runtime", () => {
     expect(tasks.beginTool("member", run.runId, { modelConfigVersion: "config-v1", budgetVersion: "budget-v1", availablePoints: 500, sourceAssetsValid: true }).kind).toBe("unknown");
     expect(tasks.completeTool("member", run.runId, started.run.tool!.toolCallId!, ["verified-ready-asset"]).status).toBe("completed");
   });
+  it("records a definitive or unknown planner failure instead of retrying a paid planner", () => {
+    const first = tasks.submit("member", input());
+    tasks.claimPlanning("member", first.runId);
+    expect(tasks.failPlanning("member", first.runId, "AI_TOOL_PLAN_INVALID")).toMatchObject({ status: "failed", dueAt: null });
+    expect(tasks.due().some(item => item.runId === first.runId)).toBe(false);
+    const second = tasks.submit("member", input());
+    tasks.claimPlanning("member", second.runId);
+    expect(tasks.failPlanning("member", second.runId, "AI_CONNECTION_FAILED", "unknown")).toMatchObject({ status: "unknown", dueAt: null });
+    expect(tasks.claimPlanning("member", second.runId)).toBeNull();
+  });
+  it("persists one member clarification answer and queues a new planning step without granting cost", () => {
+    const run = tasks.submit("member", input());
+    tasks.claimPlanning("member", run.runId);
+    const question = tasks.awaitInput("member", run.runId, "希望横屏还是竖屏？", Date.now() + 30_000);
+    expect(question.status).toBe("awaiting_input");
+    const answered = tasks.answerInput("member", run.runId, question.freeQuestion!.questionId, "竖屏");
+    expect(answered.status).toBe("queued");
+    expect(answered.authorization).toBeUndefined();
+    expect(answered.stepId).not.toBe(run.stepId);
+    expect(tasks.answerInput("member", run.runId, question.freeQuestion!.questionId, "竖屏").version).toBe(answered.version);
+    expect(() => tasks.answerInput("member", run.runId, question.freeQuestion!.questionId, "横屏")).toThrow();
+    expect(tasks.claimPlanning("member", run.runId)?.status).toBe("planning");
+    expect(tasks.get("other-member", run.runId)).toBeNull();
+  });
+  it("repolls one accepted video service request without submitting another paid call", () => {
+    const run = tasks.submit("member", input());
+    tasks.claimPlanning("member", run.runId);
+    tasks.stageTool("member", run.runId, { capability: "video", operationKey: "video-step", estimatedPoints: 250, sourceAssetIds: [] });
+    tasks.grantAuthorization("member", run.runId, {
+      grantId: crypto.randomUUID(), capabilities: ["video"], sourceAssetIds: [], maxPointsPerTool: 300,
+      budgetVersion: "budget-v1", modelConfigVersion: "config-v1", automaticChoice: false, expiresAt: Date.now() + 60_000,
+    });
+    const started = tasks.beginTool("member", run.runId, { modelConfigVersion: "config-v1", budgetVersion: "budget-v1", availablePoints: 500, sourceAssetsValid: true }).run;
+    const id = started.tool!.toolCallId!;
+    const first = tasks.recordToolSubmission("member", run.runId, id, id, Date.now() + 1000);
+    const second = tasks.recordToolSubmission("member", run.runId, id, id, Date.now() + 10_000);
+    expect(second.dueAt).toBeGreaterThan(first.dueAt!);
+    expect(second.tool?.toolCallId).toBe(id);
+    expect(second.tool?.serviceRequestId).toBe(id);
+  });
 });

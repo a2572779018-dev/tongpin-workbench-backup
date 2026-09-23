@@ -113,7 +113,17 @@ export class AiVideoService {
    * revalidates every source in the original conversation before a plan. */
   async referenceFingerprintsForTask(userId: string, referenceIds: string[], conversationId: string): Promise<string[]> {
     this.store.assertAccess(userId);
-    return (await this.references(userId, referenceIds, validConversationId(conversationId, referenceIds[0] ?? "reference"))).fingerprints;
+    const scopedConversationId = validConversationId(conversationId, referenceIds[0] ?? "reference");
+    // The new durable task path accepts only references bound to its immutable
+    // conversation. Older clients can still submit old unbound references via
+    // the legacy endpoint, but cannot quietly move them into a new task.
+    for (const id of referenceIds) {
+      if (!/^[a-f0-9]{64}$/.test(id)) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片编号无效");
+      const row = this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_references WHERE tenant_id=? AND id=? AND user_id=?", this.store.tenantId, this.referenceKey(id), this.userKey(userId))[0];
+      const stored = row ? JSON.parse(row.data) as { conversationId?: unknown; generatedAsset?: unknown; sourceVideo?: unknown } : null;
+      if (!stored || stored.conversationId !== scopedConversationId) throw new AiError(409, "AI_VIDEO_SOURCE_CONVERSATION", "参考图片不属于当前对话，请重新选择");
+    }
+    return (await this.references(userId, referenceIds, scopedConversationId)).fingerprints;
   }
   private memberSettings(tier: AiMode = "quick"): AiVideoSettings {
     const admin = this.settings();
@@ -159,6 +169,8 @@ export class AiVideoService {
     if (p.generatedAsset !== undefined || p.sourceVideo !== undefined) assertGeneratedReferenceJpeg(p.dataUrl);
     const generatedAsset = p.generatedAsset === undefined ? undefined : await validateGeneratedAssetReferenceBinding(this.store, userId, p.generatedAsset);
     const sourceVideo = p.sourceVideo === undefined ? undefined : await bindSourceVideoReference(this.store, userId, p.sourceVideo, p.dataUrl);
+    const conversationId = p.conversationId === undefined ? generatedAsset?.conversationId ?? sourceVideo?.conversationId : validConversationId(p.conversationId, "reference");
+    if (conversationId && (generatedAsset && generatedAsset.conversationId !== conversationId || sourceVideo && sourceVideo.conversationId !== conversationId)) throw new AiError(409, "AI_VIDEO_SOURCE_CONVERSATION", "参考素材来自其他对话，请在原对话中继续生成");
     const box = await this.box(), chunks: string[] = [];
     for (let i = 0; i < p.dataUrl.length; i += 16000) chunks.push(await box.encrypt(p.dataUrl.slice(i, i + 16000)));
     const fingerprint = await aiVideoReferenceFingerprint(p.dataUrl);
@@ -169,7 +181,7 @@ export class AiVideoService {
       this.store.sql.exec("DELETE FROM ai_video_references WHERE tenant_id=? AND expires_at <= ?", this.store.tenantId, Date.now());
       const count = this.store.sql.all<{ n: number }>("SELECT COUNT(*) AS n FROM ai_video_references WHERE tenant_id=? AND user_id=?", this.store.tenantId, storedUserId)[0].n;
       if (count >= 32) throw new AiError(429, "AI_VIDEO_IMAGE_LIMIT", "暂存图片已达上限，请稍后再试");
-      this.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", this.referenceKey(id), this.store.tenantId, publicId, storedUserId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify({ chunks, fingerprint, ...(generatedAsset ? { generatedAsset } : {}), ...(sourceVideo ? { sourceVideo } : {}) }));
+      this.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", this.referenceKey(id), this.store.tenantId, publicId, storedUserId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify({ chunks, fingerprint, ...(conversationId ? { conversationId } : {}), ...(generatedAsset ? { generatedAsset } : {}), ...(sourceVideo ? { sourceVideo } : {}) }));
     });
     return { id };
   }
@@ -192,8 +204,9 @@ export class AiVideoService {
     for (const id of value) {
       const row = this.store.sql.all<{ expires_at: number; data: string; public_id: string }>("SELECT expires_at,data,public_id FROM ai_video_references WHERE tenant_id=? AND id=? AND user_id=?", this.store.tenantId, this.referenceKey(id), this.userKey(userId))[0];
       if (!row || row.expires_at <= Date.now()) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片已过期，请重新上传");
-      const stored = JSON.parse(row.data) as { fingerprint?: unknown; generatedAsset?: unknown; sourceVideo?: unknown } | string[];
+      const stored = JSON.parse(row.data) as { fingerprint?: unknown; conversationId?: unknown; generatedAsset?: unknown; sourceVideo?: unknown } | string[];
       if (Array.isArray(stored) || typeof stored.fingerprint !== "string" || !AI_VIDEO_REFERENCE_FINGERPRINT.test(stored.fingerprint)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "旧参考图片没有完整校验信息，请重新上传并整理视频任务");
+      if (stored.conversationId !== undefined && stored.conversationId !== conversationId && stored.generatedAsset === undefined && stored.sourceVideo === undefined) throw new AiError(409, "AI_VIDEO_SOURCE_CONVERSATION", "参考图片来自其他对话，请在原对话中继续生成");
       if (stored.generatedAsset !== undefined) await validateGeneratedAssetReferenceBinding(this.store, userId, stored.generatedAsset, conversationId);
       if (stored.sourceVideo !== undefined) {
         const source = await validateSourceVideoReferenceBinding(this.store, userId, stored.sourceVideo, conversationId);

@@ -75,6 +75,13 @@ export interface MediaTaskQuestion {
   selectedAt?: number;
   timeoutBlockedReason?: "not_authorized" | "configuration_changed" | "budget_changed" | "source_unavailable";
 }
+export interface MediaTaskFreeQuestion {
+  questionId: string;
+  prompt: string;
+  deadlineAt: number;
+  answer?: string;
+  answeredAt?: number;
+}
 export interface MediaTaskToolSpec {
   capability: MediaTaskCapability;
   /** Stable across a planner retry. Not a provider task ID. */
@@ -119,6 +126,8 @@ export interface MediaTaskRun {
   deadlineAt: number;
   dueAt: number | null;
   question?: MediaTaskQuestion;
+  freeQuestion?: MediaTaskFreeQuestion;
+  inputAnswers?: Array<{ questionId: string; answer: string; answeredAt: number }>;
   authorization?: MediaTaskAuthorizationScope;
   tool?: MediaTaskTool;
   cancelRequested?: boolean;
@@ -365,6 +374,54 @@ export class MediaTaskRuntime {
       return this.update(run);
     });
   }
+  /** Unknown planner outcomes freeze the task rather than resending it. */
+  failPlanning(userId: string, runId: string, errorCode: string, outcome: "failed" | "unknown" = "failed"): MediaTaskRun {
+    validVersion(errorCode, "错误代码");
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      if (run.status !== "planning") conflict("当前任务不在规划中");
+      run.status = outcome;
+      run.errorCode = errorCode;
+      run.dueAt = null;
+      return this.update(run);
+    });
+  }
+  /** Clarification is distinct from selecting parameters or authorizing cost. */
+  awaitInput(userId: string, runId: string, prompt: string, deadlineAt: number): MediaTaskRun {
+    if (typeof prompt !== "string" || !prompt.trim() || prompt.trim().length > 500 || /[\u0000-\u001f\u007f]/.test(prompt)) invalid("追问内容无效");
+    timestamp(deadlineAt, "追问期限");
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      if (run.status !== "planning") conflict("当前任务不能追问");
+      if (deadlineAt <= this.now() || deadlineAt > run.deadlineAt) invalid("追问期限超出任务范围");
+      run.freeQuestion = { questionId: crypto.randomUUID(), prompt: prompt.trim(), deadlineAt };
+      run.status = "awaiting_input";
+      run.dueAt = deadlineAt;
+      return this.update(run);
+    });
+  }
+  answerInput(userId: string, runId: string, questionId: string, answer: string): MediaTaskRun {
+    validId(questionId, "问题标识");
+    if (typeof answer !== "string" || !answer.trim() || answer.trim().length > 2000 || /\u0000/.test(answer)) invalid("回答内容无效");
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      const question = run.freeQuestion;
+      if (!question || question.questionId !== questionId) conflict("追问已失效");
+      if (question.answer !== undefined) {
+        if (question.answer !== answer.trim()) conflict("追问已经由另一份回答完成");
+        return clone(run);
+      }
+      if (run.status !== "awaiting_input" || question.deadlineAt <= this.now() || run.deadlineAt <= this.now()) conflict("追问已过期");
+      question.answer = answer.trim();
+      question.answeredAt = this.now();
+      run.inputAnswers = [...(run.inputAnswers ?? []), { questionId, answer: question.answer, answeredAt: question.answeredAt }];
+      run.stepId = crypto.randomUUID();
+      run.attemptId = crypto.randomUUID();
+      run.status = "queued";
+      run.dueAt = this.now();
+      return this.update(run);
+    });
+  }
   openQuestion(userId: string, runId: string, input: { options: MediaTaskQuestionOption[]; defaultOptionId: string; deadlineAt: number }): MediaTaskRun {
     const normalizedOptions = options(input.options);
     const defaultOptionId = validId(input.defaultOptionId, "默认选项");
@@ -487,7 +544,8 @@ export class MediaTaskRuntime {
       if (run.status !== "running" || run.tool?.toolCallId !== toolCallId) conflict("工具调用状态不匹配");
       if (run.tool.serviceRequestId) {
         if (run.tool.serviceRequestId !== serviceRequestId) conflict("工具提交结果不一致");
-        return clone(run);
+        run.dueAt = Math.min(run.deadlineAt, pollAt);
+        return this.update(run);
       }
       run.tool.serviceRequestId = serviceRequestId;
       run.tool.submittedAt = this.now();

@@ -121,9 +121,12 @@ describe("durable H3 jobs and isolated quotas", () => {
     const before = await video.configurationVersion("quick");
     expect(before).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify({ before })).not.toContain(config.apiKey);
-    const first = await video.uploadReference("a", { dataUrl: "data:image/jpeg;base64,/9j/AAAA" });
+    const first = await video.uploadReference("a", { dataUrl: "data:image/jpeg;base64,/9j/AAAA", conversationId: "conversation_a" });
     expect(await video.referenceFingerprintsForTask("a", [first.id], "conversation_a")).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
-    await expect(video.referenceFingerprintsForTask("b", [first.id], "conversation_a")).rejects.toMatchObject({ code: "AI_VIDEO_IMAGE_INVALID" });
+    await expect(video.referenceFingerprintsForTask("b", [first.id], "conversation_a")).rejects.toMatchObject({ code: "AI_VIDEO_SOURCE_CONVERSATION" });
+    await expect(video.referenceFingerprintsForTask("a", [first.id], "conversation_b")).rejects.toMatchObject({ code: "AI_VIDEO_SOURCE_CONVERSATION" });
+    const legacy = await video.uploadReference("a", { dataUrl: "data:image/jpeg;base64,/9j/AAAA" });
+    await expect(video.referenceFingerprintsForTask("a", [legacy.id], "conversation_a")).rejects.toMatchObject({ code: "AI_VIDEO_SOURCE_CONVERSATION" });
     await video.configure({ ...config, defaultModel: "sd-2-c6" });
     expect(await video.configurationVersion("quick")).not.toBe(before);
     expect(transport).not.toHaveBeenCalled();
