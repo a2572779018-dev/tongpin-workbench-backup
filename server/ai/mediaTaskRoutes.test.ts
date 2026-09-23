@@ -161,6 +161,23 @@ describe("Node authenticated media-task routes", () => {
     expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(0);
   });
 
+  it("asks for content on a bare image request and resumes the same queued task after the answer", async () => {
+    const input = taskInput({ entrypoint: "natural", requestText: "帮我生成一张图片",
+      confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 } });
+    const submitted = await post("/api/ai/media-tasks", input).expect(202);
+    const waiting = await waitForStatus(input.requestId, "awaiting_input");
+    expect(waiting.runId).toBe(submitted.body.task.runId);
+    expect(transport).not.toHaveBeenCalled();
+    transport.mockResolvedValueOnce(plan("一只蓝色的猫")).mockResolvedValueOnce(image());
+    const answered = await post(`/api/ai/media-tasks/${waiting.runId}/answer`, {
+      questionId: (waiting.freeQuestion as { questionId: string }).questionId, answer: "一只蓝色的猫",
+    }).expect(200);
+    expect(answered.body.task).toMatchObject({ runId: waiting.runId, status: "queued" });
+    const finished = await waitForStatus(input.requestId, "completed");
+    expect(finished.runId).toBe(waiting.runId);
+    expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
+  });
+
   it("passes an explicit send-time confirmation through while the HTTP response remains queued and non-blocking", async () => {
     const planner = deferred<Response>();
     transport.mockImplementationOnce(() => planner.promise).mockResolvedValueOnce(image());
