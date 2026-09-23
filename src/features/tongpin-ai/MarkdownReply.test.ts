@@ -21,6 +21,7 @@ describe("AI reply formatting", () => {
     const html = render('## 下一步\n\n1. **核实资料**\n2. 保留记录\n\n> 提示\n\n| 项目 | 状态 |\n| --- | --- |\n| 测试 | 完成 |');
     for (const tag of ["<h2>", "<ol>", "<li>", "<blockquote>", "<table>", "<th>", "<td>"]) expect(html).toContain(tag);
     expect(html).toContain('aria-label="回复中的表格"');
+    for (const label of ["复制 Markdown", "复制 TSV", "下载 CSV"]) expect(html).toContain(`>${label}</button>`);
   });
   it("does not rewrite code or deliberately escaped asterisks", () => {
     const html = render('`**不是加粗**`\n\n```js\nconst s = "**保留。 **";\n```\n\n\\*\\*原样标记\\*\\*');

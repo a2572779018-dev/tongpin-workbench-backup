@@ -17,9 +17,19 @@
 .tp-ai-markdown code { font: 0.88em/1.7 ui-monospace, monospace; background: #eee9dd; padding: 0.12em 0.35em; border-radius: 4px; }
 .tp-ai-markdown pre { max-width: 100%; overflow-x: auto; white-space: pre; padding: 1em; border: 1px solid #ddd4c2; border-radius: 10px; background: #f1ecdf; }
 .tp-ai-markdown pre code { background: transparent; padding: 0; white-space: pre; }
-.tp-ai-markdown-table { max-width: 100%; overflow-x: auto; margin: 1em 0; border: 1px solid #ddd4c2; border-radius: 8px; }
+.tp-ai-markdown-table { max-width: 100%; margin: 1em 0; border: 1px solid #ddd4c2; border-radius: 8px; overflow: hidden; }
+.tp-ai-markdown-table__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35em; padding: 0.35em 0.55em; border-bottom: 1px solid #e5dece; background: #faf7ef; font-size: 0.78em; line-height: 1.5; }
+.tp-ai-markdown-table__actions button { border: 1px solid transparent; border-radius: 5px; padding: 0.18em 0.45em; background: transparent; color: #62573d; font: inherit; cursor: pointer; }
+.tp-ai-markdown-table__actions button:hover { background: #f1ead4; border-color: #e5dece; }
+.tp-ai-markdown-table__actions button:focus-visible { outline: 2px solid #a68b31; outline-offset: 1px; }
+.tp-ai-markdown-table__actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+.tp-ai-markdown-table__actions [role="status"] { margin-left: auto; color: #70664f; }
+.tp-ai-markdown-table__scroll { max-width: 100%; overflow-x: auto; }
+.tp-ai-markdown-table__scroll:focus-visible { outline: 2px solid #a68b31; outline-offset: -2px; }
 .tp-ai-markdown table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
 .tp-ai-markdown :is(th, td) { padding: 0.55em 0.8em; text-align: left; border-bottom: 1px solid #e5dece; min-width: 6em; }
+.tp-ai-markdown :is(th, td)[align="center"] { text-align: center; }
+.tp-ai-markdown :is(th, td)[align="right"] { text-align: right; }
 .tp-ai-markdown th { background: #f1ead4; }
 .tp-ai-markdown tr:last-child td { border-bottom: 0; }
 .tp-ai-markdown hr { margin: 1.2em 0; border: 0; border-top: 1px solid #ddd4c2; }

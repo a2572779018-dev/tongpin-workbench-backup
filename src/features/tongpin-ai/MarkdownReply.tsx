@@ -1,18 +1,53 @@
-import { Children, cloneElement, isValidElement, memo, useMemo, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AiSourceAnchor } from "./AiSourceLink";
 import { splitMarkdownIntoBlocks, StableMarkdownBlocks } from "./librechatMarkdownBlocks";
 import { remarkReplyEmphasis, replyUrlTransform } from "./replyMarkdown";
+import { tableRowsFromHast, tableToCsv, tableToMarkdown, tableToTsv } from "./replyTableData";
 import { TypewriterText } from "./TypewriterText";
 import "./reply-markdown.css";
 
 const plugins = [remarkGfm, remarkReplyEmphasis];
+
+function ReplyTable({ node, children }: { node: unknown; children: ReactNode }) {
+  const rows = useMemo(() => tableRowsFromHast(node), [node]);
+  const [feedback, setFeedback] = useState("");
+  const copy = async (format: "markdown" | "tsv") => {
+    try {
+      await navigator.clipboard.writeText(format === "markdown" ? tableToMarkdown(rows) : tableToTsv(rows));
+      setFeedback(format === "markdown" ? "已复制 Markdown" : "已复制 TSV");
+    } catch { setFeedback("复制失败，请手动选择表格内容。"); }
+  };
+  const downloadCsv = () => {
+    try {
+      const url = URL.createObjectURL(new Blob([tableToCsv(rows)], { type: "text/csv;charset=utf-8" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "同频AI-表格.csv";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setFeedback("下载已开始，请到下载目录确认文件。");
+    } catch { setFeedback("下载未开始，请重试。"); }
+  };
+  return <div className="tp-ai-markdown-table">
+    <div className="tp-ai-markdown-table__actions">
+      <button type="button" disabled={!rows.length} onClick={() => void copy("markdown")}>复制 Markdown</button>
+      <button type="button" disabled={!rows.length} onClick={() => void copy("tsv")}>复制 TSV</button>
+      <button type="button" disabled={!rows.length} onClick={downloadCsv}>下载 CSV</button>
+      <span role="status" aria-live="polite">{feedback}</span>
+    </div>
+    <div className="tp-ai-markdown-table__scroll" tabIndex={0} role="region" aria-label="回复中的表格"><table>{children}</table></div>
+  </div>;
+}
+
 const components: Components = {
   a: ({ href, children }) => <AiSourceAnchor className="tp-ai-inline-source" href={href ?? ""}>{children}</AiSourceAnchor>,
   // Remote images in model text must not initiate network requests on display.
   img: ({ src, alt }) => <AiSourceAnchor href={typeof src === "string" ? src : ""}>{alt || "查看图片"}</AiSourceAnchor>,
-  table: ({ children }) => <div className="tp-ai-markdown-table" tabIndex={0} role="region" aria-label="回复中的表格"><table>{children}</table></div>,
+  table: ({ node, children }) => <ReplyTable node={node} children={children} />,
 };
 
 function renderReplyBlock(content: string): ReactNode {
