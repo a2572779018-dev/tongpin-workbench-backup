@@ -48,6 +48,106 @@ describe("Dify engine adapter", () => {
     expect(result.events.map(event => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 
+  it("does not append the Agent closing full message to already streamed agent_message deltas", async () => {
+    const ids = { task_id: "task-agent", message_id: "message-agent", conversation_id: "conversation-agent" };
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "agent_message", ...ids, answer: "你好，" },
+      { event: "agent_message", ...ids, answer: "世界" },
+      { event: "message", ...ids, answer: "你好，世界" },
+      { event: "message_end", ...ids, metadata: { usage: { total_tokens: 3 } } },
+    ], 3), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const result = await new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input);
+    expect(result.answer).toBe("你好，世界");
+    expect(result.events.filter(event => event.type === "answer_delta").map(event => event.content)).toEqual(["你好，", "世界"]);
+    expect(result.events.at(-1)?.type).toBe("run_finished");
+  });
+
+  it("emits only the missing suffix when the Agent final message completes partial deltas", async () => {
+    const ids = { task_id: "task-agent", message_id: "message-agent", conversation_id: "conversation-agent" };
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "agent_message", ...ids, answer: "你好，" },
+      { event: "message", ...ids, answer: "你好，世界" },
+      { event: "message_end", ...ids },
+    ], 5), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const result = await new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input);
+    expect(result.answer).toBe("你好，世界");
+    expect(result.events.filter(event => event.type === "answer_delta").map(event => event.content)).toEqual(["你好，", "世界"]);
+  });
+
+  it("retains agent_message-only Legacy Agent and message-only Chatbot streams", async () => {
+    for (const event of ["agent_message", "message"] as const) {
+      const ids = { task_id: `task-${event}`, message_id: `message-${event}`, conversation_id: `conversation-${event}` };
+      const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+        { event, ...ids, answer: "片段一" },
+        { event, ...ids, answer: "片段二" },
+        { event: "message_end", ...ids },
+      ], 2), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+      const result = await new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input);
+      expect(result.answer).toBe("片段一片段二");
+      expect(result.events.filter(item => item.type === "answer_delta").map(item => item.content)).toEqual(["片段一", "片段二"]);
+    }
+  });
+
+  it("waits for a successful workflow_finished after Chatflow message chunks", async () => {
+    const ids = { task_id: "task-chatflow", conversation_id: "conversation-chatflow", workflow_run_id: "workflow-chatflow" };
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "workflow_started", ...ids },
+      { event: "message", ...ids, message_id: "message-chatflow", answer: "你好，" },
+      { event: "message", ...ids, message_id: "message-chatflow", answer: "世界" },
+      { event: "message_end", ...ids, message_id: "message-chatflow", metadata: { usage: { total_tokens: 3 } } },
+      { event: "workflow_finished", ...ids, data: { status: "succeeded" } },
+    ], 4), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const result = await new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input);
+    expect(result).toMatchObject({ status: "completed", answer: "你好，世界", remoteWorkflowRunId: "workflow-chatflow" });
+    expect(result.events.filter(event => event.type === "answer_delta").map(event => event.content)).toEqual(["你好，", "世界"]);
+    expect(result.events.slice(-2).map(event => event.type)).toEqual(["usage_updated", "run_finished"]);
+  });
+
+  it("does not report Chatflow success from message_end without workflow_finished", async () => {
+    const ids = { task_id: "task-chatflow", conversation_id: "conversation-chatflow", workflow_run_id: "workflow-chatflow" };
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "workflow_started", ...ids },
+      { event: "message", ...ids, message_id: "message-chatflow", answer: "片段" },
+      { event: "message_end", ...ids, message_id: "message-chatflow", metadata: { usage: { total_tokens: 3 } } },
+    ]), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const emitted: string[] = [];
+    await expect(new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type)))
+      .rejects.toMatchObject({ code: "DIFY_OUTCOME_UNKNOWN", outcome: "unknown", retryable: false });
+    expect(emitted).not.toContain("usage_updated");
+    expect(emitted).not.toContain("run_finished");
+  });
+
+  it("does not report Chatflow success when workflow_finished fails or lacks its run ID", async () => {
+    for (const [workflowRunId, status] of [["workflow-chatflow", "failed"], [undefined, "succeeded"]] as const) {
+      const ids = { task_id: "task-chatflow", conversation_id: "conversation-chatflow", ...(workflowRunId ? { workflow_run_id: workflowRunId } : {}) };
+      const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+        { event: "workflow_started", ...ids },
+        { event: "message", ...ids, message_id: "message-chatflow", answer: "片段" },
+        { event: "message_end", ...ids, message_id: "message-chatflow", metadata: { usage: { total_tokens: 3 } } },
+        { event: "workflow_finished", ...ids, data: { status } },
+      ]), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+      const emitted: string[] = [];
+      await expect(new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type)))
+        .rejects.toMatchObject({ outcome: status === "failed" ? "failed" : "unknown", retryable: false });
+      expect(emitted).not.toContain("usage_updated");
+      expect(emitted).not.toContain("run_finished");
+    }
+  });
+
+  it("rejects a divergent Agent closing answer instead of showing duplicate or inconsistent text", async () => {
+    const ids = { task_id: "task-agent", message_id: "message-agent", conversation_id: "conversation-agent" };
+    const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
+      { event: "agent_message", ...ids, answer: "先前片段" },
+      { event: "message", ...ids, answer: "不同的最终回答" },
+      { event: "message_end", ...ids, metadata: { usage: { total_tokens: 3 } } },
+    ]), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const emitted: string[] = [];
+    await expect(new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl }).run(input, event => emitted.push(event.type)))
+      .rejects.toMatchObject({ code: "DIFY_PROTOCOL_ERROR", outcome: "unknown", retryable: false });
+    expect(emitted).not.toContain("usage_updated");
+    expect(emitted).not.toContain("run_finished");
+  });
+
   it("keeps terminal success and usage hidden when an observed tool never finishes", async () => {
     const fetchImpl = vi.fn(async () => new Response(fragmentedSse([
       { event: "agent_thought", task_id: "task-unresolved", message_id: "message-unresolved", conversation_id: "conversation-unresolved", id: "tool-1", tool: "tongpin_lookup" },

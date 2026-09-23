@@ -19,6 +19,7 @@ export interface DifyEngineEvent {
   remoteTaskId?: string;
   remoteMessageId?: string;
   remoteConversationId?: string;
+  remoteWorkflowRunId?: string;
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
   errorCode?: string;
 }
@@ -42,6 +43,7 @@ export interface DifyEngineRunResult {
   remoteTaskId: string;
   remoteMessageId?: string;
   remoteConversationId: string;
+  remoteWorkflowRunId?: string;
   events: DifyEngineEvent[];
 }
 
@@ -181,8 +183,14 @@ export class DifyEngineAdapter {
     let remoteTaskId = "";
     let remoteMessageId = "";
     let remoteConversationId = suppliedRemoteConversationId ?? "";
+    let remoteWorkflowRunId = "";
     let answer = "";
     let terminal = false;
+    let messageEndSeen = false;
+    let chatflow = false;
+    let agentMessageSeen = false;
+    let closingAgentMessageSeen = false;
+    let messageChunkSeen = false;
     let seq = 0;
     const startedTools = new Map<string, string>();
     const finishedTools = new Set<string>();
@@ -230,23 +238,45 @@ export class DifyEngineAdapter {
         let item: Record<string, unknown>;
         try { item = JSON.parse(raw) as Record<string, unknown>; }
         catch { throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 返回了无效事件", remoteTaskId ? "unknown" : "not_started", false); }
-        // A contradictory event after message_end invalidates the purported
-        // success. Do not publish a terminal event until the stream ends.
-        if (terminal) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 终态后又返回事件，结果需要核对", "unknown", false);
         const event = bounded(item.event, 80);
+        // Chatflow emits workflow_finished after message_end; other chat apps
+        // do not. Delay all success events until the complete stream closes.
+        if (terminal || (messageEndSeen && event !== "workflow_finished" && event !== "error")) {
+          throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 终态后又返回事件，结果需要核对", "unknown", false);
+        }
         const taskId = remoteEventId(item.task_id);
         const conversationId = remoteEventId(item.conversation_id);
-        if ((taskId && remoteTaskId && taskId !== remoteTaskId) || (conversationId && remoteConversationId && conversationId !== remoteConversationId)) {
+        const workflowRunId = remoteEventId(item.workflow_run_id);
+        if ((taskId && remoteTaskId && taskId !== remoteTaskId) || (conversationId && remoteConversationId && conversationId !== remoteConversationId) || (workflowRunId && remoteWorkflowRunId && workflowRunId !== remoteWorkflowRunId)) {
           throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 任务标识在事件流中发生变化，结果需要核对", "unknown", false);
         }
         remoteTaskId ||= taskId;
         remoteMessageId ||= remoteEventId(item.message_id);
         remoteConversationId ||= conversationId;
-        const common = { timestamp: eventTime(item.created_at), remoteTaskId: remoteTaskId || undefined, remoteMessageId: remoteMessageId || undefined, remoteConversationId: remoteConversationId || undefined };
+        remoteWorkflowRunId ||= workflowRunId;
+        const common = { timestamp: eventTime(item.created_at), remoteTaskId: remoteTaskId || undefined, remoteMessageId: remoteMessageId || undefined, remoteConversationId: remoteConversationId || undefined, remoteWorkflowRunId: remoteWorkflowRunId || undefined };
         if (events.length === 0) emit({ type: "run_started", stepId: `dify:${attemptId}`, ...common });
-        if (event === "message" || event === "agent_message") {
+        if (event === "workflow_started") {
+          if (agentMessageSeen || messageChunkSeen) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 工作流事件顺序无效", "unknown", false);
+          chatflow = true;
+        } else if (event === "agent_message") {
+          if (chatflow || messageChunkSeen || closingAgentMessageSeen) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 回答事件顺序无效", "unknown", false);
+          agentMessageSeen = true;
           const delta = bounded(item.answer, 128_000);
           if (delta) { answer += delta; emit({ type: "answer_delta", stepId: remoteMessageId || `dify:${attemptId}`, content: delta, ...common }); }
+        } else if (event === "message") {
+          const text = bounded(item.answer, 128_000);
+          if (agentMessageSeen) {
+            // Agent's closing message is the full answer, not another delta.
+            if (closingAgentMessageSeen || !text.startsWith(answer)) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 最终回答与已发送片段不一致", "unknown", false);
+            closingAgentMessageSeen = true;
+            const remaining = text.slice(answer.length);
+            if (remaining) emit({ type: "answer_delta", stepId: remoteMessageId || `dify:${attemptId}`, content: remaining, ...common });
+            answer = text;
+          } else {
+            messageChunkSeen = true;
+            if (text) { answer += text; emit({ type: "answer_delta", stepId: remoteMessageId || `dify:${attemptId}`, content: text, ...common }); }
+          }
         } else if (event === "agent_thought") {
           const toolName = bounded(item.tool, 120);
           const observation = typeof item.observation === "string" && item.observation.length > 0;
@@ -270,6 +300,17 @@ export class DifyEngineAdapter {
           const metadata = item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata as Record<string, unknown> : {};
           terminalUsage = usageFrom(metadata.usage);
           terminalTimestamp = common.timestamp;
+          messageEndSeen = true;
+          if (!chatflow) terminal = true;
+        } else if (event === "workflow_finished") {
+          if (!chatflow || !messageEndSeen) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 工作流终态顺序无效", "unknown", false);
+          const data = item.data && typeof item.data === "object" && !Array.isArray(item.data) ? item.data as Record<string, unknown> : {};
+          if (data.status === "failed" || data.status === "stopped") {
+            emit({ type: "run_failed", stepId: remoteMessageId || `dify:${attemptId}`, errorCode: "DIFY_WORKFLOW_FAILED", ...common });
+            throw new DifyEngineError("DIFY_WORKFLOW_FAILED", "Dify 工作流执行失败", "failed", false);
+          }
+          if (data.status !== "succeeded") throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 工作流终态无效", "unknown", false);
+          terminalTimestamp = common.timestamp;
           terminal = true;
         } else if (event === "error") {
           const errorCode = bounded(item.code, 120) || "DIFY_REMOTE_ERROR";
@@ -277,13 +318,13 @@ export class DifyEngineAdapter {
           throw new DifyEngineError(errorCode, bounded(item.message, 500) || "Dify 任务失败", "failed", false);
         }
       }
-      if (!terminal || !remoteTaskId || !remoteConversationId || startedTools.size !== finishedTools.size) {
+      if (!terminal || !remoteTaskId || !remoteConversationId || chatflow && !remoteWorkflowRunId || startedTools.size !== finishedTools.size) {
         throw new DifyEngineError("DIFY_OUTCOME_UNKNOWN", "Dify 终态、任务标识或工具结果未能核实，不会自动切换引擎或重复执行", "unknown", false);
       }
-      const final = { timestamp: terminalTimestamp, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId };
+      const final = { timestamp: terminalTimestamp, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId, ...(remoteWorkflowRunId ? { remoteWorkflowRunId } : {}) };
       if (terminalUsage) emit({ type: "usage_updated", stepId: remoteMessageId || `dify:${attemptId}`, usage: terminalUsage, ...final });
       emit({ type: "run_finished", stepId: remoteMessageId || `dify:${attemptId}`, ...final });
-      return { engine: "dify", status: "completed", answer, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId, events };
+      return { engine: "dify", status: "completed", answer, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId, ...(remoteWorkflowRunId ? { remoteWorkflowRunId } : {}), events };
     } catch (error) {
       if (error instanceof DifyEngineError) throw error;
       const timedOut = controller.signal.aborted;
