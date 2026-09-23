@@ -31,6 +31,12 @@ export interface MediaTaskCreateInput {
   intent: MediaTaskCapability;
   /** Private task input. Media bytes must be stored as scoped assets, never here. */
   requestText: string;
+  /** Server-sourced, bounded conversation history frozen when this task is
+   * submitted. Old snapshots without this field remain valid. */
+  contextMessages?: MediaTaskContextMessage[];
+  /** Workspace revision used only as provenance; never queried again to
+   * silently change the meaning of a submitted task. */
+  contextRevision?: number;
   modelConfigVersion: string;
   sourceAssetIds: string[];
   /** Resolved on the server before submission. Reference IDs belong to the
@@ -38,6 +44,12 @@ export interface MediaTaskCreateInput {
   videoParameters?: MediaTaskVideoParameters;
   authorizationScope: MediaTaskAuthorizationScope | null;
   deadlineAt: number;
+}
+
+export interface MediaTaskContextMessage {
+  sourceMessageId: string;
+  role: "user" | "assistant";
+  content: string;
 }
 
 export interface MediaTaskVideoParameters {
@@ -224,9 +236,22 @@ function createInput(value: MediaTaskCreateInput): MediaTaskCreateInput {
   if (!ENTRYPOINTS.has(value.entrypoint) || !TIERS.has(value.tier) || !CAPABILITIES.has(value.intent)) invalid("任务入口或类型无效");
   if (value.videoParameters !== undefined && value.intent !== "video") invalid("图片任务不能携带视频参数");
   if (typeof value.requestText !== "string" || !value.requestText.trim() || value.requestText.length > 12_000 || /\u0000/.test(value.requestText)) invalid("任务描述无效");
+  if (value.contextRevision !== undefined && (!Number.isSafeInteger(value.contextRevision) || value.contextRevision < 0)) invalid("会话版本无效");
+  if (value.contextMessages !== undefined && (!Array.isArray(value.contextMessages) || value.contextMessages.length > 12)) invalid("会话上下文无效");
+  let contextLength = 0;
+  const contextMessages = value.contextMessages?.map(item => {
+    if (!item || (item.role !== "user" && item.role !== "assistant")
+      || typeof item.sourceMessageId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(item.sourceMessageId)
+      || typeof item.content !== "string" || !item.content.trim() || item.content.length > 1200 || /\u0000/.test(item.content)) invalid("会话上下文无效");
+    contextLength += item.content.length;
+    return { sourceMessageId: item.sourceMessageId, role: item.role, content: item.content.trim() };
+  });
+  if (contextLength > 6000 || (contextMessages && new Set(contextMessages.map(item => item.sourceMessageId)).size !== contextMessages.length)) invalid("会话上下文过长或重复");
   return {
     requestId: validId(value.requestId, "请求标识"), conversationId: validId(value.conversationId, "会话标识"),
     entrypoint: value.entrypoint, tier: value.tier, intent: value.intent, requestText: value.requestText.trim(),
+    ...(contextMessages?.length ? { contextMessages } : {}),
+    ...(value.contextRevision !== undefined ? { contextRevision: value.contextRevision } : {}),
     modelConfigVersion: validVersion(value.modelConfigVersion, "模型配置版本"),
     sourceAssetIds: ids(value.sourceAssetIds, "参考素材"),
     ...(value.videoParameters !== undefined ? { videoParameters: videoParameters(value.videoParameters) } : {}),

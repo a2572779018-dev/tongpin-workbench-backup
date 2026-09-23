@@ -5,6 +5,7 @@ import {
   MediaTaskRuntime,
   type MediaTaskAuthorizationScope,
   type MediaTaskCreateInput,
+  type MediaTaskContextMessage,
   type MediaTaskEntrypoint,
   type MediaTaskExecutionGuard,
   type MediaTaskRun,
@@ -14,9 +15,14 @@ import { AiError } from "./security";
 import type { AiService } from "./service";
 import { tenantStorageKey } from "./tenant";
 import { validateToolPlan } from "./toolPlans";
+import { AiWorkspaceRepository } from "./workspace";
 
 const MAX_TASK_LIFETIME_MS = 30 * 60_000;
 const VIDEO_POLL_MS = 10_000;
+const MAX_CONTEXT_MESSAGES = 12;
+const MAX_CONTEXT_CHARACTERS = 6000;
+const MAX_CONTEXT_MESSAGE_CHARACTERS = 1200;
+const URL_IN_HISTORY = /(?:https?:\/\/|file:\/\/|ftp:\/\/|data:|javascript:|www\.)[^\s<>()\[\]{}"']+/gi;
 
 export interface SubmitMediaTask {
   requestId: string;
@@ -56,6 +62,34 @@ function expectedRun(runtime: MediaTaskRuntime, userId: string, runId: string): 
 }
 function safeErrorCode(error: unknown): string {
   return error instanceof AiError && /^[a-zA-Z0-9._:-]{1,120}$/.test(error.code) ? error.code : "AI_MEDIA_TASK_FAILED";
+}
+function normalizedText(value: string): string { return value.replace(/\s+/g, " ").trim(); }
+
+/** Capture only text from this account's already-saved conversation. A link
+ * in historical content is untrusted input, not a fetch instruction. */
+function frozenConversationContext(service: MediaTaskService, userId: string, conversationId: string, requestText: string): {
+  contextMessages: MediaTaskContextMessage[]; contextRevision?: number;
+} {
+  const saved = new AiWorkspaceRepository(service.store.sql).read(userId, service.store.tenantId);
+  const conversation = saved.state?.conversations.find(item => item.id === conversationId);
+  if (!conversation) return { contextMessages: [] };
+  const eligible = conversation.messages.filter(item => (item.role === "user" || item.role === "assistant")
+    && (item.status === undefined || item.status === "ready") && typeof item.content === "string" && item.content.trim());
+  // The client may have already persisted the current message. Keep only the
+  // prior conversation and append requestText once as the active user turn.
+  if (eligible.at(-1)?.role === "user" && normalizedText(eligible.at(-1)!.content) === normalizedText(requestText)) eligible.pop();
+  const collected: MediaTaskContextMessage[] = [];
+  let remaining = MAX_CONTEXT_CHARACTERS;
+  for (let index = eligible.length - 1; index >= 0 && collected.length < MAX_CONTEXT_MESSAGES && remaining >= 50; index--) {
+    const message = eligible[index];
+    const content = message.content.replace(URL_IN_HISTORY, "[链接已省略]").replace(/\u0000/g, "").trim();
+    if (!content) continue;
+    const clipped = content.slice(0, Math.min(MAX_CONTEXT_MESSAGE_CHARACTERS, remaining)).trim();
+    if (!clipped) continue;
+    collected.push({ sourceMessageId: message.id, role: message.role, content: clipped });
+    remaining -= clipped.length;
+  }
+  return { contextMessages: collected.reverse(), contextRevision: saved.revision };
 }
 
 /** Concrete bridge to the existing one-time chat plan, image reservation and
@@ -162,11 +196,14 @@ export class AiServiceMediaTaskOrchestrator {
     await this.scopedSources(userId, input);
     this.estimatedPoints(userId, input.intent);
     if (input.intent === "video") this.service.video.bindPlanModel(input.tier, input.videoParameters!.model);
+    const context = frozenConversationContext(this.service, userId, input.conversationId, input.requestText);
     const snapshot: MediaTaskCreateInput = {
       requestId: input.requestId, conversationId: input.conversationId, entrypoint: input.entrypoint,
       tier: input.tier, intent: input.intent, requestText: input.requestText,
       modelConfigVersion: await this.configurationVersion(input.intent, input.tier),
       sourceAssetIds: [...input.sourceAssetIds],
+      ...(context.contextMessages.length ? { contextMessages: context.contextMessages } : {}),
+      ...(context.contextRevision !== undefined ? { contextRevision: context.contextRevision } : {}),
       ...(input.videoParameters ? { videoParameters: { ...input.videoParameters, referenceIds: [...input.videoParameters.referenceIds] } } : {}),
       authorizationScope: null, deadlineAt,
     };
@@ -176,6 +213,16 @@ export class AiServiceMediaTaskOrchestrator {
   get(userId: string, runId: string): MediaTaskRun {
     this.service.store.assertAccess(userId);
     return expectedRun(this.runtime, userId, runId);
+  }
+
+  getByRequest(userId: string, requestId: string): MediaTaskRun {
+    this.service.store.assertAccess(userId);
+    const row = this.service.store.sql.all<{ run_id: string }>(
+      "SELECT run_id FROM ai_media_task_runs WHERE tenant_id=? AND user_id=? AND request_id=?",
+      this.service.store.tenantId, tenantStorageKey(this.service.store.tenantId, userId), requestId,
+    )[0];
+    if (!row) throw new AiError(404, "AI_MEDIA_TASK_NOT_FOUND", "没有找到这条任务");
+    return expectedRun(this.runtime, userId, row.run_id);
   }
 
   cancel(userId: string, runId: string): MediaTaskRun {
@@ -222,7 +269,7 @@ export class AiServiceMediaTaskOrchestrator {
       if (planningText.length > 12_000) rejected("AI_CONTEXT_TOO_LONG", "补充内容过长，请在新任务中简化描述", 400);
       const response: AiChatResponse = await this.service.chat(userId, {
         requestId: planRequestId, conversationId: snapshot.conversationId, mode: snapshot.tier,
-        messages: [{ role: "user", content: planningText }],
+        messages: [...(snapshot.contextMessages ?? []).map(item => ({ role: item.role, content: item.content })), { role: "user", content: planningText }],
         outputFormat: snapshot.intent === "image" ? "image_plan" : "video_plan",
         ...(source.attachments.length ? { attachments: source.attachments } : {}),
         ...(snapshot.videoParameters ? { videoParameters: {

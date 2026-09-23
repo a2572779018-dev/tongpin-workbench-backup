@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNodeAi } from "./node";
 import { AiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 import type { AiTransport } from "./provider";
+import { AiWorkspaceRepository } from "./workspace";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const MP4 = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0]);
@@ -27,12 +28,14 @@ describe("real AiService media orchestration", () => {
   let directory: string;
   let node: Awaited<ReturnType<typeof createNodeAi>>;
   let orchestrator: AiServiceMediaTaskOrchestrator;
+  let workspace: AiWorkspaceRepository;
   const transport = vi.fn<AiTransport>();
 
   beforeEach(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-media-orchestrator-"));
     transport.mockReset();
     node = await createNodeAi(path.join(directory, "fixture.json"), transport);
+    workspace = new AiWorkspaceRepository(node.store.sql); workspace.initialize();
     await node.service.saveProvider(provider);
     node.service.setQuota("member", "admin", { limitTokens: 20_000 });
     orchestrator = new AiServiceMediaTaskOrchestrator(node.service);
@@ -109,6 +112,44 @@ describe("real AiService media orchestration", () => {
     const foreign = new AiServiceMediaTaskOrchestrator(node.service.forTenant("other-tenant"));
     expect(() => foreign.get("member", run.runId)).toThrow();
     expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("freezes bounded same-conversation history, strips links, and never re-reads edited history while planning", async () => {
+    const state = (oldText: string) => ({
+      view: "chat" as const, mode: "quick" as const, projects: [], artifacts: [], drafts: {}, enabledSkillIds: [],
+      activeConversationId: "conversation-a", activeProjectId: null,
+      conversations: [{ id: "conversation-a", title: "海报", timeLabel: "刚刚", messages: [
+        { id: "previous-user", role: "user" as const, content: `${oldText} https://untrusted.example/secret`, time: "10:00", status: "ready" as const },
+        { id: "previous-assistant", role: "assistant" as const, content: "你希望保留蓝色背景。", time: "10:01", status: "ready" as const },
+        { id: "current-user", role: "user" as const, content: "画一张蓝色科技海报", time: "10:02", status: "ready" as const },
+      ] }],
+    });
+    await workspace.save("member", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("最初的品牌风格") });
+    const run = await orchestrator.submit("member", input());
+    expect(orchestrator.getByRequest("member", run.requestId).runId).toBe(run.runId);
+    const snapshot = orchestrator.runtime.snapshot("member", run.runId)!;
+    expect(snapshot.contextMessages).toEqual([
+      { sourceMessageId: "previous-user", role: "user", content: "最初的品牌风格 [链接已省略]" },
+      { sourceMessageId: "previous-assistant", role: "assistant", content: "你希望保留蓝色背景。" },
+    ]);
+    expect(snapshot.contextRevision).toBe(1);
+    await workspace.save("member", { expectedRevision: 1, mutationId: crypto.randomUUID(), state: state("修改后的不同历史") });
+    transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+    await orchestrator.advance("member", run.runId);
+    const body = JSON.parse(transport.mock.calls[0][1].body!);
+    const serialized = JSON.stringify(body);
+    expect(serialized).toContain("最初的品牌风格");
+    expect(serialized).not.toContain("修改后的不同历史");
+    expect(serialized).not.toContain("untrusted.example");
+    expect(body.messages.filter((item: { content: string }) => item.content.includes("画一张蓝色科技海报"))).toHaveLength(1);
+    expect((await orchestrator.submit("member", input(run.requestId))).runId).toBe(run.runId);
+  });
+
+  it("uses no history when the requested conversation was not saved and rejects other-account lookups", async () => {
+    const run = await orchestrator.submit("member", input());
+    expect(orchestrator.runtime.snapshot("member", run.runId)?.contextMessages).toBeUndefined();
+    expect(() => orchestrator.getByRequest("other-member", run.requestId)).toThrow();
+    expect(() => new AiServiceMediaTaskOrchestrator(node.service.forTenant("other-tenant")).getByRequest("member", run.requestId)).toThrow();
   });
 
   it("marks an ambiguous image send unknown and never resubmits it on advance or confirmation", async () => {
