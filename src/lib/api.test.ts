@@ -6,6 +6,14 @@ import {
 } from "./api";
 
 describe("API network handling", () => {
+  it("hands an SSE response to the caller without consuming its body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('data: {"type":"run_started"}\n\n', {
+      headers: { "Content-Type": "text/event-stream" },
+    })));
+    const response = await publicRequest<Response>("/api/ai/chat/stream", {}, 1000, "stream");
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(await response.text()).toBe('data: {"type":"run_started"}\n\n');
+  });
   it("restores JPEG references with an explicit image mode without weakening video validation", async () => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => new Response(new Uint8Array([255, 216, 255, 217]), { headers: { "Content-Type": "image/jpeg" } })));
     const image = await publicRequest<Blob>("/api/video-reference/test", {}, 1000, "image");

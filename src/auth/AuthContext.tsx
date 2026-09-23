@@ -40,7 +40,7 @@ interface AuthContextValue {
   ): Promise<void>;
   logout(): Promise<void>;
   retryStartup(): Promise<void>;
-  api<T>(path: string, init?: RequestInit, timeoutMs?: number, responseMode?: "json" | "blob" | "image"): Promise<T>;
+  api<T>(path: string, init?: RequestInit, timeoutMs?: number, responseMode?: "json" | "blob" | "image" | "stream"): Promise<T>;
   updateUser(user: User): Promise<void>;
 }
 
@@ -130,7 +130,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       path: string,
       init: RequestInit = {},
       timeoutMs?: number,
-      responseMode?: "json" | "blob" | "image",
+      responseMode?: "json" | "blob" | "image" | "stream",
     ): Promise<T> {
       let current = sessionRef.current;
       if (!current) {

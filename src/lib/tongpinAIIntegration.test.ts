@@ -238,7 +238,11 @@ describe("Tongpin AI authenticated integration boundary", () => {
         // The citation component has one reviewed, URL-only bridge. It does not
         // receive session/provider secrets or change the quota. All other bridge
         // accesses remain forbidden, including new properties in this component.
-        const inspected = boundary === "Electron bridge" && file.endsWith("/AiSourceLink.tsx")
+        const inspected = boundary === "browser persistence" && file.endsWith("/conversationTaskStatus.ts")
+          // Reviewed account-scoped unread IDs only; behavioral tests reject
+          // text, key-like strings and arbitrary objects before storage writes.
+          ? source.replace(/\bwindow\.localStorage\b/g, "reviewedReadMarkerStorage")
+          : boundary === "Electron bridge" && file.endsWith("/AiSourceLink.tsx")
           ? source.replace(/\bwindow\.tongpin\.openAiSource\b/g, "reviewedAiSourceOpener")
             .replace(/if \(!window\.tongpin\) return;/g, "")
           : source;

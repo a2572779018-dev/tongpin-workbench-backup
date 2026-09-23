@@ -59,6 +59,7 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
       providers: current.providers.map(provider => provider.id === providerId ? { ...provider, ...patch } : provider),
       tiers: Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, { ...current.tiers[tier],
         ...(patch.protocol !== undefined && current.tiers[tier].providerId === providerId ? { protocol: patch.protocol } : {}),
+        ...(patch.baseUrl !== undefined && current.tiers[tier].imageProviderId === providerId ? { imageEditCapability: undefined } : {}),
       }])) as Record<AiMode, AiHarnessTierRoute>,
     }));
     if (patch.baseUrl !== undefined) {
@@ -68,7 +69,9 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
     setProviderErrors(current => ({ ...current, [providerId]: "" })); setNotice(""); setError("");
   }
   function updateTier(tier: AiMode, patch: Partial<AiHarnessTierRoute>) {
-    setDraft(current => ({ ...current, tiers: { ...current.tiers, [tier]: { ...current.tiers[tier], ...patch } } }));
+    setDraft(current => ({ ...current, tiers: { ...current.tiers, [tier]: { ...current.tiers[tier], ...patch,
+      ...(Object.hasOwn(patch, "imageProviderId") || Object.hasOwn(patch, "imageModelId") ? { imageEditCapability: undefined } : {}),
+    } } }));
     setNotice(""); setError("");
   }
   async function discover(provider: AiHarnessProviderInput) {
@@ -190,6 +193,16 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
             <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={route.enabled} onChange={event => updateTier(activeTier, { enabled: event.target.checked })} />启用{AI_BUSINESS_TIER_LABELS[activeTier]}档</label>
             <div className="is-wide tp-ai-admin-actions"><span className="tp-ai-admin-hint">开放能力</span>{CAPABILITIES.map(([capability, label]) => <label className="tp-ai-admin-toggle" key={capability}><input type="checkbox" checked={route.capabilities.includes(capability)} onChange={event => updateTier(activeTier, { capabilities: event.target.checked ? [...route.capabilities, capability] : route.capabilities.filter(item => item !== capability) })} />{label}</label>)}</div>
             <details className="is-wide tp-ai-provider-capabilities"><summary>高级参数</summary><div className="tp-ai-admin-fields">
+              <label className="tp-ai-admin-field">参考图编辑协议<select disabled={!route.imageModelId || !route.imageProviderId} value={route.imageEditCapability?.profile ?? ""} onChange={event => {
+                const provider = draft.providers.find(item => item.id === route.imageProviderId);
+                const profile = event.target.value;
+                if (!profile) { updateTier(activeTier, { imageEditCapability: undefined }); return; }
+                if (!provider || !route.imageModelId || profile !== "openai-gpt-image-edits-v1" && profile !== "openai-dall-e-2-edits-v1") return;
+                try {
+                  updateTier(activeTier, { imageEditCapability: { baseUrl: normalizeAiBaseUrl(provider.baseUrl), modelId: route.imageModelId, profile } });
+                } catch { setError("请先填写有效的图片服务 HTTPS 地址，再选择参考图编辑协议。"); }
+              }}><option value="">未配置 · 仅文字生图</option><option value="openai-gpt-image-edits-v1">GPT Image 兼容编辑</option><option value="openai-dall-e-2-edits-v1">DALL·E 2 兼容编辑</option></select></label>
+              <small className="tp-ai-admin-hint">按服务商文档选择；模型列表不代表支持参考图。更换地址或模型后需重新确认。</small>
               <label className="tp-ai-admin-field">单次输出上限 · Token<input type="number" min={16} max={32768} required value={route.maxOutputTokens} onChange={event => updateTier(activeTier, { maxOutputTokens: Number(event.target.value) })} /></label>
               <label className="tp-ai-admin-field">思考强度<select value={route.reasoningEffort} onChange={event => updateTier(activeTier, { reasoningEffort: event.target.value as AiHarnessTierRoute["reasoningEffort"] })}><option value="">服务商默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
             </div></details>

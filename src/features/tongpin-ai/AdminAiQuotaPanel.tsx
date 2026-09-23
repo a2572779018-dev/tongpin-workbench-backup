@@ -152,6 +152,11 @@ function MemberUsageDialog({ member, onClose }: { member: AiMember; onClose: () 
                 : <p>{aiUsageDescription(entry)} · 合计 {aiUsageTotal(entry)}</p>}
               <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString("zh-CN")}</time>
               {entry.diagnostic ? <details><summary>{aiDiagnosticDescription(entry.diagnostic)}</summary><p>请求编号：{entry.requestId}</p>{entry.diagnostic.cfRay ? <p>服务商诊断编号：{entry.diagnostic.cfRay}</p> : null}</details> : null}
+              {entry.generation ? <details><summary>响应诊断 · {entry.generation.status === "incomplete" ? "回复未完成" : entry.generation.status === "completed" ? "已完成" : "待核对"}</summary>
+                <p>{entry.generation.protocol} · 单次输出上限 {entry.generation.outputLimit} · 耗时 {(entry.generation.durationMs / 1000).toFixed(1)} 秒</p>
+                <p>结束原因：{entry.generation.incompleteReason ?? entry.generation.finishReason ?? "服务商未提供"}{entry.generation.reasoningTokens !== undefined ? ` · 推理 Token ${entry.generation.reasoningTokens}` : ""}</p>
+                <p>请求编号：{entry.requestId}{entry.generation.providerRequestId ? ` · 服务商请求编号：${entry.generation.providerRequestId}` : ""}</p>
+              </details> : null}
             </article>
           ))}
         </div>

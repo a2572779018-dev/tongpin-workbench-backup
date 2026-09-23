@@ -30,7 +30,7 @@ export async function publicRequest<T>(
   path: string,
   init: RequestInit = {},
   timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  responseMode: "json" | "blob" | "image" = "json",
+  responseMode: "json" | "blob" | "image" | "stream" = "json",
 ): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -68,6 +68,8 @@ export async function publicRequest<T>(
     }
 
     if (response.status === 204) return undefined as T;
+    // The caller owns bounded decoding, cancellation and the body timeout.
+    if (responseMode === "stream") return response as T;
     if (responseMode === "blob" || responseMode === "image") {
       const image = responseMode === "image";
       const mime = image ? "image/jpeg" : "video/mp4";
