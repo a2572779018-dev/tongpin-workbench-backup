@@ -1,4 +1,5 @@
 import type { AiMode } from "../../shared/ai";
+import type { AiMediaTaskEvent } from "../../shared/aiRunEvents";
 import { videoModel, videoSeconds, type VideoModelId, type VideoResolution } from "../../shared/aiVideoModels";
 import { AiError } from "./security";
 import type { AiStore } from "./storage";
@@ -172,6 +173,11 @@ CREATE TABLE IF NOT EXISTS ai_media_task_snapshots (
   tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, run_id TEXT NOT NULL, data TEXT NOT NULL,
   PRIMARY KEY (tenant_id,user_id,run_id)
 );
+CREATE TABLE IF NOT EXISTS ai_media_task_events (
+  tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, run_id TEXT NOT NULL,
+  seq INTEGER NOT NULL, data TEXT NOT NULL,
+  PRIMARY KEY (tenant_id,user_id,run_id,seq)
+);
 `;
 
 const IDENTIFIER = /^[a-zA-Z0-9_-]{1,120}$/;
@@ -326,7 +332,31 @@ export class MediaTaskRuntime {
     this.save(run);
     return clone(run);
   }
+  private appendArtifactReady(run: MediaTaskRun): void {
+    if (run.status !== "completed" || !run.tool?.artifactIds?.length) conflict("成果尚未完成");
+    const seq = (this.store.sql.all<{ seq: number }>(
+      "SELECT MAX(seq) AS seq FROM ai_media_task_events WHERE tenant_id=? AND user_id=? AND run_id=?",
+      this.store.tenantId, this.userKey(run.userId), run.runId,
+    )[0]?.seq ?? 0) + 1;
+    if (seq > 4096) throw new AiError(502, "AI_EVENT_LIMIT", "任务事件超过上限");
+    const event: AiMediaTaskEvent = {
+      type: "artifact_ready", data: { capability: run.tool.capability, artifactIds: [...run.tool.artifactIds] },
+      requestId: run.requestId, runId: run.runId, stepId: run.stepId, seq, timestamp: this.now(),
+    };
+    this.store.sql.exec(
+      "INSERT INTO ai_media_task_events(tenant_id,user_id,run_id,seq,data) VALUES(?,?,?,?,?)",
+      this.store.tenantId, this.userKey(run.userId), run.runId, seq, JSON.stringify(event),
+    );
+  }
   get(userId: string, runId: string): MediaTaskRun | null { return clone(this.load(userId, runId)); }
+  events(userId: string, runId: string, after = 0): AiMediaTaskEvent[] {
+    if (!Number.isSafeInteger(after) || after < 0) throw new AiError(400, "AI_EVENT_CURSOR_INVALID", "事件游标无效");
+    this.required(userId, runId);
+    return this.store.sql.all<{ data: string }>(
+      "SELECT data FROM ai_media_task_events WHERE tenant_id=? AND user_id=? AND run_id=? AND seq>? ORDER BY seq LIMIT 512",
+      this.store.tenantId, this.userKey(userId), runId, after,
+    ).map(row => JSON.parse(row.data) as AiMediaTaskEvent);
+  }
   snapshot(userId: string, runId: string): MediaTaskSnapshot | null {
     const row = this.store.sql.all<{ data: string }>(
       "SELECT data FROM ai_media_task_snapshots WHERE tenant_id=? AND user_id=? AND run_id=?",
@@ -651,7 +681,9 @@ export class MediaTaskRuntime {
       run.tool.artifactIds = readyAssets;
       run.status = "completed";
       run.dueAt = null;
-      return this.update(run);
+      const completed = this.update(run);
+      this.appendArtifactReady(run);
+      return completed;
     });
   }
   recordPartial(userId: string, runId: string, toolCallId: string, artifactIds: string[], reason: string): MediaTaskRun {

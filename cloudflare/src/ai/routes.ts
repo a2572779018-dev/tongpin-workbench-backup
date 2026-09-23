@@ -164,6 +164,11 @@ export async function handleAiRequest(request: Request, service: AiService, user
       const task = createAiServiceMediaTaskOrchestrator(service).getByRequest(user.id, decodeURIComponent(mediaByRequestMatch[1]));
       return json({ task: mediaTaskScope(task, tenantId, user.id) });
     }
+    const mediaTaskEventMatch = path.match(/^\/api\/ai\/media-tasks\/([^/]+)\/events$/);
+    if (mediaTaskEventMatch && method === "GET") {
+      const events = createAiServiceMediaTaskOrchestrator(service).events(user.id, decodeURIComponent(mediaTaskEventMatch[1]), Number(url.searchParams.get("after") ?? 0));
+      return json({ events });
+    }
     const mediaTaskActionMatch = path.match(/^\/api\/ai\/media-tasks\/([^/]+)\/(advance|answer|authorize)$/);
     if (mediaTaskActionMatch && method === "POST") {
       const runId = decodeURIComponent(mediaTaskActionMatch[1]);

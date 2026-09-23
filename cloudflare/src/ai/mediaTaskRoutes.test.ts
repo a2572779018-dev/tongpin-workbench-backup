@@ -124,13 +124,22 @@ describe("Cloudflare authenticated media-task routes", () => {
     expect(staged.authorization).toBeUndefined();
     expect(transport).toHaveBeenCalledTimes(1);
     expect(service.forTenant("tenant-alpha").store.usage("member-a").filter(entry => entry.kind === "image")).toHaveLength(0);
+    expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/events`, "GET")).status).toBe(200);
+    expect((await (await invoke(`/api/ai/media-tasks/${submitted.runId}/events`, "GET")).json() as { events: unknown[] }).events).toEqual([]);
 
     expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/authorize`, "POST", principal(), { confirmed: false, maxPointsPerTool: 1000 })).status).toBe(400);
     expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/authorize`, "POST", principal(), undefined, undefined, '{"confirmed":')).status).toBe(400);
     transport.mockResolvedValueOnce(image());
     const authorized = await invoke(`/api/ai/media-tasks/${submitted.runId}/authorize`, "POST", principal(), { confirmed: true, maxPointsPerTool: 1000 });
     expect(authorized.status).toBe(200);
-    expect((await jsonTask(authorized)).status).toBe("completed");
+    const completed = await jsonTask(authorized);
+    expect(completed.status).toBe("completed");
+    const events = (await (await invoke(`/api/ai/media-tasks/${submitted.runId}/events`, "GET")).json() as { events: Array<Record<string, any>> }).events;
+    expect(events).toMatchObject([{ type: "artifact_ready", requestId: input.requestId, runId: submitted.runId, seq: 1, data: { capability: "image", artifactIds: completed.tool.artifactIds } }]);
+    expect((await (await invoke(`/api/ai/media-tasks/${submitted.runId}/events?after=1`, "GET")).json() as { events: unknown[] }).events).toEqual([]);
+    expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/events`, "GET", principal("member-b"))).status).toBe(404);
+    expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/events`, "GET", principal("member-a", "tenant-beta"))).status).toBe(404);
+    expect((await invoke(`/api/ai/media-tasks/${submitted.runId}/events?after=-1`, "GET")).status).toBe(400);
     expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
   });
 

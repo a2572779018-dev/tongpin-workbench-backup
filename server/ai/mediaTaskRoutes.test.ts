@@ -130,6 +130,7 @@ describe("Node authenticated media-task routes", () => {
     expect(staged.authorization).toBeUndefined();
     expect(transport).toHaveBeenCalledTimes(1);
     expect(node.service.forTenant("tenant-alpha").store.usage("member-a").filter(entry => entry.kind === "image")).toHaveLength(0);
+    expect((await get(`/api/ai/media-tasks/${submitted.body.task.runId}/events`).expect(200)).body.events).toEqual([]);
 
     await post(`/api/ai/media-tasks/${submitted.body.task.runId}/authorize`, { confirmed: false, maxPointsPerTool: 1000 }).expect(400);
     await request(app).post(`/api/ai/media-tasks/${submitted.body.task.runId}/authorize`).set(actorHeaders()).set("Content-Type", "application/json").send('{"confirmed":').expect(400);
@@ -137,6 +138,12 @@ describe("Node authenticated media-task routes", () => {
     transport.mockResolvedValueOnce(image());
     const authorized = await post(`/api/ai/media-tasks/${submitted.body.task.runId}/authorize`, { confirmed: true, maxPointsPerTool: 1000 }).expect(200);
     expect(authorized.body.task.status).toBe("completed");
+    const events = (await get(`/api/ai/media-tasks/${submitted.body.task.runId}/events`).expect(200)).body.events;
+    expect(events).toMatchObject([{ type: "artifact_ready", requestId: input.requestId, runId: submitted.body.task.runId, seq: 1, data: { capability: "image", artifactIds: authorized.body.task.tool.artifactIds } }]);
+    expect((await get(`/api/ai/media-tasks/${submitted.body.task.runId}/events?after=1`).expect(200)).body.events).toEqual([]);
+    await get(`/api/ai/media-tasks/${submitted.body.task.runId}/events`, "member-b").expect(404);
+    await get(`/api/ai/media-tasks/${submitted.body.task.runId}/events`, "member-a", "tenant-beta").expect(404);
+    await get(`/api/ai/media-tasks/${submitted.body.task.runId}/events?after=-1`).expect(400);
     expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
   });
 

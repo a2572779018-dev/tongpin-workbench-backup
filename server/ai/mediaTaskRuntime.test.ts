@@ -146,7 +146,7 @@ describe("persisted media task runtime", () => {
     expect(tasks.beginTool("member", run.runId, guard).kind).toBe("unknown");
   });
 
-  it("does not mark an accepted asynchronous submission completed without a ready artifact", () => {
+  it("does not mark an accepted asynchronous submission completed without a ready artifact", async () => {
     const run = tasks.submit("member", input());
     tasks.claimPlanning("member", run.runId);
     tasks.stageTool("member", run.runId, { capability: "video", operationKey: "video-step", estimatedPoints: 250, sourceAssetIds: [] });
@@ -158,9 +158,22 @@ describe("persisted media task runtime", () => {
     const started = tasks.beginTool("member", run.runId, { modelConfigVersion: "config-v1", budgetVersion: "budget-v1", availablePoints: 500, sourceAssetsValid: true });
     const toolCallId = started.run.tool!.toolCallId!;
     expect(tasks.recordToolSubmission("member", run.runId, toolCallId, toolCallId, Date.now() + 1000).status).toBe("running");
+    expect(tasks.events("member", run.runId)).toEqual([]);
     expect(() => tasks.completeTool("member", run.runId, toolCallId, [])).toThrow();
     expect(tasks.completeTool("member", run.runId, toolCallId, ["ready-asset-1"]).status).toBe("completed");
     expect(tasks.completeTool("member", run.runId, toolCallId, ["ready-asset-1"]).status).toBe("completed");
+    expect(tasks.events("member", run.runId)).toMatchObject([{
+      type: "artifact_ready", requestId: run.requestId, runId: run.runId, stepId: started.run.stepId,
+      seq: 1, timestamp: expect.any(Number), data: { capability: "video", artifactIds: ["ready-asset-1"] },
+    }]);
+    expect(tasks.events("member", run.runId, 1)).toEqual([]);
+    expect(() => tasks.events("other-member", run.runId)).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_NOT_FOUND" }));
+    expect(() => tasks.forTenant("other-tenant").events("member", run.runId)).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_NOT_FOUND" }));
+    expect(() => tasks.events("member", run.runId, -1)).toThrow(expect.objectContaining({ code: "AI_EVENT_CURSOR_INVALID" }));
+    node.close();
+    node = await createNodeAi(path.join(directory, "runtime.json"));
+    tasks = new MediaTaskRuntime(node.store);
+    expect(tasks.events("member", run.runId)).toHaveLength(1);
   });
 
   it("cancels queued work locally, but keeps an already-started paid call live until provider acknowledgement", () => {

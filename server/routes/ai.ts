@@ -160,6 +160,11 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
       const task = createAiServiceMediaTaskOrchestrator(scoped(request)).getByRequest(userId, request.params.requestId);
       response.json({ task: mediaTaskScope(task, tenantId, userId) });
     });
+    router.get("/media-tasks/:id/events", (request, response) => {
+      const userId = request.currentUser!.id;
+      const events = createAiServiceMediaTaskOrchestrator(scoped(request)).events(userId, request.params.id, Number(request.query.after ?? 0));
+      response.json({ events });
+    });
     router.get("/media-tasks/:id", (request, response) => {
       const tenantId = aiTenantIdFromPrincipal(request.currentUser);
       const userId = request.currentUser!.id;

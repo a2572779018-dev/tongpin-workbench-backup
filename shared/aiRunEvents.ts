@@ -10,3 +10,15 @@ export type AiRunEventPayload =
   | { type: "run_finished"; data: { response: AiChatResponse } }
   | { type: "run_failed"; data: { error: { code: string; message: string } } };
 export type AiRunEvent = AiRunEventPayload & { requestId: string; runId: string; stepId: string; seq: number; timestamp: number };
+
+/** Media tasks have their own durable run and event cursor. Unlike text chat
+ * events, these are journaled only when a verified tool result is committed. */
+export type AiMediaTaskEvent = {
+  type: "artifact_ready";
+  data: { capability: "image" | "video"; artifactIds: string[] };
+  requestId: string;
+  runId: string;
+  stepId: string;
+  seq: number;
+  timestamp: number;
+};

@@ -1,4 +1,5 @@
 import type { AiAttachment, AiChatResponse, AiMode } from "../../shared/ai";
+import type { AiMediaTaskEvent } from "../../shared/aiRunEvents";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
 import type { AiVideoJob } from "../../shared/aiVideo";
 import { validateImageBase64 } from "./capabilities";
@@ -292,6 +293,11 @@ export class AiServiceMediaTaskOrchestrator {
   get(userId: string, runId: string): MediaTaskRun {
     this.service.store.assertAccess(userId);
     return expectedRun(this.runtime, userId, runId);
+  }
+
+  events(userId: string, runId: string, after = 0): AiMediaTaskEvent[] {
+    this.service.store.assertAccess(userId);
+    return this.runtime.events(userId, runId, after);
   }
 
   getByRequest(userId: string, requestId: string): MediaTaskRun {
