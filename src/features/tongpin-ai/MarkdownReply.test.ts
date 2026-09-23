@@ -29,6 +29,8 @@ describe("AI reply formatting", () => {
     expect(html).toContain("**保留。 **");
     expect(html).toContain("**原样标记**");
     expect(html).not.toContain("<strong>");
+    expect(html).toContain(">js</span>");
+    expect(html).toContain(">复制代码</button>");
   });
   it("never executes HTML, unsafe URLs or loads remote tracking images", () => {
     const html = render('<script>alert(1)</script>\n\n<img src="https://tracker.example/pixel" onerror="alert(1)">\n\n[危险](javascript:alert%281%29)\n\n[文件](file:///tmp/private)\n\n![示意图](https://example.com/image.png)');

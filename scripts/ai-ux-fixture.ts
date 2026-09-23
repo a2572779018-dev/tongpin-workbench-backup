@@ -16,7 +16,7 @@ const fixturePort = Number(process.env.TONGPIN_FIXTURE_PORT || 4318);
 const fixtureOrigin = process.env.TONGPIN_FIXTURE_ORIGIN || "http://127.0.0.1:5173";
 if (![4318, 4319, 4320].includes(fixturePort) || !/^http:\/\/127\.0\.0\.1:(5173|5174|5175)$/.test(fixtureOrigin)) throw new Error("Only dedicated loopback fixture ports are permitted");
 const fixtureApi = `http://127.0.0.1:${fixturePort}`;
-const fixtureAnswer = "【本地模拟回复，不调用真实模型】\n\n本周任务可按下面的进度继续推进：\n\n| 事项 | 状态 |\n| --- | --- |\n| 需求核对 | 已完成 |\n| 发布验收 | 待验证 |\n\n先核对验收证据，再决定是否发布。";
+const fixtureAnswer = "【本地模拟回复，不调用真实模型】\n\n本周任务可按下面的进度继续推进：\n\n| 事项 | 状态 |\n| --- | --- |\n| 需求核对 | 已完成 |\n| 发布验收 | 待验证 |\n\n示例代码：\n\n```ts\n  const answer = 42;\n\n  console.log(answer);\n```\n\n先核对验收证据，再决定是否发布。";
 const config: AppConfig = {
   host: "127.0.0.1", port: fixturePort, dataFile: path.join(directory, "fixture.json"),
   jwtSecret: crypto.randomUUID() + crypto.randomUUID(), clientOrigins: [fixtureOrigin],

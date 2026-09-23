@@ -17,6 +17,13 @@
 .tp-ai-markdown code { font: 0.88em/1.7 ui-monospace, monospace; background: #eee9dd; padding: 0.12em 0.35em; border-radius: 4px; }
 .tp-ai-markdown pre { max-width: 100%; overflow-x: auto; white-space: pre; padding: 1em; border: 1px solid #ddd4c2; border-radius: 10px; background: #f1ecdf; }
 .tp-ai-markdown pre code { background: transparent; padding: 0; white-space: pre; }
+.tp-ai-markdown-code { max-width: 100%; margin: 1em 0; border: 1px solid #ddd4c2; border-radius: 10px; overflow: hidden; }
+.tp-ai-markdown-code__actions { display: flex; align-items: center; gap: 0.55em; padding: 0.35em 0.65em; border-bottom: 1px solid #e5dece; background: #faf7ef; color: #62573d; font: 0.78em/1.5 ui-monospace, monospace; }
+.tp-ai-markdown-code__actions button { margin-left: auto; border: 1px solid transparent; border-radius: 5px; padding: 0.18em 0.45em; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.tp-ai-markdown-code__actions button:hover { background: #f1ead4; border-color: #e5dece; }
+.tp-ai-markdown-code__actions button:focus-visible { outline: 2px solid #a68b31; outline-offset: 1px; }
+.tp-ai-markdown-code__actions [role="status"]:empty { display: none; }
+.tp-ai-markdown-code pre { margin: 0; border: 0; border-radius: 0; }
 .tp-ai-markdown-table { max-width: 100%; margin: 1em 0; border: 1px solid #ddd4c2; border-radius: 8px; overflow: hidden; }
 .tp-ai-markdown-table__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35em; padding: 0.35em 0.55em; border-bottom: 1px solid #e5dece; background: #faf7ef; font-size: 0.78em; line-height: 1.5; }
 .tp-ai-markdown-table__actions button { border: 1px solid transparent; border-radius: 5px; padding: 0.18em 0.45em; background: transparent; color: #62573d; font: inherit; cursor: pointer; }

@@ -3,6 +3,7 @@ import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AiSourceAnchor } from "./AiSourceLink";
 import { splitMarkdownIntoBlocks, StableMarkdownBlocks } from "./librechatMarkdownBlocks";
+import { codeBlockFromHast } from "./replyCodeData";
 import { remarkReplyEmphasis, replyUrlTransform } from "./replyMarkdown";
 import { tableRowsFromHast, tableToCsv, tableToMarkdown, tableToTsv } from "./replyTableData";
 import { TypewriterText } from "./TypewriterText";
@@ -43,10 +44,30 @@ function ReplyTable({ node, children }: { node: unknown; children: ReactNode }) 
   </div>;
 }
 
+function ReplyCode({ node, children }: { node: unknown; children: ReactNode }) {
+  const { text, language } = useMemo(() => codeBlockFromHast(node), [node]);
+  const [feedback, setFeedback] = useState("");
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setFeedback("已复制代码");
+    } catch { setFeedback("复制失败，请手动选择代码。"); }
+  };
+  return <div className="tp-ai-markdown-code">
+    <div className="tp-ai-markdown-code__actions">
+      <span>{language || "代码"}</span>
+      <button type="button" onClick={() => void copy()}>复制代码</button>
+      <span role="status" aria-live="polite">{feedback}</span>
+    </div>
+    <pre>{children}</pre>
+  </div>;
+}
+
 const components: Components = {
   a: ({ href, children }) => <AiSourceAnchor className="tp-ai-inline-source" href={href ?? ""}>{children}</AiSourceAnchor>,
   // Remote images in model text must not initiate network requests on display.
   img: ({ src, alt }) => <AiSourceAnchor href={typeof src === "string" ? src : ""}>{alt || "查看图片"}</AiSourceAnchor>,
+  pre: ({ node, children }) => <ReplyCode node={node} children={children} />,
   table: ({ node, children }) => <ReplyTable node={node} children={children} />,
 };
 
