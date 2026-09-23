@@ -61,7 +61,7 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     expect((await invoke("/api/ai/dify/grants", "POST", admin, approval)).status).toBe(403);
     expect((await invoke("/api/ai/dify/grants", "POST", a, approval, { "X-Tongpin-Account": "b" })).status).toBe(409);
     expect((await invoke("/api/ai/dify/grants", "POST", a, approval)).status).toBe(503);
-    const dify: DifyRouteOptions = { config: { enabled: true, appId: "cloudflare-fixture-app" }, principalActive: (tenantId, userId) => tenantId === "default" && userId === "a" };
+    const dify: DifyRouteOptions = { config: { enabled: true, appId: "cloudflare-fixture-app" }, serviceSecret: "cloudflare-route-test-service-credential-32-bytes", principalActive: (tenantId, userId) => tenantId === "default" && userId === "a" };
     const granted = await invoke("/api/ai/dify/grants", "POST", a, approval, {}, dify);
     expect(granted.status).toBe(200);
     expect(granted.headers.get("cache-control")).toBe("no-store");

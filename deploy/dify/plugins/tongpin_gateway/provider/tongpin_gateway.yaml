@@ -4,8 +4,8 @@ credentials_for_provider:
       en_US: Tongpin gateway URL
       zh_Hans: 同频网关地址
     placeholder:
-      en_US: http://host.docker.internal:4318/internal/ai/dify/tools/invoke
-      zh_Hans: http://host.docker.internal:4318/internal/ai/dify/tools/invoke
+      en_US: http://host.docker.internal:4318/api/dify/tools/invoke
+      zh_Hans: http://host.docker.internal:4318/api/dify/tools/invoke
     required: true
     type: text-input
   gateway_secret:

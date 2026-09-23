@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createRuntime, type AppRuntime } from "../app";
@@ -10,6 +12,8 @@ import type { AiTransport } from "./provider";
 import { toolPlanContextFingerprint } from "./toolPlans";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const SERVICE_SECRET = "mounted-dify-service-credential-at-least-32-bytes";
+const execFileAsync = promisify(execFile);
 
 describe.sequential("mounted Dify routes with real Node authentication", () => {
   let directory: string;
@@ -31,7 +35,7 @@ describe.sequential("mounted Dify routes with real Node authentication", () => {
     transport.mockResolvedValue(Response.json({ data: [{ b64_json: PNG }] }));
     runtime = await createRuntime(config, {
       attachSockets: false, startLoraCollector: false, startAiAgentScheduler: false,
-      aiTransport: transport, difyConfig: { enabled: true, appId: "mounted-fixture-app" },
+      aiTransport: transport, difyConfig: { enabled: true, appId: "mounted-fixture-app" }, difyServiceSecret: SERVICE_SECRET,
     });
     const admin = await runtime.store.read(database => database.users.find(user => user.role === "admin")!);
     memberId = crypto.randomUUID();
@@ -64,15 +68,34 @@ describe.sequential("mounted Dify routes with real Node authentication", () => {
     const { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds } = approved.body.claims;
     const callback = { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds, toolCallId: `call-${requestId}`, toolName: "image.generate", input: approved.body.input };
     await request(runtime.app).post("/api/dify/tools/invoke").send(callback).expect(401);
-    const first = await request(runtime.app).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.body.authorization}`).send(callback).expect(200);
+    await request(runtime.app).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.body.authorization}`).set("X-Dify-Tool-Secret", "wrong-service-credential-at-least-32-bytes").send(callback).expect(401);
+    await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).send(callback).expect(401);
+    await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${"a".repeat(64)}`).send(callback).expect(403);
+    expect(transport).not.toHaveBeenCalled();
+    const first = await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.body.authorization}`).send(callback).expect(200);
     expect(first.body).toMatchObject({ output: { requestId, status: "completed" }, ledger: { chargedPoints: 100, userId: memberId } });
-    const replay = await request(runtime.app).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.body.authorization}`).send(callback).expect(200);
+    const server = await new Promise<import("node:http").Server>((resolve, reject) => {
+      const listener = runtime.app.listen(0, "127.0.0.1", () => resolve(listener));
+      listener.once("error", reject);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Local callback listener has no TCP port");
+      const code = "import json,sys; from tools.gateway_client import invoke_gateway; print(json.dumps(invoke_gateway(sys.argv[1],sys.argv[2],json.loads(sys.argv[3]))))";
+      const { stdout } = await execFileAsync("python3", ["-c", code, `http://127.0.0.1:${address.port}/api/dify/tools/invoke`, SERVICE_SECRET, JSON.stringify({ ...callback, authorization: approved.body.authorization })], {
+        cwd: path.resolve("deploy/dify/plugins/tongpin_gateway"), timeout: 10_000,
+      });
+      expect(JSON.parse(stdout)).toEqual(first.body);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+    const replay = await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.body.authorization}`).send(callback).expect(200);
     expect(replay.body).toEqual(first.body);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.aiStore.quota(memberId)).toMatchObject({ usedTokens: 100, reservedTokens: 0 });
     await request(runtime.app).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.body.authorization}`).send({ padding: "x".repeat(17_000) }).expect(413);
     await runtime.store.mutate(database => { database.users.find(user => user.id === memberId)!.status = "disabled"; });
-    const inactive = await request(runtime.app).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.body.authorization}`).send(callback).expect(403);
+    const inactive = await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.body.authorization}`).send(callback).expect(403);
     expect(inactive.body.error.code).toBe("DIFY_TOOL_SCOPE_MISMATCH");
     expect(transport).toHaveBeenCalledTimes(1);
   });

@@ -23,7 +23,7 @@ Tongpin client
   -> existing Tongpin authorization, asset ownership, idempotency and ledger services
 ```
 
-Dify never receives provider credentials owned by Tongpin and never executes media tools directly. The outbound Agent request carries an immutable task binding and a short-lived tool capability. The plugin exposes only `tool_name` and strict `input_json` to the model; tenant, user, conversation, run, attempt, asset ids, and authorization are manually bound runtime parameters.
+Dify never receives provider credentials owned by Tongpin and never executes media tools directly. The outbound Agent request carries an immutable task binding and a short-lived tool capability. The plugin exposes only `tool_name` and strict `input_json` to the model; tenant, user, conversation, run, attempt, asset ids, and authorization are manually bound runtime parameters. The plugin calls `/api/dify/tools/invoke` with both `X-Dify-Tool-Secret` (deployment service credential) and `Authorization: Bearer <per-run-grant>`. The grant is not copied into the JSON body. Both Node and Cloudflare reject either missing or invalid credential before tool execution.
 
 The plugin derives a stable `toolCallId` from the immutable binding and canonical tool arguments. The Tongpin gateway scopes it by tenant/user, atomically reserves it, replays successful results, rejects changed parameters, and freezes a parent run after an unknown side-effect outcome. An interrupted Dify event stream is `unknown`; the adapter never silently falls back to the self-built engine and never submits the run again.
 
@@ -35,7 +35,7 @@ The owning task service must provide these pieces; they intentionally remain out
 2. Issue a signed `DifyToolGrantClaims` token containing tenant/user/conversation/run/attempt, allowed tools, exact asset ids, budget version, maximum points, and expiry.
 3. Persist Dify `task_id`, `message_id`, and `conversation_id` against the Tongpin run/attempt before publishing events.
 4. Implement `DifyToolCallStore.reserve()` as one atomic database operation: enforce uniqueness for `(tenant_id,user_id,tool_call_id)` and return `run_blocked` when the same tenant/user/run has an unknown outcome. A separate preflight query is not sufficient because it permits a race.
-5. Implement the internal plugin route with an independent Dify service credential, then create `DifyToolExecutionContext` from verified server identity/grant claims rather than trusting request JSON.
+5. Wire the callback to an independent Dify service credential and the approved per-run grant; the route is implemented but defaults to disabled when the credential is absent. Create `DifyToolExecutionContext` from verified grant claims rather than trusting request JSON.
 6. The injected executor must revalidate tool permission, current budget version, asset ownership, and provider capability; reserve/settle each child call in the existing ledger and return exactly one ledger entry. Parent aggregation must not charge those child calls again.
 7. Map `DifyEngineEvent` into the shared run-event store. `agent_thought` is treated only as tool lifecycle metadata; hidden thought text, tool input, observation, credentials, and private URLs are not exposed.
 
@@ -50,7 +50,7 @@ scripts/dify/bootstrap-local.sh /absolute/development/path
 TONGPIN_DIFY_LICENSE_APPROVED=1 scripts/dify/bootstrap-local.sh /absolute/development/path --start
 ```
 
-Then initialize the local Dify console, install official `langgenius/agent` exactly at `0.0.47`, package/install `deploy/dify/plugins/tongpin_gateway` with the official Dify plugin CLI, configure only the internal gateway URL/service credential, create the Agent app, and export its DSL. Verify without printing secrets:
+Then initialize the local Dify console, install official `langgenius/agent` exactly at `0.0.47`, package/install `deploy/dify/plugins/tongpin_gateway` with the official Dify plugin CLI, configure only the gateway URL/service credential, create the Agent app, and export its DSL. The Node local callback URL is `http://host.docker.internal:4318/api/dify/tools/invoke`; a remote Worker must use its own HTTPS origin with the same path. Set `DIFY_TOOL_ENABLED=true`, `DIFY_APP_ID` and a random `DIFY_TOOL_SECRET` of at least 32 UTF-8 bytes in the Tongpin runtime; enter that same secret as the plugin's `gateway_secret`. Do not put it in the browser or a model prompt. Missing/weak service credential disables grant issuance and callbacks. Verify without printing secrets:
 
 ```bash
 DIFY_BASE_URL=http://127.0.0.1 DIFY_APP_API_KEY=... node scripts/dify/verify-runtime.mjs
@@ -69,7 +69,7 @@ Because Tongpin is multi-tenant, production use is blocked pending written confi
 - `docker` command: unavailable.
 - Local probes at ports 80, 3000, 5001, and 8080: no Dify service; port 4318 is the existing Tongpin development backend.
 - TypeScript protocol tests cover fragmented SSE, multi-step tool events, task binding, no secret/tool payload disclosure, disconnect-as-unknown, no retry/fallback, tenant isolation, same-ID replay, changed-input conflict, unauthorized/cross-tenant assets, budget rejection, and run freeze after unknown outcome.
-- Python plugin tests perform a real localhost HTTP round trip and verify stable tool-call IDs and input/URL rejection. This validates the plugin client only, not a Dify installation.
+- Python plugin tests perform a real localhost HTTP round trip and verify stable tool-call IDs, both authentication headers, nested error codes, and input/URL rejection. A Node fixture additionally invokes the actual Python client against the mounted Tongpin callback; Worker fixtures verify approved callbacks and single ledger settlement. These are local protocol tests, not a Dify installation or production Agent run.
 
 ## Official references
 

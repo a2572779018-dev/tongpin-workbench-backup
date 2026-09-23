@@ -1,6 +1,8 @@
+import io
 import json
 import threading
 import unittest
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -12,7 +14,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
-        self.__class__.requests.append((self.headers.get("X-Dify-Tool-Secret"), json.loads(body)))
+        self.__class__.requests.append((self.headers.get("X-Dify-Tool-Secret"), self.headers.get("Authorization"), json.loads(body)))
         response = json.dumps({"output": {"ok": True}, "ledger": {"chargedPoints": 0}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -34,22 +36,36 @@ class GatewayClientTest(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            result = invoke_gateway(f"http://127.0.0.1:{server.server_port}/invoke", "service-secret", {**binding, "toolCallId": first})
+            result = invoke_gateway(f"http://127.0.0.1:{server.server_port}/invoke", "service-credential-for-local-tests-32-bytes", {**binding, "toolCallId": first, "authorization": "a" * 64})
         finally:
             server.shutdown(); server.server_close(); thread.join()
         self.assertEqual(result["output"], {"ok": True})
-        self.assertEqual(GatewayHandler.requests[-1][0], "service-secret")
+        self.assertEqual(GatewayHandler.requests[-1][0], "service-credential-for-local-tests-32-bytes")
+        self.assertEqual(GatewayHandler.requests[-1][1], "Bearer " + "a" * 64)
+        self.assertNotIn("authorization", GatewayHandler.requests[-1][2])
 
     def test_rejects_unsafe_urls_and_invalid_parameters(self):
         with self.assertRaises(ValueError): validate_gateway_url("http://example.com/invoke")
         self.assertEqual(validate_gateway_url("https://example.com/invoke"), "https://example.com/invoke")
         with self.assertRaises(ValueError): parse_object("[]")
         with self.assertRaises(ValueError): parse_asset_ids('["same","same"]')
+        with self.assertRaisesRegex(ValueError, "per-run Tongpin grant"):
+            invoke_gateway("http://127.0.0.1:4318/api/dify/tools/invoke", "service-credential-for-local-tests-32-bytes", {"authorization": "not-a-grant"})
+        with self.assertRaisesRegex(ValueError, "gateway_secret"):
+            invoke_gateway("http://127.0.0.1:4318/api/dify/tools/invoke", "weak", {"authorization": "a" * 64})
 
     def test_timeout_is_an_explicit_unknown_outcome(self):
         with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
             with self.assertRaisesRegex(RuntimeError, "result unknown; do not retry"):
-                invoke_gateway("http://127.0.0.1:4318/internal/ai/dify/tools/invoke", "secret", {})
+                invoke_gateway("http://127.0.0.1:4318/api/dify/tools/invoke", "service-credential-for-local-tests-32-bytes", {"authorization": "a" * 64})
+
+    def test_preserves_nested_tongpin_auth_error_code_and_http_status(self):
+        for status, code in [(401, "DIFY_TOOL_AUTH_INVALID"), (403, "DIFY_TOOL_AUTH_EXPIRED")]:
+            body = json.dumps({"error": {"code": code, "message": "授权不可用"}}).encode()
+            error = urllib.error.HTTPError("http://127.0.0.1/invoke", status, "failure", {}, io.BytesIO(body))
+            with patch("urllib.request.urlopen", side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, f"{code} \\(HTTP {status}\\): 授权不可用"):
+                    invoke_gateway("http://127.0.0.1:4318/api/dify/tools/invoke", "service-credential-for-local-tests-32-bytes", {"authorization": "a" * 64})
 
 
 if __name__ == "__main__":

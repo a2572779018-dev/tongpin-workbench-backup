@@ -845,6 +845,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   private difyRouteOptions(): DifyRouteOptions {
     return {
       config: { enabled: this.env.DIFY_TOOL_ENABLED === "true", appId: this.env.DIFY_APP_ID ?? "" },
+      serviceSecret: this.env.DIFY_TOOL_SECRET ?? "",
       principalActive: (tenantId, userId) => this.sql.exec<{ id: string }>(
         "SELECT id FROM users WHERE tenant_id=? AND id=? AND status='active' AND role IN ('member','boss') LIMIT 1",
         tenantId,

@@ -10,7 +10,8 @@ class TongpinGatewayProvider(ToolProvider):
     def _validate_credentials(self, credentials: dict[str, Any]) -> None:
         try:
             validate_gateway_url(str(credentials.get("gateway_url", "")))
-            if not str(credentials.get("gateway_secret", "")).strip():
-                raise ValueError("gateway_secret is required")
+            secret = str(credentials.get("gateway_secret", ""))
+            if secret != secret.strip() or len(secret.encode("utf-8")) < 32:
+                raise ValueError("gateway_secret must be at least 32 bytes and contain no surrounding whitespace")
         except ValueError as error:
             raise ToolProviderCredentialValidationError(str(error)) from error

@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -53,10 +54,15 @@ def stable_tool_call_id(binding: dict[str, str], tool_name: str, tool_input: dic
 
 
 def invoke_gateway(url: str, secret: str, payload: dict[str, Any], timeout: float = 60.0) -> dict[str, Any]:
+    if secret != secret.strip() or len(secret.encode("utf-8")) < 32:
+        raise ValueError("gateway_secret must be at least 32 bytes and contain no surrounding whitespace")
+    authorization = payload.get("authorization")
+    if not isinstance(authorization, str) or re.fullmatch(r"[a-f0-9]{64}", authorization) is None:
+        raise ValueError("authorization must be a per-run Tongpin grant")
     request = urllib.request.Request(
         validate_gateway_url(url),
-        data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-        headers={"Content-Type": "application/json", "X-Dify-Tool-Secret": secret},
+        data=json.dumps({key: value for key, value in payload.items() if key != "authorization"}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Dify-Tool-Secret": secret, "Authorization": f"Bearer {authorization}"},
         method="POST",
     )
     try:
@@ -72,10 +78,16 @@ def invoke_gateway(url: str, secret: str, payload: dict[str, Any], timeout: floa
         body = error.read(8192)
         try:
             detail = json.loads(body)
-            code = detail.get("code", "TONGPIN_TOOL_REJECTED") if isinstance(detail, dict) else "TONGPIN_TOOL_REJECTED"
-            message = detail.get("message", "Tongpin rejected the tool call") if isinstance(detail, dict) else "Tongpin rejected the tool call"
+            if isinstance(detail, dict):
+                failure = detail.get("error") if isinstance(detail.get("error"), dict) else detail
+                code = failure.get("code", "TONGPIN_TOOL_REJECTED")
+                message = failure.get("message", "Tongpin rejected the tool call")
+                if not isinstance(code, str) or not isinstance(message, str):
+                    code, message = "TONGPIN_TOOL_REJECTED", "Tongpin rejected the tool call"
+            else:
+                code, message = "TONGPIN_TOOL_REJECTED", "Tongpin rejected the tool call"
         except (UnicodeDecodeError, json.JSONDecodeError):
             code, message = "TONGPIN_TOOL_REJECTED", "Tongpin rejected the tool call"
-        raise RuntimeError(f"{code}: {message}") from error
+        raise RuntimeError(f"{code} (HTTP {error.code}): {message}") from error
     except (urllib.error.URLError, TimeoutError) as error:
         raise RuntimeError("TONGPIN_TOOL_GATEWAY_UNAVAILABLE: result unknown; do not retry automatically") from error

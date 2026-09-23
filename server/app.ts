@@ -91,6 +91,7 @@ export async function createRuntime(
     startAiAgentScheduler?: boolean;
     aiTransport?: AiTransport;
     difyConfig?: DifyRuntimeConfig;
+    difyServiceSecret?: string;
   } = {},
 ): Promise<AppRuntime> {
   const store = await JsonStore.open(config.dataFile);
@@ -104,6 +105,7 @@ export async function createRuntime(
   aiPersona.initialize();
   const dify: DifyRouteOptions = {
     config: options.difyConfig ?? { enabled: process.env.DIFY_TOOL_ENABLED === "true", appId: process.env.DIFY_APP_ID ?? "" },
+    serviceSecret: options.difyServiceSecret ?? process.env.DIFY_TOOL_SECRET ?? "",
     principalActive: (tenantId, userId) => store.read(database => database.users.some(user =>
       user.id === userId && user.status === "active" && (user.role === "member" || user.role === "boss") && aiTenantIdFromPrincipal(user) === tenantId,
     )),
@@ -149,7 +151,7 @@ export async function createRuntime(
   app.post("/api/dify/tools/invoke", express.raw({ type: "application/json", limit: "16kb" }), async (request, response) => {
     const result = await createDifyToolResponse(ai.service, new Request("http://localhost/api/dify/tools/invoke", {
       method: "POST",
-      headers: { Authorization: request.get("Authorization") ?? "" },
+      headers: { Authorization: request.get("Authorization") ?? "", "X-Dify-Tool-Secret": request.get("X-Dify-Tool-Secret") ?? "" },
       ...(Buffer.isBuffer(request.body) ? { body: request.body.toString("utf8") } : {}),
     }), dify);
     result.headers.forEach((value, key) => response.set(key, value));
