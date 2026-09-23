@@ -1384,11 +1384,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     pendingGenerationRef.current.add(conversationId);
     setReplyActivity(conversationId, messageId, "waiting");
     workspaceRef.current = { ...latest, conversations: next.conversations, artifacts: next.artifacts, drafts: next.drafts,
-      draftAttachments: next.draftAttachments ?? {}, videoDraftSettings: next.videoDraftSettings ?? {}, activeConversationId: conversationId, view: "chat" };
+      draftAttachments: next.draftAttachments ?? {}, videoDraftSettings: next.videoDraftSettings ?? {},
+      ...(!continuation ? { activeConversationId: conversationId, view: "chat" as const } : {}) };
     persistentStateRef.current = next;
     setConversations(next.conversations); setArtifacts(next.artifacts); setDrafts(next.drafts);
     setDraftAttachments(next.draftAttachments ?? {}); setVideoDraftSettings(next.videoDraftSettings ?? {});
-    setActiveConversationId(conversationId); setView("chat"); if (!continuation) draftConversationIdsRef.current.delete(origin.draftKey);
+    if (!continuation) { setActiveConversationId(conversationId); setView("chat"); draftConversationIdsRef.current.delete(origin.draftKey); }
     let postStarted = false;
     try {
       // A successful workspace CAS is required before any media source or paid task POST.

@@ -186,6 +186,21 @@ try {
     await context.close();
   }
   {
+    const { page, context, errors } = await fixture("&dispatch");
+    await page.locator("textarea").fill("给猫咪来幅画");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("stream:first-delta"));
+    await row(page, "B 编辑中").click();
+    assert.equal(await row(page, "B 编辑中").getAttribute("aria-current"), "page");
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("media-task-post:image:a:refs=0"), null, { timeout: 15000 });
+    assert.equal(await row(page, "B 编辑中").getAttribute("aria-current"), "page", "A media continuation must not steal B's focus");
+    assert.equal(await page.locator("textarea").inputValue(), "B 的草稿不能丢");
+    assert.ok(await page.getByRole("button", { name: "移除附件 B.txt" }).isVisible());
+    assert.deepEqual(errors, []);
+    results.dispatchFocus = { aMediaContinuedInBackground: true, bFocusAndDraftPreserved: true };
+    await context.close();
+  }
+  {
     const { page, context, errors } = await fixture("&dispatch&fast");
     await page.locator("textarea").fill("给猫咪来幅画");
     await page.getByRole("button", { name: "发送消息", exact: true }).click();
