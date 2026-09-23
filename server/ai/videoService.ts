@@ -10,6 +10,7 @@ import { claimToolPlan, validateToolPlan } from "./toolPlans";
 import { validConversationId, type AiHarness, type ResolvedHarnessMediaRoute } from "./harness";
 import { DEFAULT_AI_TENANT_ID, tenantStorageKey } from "./tenant";
 import { assertGeneratedReferenceJpeg, readGeneratedAssetReference, validateGeneratedAssetReferenceBinding, type GeneratedAssetReferenceSource } from "./generatedAssetReference";
+import { bindSourceVideoReference, validateSourceVideoReferenceBinding } from "./sourceVideoReference";
 
 const BASE = "https://www.75api.com/v1";
 interface Settings {
@@ -135,8 +136,10 @@ export class AiVideoService {
     if (!s.enabled || !s.apiKeyConfigured) throw new AiError(403, "AI_VIDEO_DISABLED", "管理员尚未启用视频生成");
     const p = object(value);
     if (typeof p.dataUrl !== "string" || p.dataUrl.length > 400000 || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(p.dataUrl)) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片格式或大小不正确，请重新选择图片");
+    if (p.generatedAsset !== undefined && p.sourceVideo !== undefined) throw new AiError(400, "AI_VIDEO_SOURCE_INVALID", "同一参考图不能同时绑定两种来源");
+    if (p.generatedAsset !== undefined || p.sourceVideo !== undefined) assertGeneratedReferenceJpeg(p.dataUrl);
     const generatedAsset = p.generatedAsset === undefined ? undefined : await validateGeneratedAssetReferenceBinding(this.store, userId, p.generatedAsset);
-    if (generatedAsset) assertGeneratedReferenceJpeg(p.dataUrl);
+    const sourceVideo = p.sourceVideo === undefined ? undefined : await bindSourceVideoReference(this.store, userId, p.sourceVideo, p.dataUrl);
     const box = await this.box(), chunks: string[] = [];
     for (let i = 0; i < p.dataUrl.length; i += 16000) chunks.push(await box.encrypt(p.dataUrl.slice(i, i + 16000)));
     const fingerprint = await aiVideoReferenceFingerprint(p.dataUrl);
@@ -147,7 +150,7 @@ export class AiVideoService {
       this.store.sql.exec("DELETE FROM ai_video_references WHERE tenant_id=? AND expires_at <= ?", this.store.tenantId, Date.now());
       const count = this.store.sql.all<{ n: number }>("SELECT COUNT(*) AS n FROM ai_video_references WHERE tenant_id=? AND user_id=?", this.store.tenantId, storedUserId)[0].n;
       if (count >= 32) throw new AiError(429, "AI_VIDEO_IMAGE_LIMIT", "暂存图片已达上限，请稍后再试");
-      this.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", this.referenceKey(id), this.store.tenantId, publicId, storedUserId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify({ chunks, fingerprint, ...(generatedAsset ? { generatedAsset } : {}) }));
+      this.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", this.referenceKey(id), this.store.tenantId, publicId, storedUserId, Date.now() + 24 * 60 * 60 * 1000, JSON.stringify({ chunks, fingerprint, ...(generatedAsset ? { generatedAsset } : {}), ...(sourceVideo ? { sourceVideo } : {}) }));
     });
     return { id };
   }
@@ -170,9 +173,13 @@ export class AiVideoService {
     for (const id of value) {
       const row = this.store.sql.all<{ expires_at: number; data: string; public_id: string }>("SELECT expires_at,data,public_id FROM ai_video_references WHERE tenant_id=? AND id=? AND user_id=?", this.store.tenantId, this.referenceKey(id), this.userKey(userId))[0];
       if (!row || row.expires_at <= Date.now()) throw new AiError(400, "AI_VIDEO_IMAGE_INVALID", "参考图片已过期，请重新上传");
-      const stored = JSON.parse(row.data) as { fingerprint?: unknown; generatedAsset?: unknown } | string[];
+      const stored = JSON.parse(row.data) as { fingerprint?: unknown; generatedAsset?: unknown; sourceVideo?: unknown } | string[];
       if (Array.isArray(stored) || typeof stored.fingerprint !== "string" || !AI_VIDEO_REFERENCE_FINGERPRINT.test(stored.fingerprint)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "旧参考图片没有完整校验信息，请重新上传并整理视频任务");
       if (stored.generatedAsset !== undefined) await validateGeneratedAssetReferenceBinding(this.store, userId, stored.generatedAsset, conversationId);
+      if (stored.sourceVideo !== undefined) {
+        const source = await validateSourceVideoReferenceBinding(this.store, userId, stored.sourceVideo, conversationId);
+        if (source.frameFingerprint !== stored.fingerprint) throw new AiError(409, "AI_VIDEO_SOURCE_CHANGED", "视频参考画面与任务记录不一致，请重新选择");
+      }
       fingerprints.push(stored.fingerprint);
       if (!/^[a-f0-9]{64}$/.test(row.public_id)) throw new AiError(409, "AI_TOOL_PLAN_MISMATCH", "参考图片缺少完整隔离信息，请重新上传并整理视频任务");
       urls.push(`https://notify.samhubs.com/api/video-reference/${row.public_id}`);
