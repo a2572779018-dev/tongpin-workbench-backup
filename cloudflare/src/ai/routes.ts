@@ -4,8 +4,41 @@ import { ApiError, json, type UserRow } from "../platform";
 import type { AiMode } from "../../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
 import { createDifyGrantResponse, type DifyRouteOptions } from "../../../server/ai/difyRuntimeRoutes";
+import {
+  createAiServiceMediaTaskOrchestrator,
+  type MediaTaskConfirmation,
+  type SubmitMediaTask,
+} from "../../../server/ai/mediaTaskOrchestrator";
+import type { MediaTaskRun } from "../../../server/ai/mediaTaskRuntime";
 
 const videoTier = (value: string | null): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
+
+function mediaTaskJson(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new AiError(400, "INVALID_JSON", "请提交有效 JSON 内容");
+  if ("tenantId" in value || "userId" in value) throw new AiError(400, "AI_MEDIA_TASK_SCOPE_FORBIDDEN", "任务账号范围只能由当前登录状态确定");
+  return value as Record<string, unknown>;
+}
+
+function mediaTaskScope(run: MediaTaskRun, tenantId: string, userId: string): MediaTaskRun {
+  if (run.tenantId !== tenantId || run.userId !== userId) throw new AiError(404, "AI_MEDIA_TASK_NOT_FOUND", "没有找到这条任务");
+  return run;
+}
+
+function keepMediaTaskAlive(
+  run: MediaTaskRun,
+  service: AiService,
+  principalActive: () => boolean,
+  keepAlive: ((task: Promise<void>) => void) | undefined,
+): void {
+  const schedulable = ["queued", "planning", "awaiting_input", "running", "partial", "unknown"].includes(run.status)
+    || run.status === "awaiting_authorization" && run.authorization !== undefined;
+  if (!keepAlive || run.dueAt === null || run.dueAt > Date.now() || !schedulable) return;
+  const task = Promise.resolve()
+    .then(() => principalActive() ? createAiServiceMediaTaskOrchestrator(service).advance(run.userId, run.runId) : null)
+    .then(next => { if (next) mediaTaskScope(next, run.tenantId, run.userId); })
+    .catch(() => { /* The persisted task remains recoverable by GET/advance. */ });
+  keepAlive(task);
+}
 
 async function parseAiJson<T = unknown>(request: Request): Promise<T> {
   if (!request.body) throw new AiError(400, "INVALID_JSON", "请提交有效 JSON 内容");
@@ -28,7 +61,7 @@ async function parseAiJson<T = unknown>(request: Request): Promise<T> {
   } finally { reader.releaseLock(); }
 }
 
-export async function handleAiRequest(request: Request, service: AiService, user: UserRow, users: () => UserRow[], dify: DifyRouteOptions = {}): Promise<Response> {
+export async function handleAiRequest(request: Request, service: AiService, user: UserRow, users: () => UserRow[], dify: DifyRouteOptions = {}, keepAlive?: (task: Promise<void>) => void): Promise<Response> {
   try {
     const url = new URL(request.url);
     const { pathname: path } = url;
@@ -103,6 +136,58 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (path === "/api/ai/usage" && method === "GET") { service.quota(user.id); return json({ entries: service.memberUsage(user.id) }); }
     if (path === "/api/ai/preflight" && method === "POST") return json(service.preflight(user.id, await parseAiJson(request)));
     if (path === "/api/ai/chat" && method === "POST") return json(await service.chat(user.id, await parseAiJson(request)));
+    if (path === "/api/ai/media-tasks" && method === "POST") {
+      const body = mediaTaskJson(await parseAiJson(request));
+      const task = mediaTaskScope(await createAiServiceMediaTaskOrchestrator(service).submit(user.id, {
+        requestId: body.requestId,
+        conversationId: body.conversationId,
+        entrypoint: body.entrypoint,
+        tier: body.tier,
+        intent: body.intent,
+        requestText: body.requestText,
+        sourceAssetIds: body.sourceAssetIds,
+        ...(body.videoParameters !== undefined ? { videoParameters: body.videoParameters } : {}),
+        ...(body.deadlineAt !== undefined ? { deadlineAt: body.deadlineAt } : {}),
+        ...(body.confirmedMediaExecution !== undefined ? { confirmedMediaExecution: body.confirmedMediaExecution } : {}),
+      } as SubmitMediaTask), tenantId, user.id);
+      keepMediaTaskAlive(task, service, () => users().some(item => item.id === user.id && item.status === "active"
+        && (item.role === "member" || item.role === "boss") && aiTenantIdFromPrincipal(item) === tenantId), keepAlive);
+      return json({ task }, 202);
+    }
+    const mediaByRequestMatch = path.match(/^\/api\/ai\/media-tasks\/by-request\/([^/]+)$/);
+    if (mediaByRequestMatch && method === "GET") {
+      const task = createAiServiceMediaTaskOrchestrator(service).getByRequest(user.id, decodeURIComponent(mediaByRequestMatch[1]));
+      return json({ task: mediaTaskScope(task, tenantId, user.id) });
+    }
+    const mediaTaskActionMatch = path.match(/^\/api\/ai\/media-tasks\/([^/]+)\/(advance|answer|authorize)$/);
+    if (mediaTaskActionMatch && method === "POST") {
+      const runId = decodeURIComponent(mediaTaskActionMatch[1]);
+      const action = mediaTaskActionMatch[2];
+      const body = action === "advance" ? {} : mediaTaskJson(await parseAiJson(request));
+      const orchestrator = createAiServiceMediaTaskOrchestrator(service);
+      const task = mediaTaskScope(action === "advance"
+        ? await orchestrator.advance(user.id, runId)
+        : action === "answer"
+          ? orchestrator.answer(user.id, runId, body.questionId as string, body.answer as string)
+          : await orchestrator.authorizeAndExecute(user.id, runId, {
+            confirmed: body.confirmed,
+            maxPointsPerTool: body.maxPointsPerTool,
+            ...(body.automaticChoice !== undefined ? { automaticChoice: body.automaticChoice } : {}),
+            ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt } : {}),
+          } as MediaTaskConfirmation), tenantId, user.id);
+      keepMediaTaskAlive(task, service, () => users().some(item => item.id === user.id && item.status === "active"
+        && (item.role === "member" || item.role === "boss") && aiTenantIdFromPrincipal(item) === tenantId), keepAlive);
+      return json({ task });
+    }
+    const mediaTaskMatch = path.match(/^\/api\/ai\/media-tasks\/([^/]+)$/);
+    if (mediaTaskMatch && method === "GET") {
+      const task = createAiServiceMediaTaskOrchestrator(service).get(user.id, decodeURIComponent(mediaTaskMatch[1]));
+      return json({ task: mediaTaskScope(task, tenantId, user.id) });
+    }
+    if (mediaTaskMatch && method === "DELETE") {
+      const task = mediaTaskScope(createAiServiceMediaTaskOrchestrator(service).cancel(user.id, decodeURIComponent(mediaTaskMatch[1])), tenantId, user.id);
+      return json({ task });
+    }
     if (path === "/api/ai/images" && method === "POST") return json(await service.generateImage(user.id, await parseAiJson(request)));
     const assetMatch = path.match(/^\/api\/ai\/assets\/([^/]+)$/);
     if (assetMatch && method === "GET") return json(service.getAsset(user.id, decodeURIComponent(assetMatch[1])));

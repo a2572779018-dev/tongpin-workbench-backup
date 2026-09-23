@@ -8,13 +8,65 @@ import type { JsonStore } from "../store";
 import type { AiMode } from "../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../ai/tenant";
 import { createDifyGrantResponse, type DifyRouteOptions } from "../ai/difyRuntimeRoutes";
+import {
+  createAiServiceMediaTaskOrchestrator,
+  type MediaTaskConfirmation,
+  type SubmitMediaTask,
+} from "../ai/mediaTaskOrchestrator";
+import type { MediaTaskRun } from "../ai/mediaTaskRuntime";
 
 const videoTier = (value: unknown): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
+
+function mediaTaskJson(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new AiError(400, "INVALID_JSON", "请提交有效 JSON 内容");
+  if ("tenantId" in value || "userId" in value) throw new AiError(400, "AI_MEDIA_TASK_SCOPE_FORBIDDEN", "任务账号范围只能由当前登录状态确定");
+  return value as Record<string, unknown>;
+}
+
+function mediaTaskScope(run: MediaTaskRun, tenantId: string, userId: string): MediaTaskRun {
+  if (run.tenantId !== tenantId || run.userId !== userId) throw new AiError(404, "AI_MEDIA_TASK_NOT_FOUND", "没有找到这条任务");
+  return run;
+}
 
 export function createAiRouter(service: AiService, users: JsonStore, requireAuth: ReturnType<typeof import("../middleware").createRequireAuth>, admin = false, dify: DifyRouteOptions = {}): Router {
   const router = Router();
   const scoped = (request: import("express").Request) => service.forTenant(aiTenantIdFromPrincipal(request.currentUser));
   const video = (request: import("express").Request) => scoped(request).video;
+  type ScheduledMediaTask = { cancelled: boolean; timer?: ReturnType<typeof setTimeout> };
+  const scheduledMediaTasks = new Map<string, ScheduledMediaTask>();
+  const mediaTaskKey = (run: Pick<MediaTaskRun, "tenantId" | "userId" | "runId">) => `${run.tenantId}\u0000${run.userId}\u0000${run.runId}`;
+  const mediaTaskPrincipalActive = (run: Pick<MediaTaskRun, "tenantId" | "userId">) => users.read(database => {
+    const current = database.users.find(item => item.id === run.userId);
+    return current?.status === "active" && (current.role === "member" || current.role === "boss")
+      && aiTenantIdFromPrincipal(current) === run.tenantId;
+  });
+  const scheduleMediaTask = (run: MediaTaskRun): void => {
+    const key = mediaTaskKey(run);
+    const previous = scheduledMediaTasks.get(key);
+    if (previous) { previous.cancelled = true; if (previous.timer) clearTimeout(previous.timer); scheduledMediaTasks.delete(key); }
+    const schedulable = ["queued", "planning", "awaiting_input", "running", "partial", "unknown"].includes(run.status)
+      || run.status === "awaiting_authorization" && run.authorization !== undefined;
+    if (run.dueAt === null || !schedulable) return;
+    const scheduled: ScheduledMediaTask = { cancelled: false };
+    const execute = () => {
+      if (scheduled.cancelled || scheduledMediaTasks.get(key) !== scheduled) return;
+      scheduledMediaTasks.delete(key);
+      void mediaTaskPrincipalActive(run)
+        .then(active => active ? createAiServiceMediaTaskOrchestrator(service.forTenant(run.tenantId)).advance(run.userId, run.runId) : null)
+        .then(next => { if (next) scheduleMediaTask(mediaTaskScope(next, run.tenantId, run.userId)); })
+        .catch(() => {
+          const retryAt = Math.min(run.deadlineAt, Date.now() + 5_000);
+          if (retryAt > Date.now()) scheduleMediaTask({ ...run, dueAt: retryAt });
+        });
+    };
+    scheduledMediaTasks.set(key, scheduled);
+    const delay = Math.max(0, run.dueAt - Date.now());
+    if (delay === 0) queueMicrotask(execute);
+    else { scheduled.timer = setTimeout(execute, delay); scheduled.timer.unref?.(); }
+  };
+  const scheduleAfterResponse = (response: import("express").Response, run: MediaTaskRun): void => {
+    response.once("finish", () => scheduleMediaTask(run));
+  };
   router.use(requireAuth);
   router.use((request, _response, next) => {
     if (request.get("X-Tongpin-Account") !== undefined && request.get("X-Tongpin-Account") !== request.currentUser!.id) {

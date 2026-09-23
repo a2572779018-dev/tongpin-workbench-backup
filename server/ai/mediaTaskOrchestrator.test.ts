@@ -8,6 +8,7 @@ import type { AiTransport } from "./provider";
 import { AiWorkspaceRepository } from "./workspace";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const PNG_ALT = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
 const MP4 = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0]);
 const provider = {
   name: "Fixture", baseUrl: "https://api.example.com/v1", apiKey: "fixture-secret-only",
@@ -282,6 +283,33 @@ describe("real AiService media orchestration", () => {
     expect(orchestrator.runtime.snapshot("member", run.runId)?.contextMessages).toBeUndefined();
     expect(() => orchestrator.getByRequest("other-member", run.requestId)).toThrow();
     expect(() => new AiServiceMediaTaskOrchestrator(node.service.forTenant("other-tenant")).getByRequest("member", run.requestId)).toThrow();
+  });
+
+  it("uses only a saved user image document in the exact conversation and freezes its bytes", async () => {
+    const state = (base64: string) => ({
+      view: "chat" as const, mode: "quick" as const, projects: [], artifacts: [], drafts: {}, enabledSkillIds: [],
+      activeConversationId: "conversation-a", activeProjectId: null,
+      conversations: [{ id: "conversation-a", title: "海报", timeLabel: "刚刚", messages: [{
+        id: "user-image", role: "user" as const, content: "帮我生成一张图片", time: "10:00", status: "ready" as const,
+        attachments: [{ id: "uploaded-image", name: "logo.png", mimeType: "image/png", content: "参考 logo",
+          media: { kind: "image" as const, frames: [{ dataUrl: `data:image/png;base64,${base64}` }] } }],
+      }] }],
+    });
+    await workspace.save("member", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state(PNG) });
+    const submission = { ...input(), requestText: "帮我生成一张图片", sourceAssetIds: ["uploaded-image"] };
+    await expect(orchestrator.submit("member", { ...submission, conversationId: "other-conversation" }))
+      .rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_INVALID" });
+    const run = await orchestrator.submit("member", submission);
+    expect(orchestrator.runtime.snapshot("member", run.runId)?.sourceFingerprints).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
+    const claimed = orchestrator.runtime.claimPlanning("member", run.runId)!;
+    orchestrator.runtime.stageTool("member", run.runId, {
+      capability: "image", operationKey: `plan-${claimed.stepId}`, estimatedPoints: 1000,
+      sourceAssetIds: ["uploaded-image"], planRequestId: `plan-${claimed.stepId}`,
+    });
+    await workspace.save("member", { expectedRevision: 1, mutationId: crypto.randomUUID(), state: state(PNG_ALT) });
+    await expect(orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 }))
+      .rejects.toMatchObject({ code: "AI_MEDIA_TASK_SOURCE_UNAVAILABLE" });
+    expect(transport).not.toHaveBeenCalled();
   });
 
   it("marks an ambiguous image send unknown and never resubmits it on advance or confirmation", async () => {

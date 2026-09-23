@@ -1,5 +1,7 @@
 import type { AiAttachment, AiChatResponse, AiMode } from "../../shared/ai";
+import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
 import type { AiVideoJob } from "../../shared/aiVideo";
+import { validateImageBase64 } from "./capabilities";
 import { readGeneratedAssetReference } from "./generatedAssetReference";
 import {
   MediaTaskRuntime,
@@ -144,11 +146,38 @@ export class AiServiceMediaTaskOrchestrator {
     if (input.sourceAssetIds.length > 5) rejected("AI_ATTACHMENT_INVALID", "图片任务最多使用五张参考图", 400);
     const attachments: AiAttachment[] = [];
     const fingerprints: string[] = [];
+    const saved = new AiWorkspaceRepository(this.service.store.sql).read(userId, this.service.store.tenantId);
+    const conversation = saved.state?.conversations.find(item => item.id === input.conversationId);
+    let totalBytes = 0;
     for (const assetId of input.sourceAssetIds) {
+      const matchingDocuments = (conversation?.messages ?? [])
+        .filter(message => message.role === "user" && (message.status === undefined || message.status === "ready"))
+        .flatMap(message => message.attachments ?? []).filter(document => document.id === assetId);
+      if (matchingDocuments.length > 1 || matchingDocuments.length && this.service.store.asset(userId, assetId)) {
+        rejected("AI_MEDIA_TASK_SOURCE_AMBIGUOUS", "参考图片标识重复，请重新选择", 409);
+      }
+      if (matchingDocuments.length === 1) {
+        const document = matchingDocuments[0];
+        const dataUrl = document.media?.kind === "image" && document.media.frames.length === 1
+          ? document.media.frames[0].dataUrl : null;
+        const match = dataUrl && /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+        if (!match || document.mimeType !== match[1]) rejected("AI_MEDIA_TASK_SOURCE_INVALID", "参考图片格式无效，请重新添加", 400);
+        const verified = validateImageBase64(match[2], AI_MEDIA_LIMITS.frameBytes, 400);
+        if (verified.mimeType !== match[1] || verified.width > AI_MEDIA_LIMITS.frameDimension || verified.height > AI_MEDIA_LIMITS.frameDimension) {
+          rejected("AI_MEDIA_TASK_SOURCE_INVALID", "参考图片内容无效，请重新添加", 400);
+        }
+        totalBytes += verified.byteLength;
+        attachments.push({ name: document.name.slice(0, 160), mediaType: verified.mimeType, dataUrl });
+        fingerprints.push(await digest({ mediaType: verified.mimeType, base64: verified.base64 }));
+        continue;
+      }
       const asset = await readGeneratedAssetReference(this.service.store, userId, { assetId, conversationId: input.conversationId });
+      const verified = validateImageBase64(asset.base64, AI_MEDIA_LIMITS.requestBytes, 400);
+      totalBytes += verified.byteLength;
       attachments.push({ name: `参考图 ${attachments.length + 1}`, mediaType: asset.mimeType, dataUrl: `data:${asset.mimeType};base64,${asset.base64}` });
       fingerprints.push(asset.sourceFingerprint);
     }
+    if (totalBytes > AI_MEDIA_LIMITS.requestBytes) rejected("AI_ATTACHMENT_INVALID", "参考图片总大小不能超过 1 MiB", 400);
     return { valid: true, attachments, fingerprints };
   }
 
