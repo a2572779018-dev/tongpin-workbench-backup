@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { AI_CHAT_CONTEXT_LIMITS, AI_CONTEXT_WINDOW_PREFIX, aiChatTextContextBytes, fitAiChatMessages } from "../../../shared/aiContext";
-import { buildChatRequest, canRecoverChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "./chatRequests";
+import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "./chatRequests";
+import { ReplyWaiting } from "./ReplyWaiting";
+import { waitForReply } from "./waitForReply";
 import type { TongpinAIConversation, TongpinAIMessage } from "./types";
 import type { AiHarnessTrace } from "../../../shared/ai";
 
@@ -11,8 +16,9 @@ const history: TongpinAIConversation[] = [{ id: "a", title: "A", timeLabel: "刚
 ] }, { id: "b", title: "B", timeLabel: "刚刚", messages: [] }];
 
 describe("real AI chat request state", () => {
+  afterEach(() => vi.useRealTimers());
   it("allows result recovery without offering a dead retry for terminal provider errors", () => {
-    for (const code of ["NETWORK_UNAVAILABLE", "AI_REQUEST_IN_PROGRESS", "AI_STREAM_INTERRUPTED", "AI_REQUEST_UNCERTAIN", "AI_QUOTA_EXHAUSTED", "AI_NOT_CONFIGURED", "AI_SEARCH_QUOTA_INSUFFICIENT", "AI_QUOTA_INSUFFICIENT"]) {
+    for (const code of ["NETWORK_UNAVAILABLE", "AI_REQUEST_IN_PROGRESS", "AI_STREAM_INTERRUPTED", "AI_REQUEST_UNCERTAIN", "AI_WAIT_TIMEOUT", "AI_QUOTA_EXHAUSTED", "AI_NOT_CONFIGURED", "AI_SEARCH_QUOTA_INSUFFICIENT", "AI_QUOTA_INSUFFICIENT"]) {
       expect(canRecoverChatRequest(code, false)).toBe(true);
     }
     for (const code of ["AI_PROVIDER_AUTH", "AI_RESPONSE_INCOMPLETE", "AI_INPUT_INVALID", "AI_CONNECTION_FAILED"]) {
@@ -71,13 +77,56 @@ describe("real AI chat request state", () => {
     expect(history[0].messages[2].status).toBe("thinking");
     expect(replaceChatMessage([history[1]], "a", "t", { content: "回答" })).toEqual([history[1]]);
   });
-  it("marks interrupted work as interrupted, without fabricating a reply or refund", () => {
+  it("does not invent a recoverable request ID for interrupted legacy work", () => {
     const recovered = recoverInterruptedMessages(history);
     expect(recovered[0].messages[2].status).toBe("error");
-    expect(recovered[0].messages[2].content).toContain("查询原任务结果");
+    expect(recovered[0].messages[2].content).toContain("未保存有效任务编号");
     expect(recovered[0].messages[2].taskPhase).toBe("unknown");
     expect(recoverInterruptedMessages([{ ...history[0], messages: [{ ...history[0].messages[2], content: "已收到的部分回答" }] }])[0].messages[0].content).toBe("已收到的部分回答");
     expect(recovered[0].messages[0]).toEqual(history[0].messages[0]);
+  });
+  it("remounts an in-flight reply as waiting and reads only its original ID", async () => {
+    const requestId = "b51d1d56-3a68-4dba-93b2-0ba5597c72fd";
+    const startedAt = Date.parse("2026-09-23T08:00:00.000Z");
+    const original: TongpinAIConversation[] = [{ id: "conversation-b", title: "B", timeLabel: "刚刚", messages: [
+      { id: "user-b", role: "user", content: "你好", time: "16:00" },
+      { id: "reply-b", role: "assistant", requestId, content: "", status: "thinking", taskPhase: "running", startedAt, time: "16:00" },
+    ] }];
+    // The server-saved workspace is JSON, not a mounted React component.
+    const restored = recoverInterruptedMessages(JSON.parse(JSON.stringify(original)));
+    expect(restored[0].messages[1]).toMatchObject({ status: "thinking", taskPhase: "running", startedAt, requestId });
+    expect(interruptedChatRequests(restored)).toEqual([{ conversationId: "conversation-b", messageId: "reply-b", requestId }]);
+    const settled = { requestId, content: "# 真实回复", model: "快速", usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3, estimated: false },
+      quota: { limitTokens: 100, usedTokens: 3, remainingTokens: 97, reservedTokens: 0, inputTokens: 1, outputTokens: 2 } };
+    const readOriginal = vi.fn(async (id: string, _signal: AbortSignal) => ({ requestId: id, status: "completed" as const, result: settled }));
+    const response = await waitForReply((signal) => readOriginal(requestId, signal), new AbortController().signal);
+    expect(readOriginal).toHaveBeenCalledTimes(1);
+    expect(readOriginal.mock.calls[0][0]).toBe(requestId);
+    if ("images" in response) throw new Error("Expected a text reply");
+    expect(completedReply(response)).toMatchObject({ content: "# 真实回复", status: "ready", taskPhase: "completed" });
+    vi.useFakeTimers(); vi.setSystemTime(startedAt + 9_500);
+    expect(renderToStaticMarkup(createElement(ReplyWaiting, { startedAt }))).toContain("已用时 9 秒");
+  });
+  it("recovers an old interruption notice but never auto-retries a stopped or media task", () => {
+    const requestId = "a150935b-69d3-4600-9f0b-f013ea077e66";
+    const old = { ...history[0], messages: [
+      { id: "old", role: "assistant" as const, requestId, time: "12:00", status: "error" as const, taskPhase: "unknown" as const,
+        content: "上次等待已中断，可以查询原任务结果；不会重复提交收费请求。" },
+      { id: "stopped", role: "assistant" as const, requestId: "92deecad-7f51-4795-9f33-5cc9caabdef2", time: "12:00", status: "stopped" as const, content: "已停止" },
+      { id: "media", role: "assistant" as const, requestId: "4c4cd796-4810-4567-8cf8-af7ae08a6f86", artifactId: "asset-1", time: "12:00", status: "thinking" as const, content: "" },
+    ] };
+    const restored = recoverInterruptedMessages([old]);
+    expect(interruptedChatRequests(restored)).toEqual([{ conversationId: "a", messageId: "old", requestId }]);
+    expect(restored[0].messages[0]).toMatchObject({ content: "", status: "thinking", taskPhase: "running" });
+    expect(restored[0].messages[1].status).toBe("stopped");
+    expect(restored[0].messages[2].status).toBe("error");
+  });
+  it("wires page navigation recovery to the GET-only branch and not a new generation POST", () => {
+    const source = readFileSync(new URL("../../pages/TongpinAIPage.tsx", import.meta.url), "utf8");
+    expect(source).toContain("void performChat(pending.conversationId, pending.messageId, pending.requestId)");
+    expect(source).toContain('if (typeof request === "string") response = await recover();');
+    expect(source).toContain('`/api/ai/requests/${encodeURIComponent(requestId)}`');
+    expect(source).toContain('if (typeof request === "string") {\n          // The dispatch result is durable');
   });
   it("uses provider response and reported usage verbatim", () => {
     const usage = { inputTokens: 30, outputTokens: 12, totalTokens: 42, estimated: false };

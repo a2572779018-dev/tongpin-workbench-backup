@@ -26,7 +26,7 @@ import { selectSkill, skillRequestIds } from "../features/tongpin-ai/skills";
 import { fitAttachmentContext, toolAttachmentContext } from "../features/tongpin-ai/attachmentContext";
 import { draftsWithoutComputerRequests, mentionedSkillIds, mentionedWorkflowId, workflowSkillIds } from "../features/tongpin-ai/skillMentions";
 import { computerUseConversationRequestMessage, computerUsePlanningObservation, validateComputerUseModelPlan, type ComputerUseModelPlan } from "../features/tongpin-ai/computerUseFlow";
-import { buildChatRequest, canRecoverChatRequest, completedReply, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
+import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence } from "../features/tongpin-ai/chatPerformance";
 import { AI_DOWNLOAD_FEEDBACK_EVENT, saveBlobWithFeedback, type AiDownloadFeedback } from "../features/tongpin-ai/downloadFeedback";
 import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "../features/tongpin-ai/videoReferenceAttachments";
@@ -147,6 +147,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [conversations, setConversations] = useState<TongpinAIConversation[]>(
     () => recoverInterruptedMessages(initialSession.conversations),
   );
+  const [interruptedRequests] = useState(() => interruptedChatRequests(initialSession.conversations));
   const [projects, setProjects] = useState<TongpinAIProject[]>(
     initialSession.projects,
   );
@@ -303,6 +304,15 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       typingRef.current.clear();
     };
   }, [refreshStatus, preflightGate]);
+
+  useEffect(() => {
+    // A page switch aborts only the browser stream. The server may keep
+    // generating, so reattach with GET by the exact saved requestId; never
+    // repeat a paid POST on mount or reload.
+    for (const pending of interruptedRequests) {
+      void performChat(pending.conversationId, pending.messageId, pending.requestId);
+    }
+  }, [interruptedRequests]);
 
   useEffect(() => {
     const bridge = getComputerUseBridge();
@@ -1098,15 +1108,20 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     // Only requests that were never sent may be POSTed by the retry button.
     retryRequestsRef.current.delete(messageId);
     const requestId = typeof request === "string" ? request : request.requestId;
-    const deadline = Date.now() + 180_000;
-    const recover = () => waitForReply((signal, timeoutMs) => api<AiRequestResult>(
-      `/api/ai/requests/${encodeURIComponent(requestId)}`,
-      { headers: { "X-Tongpin-Account": user.id }, signal }, timeoutMs,
-    ), controller.signal, deadline);
     const persistedReply = workspaceRef.current.conversations
       .find(item => item.id === conversationId)?.messages
       .find(message => message.id === messageId);
     const persistedStartedAt = persistedReply?.startedAt;
+    const now = Date.now();
+    const originalDeadline = Number.isSafeInteger(persistedStartedAt) && persistedStartedAt! <= now
+      ? persistedStartedAt! + 180_000 : now + 180_000;
+    const deadline = typeof request === "string"
+      ? Math.min(now + 180_000, Math.max(now + 30_000, originalDeadline))
+      : now + 180_000;
+    const recover = () => waitForReply((signal, timeoutMs) => api<AiRequestResult>(
+      `/api/ai/requests/${encodeURIComponent(requestId)}`,
+      { headers: { "X-Tongpin-Account": user.id }, signal }, timeoutMs,
+    ), controller.signal, deadline);
     if (typeof request === "string") { liveContent = persistedReply?.content ?? ""; liveSummary = persistedReply?.analysisSummary ?? ""; }
     setReplyActivity(conversationId, messageId, "waiting");
     updateReply(conversationId, messageId, {
@@ -1143,6 +1158,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         if (decision.kind === "text" || decision.clarification) {
           acceptGeneration(conversationId, messageId, { ...response, content: decision.kind === "text" ? decision.content : decision.clarification! });
           if (decision.kind !== "text") updateReply(conversationId, messageId, { taskPhase: "awaiting_input" });
+          return;
+        }
+        if (typeof request === "string") {
+          // The dispatch result is durable but its attachment/settings snapshot
+          // is not. A read-only remount must not silently start a new tool POST.
+          const kind = { image: "图片", video: "视频", presentation: "演示文稿", computer: "电脑操作" }[decision.kind];
+          acceptGeneration(conversationId, messageId, { ...response, content: `已恢复原任务：同频 AI 建议生成${kind}。请重新确认任务输入后再继续；本次未自动调用工具。` });
+          updateReply(conversationId, messageId, { taskPhase: "awaiting_input" });
           return;
         }
         // Dispatch only classifies the already-persisted turn. Release its
@@ -1183,8 +1206,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       if (!mountedRef.current) return;
       const interrupted = controller.signal.aborted;
       if (!interrupted && typeof request !== "string") availability.recordFailure("prompt" in request ? "image" : `${request.mode}:${request.webSearch ? "search" : "chat"}`, error);
-      const recoverable = canRecoverChatRequest(error instanceof ApiRequestError ? error.code : undefined, interrupted);
-      updateReply(conversationId, messageId, { status: "error", taskPhase: recoverable ? "unknown" : "failed", retryDisposition: recoverable ? "recover" : "regenerate", content: liveContent || (interrupted
+      const originalMissing = typeof request === "string" && error instanceof ApiRequestError && error.status === 404;
+      const recoverable = !originalMissing && canRecoverChatRequest(error instanceof ApiRequestError ? error.code : undefined, interrupted);
+      updateReply(conversationId, messageId, { status: "error", taskPhase: recoverable ? "unknown" : "failed", retryDisposition: originalMissing ? undefined : recoverable ? "recover" : "regenerate", content: originalMissing
+        ? "原请求没有服务端记录或已过期，本次未自动重新发送。请重新输入任务后再发送。"
+        : liveContent || (interrupted
         ? "已停止等待。请求可能仍在处理，实际扣额请查看 Token 使用详情。"
         : error instanceof ApiRequestError && error.code === "NETWORK_UNAVAILABLE"
           ? "连接中断，暂时没有收到完整回复。可重新获取同一请求，避免重复发送。"
@@ -2231,7 +2257,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
               const next = { ...current, [owner.id]: task.resultToken! }; saveSeenResults(user.id, next); return next;
             });
           }}
-          retryableMessageIds={new Set([...retryRequestsRef.current.keys(), ...conversations.flatMap(item => item.messages.filter(message => message.status === "error" && message.requestId).map(message => message.id))])}
+          retryableMessageIds={new Set([...retryRequestsRef.current.keys(), ...conversations.flatMap(item => item.messages.filter(message => message.status === "error" && message.requestId && message.retryDisposition).map(message => message.id))])}
         />
       )}
 
