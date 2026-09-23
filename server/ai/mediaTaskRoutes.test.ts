@@ -116,7 +116,7 @@ describe("Node authenticated media-task routes", () => {
     await post("/api/ai/media-tasks", forged).expect(400);
     const input = taskInput();
     const submitted = await quickly(post("/api/ai/media-tasks", input).then(response => response));
-    expect(submitted.status).toBe(202);
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(202);
     expect(submitted.body.task).toMatchObject({ requestId: input.requestId, tenantId: "tenant-alpha", userId: "member-a", status: "queued" });
     expect(submitted.body.task.authorization).toBeUndefined();
     await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
@@ -166,7 +166,7 @@ describe("Node authenticated media-task routes", () => {
     transport.mockImplementationOnce(() => planner.promise).mockResolvedValueOnce(image());
     const input = taskInput({ confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 } });
     const submitted = await quickly(post("/api/ai/media-tasks", input).then(response => response));
-    expect(submitted.status).toBe(202);
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(202);
     expect(submitted.body.task).toMatchObject({ status: "queued", authorization: { capabilities: ["image"], maxPointsPerTool: 1000 } });
     await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
     planner.resolve(plan());

@@ -98,7 +98,7 @@ describe("real AiService media orchestration", () => {
     },
   );
 
-  it.each(["生成视频，不要字幕或旁白", "这个是 logo，帮我生成一段视频"])(
+  it.each(["生成视频，不要字幕或旁白", "这个是 logo，帮我生成一段视频", "用刚才同一个人物做视频"])(
     "recognizes an affirmative video request with context or negative creative constraints: %s",
     async requestText => {
       await node.service.video.configure({ enabled: true, quotaPoints: 3000, apiKey: "fixture-video-key", defaultModel: "minimax_h3" });
@@ -113,6 +113,25 @@ describe("real AiService media orchestration", () => {
         confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 3000 },
       });
       expect(orchestrator.runtime.snapshot("member", run.runId)?.authorizationScope).toMatchObject({ capabilities: ["video"], maxPointsPerTool: 3000 });
+    },
+  );
+
+  it.each(["用刚才同一个人物做视频的提示词怎么写", "用刚才同一个人物做视频可以吗", "用刚才同一个人物做视频，先别生成"])(
+    "does not preauthorize a reference-first discussion or negated video action: %s",
+    async requestText => {
+      await node.service.video.configure({ enabled: true, quotaPoints: 3000, apiKey: "fixture-video-key", defaultModel: "minimax_h3" });
+      const row = node.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0];
+      const settings = JSON.parse(row.data);
+      node.store.sql.exec("UPDATE ai_settings SET data=? WHERE id='video'", JSON.stringify({ ...settings,
+        verifiedConfigVersion: settings.configVersion, verifiedKeyVersion: settings.keyVersion, verifiedModels: ["minimax_h3"] }));
+      const run = await orchestrator.submit("member", {
+        requestId: crypto.randomUUID(), conversationId: "conversation-v", entrypoint: "natural", tier: "quick",
+        intent: "video", requestText, sourceAssetIds: [],
+        videoParameters: { model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [] },
+        confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 3000 },
+      });
+      expect(orchestrator.runtime.snapshot("member", run.runId)?.authorizationScope).toBeNull();
+      expect(transport).not.toHaveBeenCalled();
     },
   );
 

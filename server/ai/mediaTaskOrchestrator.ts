@@ -73,13 +73,18 @@ function normalizedText(value: string): string { return value.replace(/\s+/g, " 
 function explicitMediaAction(intent: "image" | "video", requestText: string): boolean {
   const statement = normalizedText(requestText);
   if (/^(?:为什么|为何|怎么|如何|是否|是不是|能否|可不可以|请问|你能不能)/.test(statement)
-    || /(?:失败|报错|错误|提示词|教程|方案|[?？])/.test(statement)
-    || /(?:不要|别|不想|不需要|无需|禁止|取消|停止|暂不|先不)\s*(?:帮我|给我|为我)?\s*(?:生成|创建|制作|绘制|画|做)/.test(statement)) return false;
+    || /(?:失败|报错|错误|提示词|教程|方案|能不能|可以吗|行吗|[?？])/.test(statement)
+    || /(?:不要|别|不想|不需要|不用|无需|禁止|取消|停止|暂不|先不|先别)\s*(?:帮我|给我|为我)?\s*(?:生成|创建|制作|绘制|画|做)/.test(statement)) return false;
   const noun = intent === "image" ? /(?:图片|图像|插画|海报|照片|画作)/ : /(?:视频|短片|动画|宣传片|影片)/;
   // Permit a short factual preface ("这是 logo，帮我生成视频") and negative
   // creative constraints ("生成视频，不要字幕"), but never a negated action.
   const action = /(?:^|[,，。;；]\s*)(?:请\s*)?(?:帮我|给我|为我|直接|现在|马上|立刻)?\s*(?:生成|创建|制作|绘制|画|做)(.{0,50})/g;
   for (const match of statement.matchAll(action)) if (noun.test(match[1])) return true;
+  // A reference-first request is still an explicit action, not a discussion:
+  // “用刚才同一个人物做视频”. Keep the prefix narrow; a question or negated
+  // action has already been rejected above, and no model text may mint consent.
+  const referenceFirst = statement.match(/^(?:用|把)(?:刚才|上面|上一张|这张|这个|同一张|同一个|相同的).{0,40}?(?:生成|制作|做)(.{0,50})/);
+  if (referenceFirst && noun.test(referenceFirst[1])) return true;
   return false;
 }
 
