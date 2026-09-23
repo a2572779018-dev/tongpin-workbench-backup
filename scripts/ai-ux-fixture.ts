@@ -14,8 +14,9 @@ import type { AiWorkspaceState } from "../shared/aiWorkspace";
 const directory = await mkdtemp(path.join(tmpdir(), "tongpin-ai-ux-"));
 const fixturePort = Number(process.env.TONGPIN_FIXTURE_PORT || 4318);
 const fixtureOrigin = process.env.TONGPIN_FIXTURE_ORIGIN || "http://127.0.0.1:5173";
-if (![4318, 4319].includes(fixturePort) || !/^http:\/\/127\.0\.0\.1:(5173|5174)$/.test(fixtureOrigin)) throw new Error("Only dedicated loopback fixture ports are permitted");
+if (![4318, 4319, 4320].includes(fixturePort) || !/^http:\/\/127\.0\.0\.1:(5173|5174|5175)$/.test(fixtureOrigin)) throw new Error("Only dedicated loopback fixture ports are permitted");
 const fixtureApi = `http://127.0.0.1:${fixturePort}`;
+const fixtureAnswer = "【本地模拟回复，不调用真实模型】\n\n本周任务可按下面的进度继续推进：\n\n| 事项 | 状态 |\n| --- | --- |\n| 需求核对 | 已完成 |\n| 发布验收 | 待验证 |\n\n先核对验收证据，再决定是否发布。";
 const config: AppConfig = {
   host: "127.0.0.1", port: fixturePort, dataFile: path.join(directory, "fixture.json"),
   jwtSecret: crypto.randomUUID() + crypto.randomUUID(), clientOrigins: [fixtureOrigin],
@@ -25,7 +26,25 @@ const config: AppConfig = {
 };
 const runtime = await createRuntime(config, {
   startLoraCollector: false,
-  aiTransport: async () => Response.json({ status: "completed", output_text: "【本地模拟回复，不调用真实模型】\n\n先给结论：将目标、输入资料和交付要求写清楚，能更快得到可用结果。\n\n" + "把工作拆成明确的小步骤，每一步都保留来源与检查记录。遇到不确定的信息先说明，再继续核实。\n".repeat(30), usage: { input_tokens: 100, output_tokens: 400, total_tokens: 500 } }),
+  aiTransport: async (url, init) => {
+    if (url.endsWith("/models")) return Response.json({ data: [{ id: "fixture-model", object: "model" }] });
+    const request = typeof init.body === "string" ? JSON.parse(init.body) as { stream?: boolean } : {};
+    const result = { status: "completed", output_text: fixtureAnswer, usage: { input_tokens: 100, output_tokens: 80, total_tokens: 180 } };
+    if (!request.stream) return Response.json(result);
+    const encoder = new TextEncoder();
+    const chunks = [fixtureAnswer.slice(0, 33), fixtureAnswer.slice(33, 67), fixtureAnswer.slice(67)];
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const [index, delta] of chunks.entries()) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "response.output_text.delta", sequence_number: index, delta })}\n\n`));
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "response.completed", sequence_number: chunks.length, response: result })}\n\n`));
+        controller.close();
+      },
+    });
+    return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+  },
 });
 const now = new Date().toISOString();
 const passwordHash = await bcrypt.hash("Fixture123!", 10);
