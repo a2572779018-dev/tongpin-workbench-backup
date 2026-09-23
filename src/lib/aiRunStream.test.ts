@@ -55,15 +55,52 @@ describe("AI run stream decoder", () => {
     expect(call).toHaveBeenCalledTimes(1);
   });
 
-  it("fails closed on a sequence gap without issuing a recovery POST", async () => {
-    const call = vi.fn();
-    const api = async <T,>(): Promise<T> => {
-      call();
-      return eventResponse([event(1, "run_started", { startedAt: 1 }), event(3, "run_finished", { response })]) as T;
+  it("fills a sequence gap from the original request's journal before displaying later events", async () => {
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
+    const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+      calls.push({ path, init });
+      if (path === "/api/ai/chat/stream") return eventResponse([
+        event(1, "run_started", { startedAt: 1 }), event(3, "run_finished", { response }),
+      ]) as T;
+      return { events: [event(2, "answer_delta", { delta: "complete" }), event(3, "run_finished", { response })] } as T;
     };
-    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal }))
-      .rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
-    expect(call).toHaveBeenCalledTimes(1);
+    const seen: number[] = [];
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value.seq) }))
+      .resolves.toEqual(response);
+    expect(seen).toEqual([1, 2, 3]);
+    expect(calls.map(call => call.path)).toEqual([
+      "/api/ai/chat/stream", `/api/ai/requests/${request.requestId}/events?after=1`,
+    ]);
+    expect(calls[1].init).toMatchObject({ headers: { "X-Tongpin-Account": "member" } });
+    expect(calls[1].init?.signal).toBe(calls[0].init?.signal);
+  });
+
+  it("replays missing answer and summary deltas after a transport drop without another POST", async () => {
+    let reads = 0;
+    const dropped = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (reads++ === 0) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event(1, "run_started", { startedAt: 1 }))}\n\n`));
+        else controller.error(new Error("socket dropped"));
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+    const paths: string[] = [];
+    const api = async <T,>(path: string): Promise<T> => {
+      paths.push(path);
+      if (path === "/api/ai/chat/stream") return dropped as T;
+      return { events: [
+        event(1, "run_started", { startedAt: 1 }),
+        event(2, "public_summary_delta", { delta: "依据" }),
+        event(3, "answer_delta", { delta: "complete" }),
+        event(4, "run_finished", { response }),
+      ] } as T;
+    };
+    const seen: AiRunEvent[] = [];
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value) }))
+      .resolves.toEqual(response);
+    expect(seen.map(value => value.seq)).toEqual([1, 2, 3, 4]);
+    expect(seen.flatMap(value => value.type === "public_summary_delta" ? [value.data.delta] : [])).toEqual(["依据"]);
+    expect(seen.flatMap(value => value.type === "answer_delta" ? [value.data.delta] : [])).toEqual(["complete"]);
+    expect(paths).toEqual(["/api/ai/chat/stream", `/api/ai/requests/${request.requestId}/events?after=1`]);
   });
 
   it("rejects an event for another request and does not surface its content", async () => {
@@ -77,7 +114,48 @@ describe("AI run stream decoder", () => {
     expect(call).toHaveBeenCalledTimes(1);
   });
 
-  it("turns a caller abort into a recoverable interruption and cancels the reader", async () => {
+  it("rejects a changed run identity before any replay query", async () => {
+    const paths: string[] = [];
+    const api = async <T,>(path: string): Promise<T> => {
+      paths.push(path);
+      return eventResponse([
+        event(1, "run_started", { startedAt: 1 }),
+        { ...event(2, "answer_delta", { delta: "untrusted" }), runId: "run-other" },
+      ]) as T;
+    };
+    const seen: number[] = [];
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value.seq) }))
+      .rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+    expect(seen).toEqual([1]);
+    expect(paths).toEqual(["/api/ai/chat/stream"]);
+  });
+
+  it("stops replay on a foreign journal event or an explicit run failure", async () => {
+    const foreign = { ...event(2, "answer_delta", { delta: "foreign" }), requestId: "request-foreign" };
+    const paths: string[] = [];
+    const api = async <T,>(path: string): Promise<T> => {
+      paths.push(path);
+      return (path === "/api/ai/chat/stream"
+        ? eventResponse([event(1, "run_started", { startedAt: 1 })])
+        : { events: [foreign] }) as T;
+    };
+    const seen: AiRunEvent[] = [];
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value) }))
+      .rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+    expect(seen.map(value => value.seq)).toEqual([1]);
+    expect(paths).toHaveLength(2);
+
+    const failedPaths: string[] = [];
+    const failedApi = async <T,>(path: string): Promise<T> => {
+      failedPaths.push(path);
+      return eventResponse([event(1, "run_failed", { error: { code: "MODEL_REFUSED", message: "failed" } })]) as T;
+    };
+    await expect(readAiChatStream(failedApi, request, { accountId: "member", signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: "MODEL_REFUSED" });
+    expect(failedPaths).toEqual(["/api/ai/chat/stream"]);
+  });
+
+  it("does not submit or replay an already aborted request", async () => {
     const cancelled = vi.fn();
     const stream = new ReadableStream<Uint8Array>({ cancel: cancelled });
     const call = vi.fn();
@@ -89,7 +167,47 @@ describe("AI run stream decoder", () => {
     catch (error) { failure = error; }
     expect(failure).toBeInstanceOf(ApiRequestError);
     expect(failure).toMatchObject({ status: 0, code: "AI_STREAM_INTERRUPTED" });
-    expect(cancelled).toHaveBeenCalledTimes(1);
-    expect(call).toHaveBeenCalledTimes(1);
+    expect(cancelled).not.toHaveBeenCalled();
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("propagates abort to the journal query and never starts another replay", async () => {
+    const controller = new AbortController();
+    let replayStarted!: () => void;
+    const started = new Promise<void>(resolve => { replayStarted = resolve; });
+    const paths: string[] = [];
+    const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+      paths.push(path);
+      if (path === "/api/ai/chat/stream") return eventResponse([event(1, "run_started", { startedAt: 1 })]) as T;
+      return new Promise<T>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new ApiRequestError(0, "NETWORK_UNAVAILABLE", "aborted")), { once: true });
+        replayStarted();
+      });
+    };
+    const pending = readAiChatStream(api, request, { accountId: "member", signal: controller.signal });
+    await started;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ status: 0, code: "AI_STREAM_INTERRUPTED" });
+    expect(paths).toEqual(["/api/ai/chat/stream", `/api/ai/requests/${request.requestId}/events?after=1`]);
+  });
+
+  it("stops bounded polling without a terminal event and lets the caller query the result", async () => {
+    vi.useFakeTimers();
+    try {
+      let queries = 0;
+      const api = async <T,>(path: string): Promise<T> => {
+        if (path === "/api/ai/chat/stream") return eventResponse([event(1, "run_started", { startedAt: 1 })]) as T;
+        queries++;
+        return { events: [] } as T;
+      };
+      const pending = readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal });
+      const assertion = expect(pending).rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+      await vi.advanceTimersByTimeAsync(9_000);
+      await assertion;
+      expect(queries).toBeGreaterThan(0);
+      expect(queries).toBeLessThanOrEqual(8);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
