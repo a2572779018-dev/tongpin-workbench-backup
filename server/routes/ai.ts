@@ -124,6 +124,74 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.get("/usage", (request, response) => { const current = scoped(request); current.quota(request.currentUser!.id); response.json({ entries: current.memberUsage(request.currentUser!.id) }); });
     router.post("/preflight", (request, response) => response.json(scoped(request).preflight(request.currentUser!.id, request.body)));
     router.post("/chat", async (request, response) => response.json(await scoped(request).chat(request.currentUser!.id, request.body)));
+    router.post("/media-tasks", async (request, response) => {
+      const tenantId = aiTenantIdFromPrincipal(request.currentUser);
+      const userId = request.currentUser!.id;
+      const body = mediaTaskJson(request.body);
+      const orchestrator = createAiServiceMediaTaskOrchestrator(scoped(request));
+      const task = mediaTaskScope(await orchestrator.submit(userId, {
+        requestId: body.requestId,
+        conversationId: body.conversationId,
+        entrypoint: body.entrypoint,
+        tier: body.tier,
+        intent: body.intent,
+        requestText: body.requestText,
+        sourceAssetIds: body.sourceAssetIds,
+        ...(body.videoParameters !== undefined ? { videoParameters: body.videoParameters } : {}),
+        ...(body.deadlineAt !== undefined ? { deadlineAt: body.deadlineAt } : {}),
+        ...(body.confirmedMediaExecution !== undefined ? { confirmedMediaExecution: body.confirmedMediaExecution } : {}),
+      } as SubmitMediaTask), tenantId, userId);
+      scheduleAfterResponse(response, task);
+      response.status(202).json({ task });
+    });
+    router.get("/media-tasks/by-request/:requestId", (request, response) => {
+      const tenantId = aiTenantIdFromPrincipal(request.currentUser);
+      const userId = request.currentUser!.id;
+      const task = createAiServiceMediaTaskOrchestrator(scoped(request)).getByRequest(userId, request.params.requestId);
+      response.json({ task: mediaTaskScope(task, tenantId, userId) });
+    });
+    router.get("/media-tasks/:id", (request, response) => {
+      const tenantId = aiTenantIdFromPrincipal(request.currentUser);
+      const userId = request.currentUser!.id;
+      const task = createAiServiceMediaTaskOrchestrator(scoped(request)).get(userId, request.params.id);
+      response.json({ task: mediaTaskScope(task, tenantId, userId) });
+    });
+    router.post("/media-tasks/:id/advance", async (request, response) => {
+      const tenantId = aiTenantIdFromPrincipal(request.currentUser);
+      const userId = request.currentUser!.id;
+      const task = mediaTaskScope(await createAiServiceMediaTaskOrchestrator(scoped(request)).advance(userId, request.params.id), tenantId, userId);
+      scheduleAfterResponse(response, task);
+      response.json({ task });
+    });
+    router.post("/media-tasks/:id/answer", (request, response) => {
+      const body = mediaTaskJson(request.body);
+      const tenantId = aiTenantIdFromPrincipal(request.currentUser);
+      const userId = request.currentUser!.id;
+      const orchestrator = createAiServiceMediaTaskOrchestrator(scoped(request));
+      const task = mediaTaskScope(orchestrator.answer(userId, request.params.id, body.questionId as string, body.answer as string), tenantId, userId);
+      scheduleAfterResponse(response, task);
+      response.json({ task });
+    });
+    router.post("/media-tasks/:id/authorize", async (request, response) => {
+      const body = mediaTaskJson(request.body);
+      const tenantId = aiTenantIdFromPrincipal(request.currentUser);
+      const userId = request.currentUser!.id;
+      const task = mediaTaskScope(await createAiServiceMediaTaskOrchestrator(scoped(request)).authorizeAndExecute(userId, request.params.id, {
+        confirmed: body.confirmed,
+        maxPointsPerTool: body.maxPointsPerTool,
+        ...(body.automaticChoice !== undefined ? { automaticChoice: body.automaticChoice } : {}),
+        ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt } : {}),
+      } as MediaTaskConfirmation), tenantId, userId);
+      scheduleAfterResponse(response, task);
+      response.json({ task });
+    });
+    router.delete("/media-tasks/:id", (request, response) => {
+      const tenantId = aiTenantIdFromPrincipal(request.currentUser);
+      const userId = request.currentUser!.id;
+      const task = mediaTaskScope(createAiServiceMediaTaskOrchestrator(scoped(request)).cancel(userId, request.params.id), tenantId, userId);
+      scheduleMediaTask(task);
+      response.json({ task });
+    });
     router.post("/images", async (request, response) => response.json(await scoped(request).generateImage(request.currentUser!.id, request.body)));
     router.get("/assets/:id", (request, response) => response.json(scoped(request).getAsset(request.currentUser!.id, request.params.id)));
     router.delete("/assets/:id", (request, response) => { scoped(request).deleteAsset(request.currentUser!.id, request.params.id); response.json({ deleted: true }); });
