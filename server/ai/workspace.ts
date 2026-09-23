@@ -419,6 +419,14 @@ export class AiWorkspaceRepository {
     const request: AiWorkspaceSaveRequest = { expectedRevision: Number(body.expectedRevision), mutationId: body.mutationId, state: validateAiWorkspaceState(body.state) };
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical(request)));
     const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    // A save response is an acknowledgement of the submitted state, not a
+    // canonical read. The 0.1.46 client requires an exact echo; it does not
+    // know videoDraftSettings, which we merge into storage below. New clients
+    // submit that field explicitly and still receive the canonical state.
+    const acknowledge = (snapshot: AiWorkspaceSnapshot): AiWorkspaceSnapshot =>
+      request.state.videoDraftSettings === undefined && snapshot.revision === request.expectedRevision + 1
+        ? { ...snapshot, state: request.state }
+        : snapshot;
     // Both adapters execute a synchronous transaction, with no external I/O or await inside.
     return this.sql.transaction(() => {
       const prior = this.sql.all<{ request_hash: string }>("SELECT request_hash FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?", tenant, storedUserId, request.mutationId)[0];
@@ -426,7 +434,7 @@ export class AiWorkspaceRepository {
       if (prior) {
         if (prior.request_hash !== hash) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于不同内容，请重新同步");
         // A delayed retry must not overwrite newer changes from this or another client.
-        return current;
+        return acknowledge(current);
       }
       if (current.revision !== request.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台已在其他窗口更新，本次未覆盖任何记录，请同步后重试");
       // Older clients do not know this optional draft field. Preserve it on
@@ -453,7 +461,7 @@ export class AiWorkspaceRepository {
       this.sql.exec("INSERT INTO ai_workspace_mutations(user_id,tenant_id,mutation_id,request_hash,revision) VALUES(?,?,?,?,?)", storedUserId, tenant, request.mutationId, hash, revision);
       // Compact receipts, not user records. Older requests still fail CAS and cannot replay writes.
       this.sql.exec("DELETE FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND revision<=?", tenant, storedUserId, Math.max(0, revision - 2048));
-      return { revision, schemaVersion: 1, updatedAt, state: stateToSave };
+      return acknowledge({ revision, schemaVersion: 1, updatedAt, state: stateToSave });
     });
   }
 }

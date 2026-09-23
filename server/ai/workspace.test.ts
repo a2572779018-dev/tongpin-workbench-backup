@@ -13,6 +13,7 @@ import { AiWorkspaceRepository, validateAiWorkspaceState } from "./workspace";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
 import { completedReply } from "../../src/features/tongpin-ai/chatRequests";
+import { WorkspaceSaveQueue } from "../../src/features/tongpin-ai/workspaceSync";
 import type { AiHarnessStep, AiHarnessTrace } from "../../shared/ai";
 
 // Keep Worker global types out of the browser/Node tsconfig. The Worker source is
@@ -119,15 +120,39 @@ describe("AI durable member workspace", () => {
     await repository.save("member-a", saveRequest(state));
     const oldWrite = saveRequest(fixture(), 1);
     const saved = await repository.save("member-a", oldWrite);
-    expect(saved.state!.videoDraftSettings).toEqual(state.videoDraftSettings);
+    expect(saved.state).toEqual(oldWrite.state);
+    expect(repository.read("member-a").state!.videoDraftSettings).toEqual(state.videoDraftSettings);
     expect(await repository.save("member-a", oldWrite)).toEqual(saved);
     const deleted = fixture();
     deleted.conversations = []; deleted.artifacts = []; deleted.activeConversationId = null;
     delete deleted.drafts["chat-a"];
     const cleaned = await repository.save("member-a", saveRequest(deleted, 2));
-    expect(cleaned.state!.videoDraftSettings).toEqual({ "new-conversation": preferences });
+    expect(cleaned.state).toEqual(deleted);
+    expect(repository.read("member-a").state!.videoDraftSettings).toEqual({ "new-conversation": preferences });
     const cleared = { ...deleted, videoDraftSettings: {} };
     expect((await repository.save("member-a", saveRequest(cleared, 3))).state!.videoDraftSettings).toEqual({});
+    // An old retry after a newer write must report the newer revision, not
+    // masquerade as acknowledgement of the stale mutation.
+    expect((await repository.save("member-a", oldWrite)).revision).toBe(4);
+  });
+  it("acknowledges legacy saves without causing the old exact-echo queue to conflict", async () => {
+    const state = fixture();
+    state.videoDraftSettings = { "chat-a": { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" } };
+    const initial = await repository.save("member-a", saveRequest(state));
+    const statuses: string[] = [];
+    const queue = new WorkspaceSaveQueue(initial,
+      body => repository.save("member-a", body),
+      status => { statuses.push(status); },
+    );
+    const legacyState = fixture();
+    legacyState.drafts["chat-a"] = "旧版客户端新增的草稿";
+    expect(await queue.saveNow(legacyState)).toBe(true);
+    expect(statuses.at(-1)).toBe("saved");
+    expect(queue.isDirty()).toBe(false);
+    const canonical = repository.read("member-a");
+    expect(canonical.revision).toBe(2);
+    expect(canonical.state!.drafts["chat-a"]).toBe("旧版客户端新增的草稿");
+    expect(canonical.state!.videoDraftSettings).toEqual(state.videoDraftSettings);
   });
   it("round-trips a bounded public analysis summary as inert message data", async () => {
     const state = fixture();
@@ -422,6 +447,17 @@ describe("AI durable member workspace", () => {
     const restored = await invoke(repository, "GET", undefined, actor(), "?ignored=1");
     expect(restored.status).toBe(200);
     expect((await restored.json() as AiWorkspaceSnapshot).state!.conversations[0].messages[1].trace).toEqual(state.conversations[0].messages[1].trace);
+  });
+  it("Cloudflare route echoes a legacy save while GET retains newer video preferences", async () => {
+    const state = fixture();
+    state.videoDraftSettings = { "chat-a": { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" } };
+    expect((await invoke(repository, "PUT", saveRequest(state))).status).toBe(200);
+    const legacy = saveRequest(fixture(), 1);
+    const saved = await invoke(repository, "PUT", legacy);
+    expect(saved.status).toBe(200);
+    expect((await saved.json() as AiWorkspaceSnapshot).state).toEqual(legacy.state);
+    const read = await invoke(repository, "GET");
+    expect((await read.json() as AiWorkspaceSnapshot).state!.videoDraftSettings).toEqual(state.videoDraftSettings);
   });
   it("Cloudflare route denies admin, ungranted boss and inactive actors, and ignores account queries", async () => {
     expect((await invoke(repository, "GET", undefined, actor("admin", "admin"))).status).toBe(403);
