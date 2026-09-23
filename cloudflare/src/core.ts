@@ -873,7 +873,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         const user = await this.requireUser(request, path.startsWith("/api/admin/") ? ["admin"] : undefined);
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
         if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);
-        return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray(), this.difyRouteOptions(), task => this.ctx.waitUntil(task));
+        return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray(), task => this.ctx.waitUntil(task));
       }
 
       if (path === AI_INTERNAL_AGENT_TICK_PATH) {

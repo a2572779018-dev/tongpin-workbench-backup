@@ -58,7 +58,7 @@ describe("Cloudflare authenticated media-task routes", () => {
       ...((body === undefined && rawBody === undefined) ? {} : { "content-type": "application/json" }),
     },
     ...((body === undefined && rawBody === undefined) ? {} : { body: rawBody ?? JSON.stringify(body) }),
-  }), service, actor, users, {}, keepAlive);
+  }), service, actor, users, keepAlive);
   const jsonTask = async (response: Response) => (await response.json() as { task: Record<string, any> }).task;
   const quickly = async <T,>(promise: Promise<T>): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;

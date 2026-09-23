@@ -13,23 +13,36 @@
     "tongpin_conversation_id",
     "tongpin_run_id",
     "tongpin_attempt_id",
+    "tongpin_request_id",
+    "tongpin_source_asset_ids_json",
     "tongpin_tool_authorization"
   ],
   "toolProvider": {
     "id": "tongpin/tongpin_gateway",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "minimumDifyVersion": "1.14.2",
     "tool": "invoke_tongpin_tool",
-    "modelVisibleParameters": ["tool_name", "input_json"],
+    "modelVisibleParameters": ["tool_name"],
     "boundParameters": [
       "tenant_id",
       "user_id",
       "conversation_id",
       "run_id",
       "attempt_id",
+      "request_id",
       "source_asset_ids_json",
       "authorization"
-    ]
+    ],
+    "parameterBindings": {
+      "tenant_id": "tongpin_tenant_id",
+      "user_id": "tongpin_user_id",
+      "conversation_id": "tongpin_conversation_id",
+      "run_id": "tongpin_run_id",
+      "attempt_id": "tongpin_attempt_id",
+      "request_id": "tongpin_request_id",
+      "source_asset_ids_json": "tongpin_source_asset_ids_json",
+      "authorization": "tongpin_tool_authorization"
+    }
   },
   "invariants": {
     "singleDecisionEngine": true,

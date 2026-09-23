@@ -157,7 +157,7 @@ export class DifyToolRuntime {
       if (!current || this.planHash(current) !== grant.planHash || current.toolPlanConsumedBy || jsonHash(this.settings()) !== grant.configHash) invalid("DIFY_TOOL_PLAN_MISMATCH", "方案或配置已改变，请重新确认", 409);
       this.store.sql.exec("INSERT INTO ai_dify_tool_grants VALUES(?,?,?,?,?,?,?)", hash(token), context.tenantId, context.userId, planId, requestId, expiresAt, JSON.stringify(grant));
     });
-    return { authorization: token, claims, input: { requestId } };
+    return { authorization: token, claims, input: { requestId }, toolBinding: { approvedRequestId: requestId, sourceAssetIds } };
   }
   private grant(token: string): Grant {
     if (typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)) invalid("DIFY_TOOL_AUTH_INVALID", "Dify 工具授权无效");

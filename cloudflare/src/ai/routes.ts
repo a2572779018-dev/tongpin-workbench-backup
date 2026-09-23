@@ -4,7 +4,6 @@ import { ApiError, json, type UserRow } from "../platform";
 import type { AiMode } from "../../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
 import { createChatStreamResponse } from "../../../server/ai/chatStream";
-import { createDifyGrantResponse, type DifyRouteOptions } from "../../../server/ai/difyRuntimeRoutes";
 import {
   createAiServiceMediaTaskOrchestrator,
   type MediaTaskConfirmation,
@@ -62,7 +61,7 @@ async function parseAiJson<T = unknown>(request: Request): Promise<T> {
   } finally { reader.releaseLock(); }
 }
 
-export async function handleAiRequest(request: Request, service: AiService, user: UserRow, users: () => UserRow[], dify: DifyRouteOptions = {}, keepAlive?: (task: Promise<void>) => void): Promise<Response> {
+export async function handleAiRequest(request: Request, service: AiService, user: UserRow, users: () => UserRow[], keepAlive?: (task: Promise<void>) => void): Promise<Response> {
   try {
     const url = new URL(request.url);
     const { pathname: path } = url;
@@ -74,7 +73,6 @@ export async function handleAiRequest(request: Request, service: AiService, user
     service = service.forTenant(tenantId);
     if (path.startsWith("/api/admin/ai/") && user.role !== "admin") throw new AiError(403, "FORBIDDEN", "你没有访问此功能的权限");
     if (path.startsWith("/api/ai/") && user.role !== "member" && user.role !== "boss") throw new AiError(403, "AI_MEMBER_REQUIRED", "请使用成员或老板账号访问 AI 工作台");
-    if (path === "/api/ai/dify/grants" && method === "POST") return createDifyGrantResponse(service, { tenantId, userId: user.id }, await parseAiJson(request), dify);
     if (path === "/api/admin/ai/video" && method === "GET") return json({ settings: service.video.settings(), pending: service.video.adminPending() });
     if (path === "/api/admin/ai/video" && method === "PUT") return json({ settings: await service.video.configure(await parseAiJson(request)) });
     if (path === "/api/admin/ai/video/test" && method === "POST") return json(await service.video.test());

@@ -13,7 +13,8 @@ function fragmentedSse(events: Record<string, unknown>[], fragment = 11) {
 
 const input = {
   tenantId: "tenant-a", userId: "member-1", conversationId: "conversation-a",
-  runId: "run-a", attemptId: "attempt-a", query: "查询后总结", toolAuthorization: "signed-grant",
+  runId: "run-a", attemptId: "attempt-1234567890", query: "查询后总结", toolAuthorization: "signed-grant",
+  approvedRequestId: "attempt-1234567890", sourceAssetIds: ["asset-a"],
 };
 
 describe("Dify engine adapter", () => {
@@ -37,15 +38,70 @@ describe("Dify engine adapter", () => {
       response_mode: "streaming", query: input.query, user: "tenant-a:member-1",
       inputs: {
         tongpin_tenant_id: "tenant-a", tongpin_user_id: "member-1", tongpin_conversation_id: "conversation-a",
-        tongpin_run_id: "run-a", tongpin_attempt_id: "attempt-a", tongpin_tool_authorization: "signed-grant",
+        tongpin_run_id: "run-a", tongpin_attempt_id: "attempt-1234567890", tongpin_request_id: "attempt-1234567890",
+        tongpin_source_asset_ids_json: '["asset-a"]', tongpin_tool_authorization: "signed-grant",
       },
     });
+    expect(String(requestBody?.query)).not.toContain(input.approvedRequestId);
+    expect(String(requestBody?.query)).not.toContain(input.toolAuthorization);
     expect(result).toMatchObject({ engine: "dify", status: "completed", answer: "已完成", remoteTaskId: "task-remote", remoteConversationId: "conversation-remote" });
     expect(emitted).toEqual(["run_started", "tool_started", "tool_progress", "tool_finished", "tool_started", "tool_progress", "tool_finished", "answer_delta", "usage_updated", "run_finished"]);
     expect(JSON.stringify(result.events)).not.toContain("private tool output");
     expect(JSON.stringify(result.events)).not.toContain("second private output");
     expect(JSON.stringify(result.events)).not.toContain("{hidden}");
     expect(result.events.map(event => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it("rejects missing, changed, duplicate or oversized approval bindings before contacting Dify", async () => {
+    const fetchImpl = vi.fn();
+    const adapter = new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl });
+    for (const binding of [
+      { approvedRequestId: "other-request-123456" },
+      { approvedRequestId: "" },
+      { sourceAssetIds: ["asset-a", "asset-a"] },
+      { sourceAssetIds: Array.from({ length: 30 }, (_, index) => `asset-${index}-${"x".repeat(180)}`) },
+    ]) {
+      await expect(adapter.run({ ...input, ...binding })).rejects.toMatchObject({ code: "DIFY_INPUT_INVALID", outcome: "not_started" });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([403, 429, 500, 503])("treats HTTP %i after POST as an unknown, non-retryable outcome", async status => {
+    const fetchImpl = vi.fn(async () => new Response("request rejected", { status }));
+    const adapter = new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl });
+    await expect(adapter.run(input)).rejects.toMatchObject({ code: "DIFY_REQUEST_REJECTED", outcome: "unknown", retryable: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a network failure before the first SSE task ID", async () => {
+    const fetchImpl = vi.fn(async () => { throw new TypeError("connection closed after sending request"); });
+    const adapter = new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl });
+    await expect(adapter.run(input)).rejects.toMatchObject({ code: "DIFY_UNAVAILABLE", outcome: "unknown", retryable: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a timeout before the first SSE task ID", async () => {
+    const fetchImpl = vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const abort = () => reject(new DOMException("request aborted", "AbortError"));
+      if (init?.signal?.aborted) abort();
+      else init?.signal?.addEventListener("abort", abort, { once: true });
+    }));
+    const adapter = new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", timeoutMs: 5, fetchImpl });
+    await expect(adapter.run(input)).rejects.toMatchObject({ code: "DIFY_TIMEOUT", outcome: "unknown", retryable: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a malformed SSE frame without a task ID as unknown after POST", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: {not-json}\n\n"));
+        controller.close();
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+    const adapter = new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "server-secret", fetchImpl });
+    await expect(adapter.run(input)).rejects.toMatchObject({ code: "DIFY_PROTOCOL_ERROR", outcome: "unknown", retryable: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("does not append the Agent closing full message to already streamed agent_message deltas", async () => {

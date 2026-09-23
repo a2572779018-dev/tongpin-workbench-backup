@@ -8,7 +8,7 @@ description:
   human:
     en_US: Runs a tool through Tongpin permission, quota, asset and idempotency checks.
     zh_Hans: 通过同频的权限、额度、素材与幂等检查执行工具。
-  llm: Use only the named tool required by the task. A rejection or unknown result must be returned to the user; never retry it under another name.
+  llm: Select only the tool required by the task. A rejection or unknown result must be returned to the user; never retry it under another name.
 parameters:
   - name: tool_name
     type: string
@@ -21,17 +21,6 @@ parameters:
       en_US: A tool allowed by the current Tongpin authorization.
       zh_Hans: 本次同频授权允许的工具。
     llm_description: Select one tool explicitly allowed for this task.
-  - name: input_json
-    type: string
-    required: true
-    form: llm
-    label:
-      en_US: Tool input JSON
-      zh_Hans: 工具参数 JSON
-    human_description:
-      en_US: Strict JSON arguments for the selected tool.
-      zh_Hans: 所选工具的严格 JSON 参数。
-    llm_description: Provide one strict JSON object. Do not include credentials, tenant ids or asset ids not supplied by the task.
   - name: tenant_id
     type: string
     required: true
@@ -62,13 +51,18 @@ parameters:
     form: form
     label: { en_US: Attempt binding, zh_Hans: 尝试绑定 }
     human_description: { en_US: Bind to the tongpin_attempt_id app input., zh_Hans: 绑定 tongpin_attempt_id 应用输入。 }
+  - name: request_id
+    type: string
+    required: true
+    form: form
+    label: { en_US: Approved request binding, zh_Hans: 已批准执行编号绑定 }
+    human_description: { en_US: Bind to the tongpin_request_id app input. Never expose it to the model., zh_Hans: 绑定 tongpin_request_id 应用输入，不向模型暴露。 }
   - name: source_asset_ids_json
     type: string
     required: true
-    default: "[]"
     form: form
     label: { en_US: Authorized source asset ids, zh_Hans: 已授权素材 ID }
-    human_description: { en_US: Bind the exact authorized asset id JSON array., zh_Hans: 绑定精确的已授权素材 ID JSON 数组。 }
+    human_description: { en_US: Bind to the tongpin_source_asset_ids_json app input. Never expose it to the model., zh_Hans: 绑定 tongpin_source_asset_ids_json 应用输入，不向模型暴露。 }
   - name: authorization
     type: string
     required: true

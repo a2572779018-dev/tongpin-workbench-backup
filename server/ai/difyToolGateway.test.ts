@@ -92,6 +92,37 @@ describe("Dify controlled tool gateway", () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
+  it("reads current status on each same-ID read-only poll and rechecks authorization", async () => {
+    const store = new MemoryToolStore();
+    let status = "queued";
+    let authorized = true;
+    const verifyAuthorization = vi.fn(async (token: string) => {
+      if (!authorized) throw new Error("grant revoked");
+      return claims(token);
+    });
+    const execute = vi.fn(async () => ({ output: { status }, accounting: { kind: "read_only" as const } }));
+    const readOnly = new DifyToolGateway({ store, execute, now: () => 1_000, verifyAuthorization, isReadOnly: name => name === "lookup" });
+    expect((await readOnly.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).output).toEqual({ status: "queued" });
+    status = "completed";
+    expect((await readOnly.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).output).toEqual({ status: "completed" });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(verifyAuthorization).toHaveBeenCalledTimes(2);
+    expect(store.records.size).toBe(0);
+    authorized = false;
+    await expect(readOnly.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" })).rejects.toMatchObject({ code: "DIFY_TOOL_AUTH_INVALID" });
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("enforces the output-size limit on uncached read-only results", async () => {
+    const readOnly = new DifyToolGateway({
+      store: new MemoryToolStore(), now: () => 1_000, verifyAuthorization: async token => claims(token),
+      isReadOnly: name => name === "lookup",
+      execute: async () => ({ output: { payload: "x".repeat(256 * 1024) }, accounting: { kind: "read_only" } }),
+    });
+    await expect(readOnly.invoke(invocation(), { tenantId: "tenant-a", userId: "member-1" }))
+      .rejects.toMatchObject({ code: "DIFY_TOOL_RESULT_TOO_LARGE", status: 409 });
+  });
+
   it("rejects a reservation for another request and any charged result from a read-only tool", async () => {
     const wrongReservation = new DifyToolGateway({
       store: new MemoryToolStore(), now: () => 1_000, verifyAuthorization: async token => claims(token),

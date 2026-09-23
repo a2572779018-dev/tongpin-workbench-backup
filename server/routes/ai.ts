@@ -8,7 +8,6 @@ import type { JsonStore } from "../store";
 import type { AiMode } from "../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../ai/tenant";
 import { createChatStreamResponse } from "../ai/chatStream";
-import { createDifyGrantResponse, type DifyRouteOptions } from "../ai/difyRuntimeRoutes";
 import {
   createAiServiceMediaTaskOrchestrator,
   type MediaTaskConfirmation,
@@ -29,7 +28,7 @@ function mediaTaskScope(run: MediaTaskRun, tenantId: string, userId: string): Me
   return run;
 }
 
-export function createAiRouter(service: AiService, users: JsonStore, requireAuth: ReturnType<typeof import("../middleware").createRequireAuth>, admin = false, dify: DifyRouteOptions = {}): Router {
+export function createAiRouter(service: AiService, users: JsonStore, requireAuth: ReturnType<typeof import("../middleware").createRequireAuth>, admin = false): Router {
   const router = Router();
   const scoped = (request: import("express").Request) => service.forTenant(aiTenantIdFromPrincipal(request.currentUser));
   const video = (request: import("express").Request) => scoped(request).video;
@@ -105,11 +104,6 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.get("/usage", (request, response) => response.json({ entries: scoped(request).store.usage(typeof request.query.userId === "string" ? request.query.userId : undefined) }));
   } else {
     router.use(requireRole("member", "boss"));
-    router.post("/dify/grants", async (request, response) => {
-      const result = await createDifyGrantResponse(scoped(request), { tenantId: aiTenantIdFromPrincipal(request.currentUser), userId: request.currentUser!.id }, request.body, dify);
-      result.headers.forEach((value, key) => response.set(key, value));
-      response.status(result.status).send(await result.text());
-    });
     router.get("/videos", (request, response) => response.json(video(request).list(request.currentUser!.id, videoTier(request.query.tier))));
     router.post("/video-references", async (request, response) => response.json(await video(request).uploadReference(request.currentUser!.id, request.body)));
     router.post("/video-references/generated-asset", async (request, response) => response.json(await video(request).generatedReferenceSource(request.currentUser!.id, request.body)));

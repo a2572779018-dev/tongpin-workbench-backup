@@ -4,30 +4,13 @@ from typing import Any
 from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
 
-from tools.gateway_client import invoke_gateway, parse_asset_ids, parse_object, stable_tool_call_id
+from tools.gateway_client import build_tool_payload, invoke_gateway
 
 
 class InvokeTongpinTool(Tool):
     def _invoke(self, tool_parameters: dict[str, Any]) -> Generator[ToolInvokeMessage, None, None]:
         try:
-            binding = {
-                "tenantId": str(tool_parameters["tenant_id"]),
-                "userId": str(tool_parameters["user_id"]),
-                "conversationId": str(tool_parameters["conversation_id"]),
-                "runId": str(tool_parameters["run_id"]),
-                "attemptId": str(tool_parameters["attempt_id"]),
-            }
-            tool_name = str(tool_parameters["tool_name"])
-            tool_input = parse_object(str(tool_parameters["input_json"]))
-            asset_ids = parse_asset_ids(str(tool_parameters.get("source_asset_ids_json", "[]")))
-            payload = {
-                **binding,
-                "toolCallId": stable_tool_call_id(binding, tool_name, tool_input, asset_ids),
-                "toolName": tool_name,
-                "input": tool_input,
-                "sourceAssetIds": asset_ids,
-                "authorization": str(tool_parameters["authorization"]),
-            }
+            payload = build_tool_payload(tool_parameters)
             result = invoke_gateway(
                 str(self.runtime.credentials["gateway_url"]),
                 str(self.runtime.credentials["gateway_secret"]),

@@ -6,7 +6,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from tools.gateway_client import invoke_gateway, parse_asset_ids, parse_object, stable_tool_call_id, validate_gateway_url
+from tools.gateway_client import build_tool_payload, invoke_gateway, parse_asset_ids, parse_request_id, stable_tool_call_id, validate_gateway_url
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -47,8 +47,11 @@ class GatewayClientTest(unittest.TestCase):
     def test_rejects_unsafe_urls_and_invalid_parameters(self):
         with self.assertRaises(ValueError): validate_gateway_url("http://example.com/invoke")
         self.assertEqual(validate_gateway_url("https://example.com/invoke"), "https://example.com/invoke")
-        with self.assertRaises(ValueError): parse_object("[]")
+        self.assertEqual(parse_request_id("approved-request-123456"), "approved-request-123456")
+        with self.assertRaises(ValueError): parse_request_id("model-picked")
+        with self.assertRaises(ValueError): parse_request_id(1234567890123456)
         with self.assertRaises(ValueError): parse_asset_ids('["same","same"]')
+        with self.assertRaises(ValueError): parse_asset_ids("")
         with self.assertRaisesRegex(ValueError, "per-run Tongpin grant"):
             invoke_gateway("http://127.0.0.1:4318/api/dify/tools/invoke", "service-credential-for-local-tests-32-bytes", {"authorization": "not-a-grant"})
         with self.assertRaisesRegex(ValueError, "gateway_secret"):
@@ -58,6 +61,23 @@ class GatewayClientTest(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
             with self.assertRaisesRegex(RuntimeError, "result unknown; do not retry"):
                 invoke_gateway("http://127.0.0.1:4318/api/dify/tools/invoke", "service-credential-for-local-tests-32-bytes", {"authorization": "a" * 64})
+
+    def test_plugin_payload_uses_only_bound_request_and_asset_parameters(self):
+        parameters = {
+            "tenant_id": "tenant-a", "user_id": "member-a", "conversation_id": "conversation-a",
+            "run_id": "run-a", "attempt_id": "approved-request-123456", "request_id": "approved-request-123456",
+            "source_asset_ids_json": '["asset-a"]', "authorization": "a" * 64,
+            "tool_name": "video.submit", "input_json": '{"requestId":"model-chosen-request"}',
+        }
+        payload = build_tool_payload(parameters)
+        self.assertEqual(payload["input"], {"requestId": "approved-request-123456"})
+        self.assertEqual(payload["sourceAssetIds"], ["asset-a"])
+        self.assertEqual(payload["authorization"], "a" * 64)
+        self.assertTrue(payload["toolCallId"].startswith("dify-"))
+        with self.assertRaisesRegex(ValueError, "approved attempt"):
+            build_tool_payload({**parameters, "request_id": "another-request-123456"})
+        with self.assertRaises(KeyError):
+            build_tool_payload({key: value for key, value in parameters.items() if key != "source_asset_ids_json"})
 
     def test_preserves_nested_tongpin_auth_error_code_and_http_status(self):
         for status, code in [(401, "DIFY_TOOL_AUTH_INVALID"), (403, "DIFY_TOOL_AUTH_EXPIRED")]:

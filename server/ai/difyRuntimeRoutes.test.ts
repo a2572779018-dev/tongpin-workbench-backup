@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNodeAi } from "./node";
-import { createDifyGrantResponse, createDifyToolResponse, type DifyRouteOptions } from "./difyRuntimeRoutes";
-import { DifySqlToolCallStore } from "./difyRuntime";
+import { createDifyToolResponse, type DifyRouteOptions } from "./difyRuntimeRoutes";
+import { DifySqlToolCallStore, DifyToolRuntime } from "./difyRuntime";
+import { DifyEngineAdapter } from "./difyEngine";
 import { toolPlanContextFingerprint } from "./toolPlans";
 import { AiWorkspaceRepository } from "./workspace";
 import type { AiTransport } from "./provider";
@@ -32,11 +33,6 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
     runtime.service.setQuota("member-b", "admin", { limitTokens: 10_000 });
     options = { config: { enabled: true, appId: "local-test-app" }, serviceSecret: SERVICE_SECRET, principalActive: (tenant, user) => tenant === "default" && ["member-a", "member-b"].includes(user) };
     app = express(); app.use(express.json());
-    // Test-only session fixture. Production approval is mounted behind the existing auth middleware.
-    app.post("/grants", async (req, res) => {
-      const response = await createDifyGrantResponse(runtime.service, { tenantId: "default", userId: String(req.headers["x-fixture-user"] ?? "member-a") }, req.body, options);
-      res.status(response.status).json(await response.json());
-    });
     app.post("/invoke", async (req, res) => {
       const response = await createDifyToolResponse(runtime.service, new Request("http://localhost/api/dify/tools/invoke", { method: "POST", headers: { Authorization: req.headers.authorization ?? "", "X-Dify-Tool-Secret": String(req.headers["x-dify-tool-secret"] ?? "") }, body: JSON.stringify(req.body) }), options);
       res.status(response.status).json(await response.json());
@@ -49,22 +45,21 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
       result: { requestId, content: "Fixture saved plan", model: "quick", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false }, toolPlan: { kind, summary: "fixture", prompt: "one test image", ...(kind === "video" ? { videoParameters: { model: "minimax_h3", seconds: 6, resolution: "768p", aspectRatio: "9:16", referenceCount: 0, referenceFingerprints: [] } } : {}) } } });
     return requestId;
   }
-  async function grant(planRequestId = plan()) {
-    const result = await request(app).post("/grants").send({ planRequestId, requestId: crypto.randomUUID(), maxPoints: 100 }).expect(200);
-    return result.body;
-  }
+  const issueGrant = (value: unknown, userId = "member-a") => new DifyToolRuntime(runtime.service, options.config, options.principalActive).issueGrant({ tenantId: "default", userId }, value);
+  const grant = (planRequestId = plan()) => issueGrant({ planRequestId, requestId: crypto.randomUUID(), maxPoints: 100 });
   function invoke(approved: Awaited<ReturnType<typeof grant>>, overrides: Record<string, unknown> = {}) {
     const { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds } = approved.claims;
     return request(app).post("/invoke").set("Authorization", `Bearer ${approved.authorization}`).set("X-Dify-Tool-Secret", SERVICE_SECRET).send({ tenantId, userId, conversationId, runId, attemptId, sourceAssetIds, toolCallId: `call-${attemptId}`, toolName: "image.generate", input: approved.input, ...overrides });
   }
   it("fails closed without runtime config or active-account verifier and rejects missing callback auth", async () => {
     options = {};
-    await request(app).post("/grants").send({ planRequestId: plan(), requestId: crypto.randomUUID(), maxPoints: 100 }).expect(503);
+    await expect(grant()).rejects.toMatchObject({ status: 503, code: "DIFY_RUNTIME_DISABLED" });
     await request(app).post("/invoke").send({}).expect(503);
     expect(transport).not.toHaveBeenCalled();
   });
   it("requires both the plugin service credential and an approved per-run grant", async () => {
     const approved = await grant();
+    expect(approved.toolBinding).toEqual({ approvedRequestId: approved.input.requestId, sourceAssetIds: approved.claims.sourceAssetIds });
     const { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds } = approved.claims;
     const callback = { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds, toolCallId: `call-${attemptId}`, toolName: "image.generate", input: approved.input };
     const post = () => request(app).post("/invoke").set("Authorization", `Bearer ${approved.authorization}`).send(callback);
@@ -72,6 +67,34 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
     expect((await post().set("X-Dify-Tool-Secret", "wrong-service-credential-32-characters").expect(401)).body.error.code).toBe("DIFY_TOOL_AUTH_INVALID");
     expect((await request(app).post("/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).send(callback).expect(401)).body.error.code).toBe("DIFY_TOOL_AUTH_INVALID");
     expect((await request(app).post("/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${"a".repeat(64)}`).send(callback).expect(403)).body.error.code).toMatch(/^DIFY_TOOL_AUTH_/);
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("delivers the saved approval binding to Dify app inputs without placing it in the model query", async () => {
+    const approved = await grant();
+    let sent: Record<string, unknown> | undefined;
+    const ids = { task_id: "remote-task", message_id: "remote-message", conversation_id: "remote-conversation" };
+    const events = [
+      { event: "message", ...ids, answer: "done" },
+      { event: "message_end", ...ids },
+    ];
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+    const claims = approved.claims;
+    await new DifyEngineAdapter({ baseUrl: "http://127.0.0.1:8080", apiKey: "fixture-app-key", fetchImpl }).run({
+      tenantId: claims.tenantId, userId: claims.userId, conversationId: claims.conversationId,
+      runId: claims.runId, attemptId: claims.attemptId, query: "已批准的测试任务",
+      toolAuthorization: approved.authorization, ...approved.toolBinding,
+    });
+    expect(sent?.inputs).toMatchObject({
+      tongpin_request_id: approved.input.requestId,
+      tongpin_source_asset_ids_json: "[]",
+      tongpin_tool_authorization: approved.authorization,
+    });
+    expect(sent?.query).toBe("已批准的测试任务");
+    expect(JSON.stringify(sent?.query)).not.toContain(approved.authorization);
+    expect(JSON.stringify(sent?.query)).not.toContain(approved.input.requestId);
     expect(transport).not.toHaveBeenCalled();
   });
   it("executes the existing image service once and replays its real ledger after reopening SQLite", async () => {
@@ -86,6 +109,18 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
     expect(runtime.store.quota("member-a")).toMatchObject({ usedTokens: 100, reservedTokens: 0 });
     await invoke(approved, { toolCallId: "call-2" }).expect(422);
     expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("returns a changed saved status on a second request.get poll with the same toolCallId", async () => {
+    const approved = await grant();
+    const query = { toolName: "request.get", toolCallId: "same-status-poll" };
+    const before = await invoke(approved, query).expect(200);
+    expect(before.body).toMatchObject({ output: { status: "not_started" }, accounting: { kind: "read_only" } });
+    await invoke(approved).expect(200);
+    const after = await invoke(approved, query).expect(200);
+    expect(after.body).toMatchObject({ output: { status: "completed" }, accounting: { kind: "read_only" } });
+    expect(after.body.ledger).toBeUndefined();
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.store.usage("member-a").filter(entry => entry.kind === "image")).toHaveLength(1);
   });
   it("freezes unknown provider outcomes durably while allowing a safe saved-result query", async () => {
     transport.mockRejectedValue(new Error("simulated disconnect after submission"));
@@ -117,7 +152,7 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
     expect(runtime.store.quota("member-a")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
   });
   it("rejects another account's plan, cross-account invocation, wrong conversation and changed input", async () => {
-    await request(app).post("/grants").set("x-fixture-user", "member-b").send({ planRequestId: plan(), requestId: crypto.randomUUID(), maxPoints: 100 }).expect(403);
+    await expect(issueGrant({ planRequestId: plan(), requestId: crypto.randomUUID(), maxPoints: 100 }, "member-b")).rejects.toMatchObject({ status: 403 });
     const approved = await grant();
     for (const override of [{ userId: "member-b" }, { tenantId: "other-tenant" }, { conversationId: "conversation-b" }, { input: { requestId: approved.input.requestId, prompt: "changed" } }, { sourceAssetIds: ["stolen-asset"] }, { toolCallId: undefined }]) await invoke(approved, override).expect(response => expect([400, 403]).toContain(response.status));
     expect(transport).not.toHaveBeenCalled();
@@ -131,7 +166,7 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
   });
   it("binds the grant to saved plan and configuration, rechecks available budget, and prevents repeated approval", async () => {
     const planId = plan(), approved = await grant(planId);
-    await request(app).post("/grants").send({ planRequestId: planId, requestId: crypto.randomUUID(), maxPoints: 100 }).expect(409);
+    await expect(issueGrant({ planRequestId: planId, requestId: crypto.randomUUID(), maxPoints: 100 })).rejects.toMatchObject({ status: 409, code: "DIFY_TOOL_GRANT_EXISTS" });
     const stored = runtime.store.request("member-a", planId)!;
     stored.result!.toolPlan!.prompt = "tampered plan"; runtime.store.saveRequest(stored);
     await invoke(approved).expect(422);
@@ -185,20 +220,18 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
     saved.result!.toolPlan!.videoParameters!.referenceFingerprints = [contentHash];
     runtime.store.saveRequest(saved);
     runtime.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", referenceId, "default", referenceId, "member-b", Date.now() + 60_000, JSON.stringify({ chunks: [], fingerprint: contentHash }));
-    const approve = () => request(app).post("/grants").send({ planRequestId: planId, requestId: crypto.randomUUID(), maxPoints: 100, referenceIds: [referenceId] });
-    expect((await approve().expect(403)).body.error.code).toBe("DIFY_TOOL_ASSET_SCOPE_MISMATCH");
+    const approve = () => issueGrant({ planRequestId: planId, requestId: crypto.randomUUID(), maxPoints: 100, referenceIds: [referenceId] });
+    await expect(approve()).rejects.toMatchObject({ status: 403, code: "DIFY_TOOL_ASSET_SCOPE_MISMATCH" });
     runtime.store.sql.exec("UPDATE ai_video_references SET user_id='member-a',expires_at=? WHERE id=?", Date.now() - 1, referenceId);
-    expect((await approve().expect(403)).body.error.code).toBe("DIFY_TOOL_ASSET_SCOPE_MISMATCH");
+    await expect(approve()).rejects.toMatchObject({ status: 403, code: "DIFY_TOOL_ASSET_SCOPE_MISMATCH" });
     runtime.store.sql.exec("UPDATE ai_video_references SET expires_at=? WHERE id=?", Date.now() + 60_000, referenceId);
     runtime.store.sql.exec("UPDATE ai_video_references SET data=? WHERE id=?", JSON.stringify({ chunks: [], fingerprint: contentHash, sourceVideo: { conversationId: "other-conversation", documentId: "source-video", name: "source.mp4", timeSeconds: 1, frameFingerprint: contentHash } }), referenceId);
-    expect((await approve().expect(409)).body.error.code).toBe("AI_VIDEO_SOURCE_CONVERSATION");
+    await expect(approve()).rejects.toMatchObject({ status: 409, code: "AI_VIDEO_SOURCE_CONVERSATION" });
     runtime.store.sql.exec("UPDATE ai_video_references SET data=? WHERE id=?", JSON.stringify({ chunks: [], fingerprint: contentHash, sourceVideo: { conversationId: "conversation-a", documentId: "source-video", name: "source.mp4", timeSeconds: 1, frameFingerprint: contentHash } }), referenceId);
-    expect((await approve().expect(404)).body.error.code).toBe("AI_VIDEO_SOURCE_NOT_FOUND");
+    await expect(approve()).rejects.toMatchObject({ status: 404, code: "AI_VIDEO_SOURCE_NOT_FOUND" });
     runtime.store.sql.exec("UPDATE ai_video_references SET data=? WHERE id=?", JSON.stringify({ chunks: [], fingerprint: contentHash }), referenceId);
     saved.toolPlanExpiresAt = Date.now() - 1; runtime.store.saveRequest(saved);
-    const expired = await approve();
-    expect(expired.status, JSON.stringify(expired.body)).toBe(409);
-    expect(expired.body.error.code).toBe("AI_TOOL_PLAN_EXPIRED");
+    await expect(approve()).rejects.toMatchObject({ status: 409, code: "AI_TOOL_PLAN_EXPIRED" });
     expect(transport).not.toHaveBeenCalled();
   });
   it("rechecks source-video ownership after approval and before any paid callback", async () => {
@@ -209,7 +242,7 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
     saved.result!.toolPlan!.videoParameters!.referenceFingerprints = [contentHash];
     runtime.store.saveRequest(saved);
     runtime.store.sql.exec("INSERT INTO ai_video_references(id,tenant_id,public_id,user_id,expires_at,data) VALUES(?,?,?,?,?,?)", referenceId, "default", referenceId, "member-a", Date.now() + 60_000, JSON.stringify({ chunks: [], fingerprint: contentHash }));
-    const approved = (await request(app).post("/grants").send({ planRequestId: planId, requestId: crypto.randomUUID(), maxPoints: 100, referenceIds: [referenceId] }).expect(200)).body;
+    const approved = await issueGrant({ planRequestId: planId, requestId: crypto.randomUUID(), maxPoints: 100, referenceIds: [referenceId] });
     runtime.store.sql.exec("UPDATE ai_video_references SET data=? WHERE id=?", JSON.stringify({ chunks: [], fingerprint: contentHash, sourceVideo: { conversationId: "conversation-a", documentId: "missing-video", name: "source.mp4", timeSeconds: 1, frameFingerprint: contentHash } }), referenceId);
     const blocked = await invoke(approved, { toolName: "video.submit" }).expect(422);
     expect(blocked.body.error.code).toBe("AI_VIDEO_SOURCE_NOT_FOUND");

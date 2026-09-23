@@ -32,6 +32,9 @@ export interface DifyEngineRunInput {
   attemptId: string;
   query: string;
   toolAuthorization: string;
+  /** Immutable execution ID and assets returned by Tongpin's approval action. */
+  approvedRequestId: string;
+  sourceAssetIds: string[];
   remoteConversationId?: string;
   inputs?: Record<string, string | number | boolean>;
 }
@@ -139,8 +142,8 @@ async function* ssePayloads(body: ReadableStream<Uint8Array>, maxEventBytes: num
 
 /**
  * Adapter for a Dify Agent/Chatflow Service API application. It never retries
- * a run: once a remote task id is observed, a disconnect is an unknown outcome
- * that must be reconciled by the owning task service.
+ * a run: once the POST is attempted, even a response without a remote task id
+ * may represent an executed task and must be reconciled by the owning service.
  */
 export class DifyEngineAdapter {
   private readonly fetchImpl: typeof fetch;
@@ -172,6 +175,15 @@ export class DifyEngineAdapter {
     const conversationId = requiredId(input.conversationId, "conversationId");
     const runId = requiredId(input.runId, "runId");
     const attemptId = requiredId(input.attemptId, "attemptId");
+    const approvedRequestId = requiredId(input.approvedRequestId, "approvedRequestId");
+    if (!/^[A-Za-z0-9_-]{16,100}$/.test(approvedRequestId) || approvedRequestId !== attemptId) {
+      throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 已批准执行编号与任务不一致", "not_started", false);
+    }
+    if (!Array.isArray(input.sourceAssetIds) || input.sourceAssetIds.some(assetId => typeof assetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(assetId)) || new Set(input.sourceAssetIds).size !== input.sourceAssetIds.length) {
+      throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 已批准素材编号无效", "not_started", false);
+    }
+    const sourceAssetIdsJson = JSON.stringify(input.sourceAssetIds);
+    if (sourceAssetIdsJson.length > 4_096) throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 已批准素材编号过多", "not_started", false);
     if (!input.query.trim()) throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 任务内容为空", "not_started", false);
     if (!input.toolAuthorization.trim()) throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 工具授权缺失", "not_started", false);
     const controller = new AbortController();
@@ -215,6 +227,8 @@ export class DifyEngineAdapter {
         tongpin_conversation_id: conversationId,
         tongpin_run_id: runId,
         tongpin_attempt_id: attemptId,
+        tongpin_request_id: approvedRequestId,
+        tongpin_source_asset_ids_json: sourceAssetIdsJson,
         tongpin_tool_authorization: input.toolAuthorization,
       },
       query: input.query,
@@ -222,22 +236,25 @@ export class DifyEngineAdapter {
       conversation_id: suppliedRemoteConversationId ?? "",
       user: `${tenantId}:${userId}`,
     };
+    let requestMayHaveReachedDify = false;
     try {
+      const body = JSON.stringify(payload);
+      requestMayHaveReachedDify = true;
       const response = await this.fetchImpl(endpoint(this.config.baseUrl, "/chat-messages"), {
         method: "POST",
         headers: { Authorization: `Bearer ${this.config.apiKey}`, "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify(payload),
+        body,
         signal: controller.signal,
       });
       if (!response.ok) {
         const message = bounded(await response.text(), 300);
-        throw new DifyEngineError("DIFY_REQUEST_REJECTED", `Dify 拒绝任务（HTTP ${response.status}）${message ? `：${message}` : ""}`, "not_started", response.status >= 500 || response.status === 429);
+        throw new DifyEngineError("DIFY_REQUEST_REJECTED", `Dify 拒绝任务（HTTP ${response.status}）${message ? `：${message}` : ""}`, "unknown", false);
       }
       if (!response.body) throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 未返回事件流", "unknown", false);
       for await (const raw of ssePayloads(response.body, this.maxEventBytes, this.maxResponseBytes)) {
         let item: Record<string, unknown>;
         try { item = JSON.parse(raw) as Record<string, unknown>; }
-        catch { throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 返回了无效事件", remoteTaskId ? "unknown" : "not_started", false); }
+        catch { throw new DifyEngineError("DIFY_PROTOCOL_ERROR", "Dify 返回了无效事件", "unknown", false); }
         const event = bounded(item.event, 80);
         // Chatflow emits workflow_finished after message_end; other chat apps
         // do not. Delay all success events until the complete stream closes.
@@ -326,9 +343,17 @@ export class DifyEngineAdapter {
       emit({ type: "run_finished", stepId: remoteMessageId || `dify:${attemptId}`, ...final });
       return { engine: "dify", status: "completed", answer, remoteTaskId, ...(remoteMessageId ? { remoteMessageId } : {}), remoteConversationId, ...(remoteWorkflowRunId ? { remoteWorkflowRunId } : {}), events };
     } catch (error) {
-      if (error instanceof DifyEngineError) throw error;
+      if (error instanceof DifyEngineError) {
+        if (requestMayHaveReachedDify && error.outcome === "not_started") {
+          throw new DifyEngineError(error.code, error.message, "unknown", false);
+        }
+        throw error;
+      }
+      if (!requestMayHaveReachedDify) {
+        throw new DifyEngineError("DIFY_INPUT_INVALID", "Dify 输入变量无法编码", "not_started", false);
+      }
       const timedOut = controller.signal.aborted;
-      throw new DifyEngineError(timedOut ? "DIFY_TIMEOUT" : "DIFY_UNAVAILABLE", timedOut ? "Dify 任务超时，未知是否已在远程执行" : "无法连接 Dify 运行环境", remoteTaskId ? "unknown" : "not_started", !remoteTaskId);
+      throw new DifyEngineError(timedOut ? "DIFY_TIMEOUT" : "DIFY_UNAVAILABLE", timedOut ? "Dify 任务超时，未知是否已在远程执行" : "无法连接 Dify 运行环境，未知是否已在远程执行", "unknown", false);
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);

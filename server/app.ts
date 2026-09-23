@@ -191,7 +191,7 @@ export async function createRuntime(
     response.status(image.status).send(Buffer.from(await image.arrayBuffer()));
   });
   app.use("/api/admin/ai", createAiRouter(ai.service, store, requireAuth, true));
-  app.use("/api/ai", createAiRouter(ai.service, store, requireAuth, false, dify));
+  app.use("/api/ai", createAiRouter(ai.service, store, requireAuth, false));
   app.use("/api/admin", createAdminRouter(store, requireAuth));
   app.use(
     "/api/boss/lora-chain",

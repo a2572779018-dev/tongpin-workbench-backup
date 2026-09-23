@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { AiService } from "./service";
 import { AiError } from "./security";
-import { DifyToolGatewayError, type DifyToolExecutionContext } from "./difyToolGateway";
+import { DifyToolGatewayError } from "./difyToolGateway";
 import { DifyToolRuntime, type DifyRuntimeConfig } from "./difyRuntime";
 
 export interface DifyRouteOptions {
@@ -50,17 +50,6 @@ async function body(request: Request): Promise<Record<string, unknown>> {
   catch { throw new DifyToolGatewayError("DIFY_TOOL_INPUT_INVALID", "Dify 请求不是有效 JSON", 400); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new DifyToolGatewayError("DIFY_TOOL_INPUT_INVALID", "Dify 请求格式无效", 400);
   return value as Record<string, unknown>;
-}
-
-/** Mount behind the existing member authentication and account-change guard.
- * Calling this approval action authorizes only the saved plan and bounded points.
- */
-export async function createDifyGrantResponse(service: AiService, context: DifyToolExecutionContext, value: unknown, options: DifyRouteOptions = {}): Promise<Response> {
-  try {
-    configuredServiceSecret(options);
-    return response(await new DifyToolRuntime(service.forTenant(context.tenantId), options.config, options.principalActive).issueGrant(context, value));
-  }
-  catch (error) { return failure(error); }
 }
 
 /** Mount separately from browser-session auth. The static plugin credential

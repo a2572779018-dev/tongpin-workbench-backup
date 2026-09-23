@@ -8,7 +8,6 @@ import type { UserRow } from "../platform";
 import { handleAiRequest } from "./routes";
 import { AiPersonaRepository } from "../../../server/ai/persona";
 import { toolPlanContextFingerprint } from "../../../server/ai/toolPlans";
-import type { DifyRouteOptions } from "../../../server/ai/difyRuntimeRoutes";
 
 describe("Cloudflare AI route contract with shared transactional service", () => {
   let database: DatabaseSync;
@@ -19,7 +18,7 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
   const user = (id: string, role: UserRow["role"] = "member"): UserRow => ({ id, name: id, role, status: "active", email: `${id}@example.com`, password_hash: "never-return-password", job_title: "", avatar_seed: 1, avatar_version: 0, avatar_data_url: null, email_verified_at: "2026-09-05T00:00:00Z", last_login_at: null, created_at: "2026-09-05T00:00:00Z", updated_at: "2026-09-05T00:00:00Z" });
   const admin = user("admin", "admin"), a = user("a"), b = user("b"), boss = user("boss", "boss");
   const provider = { name: "Test", baseUrl: "https://provider.example.com", apiKey: "private-test-key", protocol: "responses", quickModel: "quick", deepModel: "deep", maxOutputTokens: 1024, reasoningEffort: "", enabled: true };
-  const invoke = (path: string, method: string, actor = admin, body?: unknown, headers: Record<string, string> = {}, dify?: DifyRouteOptions) => handleAiRequest(new Request(`https://tongpin.example.com${path}`, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), service, actor, () => [admin, a, b, boss], dify);
+  const invoke = (path: string, method: string, actor = admin, body?: unknown, headers: Record<string, string> = {}) => handleAiRequest(new Request(`https://tongpin.example.com${path}`, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), service, actor, () => [admin, a, b, boss]);
   const saveToolPlan = (actor: UserRow, plan: { kind: "image"; prompt: string } | { kind: "video"; prompt: string; videoParameters: { model: string; seconds: number; resolution: string; aspectRatio: "16:9" | "9:16"; referenceCount: number; referenceFingerprints: string[] } }) => {
     const requestId = crypto.randomUUID();
     store.saveRequest({
@@ -49,7 +48,7 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     service = new AiService(store, () => createSecretBox("test-encryption-secret-with-at-least-32-bytes"), transport);
   });
   afterEach(() => { database.close(); });
-  it("mounts Dify approval behind active member and account checks while disabled by default", async () => {
+  it("does not expose Dify tool capabilities from a member HTTP route", async () => {
     await service.saveProvider({ ...provider, imageModel: "fixture-image", imageQuotaTokens: 100 });
     service.setQuota("a", "admin", { limitTokens: 1000 });
     const planRequestId = saveToolPlan(a, { kind: "image", prompt: "one fixture image" });
@@ -60,12 +59,8 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     const approval = { planRequestId, requestId: crypto.randomUUID(), maxPoints: 100 };
     expect((await invoke("/api/ai/dify/grants", "POST", admin, approval)).status).toBe(403);
     expect((await invoke("/api/ai/dify/grants", "POST", a, approval, { "X-Tongpin-Account": "b" })).status).toBe(409);
-    expect((await invoke("/api/ai/dify/grants", "POST", a, approval)).status).toBe(503);
-    const dify: DifyRouteOptions = { config: { enabled: true, appId: "cloudflare-fixture-app" }, serviceSecret: "cloudflare-route-test-service-credential-32-bytes", principalActive: (tenantId, userId) => tenantId === "default" && userId === "a" };
-    const granted = await invoke("/api/ai/dify/grants", "POST", a, approval, {}, dify);
-    expect(granted.status).toBe(200);
-    expect(granted.headers.get("cache-control")).toBe("no-store");
-    expect(await granted.json()).toMatchObject({ claims: { tenantId: "default", userId: "a", conversationId: "cloudflare-conversation", maxPoints: 100 }, input: { requestId: approval.requestId } });
+    expect((await invoke("/api/ai/dify/grants", "POST", a, approval)).status).toBe(404);
+    expect((await invoke("/api/ai/dify/grants", "GET", a)).status).toBe(404);
     expect(transport).not.toHaveBeenCalled();
   });
   it("keeps availability authenticated, account-bound, no-store and non-generating", async () => {

@@ -79,6 +79,7 @@ export interface DifyToolGatewayDependencies {
   store: DifyToolCallStore;
   execute(request: Omit<DifyToolInvocation, "authorization">, claims: DifyToolGrantClaims): Promise<DifyToolExecutionResult>;
   now?: () => number;
+  /** Only mark tools with no side effects, such as request.get, as read-only. */
   isReadOnly?: (toolName: string) => boolean;
 }
 
@@ -149,19 +150,8 @@ export class DifyToolGateway {
     if (!sameSet(invocation.sourceAssetIds, claims.sourceAssetIds)) throw new DifyToolGatewayError("DIFY_TOOL_ASSET_SCOPE_MISMATCH", "Dify 工具素材与已授权素材不匹配", 403);
     const { authorization: _authorization, ...request } = invocation;
     const hash = requestHash(request);
-    const scope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.toolCallId}`;
-    const runScope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.runId}`;
     const readOnly = this.dependencies.isReadOnly?.(invocation.toolName) === true;
-    const reservation = await this.dependencies.store.reserve(scope, runScope, hash, { readOnly });
-    if (reservation.kind === "run_blocked") throw new DifyToolGatewayError("DIFY_RUN_OUTCOME_UNKNOWN", "父任务存在结果未知的工具调用，调和前禁止新执行", 409);
-    if (reservation.kind === "conflict") throw new DifyToolGatewayError("DIFY_TOOL_IDEMPOTENCY_CONFLICT", "相同 toolCallId 已绑定其他参数", 409);
-    if (reservation.kind === "in_progress") throw new DifyToolGatewayError("DIFY_TOOL_IN_PROGRESS", "该工具调用正在执行，请只查询原任务", 409);
-    if (reservation.kind === "replay") {
-      if (reservation.record.status === "succeeded" && reservation.record.result) return reservation.record.result;
-      if (reservation.record.status === "unknown") throw new DifyToolGatewayError("DIFY_TOOL_OUTCOME_UNKNOWN", "原工具调用结果未知，禁止重复执行", 409);
-      throw new DifyToolGatewayError(reservation.record.errorCode ?? "DIFY_TOOL_FAILED", "原工具调用已失败，需要新 toolCallId 才能重试", 409);
-    }
-    try {
+    const executeChecked = async (): Promise<DifyToolExecutionResult> => {
       const result = await this.dependencies.execute(request, claims);
       const encodedOutput = canonical(result.output);
       if (new TextEncoder().encode(encodedOutput).byteLength > 256 * 1024) throw new DifyToolExecutionError("DIFY_TOOL_RESULT_TOO_LARGE", "工具结果超出 Dify 回流限制", "unknown");
@@ -172,13 +162,37 @@ export class DifyToolGateway {
       if (!validLedger && !validAccounting) {
         throw new DifyToolExecutionError("DIFY_TOOL_LEDGER_INVALID", "工具执行未返回与父任务一致的账本记录", "unknown");
       }
+      return result;
+    };
+    const executionFailure = (error: unknown): DifyToolGatewayError => error instanceof DifyToolExecutionError
+      ? new DifyToolGatewayError(error.code, error.message, error.outcome === "not_started" ? 422 : 409)
+      : new DifyToolGatewayError("DIFY_TOOL_OUTCOME_UNKNOWN", "工具调用结果未知，禁止自动重试", 409);
+    // A status query must read the current record on every poll. It has no
+    // side effect to reserve or replay, but still passes every authorization,
+    // input, output-size and no-charge check above and below.
+    if (readOnly) {
+      try { return await executeChecked(); }
+      catch (error) { throw executionFailure(error); }
+    }
+    const scope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.toolCallId}`;
+    const runScope = `${invocation.tenantId}\u0000${invocation.userId}\u0000${invocation.runId}`;
+    const reservation = await this.dependencies.store.reserve(scope, runScope, hash, { readOnly });
+    if (reservation.kind === "run_blocked") throw new DifyToolGatewayError("DIFY_RUN_OUTCOME_UNKNOWN", "父任务存在结果未知的工具调用，调和前禁止新执行", 409);
+    if (reservation.kind === "conflict") throw new DifyToolGatewayError("DIFY_TOOL_IDEMPOTENCY_CONFLICT", "相同 toolCallId 已绑定其他参数", 409);
+    if (reservation.kind === "in_progress") throw new DifyToolGatewayError("DIFY_TOOL_IN_PROGRESS", "该工具调用正在执行，请只查询原任务", 409);
+    if (reservation.kind === "replay") {
+      if (reservation.record.status === "succeeded" && reservation.record.result) return reservation.record.result;
+      if (reservation.record.status === "unknown") throw new DifyToolGatewayError("DIFY_TOOL_OUTCOME_UNKNOWN", "原工具调用结果未知，禁止重复执行", 409);
+      throw new DifyToolGatewayError(reservation.record.errorCode ?? "DIFY_TOOL_FAILED", "原工具调用已失败，需要新 toolCallId 才能重试", 409);
+    }
+    try {
+      const result = await executeChecked();
       await this.dependencies.store.finish(scope, hash, { status: "succeeded", result });
       return result;
     } catch (error) {
       const known = error instanceof DifyToolExecutionError;
       await this.dependencies.store.finish(scope, hash, { status: known && error.outcome === "not_started" ? "failed" : "unknown", errorCode: known ? error.code : "DIFY_TOOL_EXECUTION_UNKNOWN" });
-      if (known) throw new DifyToolGatewayError(error.code, error.message, error.outcome === "not_started" ? 422 : 409);
-      throw new DifyToolGatewayError("DIFY_TOOL_OUTCOME_UNKNOWN", "工具调用结果未知，禁止自动重试", 409);
+      throw executionFailure(error);
     }
   }
 }

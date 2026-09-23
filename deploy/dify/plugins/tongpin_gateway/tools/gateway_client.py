@@ -27,20 +27,43 @@ def validate_gateway_url(value: str) -> str:
     return url
 
 
-def parse_object(value: str) -> dict[str, Any]:
-    parsed = json.loads(value)
-    if not isinstance(parsed, dict):
-        raise ValueError("input_json must be a JSON object")
-    return parsed
+def parse_request_id(value: Any) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,100}", value) is None:
+        raise ValueError("request_id must be an approved Tongpin execution ID")
+    return value
 
 
 def parse_asset_ids(value: str) -> list[str]:
-    parsed = json.loads(value or "[]")
+    parsed = json.loads(value)
     if not isinstance(parsed, list) or any(not isinstance(item, str) or not item for item in parsed):
         raise ValueError("source_asset_ids_json must be a JSON string array")
     if len(set(parsed)) != len(parsed):
         raise ValueError("source asset ids must not repeat")
     return parsed
+
+
+def build_tool_payload(tool_parameters: dict[str, Any]) -> dict[str, Any]:
+    binding = {
+        "tenantId": str(tool_parameters["tenant_id"]),
+        "userId": str(tool_parameters["user_id"]),
+        "conversationId": str(tool_parameters["conversation_id"]),
+        "runId": str(tool_parameters["run_id"]),
+        "attemptId": str(tool_parameters["attempt_id"]),
+    }
+    request_id = parse_request_id(tool_parameters["request_id"])
+    if request_id != binding["attemptId"]:
+        raise ValueError("request_id does not match the approved attempt")
+    tool_name = str(tool_parameters["tool_name"])
+    tool_input = {"requestId": request_id}
+    asset_ids = parse_asset_ids(str(tool_parameters["source_asset_ids_json"]))
+    return {
+        **binding,
+        "toolCallId": stable_tool_call_id(binding, tool_name, tool_input, asset_ids),
+        "toolName": tool_name,
+        "input": tool_input,
+        "sourceAssetIds": asset_ids,
+        "authorization": str(tool_parameters["authorization"]),
+    }
 
 
 def stable_tool_call_id(binding: dict[str, str], tool_name: str, tool_input: dict[str, Any], asset_ids: list[str]) -> str:
