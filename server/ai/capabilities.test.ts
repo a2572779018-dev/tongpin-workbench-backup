@@ -637,6 +637,13 @@ describe("Capability input and provider output limits", () => {
     expect(parseToolPlan('{"kind":"video","summary":"","prompt":"缓慢推进"}', "video").summary).toBe("缓慢推进");
     expect(() => parseToolPlan('{"kind":"video","summary":"缺少内容","prompt":""}', "video")).toThrow();
   });
+  it.each(["image", "video", "presentation"] as const)("keeps a valid %s tool prompt when only its display summary is long", kind => {
+    const prompt = kind === "video" ? "缓慢推进镜头" : "制作一张蓝色海报";
+    const parsed = parseToolPlan(JSON.stringify({ kind, summary: "展示说明".repeat(1001), prompt }), kind);
+    expect(parsed).toEqual({ kind, summary: "展示说明".repeat(60), prompt });
+    expect(parseToolPlan(JSON.stringify({ kind, summary: "\u0001不安全说明", prompt }), kind).summary).toBe(prompt);
+    expect(() => parseToolPlan(JSON.stringify({ kind, summary: "正常", prompt: "x".repeat(kind === "video" ? 4001 : 12001) }), kind)).toThrow(expect.objectContaining({ code: "AI_TOOL_PLAN_INVALID" }));
+  });
   it("accepts bounded clarification questions without creating executable plans", () => {
     expect(parseToolClarification('{"kind":"clarification","question":"想生成什么主题的图片？"}')).toBe("想生成什么主题的图片？");
     expect(parseToolClarification('{"kind":"image","summary":"想生成什么主题？","prompt":""}')).toBe("想生成什么主题？");

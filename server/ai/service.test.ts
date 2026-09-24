@@ -83,6 +83,23 @@ describe("AI transactional service", () => {
     await expect(runtime.service.generateImage("member-a", { requestId: crypto.randomUUID(), prompt: response.content, planRequestId: request.requestId })).rejects.toMatchObject({ code: "AI_TOOL_PLAN_MISMATCH" });
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it("accepts an image plan with an overlong display summary without executing or double-charging", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 30000 });
+    const prompt = "制作一张蓝色科技海报";
+    transport.mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: JSON.stringify({ kind: "image", summary: "展示说明".repeat(1001), prompt }) } }],
+      usage: { prompt_tokens: 20, completion_tokens: 15, total_tokens: 35 },
+    }));
+    const planned = { ...chat(), outputFormat: "image_plan" as const, messages: [{ role: "user" as const, content: prompt }] };
+    const response = await runtime.service.chat("member-a", planned);
+    expect(response.toolPlan).toMatchObject({ kind: "image", prompt, summary: "展示说明".repeat(60) });
+    expect(runtime.store.request("member-a", planned.requestId)?.status).toBe("completed");
+    expect(runtime.service.quota("member-a").usedTokens).toBe(35);
+    await expect(runtime.service.chat("member-a", planned)).resolves.toMatchObject({ toolPlan: { kind: "image", prompt } });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(runtime.service.quota("member-a").usedTokens).toBe(35);
+  });
   it("persists a model-authored public analysis summary separately and never invents one", async () => {
     runtime.service.setQuota("member-a", "admin", { limitTokens: 10000 });
     transport.mockResolvedValueOnce(Response.json({

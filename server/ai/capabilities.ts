@@ -161,15 +161,18 @@ export function parseToolPlan(content: string, expected: AiToolPlanKind): AiTool
   catch { throw new AiError(502, "AI_TOOL_PLAN_INVALID", "同频 AI 没有返回完整的工具方案，请重新整理任务"); }
   const root = record(value);
   if (root.kind !== expected) throw new AiError(502, "AI_TOOL_PLAN_INVALID", "同频 AI 返回的工具类型与当前任务不一致，请重新整理任务");
-  const read = (field: "summary" | "prompt", max: number) => {
-    const raw = root[field];
+  const readPrompt = (max: number) => {
+    const raw = root.prompt;
     if (typeof raw !== "string" || !raw.trim() || raw.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(raw)) throw new AiError(502, "AI_TOOL_PLAN_INVALID", "同频 AI 返回的工具方案不完整或过长，请重新整理任务");
     return raw.trim();
   };
-  const prompt = read("prompt", expected === "video" ? 4000 : 12000);
-  // Summary is presentation-only; never reject a valid bounded tool prompt
-  // solely because a provider omitted or over-expanded the display caption.
-  const summary = typeof root.summary === "string" && root.summary.trim() ? read("summary", 4000).slice(0, 240) : prompt.slice(0, 120);
+  const prompt = readPrompt(expected === "video" ? 4000 : 12000);
+  // The caption is display-only. A provider's verbose or malformed caption
+  // must not turn an otherwise valid, bounded executable prompt into a failed
+  // paid planning request.
+  const rawSummary = typeof root.summary === "string" ? root.summary.trim() : "";
+  const summary = rawSummary && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(rawSummary)
+    ? rawSummary.slice(0, 240) : prompt.slice(0, 120);
   return { kind: expected, summary, prompt };
 }
 export function parseToolClarification(content: string): string | undefined {
