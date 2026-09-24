@@ -221,6 +221,115 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_image_artifacts WHERE user_id='member-a'").get()).toEqual({ count: 0 });
   });
 
+  it("creates and updates one project with CAS, replay and stable identity", async () => {
+    const prepared = await active();
+    const created = { id: "project-b", title: "新项目", timeLabel: "现在", instructions: "只讨论工作" };
+    const create = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: created.id, expectedRevision: 0, action: "put", value: created },
+    ] };
+    const createAck = await v2.mutateActive("member-a", create);
+    expect(createAck).toMatchObject({ entities: [{ kind: "project", entityId: created.id, revision: 1, deleted: false }] });
+    expect(await v2.readActiveEntity("member-a", "project", created.id)).toMatchObject({ revision: 1, value: created });
+    expect(await v2.mutateActive("member-a", create)).toEqual(createAck);
+    const updated = { ...created, title: "已改名" };
+    const update = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: created.id, expectedRevision: 1, action: "put", value: updated },
+    ] };
+    expect(await v2.mutateActive("member-a", update)).toMatchObject({ entities: [{ revision: 2 }] });
+    expect(await v2.readActiveEntity("member-a", "project", created.id)).toMatchObject({ revision: 2, value: updated });
+    await expect(v2.mutateActive("member-a", { ...create, mutationId: crypto.randomUUID() })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    await expect(v2.mutateActive("member-a", { ...create, ops: [{ ...create.ops[0], value: { ...created, title: "篡改" } }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_MUTATION_CONFLICT" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: "wrong-id", expectedRevision: 0, action: "put", value: created },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: created.id, expectedRevision: 2, action: "delete" },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+  });
+
+  it("keeps project-only batches atomic and enforces the account-wide 100-project cap", async () => {
+    const full = state("满");
+    full.projects = Array.from({ length: 99 }, (_, index) => ({ id: `project-${index}`, title: `项目${index}`, timeLabel: "现在" }));
+    full.conversations[0].projectId = "project-0";
+    full.artifacts[0].projectId = "project-0";
+    full.activeProjectId = "project-0";
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: full });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-a'").run(new Date().toISOString());
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-a'").run();
+    const project = (id: string) => ({ id, title: id, timeLabel: "现在" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: "project-99", expectedRevision: 0, action: "put", value: project("project-99") },
+      { kind: "project", entityId: "project-100", expectedRevision: 0, action: "put", value: project("project-100") },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    expect(await v2.readActiveEntity("member-a", "project", "project-99")).toBeNull();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: "project-99", expectedRevision: 0, action: "put", value: project("project-99") },
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "不应保存" },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    expect(await v2.readActiveEntity("member-a", "project", "project-99")).toBeNull();
+    const finalSlot = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: "project-99", expectedRevision: 0, action: "put", value: project("project-99") },
+    ] };
+    const ack = await v2.mutateActive("member-a", finalSlot);
+    expect(ack).toMatchObject({ entities: [{ entityId: "project-99", revision: 1 }] });
+    expect(await v2.mutateActive("member-a", finalSlot)).toEqual(ack);
+    await expect(v2.mutateActive("member-a", { ...finalSlot, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: "project-100", expectedRevision: 0, action: "put", value: project("project-100") },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+  });
+
+  it("keeps identical project IDs isolated between members of the same tenant", async () => {
+    await active("甲");
+    new AiStore(sql).saveQuota("member-b", { ...emptyQuota(), limitTokens: 10_000 });
+    await workspace.save("member-b", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("乙") });
+    await shadow.stageFromV1("member-b");
+    const prepared = (await v2.prepareFromShadow("member-b"))!;
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-b'").run(new Date().toISOString());
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-b'").run();
+    const changed = { ...state("乙").projects[0], title: "成员乙独立项目" };
+    await v2.mutateActive("member-b", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: changed.id, expectedRevision: 1, action: "put", value: changed },
+    ] });
+    expect((await v2.readActiveEntity("member-b", "project", changed.id))?.value).toEqual(changed);
+    expect((await v2.readActiveEntity("member-a", "project", changed.id))?.value).toEqual(state("甲").projects[0]);
+  });
+
+  it("rejects invalid project content, tombstone revival and tenant-crossing writes", async () => {
+    const first = await active("甲");
+    const second = await active("乙", "tenant-b");
+    const current = state("甲").projects[0];
+    await expect(v2.mutateActive("member-a", { epoch: first.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: current.id, expectedRevision: 1, action: "put", value: { ...current, instructions: "x".repeat(24_001) } },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    const updated = { ...state("乙").projects[0], title: "乙租户独立" };
+    expect(await v2.mutateActive("member-a", { epoch: second.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: updated.id, expectedRevision: 1, action: "put", value: updated },
+    ] }, "tenant-b")).toMatchObject({ entities: [{ revision: 2 }] });
+    expect((await v2.readActiveEntity("member-a", "project", current.id))?.value).toEqual(current);
+    database.prepare("UPDATE ai_workspace_v2_entities SET deleted=1 WHERE tenant_id='default' AND user_id='member-a' AND kind='project' AND entity_id='project-a'").run();
+    await expect(v2.mutateActive("member-a", { epoch: first.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: current.id, expectedRevision: 1, action: "put", value: current },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+  });
+
+  it("rolls back a project entity write and receipt if SQLite fails", async () => {
+    const prepared = await active();
+    const project = { id: "project-b", title: "未保存", timeLabel: "现在" };
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_entities") && bindings[2] === "project") throw new Error("fixture project write failed");
+      sql.exec(query, ...bindings);
+    } };
+    const brokenV2 = new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken));
+    await expect(brokenV2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "project", entityId: project.id, expectedRevision: 0, action: "put", value: project },
+    ] })).rejects.toThrow("fixture project write failed");
+    expect(await v2.readActiveEntity("member-a", "project", project.id)).toBeNull();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+  });
+
   it("fences artifact ownership changes, deletes and old preparations without a valid image index", async () => {
     const prepared = await active();
     const original = state("甲").artifacts[0];
