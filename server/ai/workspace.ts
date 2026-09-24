@@ -1,4 +1,4 @@
-import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
@@ -260,8 +260,9 @@ function harnessTrace(value: unknown): void {
   if (trace.nextAction !== expectedAction) invalid("处理下一步状态与任务状态不一致");
 }
 
-/** Validate the entire snapshot before any write. Unknown fields fail explicitly, never disappear. */
-export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
+/** Keep all field rules shared; only the legacy whole-account write enforces
+ * the 8 MiB aggregate cap. V2 still needs independent per-entity size caps. */
+function validatedWorkspaceState(value: unknown, enforceAggregateLimit: boolean): AiWorkspaceState {
   const state = record(value, "工作台", ["view", "mode", "conversations", "projects", "artifacts", "drafts", "draftAttachments", "videoDraftSettings", "composerTool", "webSearch", "activeConversationId", "activeProjectId", "enabledSkillIds", "sidebarCollapsed"]);
   if (!["chat", "project", "skills"].includes(String(state.view)) || !["quick", "standard", "deep", "pro"].includes(String(state.mode))) invalid("工作台页面或模式无效");
   if (state.sidebarCollapsed !== undefined && typeof state.sidebarCollapsed !== "boolean") invalid("侧栏状态无效");
@@ -383,9 +384,65 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
   }
   jsonValue(state);
   const serialized = JSON.stringify(state);
-  if (new TextEncoder().encode(serialized).byteLength > LIMITS.stateBytes) tooLarge("云端对话资料已达安全保存上限，请导出并整理历史记录后重试；原记录未被更改");
+  if (enforceAggregateLimit && new TextEncoder().encode(serialized).byteLength > LIMITS.stateBytes) tooLarge("云端对话资料已达安全保存上限，请导出并整理历史记录后重试；原记录未被更改");
   // Isolate the validated request from caller mutations during the asynchronous hash.
   return JSON.parse(serialized) as AiWorkspaceState;
+}
+
+/** Validate the entire V1 snapshot before any write. */
+export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
+  return validatedWorkspaceState(value, true);
+}
+
+function entitySurrogate(projects: unknown[], conversations: unknown[], artifacts: unknown[]): unknown {
+  return { view: "chat", mode: "standard", activeConversationId: null, activeProjectId: null,
+    enabledSkillIds: [], projects, conversations, artifacts, drafts: {} };
+}
+
+/** One entity must fit an active V2 read by itself. Cross-entity batch and
+ * account-wide count/reference rules remain the V2 store's responsibility. */
+export const AI_WORKSPACE_V2_ENTITY_BYTES = {
+  project: 8 * 1024 * 1024,
+  conversation: 16 * 1024 * 1024,
+  artifact: 8 * 1024 * 1024,
+} as const;
+
+function boundedEntity<T>(value: T, maxBytes: number): T {
+  if (new TextEncoder().encode(JSON.stringify(value)).byteLength > maxBytes) tooLarge("单条工作台记录超出安全保存上限，原记录未被更改");
+  return value;
+}
+
+/** The same V1 field rules for one V2 project, without reintroducing the
+ * legacy aggregate cap. Cross-entity references are checked by its caller. */
+export function validateAiWorkspaceProjectEntity(value: unknown): AiWorkspaceProject {
+  return boundedEntity(validatedWorkspaceState(entitySurrogate([value], [], []), false).projects[0], AI_WORKSPACE_V2_ENTITY_BYTES.project);
+}
+
+/** Structural validation only. Placeholder artifacts allow the V1 message
+ * rules to run; an authorized reader must still resolve their real records. */
+export function validateAiWorkspaceConversationEntity(value: unknown): AiWorkspaceConversation {
+  const source = record(value, "对话");
+  const messages = array(source.messages, "对话消息", LIMITS.messagesPerConversation);
+  const projectId = typeof source.projectId === "string" ? source.projectId : undefined;
+  const projects = projectId ? [{ id: projectId, title: "关联项目", timeLabel: "" }] : [];
+  const artifactIds = new Set(messages.flatMap(message => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return [];
+    const artifactId = (message as ObjectValue).artifactId;
+    return typeof artifactId === "string" ? [artifactId] : [];
+  }));
+  const artifacts = Array.from(artifactIds, artifactId => ({ id: artifactId, conversationId: source.id,
+    ...(projectId ? { projectId } : {}), title: "关联成果", kind: "note", updatedLabel: "", summary: "", sections: [] }));
+  return boundedEntity(validatedWorkspaceState(entitySurrogate(projects, [value], artifacts), false).conversations[0], AI_WORKSPACE_V2_ENTITY_BYTES.conversation);
+}
+
+/** Structural validation only; the real conversation and optional project
+ * must still be resolved under the same account and tenant. */
+export function validateAiWorkspaceArtifactEntity(value: unknown): AiWorkspaceArtifact {
+  const source = record(value, "成果");
+  const projectId = typeof source.projectId === "string" ? source.projectId : undefined;
+  const projects = projectId ? [{ id: projectId, title: "关联项目", timeLabel: "" }] : [];
+  const conversations = [{ id: source.conversationId, title: "关联对话", timeLabel: "", ...(projectId ? { projectId } : {}), messages: [] }];
+  return boundedEntity(validatedWorkspaceState(entitySurrogate(projects, conversations, [value]), false).artifacts[0], AI_WORKSPACE_V2_ENTITY_BYTES.artifact);
 }
 
 function canonical(value: unknown): string {

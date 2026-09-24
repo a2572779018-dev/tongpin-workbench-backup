@@ -9,7 +9,7 @@ import { AI_WORKSPACE_LIMITS, type AiWorkspaceSaveRequest, type AiWorkspaceSnaps
 import { createAiWorkspaceRouter } from "./workspaceRoutes";
 import { ApiError, errorHandler } from "../errors";
 import { AiStore, emptyQuota, type AiSql } from "./storage";
-import { AiWorkspaceRepository, validateAiWorkspaceState } from "./workspace";
+import { AI_WORKSPACE_V2_ENTITY_BYTES, AiWorkspaceRepository, validateAiWorkspaceArtifactEntity, validateAiWorkspaceConversationEntity, validateAiWorkspaceProjectEntity, validateAiWorkspaceState } from "./workspace";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
 import { completedReply } from "../../src/features/tongpin-ai/chatRequests";
@@ -581,5 +581,43 @@ describe("AI durable member workspace", () => {
       const admin = await request(runtime.app).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
       await request(runtime.app).get("/api/ai/workspace").set("Authorization", `Bearer ${admin.body.accessToken}`).expect(403);
     } finally { await runtime.close(); }
+  });
+});
+
+describe("V2 entity field validation reuses V1 rules without its aggregate limit", () => {
+  it("accepts valid project, conversation, and artifact bodies without granting their cross-entity references", () => {
+    const state = fixture();
+    expect(validateAiWorkspaceProjectEntity(state.projects[0])).toEqual(state.projects[0]);
+    expect(validateAiWorkspaceConversationEntity(state.conversations[0])).toEqual(state.conversations[0]);
+    expect(validateAiWorkspaceArtifactEntity(state.artifacts[0])).toEqual(state.artifacts[0]);
+  });
+
+  it("keeps V1 message/document/artifact field checks and rejects unknown or malformed content", () => {
+    const state = fixture();
+    const invalidConversation = { ...state.conversations[0], messages: [{ ...state.conversations[0].messages[0], attachments: [{ id: "file-a", name: "x", mimeType: "text/plain", content: "x", surprise: true }] }] };
+    expect(() => validateAiWorkspaceConversationEntity(invalidConversation)).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_INVALID" }));
+    expect(() => validateAiWorkspaceProjectEntity({ ...state.projects[0], instructions: "x".repeat(AI_WORKSPACE_LIMITS.instructionsCharacters + 1) })).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_TOO_LARGE" }));
+    expect(() => validateAiWorkspaceArtifactEntity({ ...state.artifacts[0], data: JSON.parse('{"unsafe":{"__proto__":"x"}}') })).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_INVALID" }));
+    expect(() => validateAiWorkspaceArtifactEntity({ ...state.artifacts[0], sections: [{ heading: "标题", lines: ["x".repeat(24_001)] }] })).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_TOO_LARGE" }));
+  });
+
+  it("does not impose the old whole-account 8 MiB cap on one valid V2 conversation", () => {
+    const source = fixture().conversations[0];
+    const large = { ...source, messages: Array.from({ length: 72 }, (_, index) => ({
+      id: `message-${index}`, role: "user" as const, content: "中".repeat(42_000), time: "10:00",
+    })) };
+    expect(new TextEncoder().encode(JSON.stringify(large)).byteLength).toBeGreaterThan(AI_WORKSPACE_LIMITS.stateBytes);
+    expect(validateAiWorkspaceConversationEntity(large).messages).toHaveLength(72);
+    expect(() => validateAiWorkspaceState({ ...fixture(), conversations: [large] })).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_TOO_LARGE" }));
+  });
+
+  it("enforces an independent per-entity bound before a V2 writer can store unreadable content", () => {
+    const state = fixture();
+    const oversizeConversation = { ...state.conversations[0], messages: Array.from({ length: 145 }, (_, index) => ({
+      id: `message-${index}`, role: "user" as const, content: "中".repeat(42_000), time: "10:00",
+    })) };
+    expect(new TextEncoder().encode(JSON.stringify(oversizeConversation)).byteLength).toBeGreaterThan(AI_WORKSPACE_V2_ENTITY_BYTES.conversation);
+    expect(() => validateAiWorkspaceConversationEntity(oversizeConversation)).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_TOO_LARGE" }));
+    expect(() => validateAiWorkspaceArtifactEntity({ ...state.artifacts[0], data: { payload: "x".repeat(AI_WORKSPACE_V2_ENTITY_BYTES.artifact) } })).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_TOO_LARGE" }));
   });
 });
