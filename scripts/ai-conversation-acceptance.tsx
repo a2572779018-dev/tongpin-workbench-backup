@@ -70,6 +70,7 @@ function taskOnRead(task: SyntheticTask): SyntheticTask {
 }
 let start = 0, feedbackPrompt = "", awaitingFirstDelta = false;
 const record = (text: string) => { evidence.push(text); window.dispatchEvent(new Event("fixture-evidence")); };
+const attachmentEvidence = (body: { attachments?: Array<{ name: string; text?: string; dataUrl?: string }> }) => JSON.stringify((body.attachments ?? []).map(item => ({ name: item.name, text: item.text ?? null, visual: Boolean(item.dataUrl) })));
 document.addEventListener("click", event => { if ((event.target as HTMLElement).closest("button[aria-label='发送消息']")) { start = performance.now(); feedbackPrompt = (document.querySelector("textarea") as HTMLTextAreaElement | null)?.value ?? ""; } }, true);
 const feedbackObserver = new MutationObserver(() => {
   if (start && feedbackPrompt && Array.from(document.querySelectorAll(".tp-ai-message.is-user")).some(row => row.textContent?.includes(feedbackPrompt))) { record(`visible_feedback_ms=${(performance.now() - start).toFixed(1)}`); start = 0; feedbackPrompt = ""; }
@@ -216,9 +217,13 @@ window.fetch = async (target, init) => {
       ? Response.json(checked ? { assetId, mimeType: "image/png", byteLength: atob(pixel.split(",")[1]).length } : { assetId, mimeType: "image/png", base64: pixel.split(",")[1] })
       : Response.json({ error: { code: "AI_ASSET_NOT_FOUND", message: "尚未生成" } }, { status: 404 });
   }
-  if (url.pathname === "/api/ai/preflight") return Response.json({ canSend: true, quota, budget: { inputTokens: 20, maxOutputTokens: 1000, searchInputReserve: 0 } });
+  if (url.pathname === "/api/ai/preflight") {
+    record(`preflight-attachments:${attachmentEvidence(body)}`);
+    return Response.json({ canSend: true, quota, budget: { inputTokens: 20, maxOutputTokens: 1000, searchInputReserve: 0 } });
+  }
   if (url.pathname === "/api/ai/chat/stream") {
     record(`stream:${body.conversationId}:${body.mode}:${body.requestId}:retry=${body.retryOf ?? "none"}:attachments=${(body.attachments ?? []).map((item: { name: string }) => item.name).join(",")}`);
+    record(`stream-attachments:${attachmentEvidence(body)}`);
     const encoder = new TextEncoder();
     const content = "这是来自真实数据流的逐步回复。第二段在稍后抵达，并不会等待完整回答后重播。";
     const latestUserText = (body.messages ?? []).filter((item: { role: string }) => item.role === "user").at(-1)?.content ?? "";

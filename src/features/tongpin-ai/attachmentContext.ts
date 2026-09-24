@@ -21,11 +21,13 @@ function utf8Prefix(text: string, maxBytes: number, maxCodeUnits: number): strin
   }
   return text.slice(0, end);
 }
-function appendOmissionNotice(items: AiAttachment[], omitted: number): AiAttachment[] {
+function appendOmissionNotice(items: AiAttachment[], omitted: number, protectedCount = 0): AiAttachment[] {
   if (!omitted || !items.length) return items;
   const notice = `上下文说明：本轮按相关性和最近顺序选取附件，${omitted} 份历史附件未重送。未提供的内容不可推测；历史原文件仍保存在对话。`;
-  let index = 0;
-  for (let i = 1; i < items.length; i += 1) if (textBytes(items[i].text) > textBytes(items[index].text)) index = i;
+  // A current-turn upload must never be shortened just to describe omitted
+  // historical context. Generated frames and historical attachments may be.
+  let index = Math.min(protectedCount, items.length - 1);
+  for (let i = index + 1; i < items.length; i += 1) if (textBytes(items[i].text) > textBytes(items[index].text)) index = i;
   const existing = items[index].text || "";
   const otherBytes = items.reduce((total, item, i) => total + (i === index ? 0 : textBytes(item.text)), 0);
   const prefix = utf8Prefix(existing,
@@ -37,7 +39,7 @@ function appendOmissionNotice(items: AiAttachment[], omitted: number): AiAttachm
 }
 
 /** Select request context only; never mutate or remove persisted conversation attachments. */
-export function fitAttachmentContext(priority: AiAttachment[], history: AiAttachment[], alreadyOmitted = 0): AiAttachment[] {
+export function fitAttachmentContext(priority: AiAttachment[], history: AiAttachment[], alreadyOmitted = 0, protectedCount = 0): AiAttachment[] {
   if (priority.length > 5) throw Error("本次附件最多 5 份，请减少当前附件");
   if (priority.some(item => !validRequestAttachment(item))) throw Error("本次附件内容无效，请重新添加");
   const result = [...priority], seen = new Set(priority.map(a => a.dataUrl || `${a.name}\n${a.text}`));
@@ -54,10 +56,41 @@ export function fitAttachmentContext(priority: AiAttachment[], history: AiAttach
     if (result.length >= 5 || bytes + size > MAX_ATTACHMENT_TOTAL_BYTES || visualBytes + imageSize > AI_MEDIA_LIMITS.requestBytes) { omitted++; continue; }
     result.push(item); bytes += size; visualBytes += imageSize;
   }
-  return appendOmissionNotice(result, omitted);
+  return appendOmissionNotice(result, omitted, protectedCount);
 }
 
-export function conversationAttachmentContext(current: AiWorkspaceDocument[], history: AiWorkspaceDocument[]) {
+/** Current uploads are mandatory; generated media uses only the remaining room. */
+export function assertGeneratedMediaCapacity(current: AiAttachment[]): void {
+  fitAttachmentContext(current, []);
+  if (current.length >= 5) throw Error("本轮已上传 5 份资料，请移除至少 1 份后再讨论生成的画面；草稿已保留，本次未发送");
+}
+
+export function fitGeneratedMediaAttachmentContext(current: AiAttachment[], visual: AiAttachment[], history: AiAttachment[], alreadyOmitted = 0): AiAttachment[] {
+  assertGeneratedMediaCapacity(current);
+  if (!visual.length || visual.some(item => !validRequestAttachment(item) || !item.dataUrl)) throw Error("生成内容没有可读取画面，本次未发送，草稿已保留");
+  const slots = 5 - current.length;
+  const currentFrames = current.filter(item => item.dataUrl).length;
+  const maxFrames = Math.min(slots, AI_MEDIA_LIMITS.requestFrames - currentFrames, visual.length);
+  const currentBytes = current.reduce((total, item) => total + textBytes(item.text), 0);
+  const currentVisualBytes = current.reduce((total, item) => total + (item.dataUrl ? mediaFrameByteLength(item.dataUrl) : 0), 0);
+  for (let count = maxFrames; count > 0; count -= 1) {
+    // Preserve both ends of a clip when possible; a one-frame budget uses its middle.
+    const indexes = Array.from({ length: count }, (_, index) => count === 1
+      ? Math.floor((visual.length - 1) / 2)
+      : Math.round(index * (visual.length - 1) / (count - 1)));
+    const picked = indexes.map(index => visual[index]);
+    const selected = picked.map((item, index) => index === 0 && count < visual.length
+      ? { ...item, text: `${item.text || ""}\n本轮仅提供 ${count}/${visual.length} 个生成内容采样画面；其他画面和音频未提供，不可推测。`.trim() }
+      : item);
+    const bytes = selected.reduce((total, item) => total + textBytes(item.text), currentBytes);
+    const visualBytes = selected.reduce((total, item) => total + mediaFrameByteLength(item.dataUrl!), currentVisualBytes);
+    if (selected.some(item => !validRequestAttachment(item)) || bytes > MAX_ATTACHMENT_TOTAL_BYTES || visualBytes > AI_MEDIA_LIMITS.requestBytes) continue;
+    return fitAttachmentContext([...current, ...selected], history, alreadyOmitted, current.length);
+  }
+  throw Error("本轮资料和生成画面合计超出分析上限，请减少当前附件后重试；草稿已保留，本次未发送");
+}
+
+export function conversationAttachmentContext(current: AiWorkspaceDocument[], history: AiWorkspaceDocument[], generatedMedia?: AiAttachment[]) {
   // Explicit new uploads are validated together. Old uploads do not make the new message unsendable.
   const priority = documentAttachments(current), ids = new Set(current.map(a => a.id));
   const old: AiAttachment[] = [];
@@ -70,7 +103,7 @@ export function conversationAttachmentContext(current: AiWorkspaceDocument[], hi
       ids.add(document.id); old.push(...documentAttachments([document]));
     } catch { omitted++; }
   }
-  return fitAttachmentContext(priority, old, omitted);
+  return generatedMedia ? fitGeneratedMediaAttachmentContext(priority, generatedMedia, old, omitted) : fitAttachmentContext(priority, old, omitted);
 }
 
 /** Build the one canonical attachment selection used by both planning and execution. */
@@ -78,10 +111,11 @@ export function toolAttachmentContext(
   current: AiWorkspaceDocument[],
   projectDocuments: AiWorkspaceDocument[],
   messages: Array<Pick<AiWorkspaceMessage, "attachments">>,
+  generatedMedia?: AiAttachment[],
 ) {
   const documents = new Map([...projectDocuments, ...current].map(item => [item.id, item]));
   for (const message of messages) {
     for (const item of message.attachments ?? []) documents.set(item.id, item);
   }
-  return conversationAttachmentContext(current, [...documents.values()].reverse());
+  return conversationAttachmentContext(current, [...documents.values()].reverse(), generatedMedia);
 }

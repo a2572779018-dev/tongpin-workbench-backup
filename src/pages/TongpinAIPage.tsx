@@ -23,7 +23,7 @@ import type { AiPersonaSnapshot } from "../../shared/aiPersona";
 import type { ComputerUseProbeResult, ComputerUseWindowState } from "../../shared/computerUse";
 import { documentAttachments, ensureAttachmentWorkspaceCapacity, extractAttachment, workspaceAttachment, validateAttachments, WorkspaceCapacityError } from "../features/tongpin-ai/attachments";
 import { selectSkill, skillRequestIds } from "../features/tongpin-ai/skills";
-import { fitAttachmentContext, toolAttachmentContext } from "../features/tongpin-ai/attachmentContext";
+import { assertGeneratedMediaCapacity, toolAttachmentContext } from "../features/tongpin-ai/attachmentContext";
 import { draftsWithoutComputerRequests, mentionedSkillIds, mentionedWorkflowId, workflowSkillIds } from "../features/tongpin-ai/skillMentions";
 import { computerUseConversationRequestMessage, computerUsePlanningObservation, validateComputerUseModelPlan, type ComputerUseModelPlan } from "../features/tongpin-ai/computerUseFlow";
 import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
@@ -1900,10 +1900,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         const media = origin.attachments.some(item => item.media) ? undefined : generatedMediaForFollowup(origin.conversation, workspaceRef.current.artifacts, content);
         if (media) {
           if (!aiStatus?.visionEnabled) throw new Error("当前模型未开启视觉理解，请管理员启用后继续讨论视频或图片。草稿已保留。");
+          assertGeneratedMediaCapacity(documentAttachments(origin.attachments));
           const { extractMediaAttachment } = await import("../features/tongpin-ai/mediaAttachments");
           const visual = await readGeneratedMedia(media, api, user.id, mediaCacheScope(session), controller.signal, extractMediaAttachment);
           if (!current()) return;
-          request.attachments = fitAttachmentContext(visual, request.attachments ?? []);
+          request.attachments = toolAttachmentContext(origin.attachments, origin.project?.contextDocuments ?? [], continuation ? messages : origin.conversation?.messages ?? [], visual);
         }
         const result = await api<AiChatPreflight>("/api/ai/preflight", {
           method: "POST", body: JSON.stringify(request), signal: controller.signal,

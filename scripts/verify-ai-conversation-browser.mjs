@@ -132,6 +132,53 @@ try {
     await context.close();
   }
   {
+    const { page, context, errors } = await fixture("&readyVideo&fast");
+    await row(page, "C 后台视频").click();
+    await page.locator(".tp-ai-video-reply video").waitFor({ timeout: 15000 });
+    const files = Array.from({ length: 4 }, (_, index) => ({ name: `current-${index + 1}.txt`, mimeType: "text/plain", buffer: Buffer.from(`本轮明确上传资料 ${index + 1}`) }));
+    await page.locator('input[aria-label="选择附件文件"]').setInputFiles(files);
+    await page.getByRole("button", { name: "移除附件 current-4.txt" }).waitFor();
+    await page.locator("textarea").fill("请结合刚才生成的视频画面和这四份资料，讨论配色。");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("stream:finished"), null, { timeout: 15000 });
+    const events = await evidence(page).innerText();
+    const attachments = prefix => JSON.parse(events.split("\n").find(line => line.startsWith(prefix)).slice(prefix.length));
+    const preflight = attachments("preflight-attachments:");
+    const streamed = attachments("stream-attachments:");
+    assert.deepEqual(streamed, preflight, "preflight and actual chat must use the same attachment selection");
+    assert.equal(streamed.length, 5);
+    assert.deepEqual(streamed.slice(0, 4).map(item => item.name), files.map(file => file.name));
+    assert.deepEqual(streamed.slice(0, 4).map(item => item.text), files.map((_, index) => `本轮明确上传资料 ${index + 1}`));
+    assert.equal(streamed.filter(item => item.visual).length, 1);
+    assert.ok(streamed[4].name.startsWith("生成成果-video-c-"));
+    assert.ok(streamed[4].text.includes("不含音频") && streamed[4].text.includes("未提供"));
+    assert.ok(!events.includes("历史附件未重送"), "new uploads must not be mislabeled as omitted history");
+    assert.ok(!/media-task-post:|media-task-authorize:|video-reference:/.test(events));
+    assert.deepEqual(errors, []);
+    results.generatedVideoCurrentUploads = { fourExplicitFilesPreserved: true, oneActualVideoFrame: true, samePreflightAndStream: true, noPaidMediaTask: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&readyVideo&fast");
+    await row(page, "C 后台视频").click();
+    await page.locator(".tp-ai-video-reply video").waitFor({ timeout: 15000 });
+    const files = Array.from({ length: 5 }, (_, index) => ({ name: `current-${index + 1}.txt`, mimeType: "text/plain", buffer: Buffer.from(`本轮明确上传资料 ${index + 1}`) }));
+    await page.locator('input[aria-label="选择附件文件"]').setInputFiles(files);
+    await page.getByRole("button", { name: "移除附件 current-5.txt" }).waitFor();
+    const prompt = "请结合刚才生成的视频画面和这五份资料，讨论配色。";
+    await page.locator("textarea").fill(prompt);
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.getByText("本轮已上传 5 份资料", { exact: false }).waitFor({ timeout: 15000 });
+    await page.waitForTimeout(400);
+    assert.equal(await page.locator("textarea").inputValue(), prompt);
+    assert.equal(await page.getByRole("button", { name: /^移除附件 current-/ }).count(), 5);
+    const events = await evidence(page).innerText();
+    assert.ok(!/preflight-attachments:|stream-attachments:|media-task-post:|media-task-authorize:|video-reference:/.test(events));
+    assert.deepEqual(errors, []);
+    results.generatedVideoCapacity = { clearCapacityMessage: true, draftAndFiveUploadsPreserved: true, noPreflightOrChatOrPaidMediaTask: true };
+    await context.close();
+  }
+  {
     const { page, context, errors } = await fixture("&imageEdit");
     await openActions(page);
     assert.equal(await page.getByRole("menuitem", { name: "上传图片" }).isDisabled(), true);
