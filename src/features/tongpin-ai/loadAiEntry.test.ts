@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ApiRequestError } from "../../lib/api";
 import { defaultAiPersonaProfile } from "../../../shared/aiPersona";
 import { loadAiEntry } from "./loadAiEntry";
 
@@ -37,6 +38,31 @@ describe("AI entry permission and onboarding order", () => {
       ? (calls.push(path), { schemaVersion: 2, epoch: 1, manifest: { base: { mode: "standard" }, hasDraftAttachments: false, hasVideoDraftSettings: false }, conversations: [], projects: [] } as T)
       : original<T>(path, init);
     expect((await loadAiEntry(api, "member-a", new AbortController().signal)).kind).toBe("ready-v2");
+    expect(calls).toEqual(["/api/ai/status", "/api/ai/persona", "/api/ai/workspace-v2/bootstrap"]);
+  });
+  it("falls back to the V1 workspace when the backend predates the V2 bootstrap endpoint", async () => {
+    // 0.1.49 客户端连到未部署 V2 接口的旧后端：404 表示"后端不支持 V2"，
+    // 必须降级走 V1，而不是让整个 AI 入口挂掉。
+    const { api: original, calls } = fixture(true, true);
+    const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+      if (path.endsWith("bootstrap")) {
+        calls.push(path);
+        throw new ApiRequestError(404, "REQUEST_FAILED", "请求的接口不存在");
+      }
+      return original<T>(path, init);
+    };
+    expect((await loadAiEntry(api, "member-a", new AbortController().signal)).kind).toBe("ready");
+    expect(calls).toEqual(["/api/ai/status", "/api/ai/persona", "/api/ai/workspace-v2/bootstrap", "/api/ai/workspace"]);
+  });
+  it("still fails on real bootstrap errors other than a missing endpoint", async () => {
+    const calls: string[] = [];
+    const api = async <T,>(path: string): Promise<T> => {
+      calls.push(path);
+      if (path.endsWith("status")) return { accessGranted: true, quota: { remainingTokens: 0 } } as T;
+      if (path.endsWith("persona")) return { revision: 1, profile: { ...defaultAiPersonaProfile(), onboardingComplete: true } } as T;
+      throw new ApiRequestError(500, "INTERNAL", "服务器错误");
+    };
+    await expect(loadAiEntry(api, "member-a", new AbortController().signal)).rejects.toMatchObject({ status: 500 });
     expect(calls).toEqual(["/api/ai/status", "/api/ai/persona", "/api/ai/workspace-v2/bootstrap"]);
   });
   it("does not continue to private endpoints after account switch or unmount", async () => {

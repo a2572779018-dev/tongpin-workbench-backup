@@ -2,6 +2,7 @@ import type { AiStatus } from "../../../shared/ai";
 import type { AiPersonaSnapshot } from "../../../shared/aiPersona";
 import type { AiWorkspaceSnapshot } from "../../../shared/aiWorkspace";
 import type { AiWorkspaceV2Bootstrap } from "../../../shared/aiWorkspaceV2";
+import { ApiRequestError } from "../../lib/api";
 
 export type AiEntry =
   | { kind: "locked"; status: AiStatus }
@@ -21,7 +22,17 @@ export async function loadAiEntry(api: EntryApi, accountId: string, signal: Abor
   const persona = await api<AiPersonaSnapshot>("/api/ai/persona", options);
   signal.throwIfAborted();
   if (!persona.profile.onboardingComplete) return { kind: "onboarding", status, persona };
-  const version = await api<AiWorkspaceV2Bootstrap>("/api/ai/workspace-v2/bootstrap", options);
+  // A backend older than the V2 rollout has no bootstrap endpoint at all: a 404
+  // there means "V2 not deployed", which must fall back to the V1 workspace
+  // instead of blocking the whole AI entry. Real failures (network, auth, 5xx)
+  // keep failing so they are not masked as a version answer.
+  let version: AiWorkspaceV2Bootstrap;
+  try {
+    version = await api<AiWorkspaceV2Bootstrap>("/api/ai/workspace-v2/bootstrap", options);
+  } catch (error) {
+    if (!(error instanceof ApiRequestError) || error.status !== 404) throw error;
+    version = { schemaVersion: 1 };
+  }
   signal.throwIfAborted();
   if (version.schemaVersion === 2) return { kind: "ready-v2", status, persona, workspace: version };
   const workspace = await api<AiWorkspaceSnapshot>("/api/ai/workspace", options);
