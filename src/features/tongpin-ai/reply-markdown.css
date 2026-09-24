@@ -40,3 +40,27 @@
 .tp-ai-markdown th { background: #f1ead4; }
 .tp-ai-markdown tr:last-child td { border-bottom: 0; }
 .tp-ai-markdown hr { margin: 1.2em 0; border: 0; border-top: 1px solid #ddd4c2; }
+
+/* --- rich content: chart --- */
+.tp-ai-chart { max-width: 100%; margin: 1em 0; border: 1px solid #ddd4c2; border-radius: 8px; background: #fffdf7; padding: 0.7em 0.9em 0.6em; }
+.tp-ai-chart__head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6em; font-size: 0.88em; }
+.tp-ai-chart__head span { color: #70664f; font-size: 0.92em; white-space: nowrap; }
+.tp-ai-chart__svg { display: block; width: 100%; height: auto; margin-top: 0.35em; }
+.tp-ai-chart__grid { stroke: #e5dece; stroke-width: 1; }
+.tp-ai-chart__bar { fill: #a68b31; }
+.tp-ai-chart__line { fill: none; stroke: #a68b31; stroke-width: 2.5; stroke-linejoin: round; }
+.tp-ai-chart__dot { fill: #a68b31; }
+.tp-ai-chart__tick { fill: #8a7f66; font-size: 11px; }
+.tp-ai-chart__value { fill: #514a37; font-size: 11px; font-weight: 600; }
+.tp-ai-chart__label { fill: #70664f; font-size: 11px; }
+.tp-ai-chart__foot { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-top: 0.3em; font-size: 0.76em; color: #70664f; }
+.tp-ai-chart__foot button { border: 1px solid #e5dece; border-radius: 5px; padding: 0.15em 0.5em; background: transparent; color: #62573d; font: inherit; font-size: 0.95em; cursor: pointer; }
+.tp-ai-chart__foot button:hover { background: #f1ead4; }
+.tp-ai-chart__data { width: 100%; border-collapse: collapse; margin-top: 0.45em; font-size: 0.82em; }
+.tp-ai-chart__data :is(th, td) { padding: 0.3em 0.55em; border-bottom: 1px solid #e5dece; }
+
+/* --- rich content: followup chips --- */
+.tp-ai-followups { display: flex; flex-wrap: wrap; gap: 0.45em; margin: 0.8em 0 0.2em; }
+.tp-ai-followups button { border: 1px solid #d9cba3; border-radius: 999px; padding: 0.28em 0.85em; background: #faf7ef; color: #5d5138; font: inherit; font-size: 0.86em; cursor: pointer; }
+.tp-ai-followups button:hover { background: #f1ead4; border-color: #a68b31; }
+.tp-ai-followups button:focus-visible { outline: 2px solid #a68b31; outline-offset: 1px; }

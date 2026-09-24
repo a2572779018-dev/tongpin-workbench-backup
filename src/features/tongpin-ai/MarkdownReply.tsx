@@ -1,15 +1,23 @@
 import { Children, cloneElement, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { AiSourceAnchor } from "./AiSourceLink";
+import { ChatChart } from "./ChatChart";
 import { splitMarkdownIntoBlocks, StableMarkdownBlocks } from "./librechatMarkdownBlocks";
 import { codeBlockFromHast } from "./replyCodeData";
 import { remarkReplyEmphasis, replyUrlTransform } from "./replyMarkdown";
+import { ReplyFollowups } from "./ReplyFollowups";
 import { tableRowsFromHast, tableToCsv, tableToMarkdown, tableToTsv } from "./replyTableData";
 import { TypewriterText } from "./TypewriterText";
 import "./reply-markdown.css";
+import "katex/dist/katex.min.css";
 
-const plugins = [remarkGfm, remarkReplyEmphasis];
+const plugins = [remarkGfm, remarkReplyEmphasis, remarkMath];
+// Model text is untrusted input: KaTeX renders with extensions off, errors
+// inline instead of throwing, and never executes links or scripts.
+const rehype = [[rehypeKatex, { throwOnError: false, errorColor: "#a33b2e", strict: false, trust: false, output: "html" }]] as unknown as NonNullable<Parameters<typeof Markdown>[0]>["rehypePlugins"];
 
 function ReplyTable({ node, children }: { node: unknown; children: ReactNode }) {
   const rows = useMemo(() => tableRowsFromHast(node), [node]);
@@ -46,6 +54,17 @@ function ReplyTable({ node, children }: { node: unknown; children: ReactNode }) 
 
 function ReplyCode({ node, children }: { node: unknown; children: ReactNode }) {
   const { text, language } = useMemo(() => codeBlockFromHast(node), [node]);
+  // Optional rich blocks ride the fenced-code channel: a valid ```chart block
+  // becomes a labelled chart, a valid ```followups block becomes chips. Any
+  // malformed payload keeps rendering as plain code below.
+  if (language === "chart") {
+    const chart = <ChatChart body={text} />;
+    if (chart) return chart;
+  }
+  if (language === "followups") {
+    const followups = <ReplyFollowups body={text} />;
+    if (followups) return followups;
+  }
   const [feedback, setFeedback] = useState("");
   const copy = async () => {
     try {
@@ -72,7 +91,7 @@ const components: Components = {
 };
 
 function renderReplyBlock(content: string): ReactNode {
-  return Markdown({ children: content, remarkPlugins: plugins,
+  return Markdown({ children: content, remarkPlugins: plugins, rehypePlugins: rehype,
     components, skipHtml: true, urlTransform: replyUrlTransform });
 }
 

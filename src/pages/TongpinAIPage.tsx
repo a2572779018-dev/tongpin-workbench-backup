@@ -255,6 +255,20 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const activeVideoDispatchRequest = videoDispatchRequest?.conversationId === activeConversationId
     ? videoDispatchRequest
     : persistedVideoResumeRequest;
+  // A followup chip only fills the composer draft: appended after any existing
+  // text, never sent, never an authorization of a paid tool.
+  useEffect(() => {
+    const onSelect = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail;
+      if (typeof detail !== "string" || !detail.trim()) return;
+      setDrafts(current => {
+        const existing = current[draftKey] ?? "";
+        return { ...current, [draftKey]: existing ? `${existing}\n${detail}` : detail };
+      });
+    };
+    window.addEventListener("tongpin-ai:followup-select", onSelect);
+    return () => window.removeEventListener("tongpin-ai:followup-select", onSelect);
+  }, [draftKey]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () =>
       initialSession.sidebarCollapsed ??

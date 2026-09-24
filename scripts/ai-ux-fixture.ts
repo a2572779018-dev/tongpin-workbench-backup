@@ -82,6 +82,26 @@ const fixtureSlides = {
 
 const IMAGE_PROMPT = "一只橘色的猫坐在窗台上，柔和自然光";
 const VIDEO_PROMPT = "让参考图片里的猫轻轻转头并眨眼";
+// A rich-content demo reply: every number is explicitly labelled as simulated
+// data, the chart carries unit + source + a raw-data view, and the followup
+// chips stay within the 0-3 cap. Triggered by chart/math keywords only.
+const fixtureRichAnswer = [
+  "【本地模拟回复，不调用真实模型】",
+  "",
+  "以下全部为**演示数据**，不代表真实统计：",
+  "",
+  "```chart",
+  JSON.stringify({ title: "季度演示营收", unit: "万元", source: "本地模拟示例数据，非真实统计", type: "bar", series: [{ label: "Q1", value: 120 }, { label: "Q2", value: 135.5 }, { label: "Q3", value: 150 }, { label: "Q4", value: 178.2 }] }),
+  "```",
+  "",
+  "圆的面积公式 $A = \\pi r^2$；行间公式：",
+  "",
+  "$$\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}$$",
+  "",
+  "```followups",
+  JSON.stringify(["把图表换成折线图", "解释公式的含义", "总结本季度要点"]),
+  "```",
+].join("\n");
 const videoJobs = new Map<string, number>();
 let videoSeq = 0;
 let imageCalls = 0;
@@ -169,7 +189,10 @@ const runtime = await createRuntime(config, {
     const wantsPpt = /ppt|演示文稿|幻灯片|汇报材料/i.test(lastUser);
     const wantsVideo = /视频|影片|动起来|生成视频/i.test(lastUser);
     const wantsImage = /图片|图|画|海报|插画|照片|logo/i.test(lastUser);
-    const answerText = wantsPpt
+    const wantsRich = /图表|chart|公式|数据可视化/i.test(lastUser);
+    const answerText = wantsRich
+      ? fixtureRichAnswer
+      : wantsPpt
       ? `<tool_request>{"kind":"presentation","prompt":"本周进度汇报${failMark}"}</tool_request>`
       : wantsVideo
         ? `<tool_request>{"kind":"video","prompt":"让参考图片里的猫轻轻转头并眨眼${failMark}"}</tool_request>`
