@@ -1,4 +1,5 @@
 import { AiError } from "./security";
+import type { AiWorkspaceArtifact } from "../../shared/aiWorkspace";
 import { AiStore } from "./storage";
 import type { AiSql } from "./storage";
 import { normalizeAiTenantId, tenantStorageKey } from "./tenant";
@@ -53,6 +54,15 @@ CREATE TABLE IF NOT EXISTS ai_workspace_v2_mutations (
   ack_json TEXT NOT NULL,
   PRIMARY KEY(tenant_id,user_id,mutation_id)
 );
+CREATE TABLE IF NOT EXISTS ai_workspace_v2_image_artifacts (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  PRIMARY KEY(tenant_id,user_id,conversation_id,asset_id,artifact_id)
+);
+CREATE INDEX IF NOT EXISTS ai_workspace_v2_image_artifacts_by_artifact ON ai_workspace_v2_image_artifacts(tenant_id,user_id,artifact_id);
 `;
 
 const ENTITY_KINDS = new Set<Segment["kind"]>(["manifest", "project", "conversation", "artifact", "draft", "draftAttachment", "videoDraftSettings"]);
@@ -60,6 +70,8 @@ const BINARY_CHUNK_BYTES = 48 * 1024; // Base64 data is at most 64 KiB per SQLit
 interface MetaRow { source_revision: number; source_hash: string; epoch: number; prepared_at: string; activated_at: string | null }
 interface EntityRow { revision: number; ordinal: number; byte_length: number; sha256: string; chunk_count: number; deleted: number }
 interface ChunkRow { chunk_index: number; data: string }
+interface ActiveSnapshotEntry extends AiWorkspaceV2EntityRef { entity: EntityRow | undefined; rows: ChunkRow[] }
+interface ActiveSnapshot { epoch: number; entries: ActiveSnapshotEntry[] }
 interface PreparedEntity { segment: Segment; bytes: Uint8Array; sha256: string; chunks: string[] }
 export interface AiWorkspaceV2PreparedSnapshot { sourceRevision: number; sourceHash: string; epoch: number; preparedAt: string; entityCount: number }
 export interface AiWorkspaceV2PreparedEntity { kind: Segment["kind"]; entityId: string; revision: number; ordinal: number; value: unknown }
@@ -75,6 +87,23 @@ const MAX_DRAFT_BYTES = 96 * 1024;
 const MAX_VIDEO_DRAFT_BYTES = 2 * 1024;
 const MAX_MUTATION_RECEIPTS = 256;
 const MAX_ACTIVE_BATCH_BYTES = 32 * 1024 * 1024;
+const MAX_IMAGE_ARTIFACT_INDEX_ROWS = 4096;
+const MAX_IMAGE_ARTIFACT_SCAN_ROWS = 8192;
+const ASSET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function* indexedImageAssets(artifact: AiWorkspaceArtifact): Generator<string> {
+  if ((artifact.kind !== "图片" && artifact.kind !== "image") || !Array.isArray(artifact.data?.images)) return;
+  if (artifact.data.images.length > MAX_IMAGE_ARTIFACT_SCAN_ROWS) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "图片成果索引超出安全准备上限，原记录未被更改");
+  const ids = new Set<string>();
+  for (const image of artifact.data.images) {
+    if (!image || typeof image !== "object" || Array.isArray(image)) continue;
+    const value = image as Record<string, unknown>;
+    if (typeof value.assetId === "string" && ASSET_ID.test(value.assetId) && !value.deleted && !ids.has(value.assetId)) {
+      ids.add(value.assetId);
+      yield value.assetId;
+    }
+  }
+}
 
 function corrupt(): never { throw new AiError(500, "AI_WORKSPACE_CORRUPT", "工作台分实体准备数据不完整，原记录未被更改"); }
 function stale(): never { throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台已更新，请重新准备分实体数据"); }
@@ -149,6 +178,16 @@ export class AiWorkspaceV2Store {
       const bytes = new TextEncoder().encode(JSON.stringify(segment.value));
       prepared.push({ segment, bytes, sha256: await hash(bytes), chunks: encodeChunks(bytes) });
     }
+    const imageIndex: Array<{ conversationId: string; artifactId: string; assetId: string }> = [];
+    const imageOwners = new Map<string, string>();
+    for (const artifact of source.state.artifacts) for (const assetId of indexedImageAssets(artifact)) {
+      if (imageIndex.length >= MAX_IMAGE_ARTIFACT_INDEX_ROWS) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "图片成果索引超出安全准备上限，原记录未被更改");
+      const identity = JSON.stringify([artifact.conversationId, assetId]);
+      const priorOwner = imageOwners.get(identity);
+      if (priorOwner && priorOwner !== artifact.id) throw new AiError(409, "AI_WORKSPACE_AMBIGUOUS_REFERENCE", "同一图片关联多个成果，暂不能准备分实体迁移");
+      imageOwners.set(identity, artifact.id);
+      imageIndex.push({ conversationId: artifact.conversationId, artifactId: artifact.id, assetId });
+    }
     const original = canonical(source.state);
     const preparedAt = new Date().toISOString();
     return this.sql.transaction(() => {
@@ -164,6 +203,7 @@ export class AiWorkspaceV2Store {
       this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=?", tenant, storedUser);
+      this.sql.exec("DELETE FROM ai_workspace_v2_image_artifacts WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       for (const item of prepared) {
         const { kind, entityId, ordinal } = item.segment;
         this.sql.exec("INSERT INTO ai_workspace_v2_entities(tenant_id,user_id,kind,entity_id,revision,ordinal,byte_length,sha256,chunk_count) VALUES(?,?,?,?,1,?,?,?,?)",
@@ -173,6 +213,10 @@ export class AiWorkspaceV2Store {
             tenant, storedUser, kind, entityId, index, data);
         }
       }
+      for (const entry of imageIndex) this.sql.exec(
+        "INSERT INTO ai_workspace_v2_image_artifacts(tenant_id,user_id,conversation_id,asset_id,artifact_id) VALUES(?,?,?,?,?)",
+        tenant, storedUser, entry.conversationId, entry.assetId, entry.artifactId,
+      );
       this.sql.exec("INSERT INTO ai_workspace_v2_meta(tenant_id,user_id,source_revision,source_hash,epoch,prepared_at,activated_at) VALUES(?,?,?,?,?,?,NULL) ON CONFLICT(tenant_id,user_id) DO UPDATE SET source_revision=excluded.source_revision,source_hash=excluded.source_hash,epoch=excluded.epoch,prepared_at=excluded.prepared_at,activated_at=NULL",
         tenant, storedUser, source.sourceRevision, source.sourceHash, epoch, preparedAt);
       return { sourceRevision: source.sourceRevision, sourceHash: source.sourceHash, epoch, preparedAt, entityCount: prepared.length };
@@ -210,29 +254,15 @@ export class AiWorkspaceV2Store {
     return { kind, entityId, revision: entity.revision, ordinal: entity.ordinal, value };
   }
 
-  /** Read a bounded set from one SQL snapshot, then verify every entity. No
-   * caller receives a partial batch when one referenced record is corrupt. */
-  async readActiveEntities(userId: string, refs: AiWorkspaceV2EntityRef[], tenantId?: string): Promise<AiWorkspaceV2ActiveBatch> {
-    if (!Array.isArray(refs) || !refs.length || refs.length > 32) invalid("工作台读取实体数量无效");
-    const identities = new Set<string>();
-    for (const ref of refs) {
-      if (!ref || !ENTITY_KINDS.has(ref.kind) || typeof ref.entityId !== "string" || !ref.entityId || ref.entityId.length > 160) invalid("工作台实体标识无效");
-      const identity = JSON.stringify([ref.kind, ref.entityId]);
-      if (identities.has(identity)) invalid("同一实体不能在单次请求中重复读取");
-      identities.add(identity);
-    }
-    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
-    const snapshot = this.sql.transaction(() => {
-      const { meta } = this.activeScope(userId, tenant);
-      return {
-        epoch: meta.epoch,
-        entries: refs.map(({ kind, entityId }) => ({
-          kind, entityId,
-          entity: this.sql.all<EntityRow>("SELECT revision,ordinal,byte_length,sha256,chunk_count,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?", tenant, storedUser, kind, entityId)[0],
-          rows: this.sql.all<ChunkRow>("SELECT chunk_index,data FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=? ORDER BY chunk_index", tenant, storedUser, kind, entityId),
-        })),
-      };
-    });
+  private captureActiveEntries(tenant: string, storedUser: string, refs: AiWorkspaceV2EntityRef[]): ActiveSnapshotEntry[] {
+    return refs.map(({ kind, entityId }) => ({
+      kind, entityId,
+      entity: this.sql.all<EntityRow>("SELECT revision,ordinal,byte_length,sha256,chunk_count,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?", tenant, storedUser, kind, entityId)[0],
+      rows: this.sql.all<ChunkRow>("SELECT chunk_index,data FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=? ORDER BY chunk_index", tenant, storedUser, kind, entityId),
+    }));
+  }
+
+  private async verifyActiveSnapshot(snapshot: ActiveSnapshot): Promise<AiWorkspaceV2ActiveBatch> {
     const entities: AiWorkspaceV2ActiveBatch["entities"] = [];
     let totalBytes = 0;
     for (const { kind, entityId, entity, rows } of snapshot.entries) {
@@ -262,10 +292,52 @@ export class AiWorkspaceV2Store {
     return { epoch: snapshot.epoch, entities };
   }
 
+  /** Read a bounded set from one SQL snapshot, then verify every entity. No
+   * caller receives a partial batch when one referenced record is corrupt. */
+  async readActiveEntities(userId: string, refs: AiWorkspaceV2EntityRef[], tenantId?: string): Promise<AiWorkspaceV2ActiveBatch> {
+    if (!Array.isArray(refs) || !refs.length || refs.length > 32) invalid("工作台读取实体数量无效");
+    const identities = new Set<string>();
+    for (const ref of refs) {
+      if (!ref || !ENTITY_KINDS.has(ref.kind) || typeof ref.entityId !== "string" || !ref.entityId || ref.entityId.length > 160) invalid("工作台实体标识无效");
+      const identity = JSON.stringify([ref.kind, ref.entityId]);
+      if (identities.has(identity)) invalid("同一实体不能在单次请求中重复读取");
+      identities.add(identity);
+    }
+    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
+    const snapshot = this.sql.transaction((): ActiveSnapshot => {
+      const { meta } = this.activeScope(userId, tenant);
+      return { epoch: meta.epoch, entries: this.captureActiveEntries(tenant, storedUser, refs) };
+    });
+    return this.verifyActiveSnapshot(snapshot);
+  }
+
   /** Internal V2 read only. It intentionally cannot be reached through the V1
    * HTTP route, whose old clients must be rejected after any future cutover. */
   async readActiveEntity(userId: string, kind: Segment["kind"], entityId: string, tenantId?: string): Promise<AiWorkspaceV2ActiveEntity | null> {
     return (await this.readActiveEntities(userId, [{ kind, entityId }], tenantId)).entities[0];
+  }
+
+  /** Index is only a candidate locator. Capture it with the conversation and
+   * artifact in one SQL snapshot; caller must still validate their linkage and
+   * current asset ownership before granting a reference. */
+  async readActiveImageSourceEntities(userId: string, conversationId: string, assetId: string, tenantId?: string): Promise<{ artifactId: string; batch: AiWorkspaceV2ActiveBatch } | null> {
+    if (!ID.test(conversationId) || !ASSET_ID.test(assetId)) invalid("图片成果标识无效");
+    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
+    const snapshot = this.sql.transaction(() => {
+      const { meta } = this.activeScope(userId, tenant);
+      const artifactIds = this.sql.all<{ artifact_id: string }>(
+        "SELECT artifact_id FROM ai_workspace_v2_image_artifacts WHERE tenant_id=? AND user_id=? AND conversation_id=? AND asset_id=? ORDER BY artifact_id LIMIT 2",
+        tenant, storedUser, conversationId, assetId,
+      ).map(row => row.artifact_id);
+      if (artifactIds.length !== 1 || !ID.test(artifactIds[0])) return null;
+      return {
+        artifactId: artifactIds[0],
+        batch: { epoch: meta.epoch, entries: this.captureActiveEntries(tenant, storedUser, [
+          { kind: "conversation", entityId: conversationId }, { kind: "artifact", entityId: artifactIds[0] },
+        ]) },
+      };
+    });
+    return snapshot ? { artifactId: snapshot.artifactId, batch: await this.verifyActiveSnapshot(snapshot.batch) } : null;
   }
 
   /** CAS is implemented for only two low-risk leaf kinds. There is no HTTP

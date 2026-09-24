@@ -9,6 +9,8 @@ import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { tenantStorageKey } from "./tenant";
 import { AiVideoService } from "./videoService";
 import { AiWorkspaceRepository } from "./workspace";
+import { AiWorkspaceV2ShadowRepository } from "./workspaceV2Shadow";
+import { AiWorkspaceV2Store } from "./workspaceV2Store";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
 // Bounded structural JPEG fixture. Codec conversion itself is exercised by the browser helper.
@@ -46,6 +48,18 @@ describe("generated image to real video-reference mapping", () => {
     store.saveRequest({ requestId: planRequestId, userId: "member", conversationId: targetConversationId, hash: "fixture", status: "completed", createdAt: new Date().toISOString(), expiresAt: Date.now() + 60000, inputReserve: 0, outputReserve: 0, convertedReserve: 0, kind: "chat", model: "fixture", mode: "quick", result: { requestId: planRequestId, content: "视频方案", model: "fixture", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false }, toolPlan: { kind: "video", prompt, summary: "人物视频", videoParameters: parameters } } });
     return video.submit("member", { requestId, planRequestId, conversationId: targetConversationId, prompt, model: parameters.model, seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [referenceId] });
   };
+  const activatePreparedV2 = async (userId = "member", tenantId = store.tenantId) => {
+    const shadow = new AiWorkspaceV2ShadowRepository(store.sql, workspace);
+    const v2 = new AiWorkspaceV2Store(store.sql, workspace); v2.initialize();
+    await shadow.stageFromV1(userId, tenantId);
+    await v2.prepareFromShadow(userId, tenantId);
+    const storedUser = tenantStorageKey(tenantId, userId);
+    store.sql.transaction(() => {
+      store.sql.exec("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id=? AND user_id=?", new Date().toISOString(), tenantId, storedUser);
+      store.sql.exec("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=?", tenantId, storedUser);
+    });
+    return { v2, storedUser };
+  };
   beforeEach(async () => {
     database = new DatabaseSync(":memory:"); store = new AiStore(adapter(database), "reference-tenant"); store.initialize();
     workspace = new AiWorkspaceRepository(store.sql); workspace.initialize();
@@ -66,6 +80,76 @@ describe("generated image to real video-reference mapping", () => {
     const before = store.quota("member");
     expect(await source()).toEqual({ assetId, conversationId, mimeType: "image/png", base64: PNG, sourceFingerprint: await aiVideoReferenceFingerprint(`data:image/png;base64,${PNG}`) });
     expect(store.quota("member")).toEqual(before); expect(transport).not.toHaveBeenCalled();
+  });
+  it("resolves only the indexed V2 image artifact and rechecks it with the assistant message before paid video", async () => {
+    const { v2 } = await activatePreparedV2();
+    expect(await v2.readActiveImageSourceEntities("member", conversationId, assetId, store.tenantId)).toMatchObject({ artifactId: "image-artifact", batch: { epoch: 1 } });
+    expect(() => workspace.read("member", store.tenantId)).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_VERSION_UNSUPPORTED" }));
+    expect(await source()).toMatchObject({ assetId, conversationId, mimeType: "image/png" });
+    const reference = await mapped();
+    await submit(reference.id);
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("does not trust a stale or ambiguous V2 asset index after the image artifact changes", async () => {
+    const { v2, storedUser } = await activatePreparedV2();
+    store.sql.transaction(() => {
+      store.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind='artifact' AND entity_id='image-artifact'", store.tenantId, storedUser);
+      store.sql.exec("UPDATE ai_workspace_v2_entities SET deleted=1,revision=revision+1,byte_length=0,sha256='',chunk_count=0 WHERE tenant_id=? AND user_id=? AND kind='artifact' AND entity_id='image-artifact'", store.tenantId, storedUser);
+    });
+    expect(await v2.readActiveImageSourceEntities("member", conversationId, assetId, store.tenantId)).toMatchObject({ artifactId: "image-artifact", batch: { epoch: 1 } });
+    await expect(source()).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    store.sql.exec("INSERT INTO ai_workspace_v2_image_artifacts(tenant_id,user_id,conversation_id,asset_id,artifact_id) VALUES(?,?,?,?,?)", store.tenantId, storedUser, conversationId, assetId, "other-artifact");
+    await expect(source()).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(store.quota("member").reservedTokens).toBe(0);
+  });
+  it("rejects a V2 image artifact that no assistant message in the source conversation owns", async () => {
+    const detached = state(); detached.conversations[0].messages = [];
+    await save(detached);
+    const { v2 } = await activatePreparedV2();
+    expect((await v2.readActiveImageSourceEntities("member", conversationId, assetId, store.tenantId))?.artifactId).toBe("image-artifact");
+    await expect(source()).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("rejects duplicated V1 image owners before preparing a V2 index without changing the current workspace", async () => {
+    const duplicated = state();
+    duplicated.artifacts.push({ ...duplicated.artifacts[0], id: "second-image-artifact" });
+    await save(duplicated);
+    const shadow = new AiWorkspaceV2ShadowRepository(store.sql, workspace);
+    const v2 = new AiWorkspaceV2Store(store.sql, workspace); v2.initialize();
+    await shadow.stageFromV1("member", store.tenantId);
+    await expect(v2.prepareFromShadow("member", store.tenantId)).rejects.toMatchObject({ code: "AI_WORKSPACE_AMBIGUOUS_REFERENCE" });
+    expect(workspace.read("member", store.tenantId).state?.artifacts).toHaveLength(2);
+    expect(store.sql.all("SELECT artifact_id FROM ai_workspace_v2_image_artifacts")).toHaveLength(0);
+    expect(store.sql.all("SELECT epoch FROM ai_workspace_v2_meta")).toHaveLength(0);
+  });
+  it("keeps legacy image kinds indexed in V2 and refuses a different conversation or removed asset", async () => {
+    const legacy = state(); legacy.artifacts[0].kind = "image"; await save(legacy);
+    const { v2 } = await activatePreparedV2();
+    expect((await v2.readActiveImageSourceEntities("member", conversationId, assetId, store.tenantId))?.artifactId).toBe("image-artifact");
+    await expect(video.generatedReferenceSource("member", { conversationId: "other-conversation", assetId })).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    const reference = await mapped();
+    store.deleteAsset("member", assetId);
+    await expect(submit(reference.id)).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(store.quota("member").reservedTokens).toBe(0);
+  });
+  it("omits deleted images from the V2 index", async () => {
+    await save(state(assetId, true));
+    const { v2 } = await activatePreparedV2();
+    expect(await v2.readActiveImageSourceEntities("member", conversationId, assetId, store.tenantId)).toBeNull();
+    await expect(source()).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+  });
+  it("does not borrow another member's V2 image bytes or another tenant's index", async () => {
+    await save(state(), "other-member");
+    await activatePreparedV2("other-member");
+    await expect(video.generatedReferenceSource("other-member", { conversationId, assetId })).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    const other = new AiStore(store.sql, "other-tenant"); other.saveQuota("member", { ...emptyQuota(), limitTokens: 10000 });
+    const noImages = state(); noImages.artifacts = []; noImages.conversations[0].messages = [];
+    await save(noImages, "member", other.tenantId);
+    const { v2 } = await activatePreparedV2("member", other.tenantId);
+    expect(await v2.readActiveImageSourceEntities("member", conversationId, assetId, other.tenantId)).toBeNull();
+    expect(await source()).toMatchObject({ assetId, conversationId });
   });
   it("also accepts legacy machine-name image artifacts", async () => {
     const legacy = state(); legacy.artifacts[0].kind = "image"; await save(legacy);

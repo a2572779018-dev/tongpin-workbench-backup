@@ -1,9 +1,12 @@
 import type { AiImageAsset } from "../../shared/ai";
+import type { AiWorkspaceArtifact, AiWorkspaceConversation } from "../../shared/aiWorkspace";
 import { aiVideoReferenceFingerprint, AI_VIDEO_REFERENCE_FINGERPRINT } from "../../shared/aiVideoReferences";
 import { validateImageBase64 } from "./capabilities";
 import { AiError } from "./security";
 import type { AiStore } from "./storage";
-import { AiWorkspaceRepository } from "./workspace";
+import { AiWorkspaceRepository, validateAiWorkspaceArtifactEntity, validateAiWorkspaceConversationEntity } from "./workspace";
+import { currentWorkspaceVersion } from "./workspaceCurrentReads";
+import { AiWorkspaceV2Store } from "./workspaceV2Store";
 
 export interface GeneratedAssetReferenceBinding {
   assetId: string;
@@ -42,11 +45,31 @@ export async function readGeneratedAssetReference(store: AiStore, userId: string
   store.assertAccess(userId);
   const { assetId, conversationId } = sourceIds(value);
   const notFound = (): never => { throw new AiError(404, "AI_GENERATED_REFERENCE_NOT_FOUND", "该图片不在当前对话中、尚未同步或已删除，请重新选择参考图片"); };
-  const state = new AiWorkspaceRepository(store.sql).read(userId, store.tenantId).state;
-  const conversation = state?.conversations.find(item => item.id === conversationId);
+  let conversation: AiWorkspaceConversation | undefined;
+  let artifacts: AiWorkspaceArtifact[];
+  if (currentWorkspaceVersion(store, userId) === 1) {
+    const state = new AiWorkspaceRepository(store.sql).read(userId, store.tenantId).state;
+    conversation = state?.conversations.find(item => item.id === conversationId);
+    artifacts = state?.artifacts ?? [];
+  } else {
+    const workspace = new AiWorkspaceRepository(store.sql);
+    const v2 = new AiWorkspaceV2Store(store.sql, workspace);
+    const source = await v2.readActiveImageSourceEntities(userId, conversationId, assetId, store.tenantId);
+    if (!source) return notFound();
+    const [conversationEntity, artifactEntity] = source.batch.entities;
+    if (!conversationEntity || conversationEntity.deleted || !artifactEntity || artifactEntity.deleted) return notFound();
+    let artifact: AiWorkspaceArtifact;
+    try {
+      conversation = validateAiWorkspaceConversationEntity(conversationEntity.value);
+      artifact = validateAiWorkspaceArtifactEntity(artifactEntity.value);
+    } catch { throw new AiError(500, "AI_WORKSPACE_CORRUPT", "图片来源记录未通过校验，请联系管理员"); }
+    if (conversation.id !== conversationId || artifact.id !== source.artifactId || artifact.conversationId !== conversationId ||
+      artifact.projectId !== conversation.projectId) return notFound();
+    artifacts = [artifact];
+  }
   if (!conversation) return notFound();
   const attached = new Set(conversation.messages.filter(message => message.role === "assistant" && message.artifactId).map(message => message.artifactId));
-  const hasImage = state!.artifacts.some(artifact => artifact.conversationId === conversationId && (artifact.kind === "图片" || artifact.kind === "image") && attached.has(artifact.id)
+  const hasImage = artifacts.some(artifact => artifact.conversationId === conversationId && (artifact.kind === "图片" || artifact.kind === "image") && attached.has(artifact.id)
     && Array.isArray(artifact.data?.images) && artifact.data.images.some(image => image !== null && typeof image === "object" && !Array.isArray(image) && image.assetId === assetId && !image.deleted));
   if (!hasImage) return notFound();
   const asset = store.asset(userId, assetId);

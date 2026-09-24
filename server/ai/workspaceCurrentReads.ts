@@ -12,21 +12,28 @@ export interface AiCurrentConversation {
   epoch?: number;
 }
 
-/** Read only the current member's requested conversation. V2 deliberately
- * never reconstructs the account snapshot through V1's 8 MiB validator. */
-export async function readCurrentConversation(store: AiStore, userId: string, conversationId: string): Promise<AiCurrentConversation | null> {
+/** A version probe is not authorization by itself: every subsequent V1/V2
+ * read repeats its own account/version checks, failing closed on cutover. */
+export function currentWorkspaceVersion(store: AiStore, userId: string): 1 | 2 {
   store.assertAccess(userId);
   const storedUser = tenantStorageKey(store.tenantId, userId);
   const version = store.sql.all<{ schema_version: number }>(
     "SELECT schema_version FROM ai_workspaces WHERE tenant_id=? AND user_id=?", store.tenantId, storedUser,
   )[0]?.schema_version ?? 1;
+  if (version !== 1 && version !== 2) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "工作台记录版本不受支持，请升级客户端");
+  return version;
+}
+
+/** Read only the current member's requested conversation. V2 deliberately
+ * never reconstructs the account snapshot through V1's 8 MiB validator. */
+export async function readCurrentConversation(store: AiStore, userId: string, conversationId: string): Promise<AiCurrentConversation | null> {
+  const version = currentWorkspaceVersion(store, userId);
   const workspace = new AiWorkspaceRepository(store.sql);
   if (version === 1) {
     const snapshot = workspace.read(userId, store.tenantId);
     const conversation = snapshot.state?.conversations.find(item => item.id === conversationId);
     return conversation ? { conversation, revision: snapshot.revision, schemaVersion: 1 } : null;
   }
-  if (version !== 2) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "工作台记录版本不受支持，请升级客户端");
   const batch = await new AiWorkspaceV2Store(store.sql, workspace).readActiveEntities(userId, [{ kind: "conversation", entityId: conversationId }], store.tenantId);
   const entity = batch.entities[0];
   if (!entity || entity.deleted) return null;
