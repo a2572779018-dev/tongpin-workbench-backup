@@ -241,6 +241,145 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT epoch FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ epoch: prepared.epoch });
   });
 
+  it("creates an empty conversation at the front and updates only its metadata with CAS", async () => {
+    const prepared = await active();
+    const conversation = { id: "chat-b", projectId: "project-a", title: "新对话", timeLabel: "刚刚", messages: [] };
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 0, action: "put", value: conversation },
+    ] };
+    const first = await v2.mutateActive("member-a", request);
+    expect(first).toMatchObject({ entities: [{ kind: "conversation", entityId: "chat-b", revision: 1, deleted: false }] });
+    expect(await v2.mutateActive("member-a", request)).toEqual(first);
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-b")).toMatchObject({ ordinal: -1, revision: 1, value: conversation });
+    const updated = { ...conversation, title: "改过的标题", timeLabel: "今天" };
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 1, action: "put", value: updated },
+    ] });
+    expect(await v2.mutateActive("member-a", request)).toEqual(first);
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-b")).toMatchObject({ ordinal: -1, revision: 2, value: updated });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 1, action: "put", value: { ...updated, title: "过期覆盖" } },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect(database.prepare("SELECT message_id,conversation_id FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a'").all()).toEqual([
+      { message_id: "message-a", conversation_id: "chat-a" },
+    ]);
+    expect(database.prepare("SELECT revision,schema_version FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual({ revision: 1, schema_version: 2 });
+  });
+
+  it("rejects conversation messages, project moves, deletes and mixed writes", async () => {
+    const prepared = await active();
+    const old = state("甲").conversations[0];
+    const attempt = (value: unknown, expectedRevision = 1) => v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-a", expectedRevision, action: "put", value },
+    ] });
+    await expect(attempt({ ...old, messages: [...old.messages, { id: "message-b", role: "user", content: "新消息", time: "11:00" }] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(attempt({ ...old, messages: [{ ...old.messages[0], content: "被改写" }] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(attempt({ id: old.id, title: old.title, timeLabel: old.timeLabel, messages: old.messages })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(attempt({ ...old, id: "chat-b" })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-new", expectedRevision: 0, action: "put", value: { ...old, id: "chat-new" } },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "new-conversation", expectedRevision: 0, action: "put", value: { id: "new-conversation", title: "占位冲突", timeLabel: "刚刚", messages: [] } },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-a", expectedRevision: 1, action: "delete" },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-a", expectedRevision: 1, action: "put", value: old },
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "混合草稿" },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-a")).toMatchObject({ revision: 1, value: old });
+  });
+
+  it("requires a verified message index and stable project before conversation writes", async () => {
+    const prepared = await active();
+    const conversation = { id: "chat-b", projectId: "project-a", title: "新对话", timeLabel: "刚刚", messages: [] };
+    const save = () => v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 0, action: "put", value: conversation },
+    ] });
+    database.prepare("UPDATE ai_workspace_v2_meta SET message_index_version=0 WHERE user_id='member-a'").run();
+    await expect(save()).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    database.prepare("UPDATE ai_workspace_v2_meta SET message_index_version=1 WHERE user_id='member-a'").run();
+    const original = v2.readActiveEntities.bind(v2);
+    const spy = vi.spyOn(v2, "readActiveEntities").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      database.prepare("UPDATE ai_workspace_v2_entities SET revision=revision+1 WHERE tenant_id='default' AND user_id='member-a' AND kind='project' AND entity_id='project-a'").run();
+      return result;
+    });
+    try { await expect(save()).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" }); }
+    finally { spy.mockRestore(); }
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-b")).toBeNull();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects absent projects and damaged message ownership", async () => {
+    const prepared = await active();
+    const missing = { id: "chat-new", projectId: "missing", title: "新对话", timeLabel: "刚刚", messages: [] };
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-new", expectedRevision: 0, action: "put", value: missing },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    const old = state("甲").conversations[0];
+    database.prepare("DELETE FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a' AND message_id='message-a'").run();
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-a", expectedRevision: 1, action: "put", value: { ...old, title: "改名" } },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-a")).toMatchObject({ revision: 1, value: old });
+  });
+
+  it("keeps an already-prepared legacy conversation with the reserved ID editable", async () => {
+    const legacy = state("甲");
+    legacy.conversations[0].id = "new-conversation";
+    legacy.activeConversationId = "new-conversation";
+    legacy.artifacts[0].conversationId = "new-conversation";
+    legacy.drafts = { "new-conversation": "原草稿" };
+    legacy.draftAttachments = { "new-conversation": legacy.draftAttachments!["chat-a"] };
+    legacy.videoDraftSettings = { "new-conversation": legacy.videoDraftSettings!["chat-a"] };
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: legacy });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-a'").run(new Date().toISOString());
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-a'").run();
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "new-conversation", expectedRevision: 1, action: "put", value: { ...legacy.conversations[0], title: "旧对话改名" } },
+    ] });
+    expect(await v2.readActiveEntity("member-a", "conversation", "new-conversation")).toMatchObject({ revision: 2, value: { title: "旧对话改名" } });
+  });
+
+  it("enforces the account conversation count without affecting another tenant", async () => {
+    const prepared = await active();
+    const other = await active("乙", "tenant-b");
+    for (let index = 0; index < 499; index++) {
+      database.prepare("INSERT INTO ai_workspace_v2_entities(tenant_id,user_id,kind,entity_id,revision,ordinal,byte_length,sha256,chunk_count) VALUES('default','member-a','conversation',?,1,?,1,'fixture',1)").run(`extra-${index}`, index + 1);
+    }
+    const conversation = { id: "chat-b", projectId: "project-a", title: "新对话", timeLabel: "刚刚", messages: [] };
+    const request = (epoch: number) => ({ epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 0, action: "put", value: conversation },
+    ] });
+    await expect(v2.mutateActive("member-a", request(prepared.epoch))).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-b")).toBeNull();
+    await v2.mutateActive("member-a", request(other.epoch), "tenant-b");
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-b", "tenant-b")).toMatchObject({ value: conversation });
+  });
+
+  it("rolls back a failed conversation entity write without a receipt", async () => {
+    const prepared = await active();
+    const conversation = { id: "chat-b", projectId: "project-a", title: "新对话", timeLabel: "刚刚", messages: [] };
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 0, action: "put", value: conversation },
+    ] };
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_entity_chunks") && bindings[2] === "conversation") throw new Error("fixture conversation write failed");
+      sql.exec(query, ...bindings);
+    } };
+    await expect(new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken)).mutateActive("member-a", request)).rejects.toThrow("fixture conversation write failed");
+    expect(await v2.readActiveEntity("member-a", "conversation", "chat-b")).toBeNull();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT message_id,conversation_id FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a'").all()).toEqual([
+      { message_id: "message-a", conversation_id: "chat-a" },
+    ]);
+  });
+
   it("rejects forged new image ownership and a duplicate index before changing an existing artifact", async () => {
     const assetId = crypto.randomUUID();
     const { prepared, artifact } = await activeImage(assetId);

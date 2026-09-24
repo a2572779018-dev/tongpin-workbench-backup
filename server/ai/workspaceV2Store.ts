@@ -1,5 +1,5 @@
 import { AiError } from "./security";
-import { AI_WORKSPACE_LIMITS, type AiWorkspaceArtifact, type AiWorkspaceProject } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceProject } from "../../shared/aiWorkspace";
 import { AiStore } from "./storage";
 import type { AiSql } from "./storage";
 import { normalizeAiTenantId, tenantStorageKey } from "./tenant";
@@ -7,8 +7,8 @@ import { AI_WORKSPACE_V2_ENTITY_BYTES, AiWorkspaceRepository, validateAiWorkspac
 import { AiWorkspaceV2ShadowRepository, canonical, split, type Segment } from "./workspaceV2Shadow";
 
 /**
- * Internal V2 preparation plus deliberately narrow leaf, project and
- * owner-stable artifact CAS proofs.
+ * Internal V2 preparation plus deliberately narrow leaf, project,
+ * empty/metadata-only conversation and owner-stable artifact CAS proofs.
  * No HTTP route or automatic migration calls this repository. A future client
  * still needs the other entity writers, media references, legacy exclusion and
  * all background readers before an account can be activated. V1 remains
@@ -89,10 +89,10 @@ export interface AiWorkspaceV2PreparedEntity { kind: Segment["kind"]; entityId: 
 export interface AiWorkspaceV2ActiveEntity extends AiWorkspaceV2PreparedEntity { deleted: boolean }
 export interface AiWorkspaceV2EntityRef { kind: Segment["kind"]; entityId: string }
 export interface AiWorkspaceV2ActiveBatch { epoch: number; entities: Array<AiWorkspaceV2ActiveEntity | null> }
-export interface AiWorkspaceV2MutationAck { epoch: number; entities: Array<{ kind: "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "manifest"; entityId: string; revision: number; deleted: boolean }> }
-type WritableKind = "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "manifest";
+export interface AiWorkspaceV2MutationAck { epoch: number; entities: Array<{ kind: "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "conversation" | "manifest"; entityId: string; revision: number; deleted: boolean }> }
+type WritableKind = "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "conversation" | "manifest";
 interface ManifestValue { base: Record<string, unknown>; hasDraftAttachments: boolean; hasVideoDraftSettings: boolean }
-interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[]; artifact?: AiWorkspaceArtifact; manifest?: ManifestValue; manifestRevision?: number; imageAssets?: string[]; dependencies?: Array<{ kind: "conversation" | "project"; entityId: string; revision: number }> }
+interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[]; artifact?: AiWorkspaceArtifact; conversation?: AiWorkspaceConversation; manifest?: ManifestValue; manifestRevision?: number; imageAssets?: string[]; dependencies?: Array<{ kind: "conversation" | "project"; entityId: string; revision: number }> }
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_DRAFT_BYTES = 96 * 1024;
@@ -393,7 +393,7 @@ export class AiWorkspaceV2Store {
     return snapshot ? { artifactId: snapshot.artifactId, batch: await this.verifyActiveSnapshot(snapshot.batch) } : null;
   }
 
-  /** CAS is implemented for draft/settings/attachments, restricted project/artifact puts and
+  /** CAS is implemented for draft/settings/attachments, restricted project/artifact/conversation puts and
    * the manifest's attachment-presence flag. No HTTP
    * route, activation entry point or real-account migration yet. */
   async mutateActive(userId: string, input: unknown, tenantId?: string): Promise<AiWorkspaceV2MutationAck> {
@@ -412,9 +412,9 @@ export class AiWorkspaceV2Store {
       const op = raw as Record<string, unknown>;
       if (Object.keys(op).some(key => !["kind", "entityId", "expectedRevision", "action", "value"].includes(key))) invalid("分实体操作包含不支持的字段");
       if (!ENTITY_KINDS.has(op.kind as Segment["kind"])) invalid("分实体类型无效");
-      if (op.kind !== "draft" && op.kind !== "draftAttachment" && op.kind !== "videoDraftSettings" && op.kind !== "artifact" && op.kind !== "project" && op.kind !== "manifest") throw new AiError(409, "V2_OPERATION_NOT_READY", "此类工作台实体尚未开放逐条写入");
+      if (op.kind !== "draft" && op.kind !== "draftAttachment" && op.kind !== "videoDraftSettings" && op.kind !== "artifact" && op.kind !== "project" && op.kind !== "conversation" && op.kind !== "manifest") throw new AiError(409, "V2_OPERATION_NOT_READY", "此类工作台实体尚未开放逐条写入");
       if (typeof op.entityId !== "string" || op.entityId.length > 160 ||
-        !(ID.test(op.entityId) || op.kind !== "artifact" && op.kind !== "project" && op.kind !== "manifest" && op.entityId.startsWith("new-project-conversation:") && ID.test(op.entityId.slice("new-project-conversation:".length)))) invalid("分实体标识无效");
+        !(ID.test(op.entityId) || op.kind !== "artifact" && op.kind !== "project" && op.kind !== "conversation" && op.kind !== "manifest" && op.entityId.startsWith("new-project-conversation:") && ID.test(op.entityId.slice("new-project-conversation:".length)))) invalid("分实体标识无效");
       if (op.kind === "manifest" && op.entityId !== "root") invalid("工作台索引标识无效");
       if (!Number.isSafeInteger(op.expectedRevision) || Number(op.expectedRevision) < 0 || Number(op.expectedRevision) >= Number.MAX_SAFE_INTEGER) invalid("分实体版本无效");
       if (op.action !== "put" && op.action !== "delete") invalid("分实体操作类型无效");
@@ -424,11 +424,11 @@ export class AiWorkspaceV2Store {
       const normalized: PreparedMutationOp = { kind: op.kind, entityId: op.entityId, expectedRevision: Number(op.expectedRevision), action: op.action };
       const forHash: Record<string, unknown> = { kind: op.kind, entityId: op.entityId, expectedRevision: op.expectedRevision, action: op.action };
       if (op.action === "put") {
-        const validated = op.kind === "draft" ? validateAiWorkspaceDraft(op.value) : op.kind === "draftAttachment" ? validateAiWorkspaceDraftAttachments(op.value) : op.kind === "videoDraftSettings" ? validateAiWorkspaceVideoDraftSetting(op.value) : op.kind === "artifact" ? validateAiWorkspaceArtifactEntity(op.value) : op.kind === "project" ? validateAiWorkspaceProjectEntity(op.value) : manifestValue(op.value);
+        const validated = op.kind === "draft" ? validateAiWorkspaceDraft(op.value) : op.kind === "draftAttachment" ? validateAiWorkspaceDraftAttachments(op.value) : op.kind === "videoDraftSettings" ? validateAiWorkspaceVideoDraftSetting(op.value) : op.kind === "artifact" ? validateAiWorkspaceArtifactEntity(op.value) : op.kind === "project" ? validateAiWorkspaceProjectEntity(op.value) : op.kind === "conversation" ? validateAiWorkspaceConversationEntity(op.value) : manifestValue(op.value);
         let value: unknown;
         try { value = JSON.parse(JSON.stringify(validated)) as unknown; } catch { invalid("分实体内容必须是有效 JSON"); }
         const bytes = new TextEncoder().encode(JSON.stringify(value));
-        if (bytes.length > (op.kind === "draft" ? MAX_DRAFT_BYTES : op.kind === "draftAttachment" ? AI_WORKSPACE_V2_ENTITY_BYTES.draftAttachment : op.kind === "videoDraftSettings" ? MAX_VIDEO_DRAFT_BYTES : op.kind === "artifact" ? AI_WORKSPACE_V2_ENTITY_BYTES.artifact : op.kind === "project" ? AI_WORKSPACE_V2_ENTITY_BYTES.project : MAX_MANIFEST_BYTES)) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "分实体内容超出安全保存上限");
+        if (bytes.length > (op.kind === "draft" ? MAX_DRAFT_BYTES : op.kind === "draftAttachment" ? AI_WORKSPACE_V2_ENTITY_BYTES.draftAttachment : op.kind === "videoDraftSettings" ? MAX_VIDEO_DRAFT_BYTES : op.kind === "artifact" ? AI_WORKSPACE_V2_ENTITY_BYTES.artifact : op.kind === "project" ? AI_WORKSPACE_V2_ENTITY_BYTES.project : op.kind === "conversation" ? AI_WORKSPACE_V2_ENTITY_BYTES.conversation : MAX_MANIFEST_BYTES)) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "分实体内容超出安全保存上限");
         totalWriteBytes += bytes.length;
         if (totalWriteBytes > MAX_MUTATION_BYTES) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "单次分实体保存内容超出安全上限");
         normalized.bytes = bytes;
@@ -442,12 +442,16 @@ export class AiWorkspaceV2Store {
           normalized.imageAssets = Array.from(indexedImageAssets(artifact));
         } else if (op.kind === "project" && (value as AiWorkspaceProject).id !== op.entityId) {
           invalid("项目标识与保存目标不一致");
+        } else if (op.kind === "conversation") {
+          const conversation = value as AiWorkspaceConversation;
+          if (conversation.id !== op.entityId) invalid("对话标识与保存目标不一致");
+          normalized.conversation = conversation;
         } else if (op.kind === "manifest") {
           normalized.manifest = manifestValue(value);
           boundedManifestBase(normalized.manifest.base);
         }
       } else {
-        if (op.kind === "artifact" || op.kind === "project" || op.kind === "manifest") throw new AiError(409, "V2_OPERATION_NOT_READY", "工作台索引、项目或成果删除尚未开放");
+        if (op.kind === "artifact" || op.kind === "project" || op.kind === "conversation" || op.kind === "manifest") throw new AiError(409, "V2_OPERATION_NOT_READY", "工作台索引、项目、对话或成果删除尚未开放");
         if (op.value !== undefined) invalid("删除操作不能携带内容");
       }
       prepared.push(normalized);
@@ -456,12 +460,15 @@ export class AiWorkspaceV2Store {
     if (prepared.some(op => op.kind === "project") && prepared.some(op => op.kind !== "project")) {
       throw new AiError(409, "V2_OPERATION_NOT_READY", "项目与其他实体的组合保存尚未开放");
     }
+    if (prepared.some(op => op.kind === "conversation") && prepared.length !== 1) {
+      throw new AiError(409, "V2_OPERATION_NOT_READY", "对话与其他实体的组合保存尚未开放");
+    }
     if (prepared.some(op => op.kind === "manifest") && prepared.length !== 1) {
       throw new AiError(409, "V2_OPERATION_NOT_READY", "工作台索引与其他实体的组合保存尚未开放");
     }
     const requestHash = await hash(new TextEncoder().encode(canonical({ epoch: body.epoch, ops: canonicalOps })));
     const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
-    const needsPreflight = prepared.some(op => op.kind === "artifact" || op.kind === "manifest" || op.kind === "draftAttachment");
+    const needsPreflight = prepared.some(op => op.kind === "artifact" || op.kind === "conversation" || op.kind === "manifest" || op.kind === "draftAttachment");
     const readReplay = (): AiWorkspaceV2MutationAck | null => this.sql.transaction(() => {
       // Replay is independent of today's parent/artifact shape. A later edit
       // must not turn an already committed mutation into a false rejection.
@@ -497,6 +504,31 @@ export class AiWorkspaceV2Store {
             previous.hasVideoDraftSettings !== op.manifest!.hasVideoDraftSettings ||
             boundedManifestBase(previous.base) !== boundedManifestBase(op.manifest!.base)) {
             throw new AiError(409, "V2_OPERATION_NOT_READY", "目前仅开放草稿附件存在标志的开启");
+          }
+          continue;
+        }
+        if (op.kind === "conversation") {
+          const conversation = op.conversation!;
+          const refs: AiWorkspaceV2EntityRef[] = [{ kind: "conversation", entityId: conversation.id }];
+          if (conversation.projectId) refs.push({ kind: "project", entityId: conversation.projectId });
+          const batch = await this.readActiveEntities(userId, refs, tenant);
+          const previous = batch.entities[0];
+          if (previous?.deleted) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "已删除的对话不能通过旧保存请求恢复");
+          if (previous) {
+            const old = validateAiWorkspaceConversationEntity(previous.value);
+            // Messages and project links need a separate writer that maintains
+            // global ownership, asset provenance and multi-entity state.
+            if (old.projectId !== conversation.projectId || canonical(old.messages) !== canonical(conversation.messages)) {
+              throw new AiError(409, "V2_OPERATION_NOT_READY", "目前仅开放对话标题与时间标签修改");
+            }
+          } else {
+            if (conversation.id === "new-conversation") invalid("新对话占位标识不能用作真实对话");
+            if (conversation.messages.length) throw new AiError(409, "V2_OPERATION_NOT_READY", "新对话消息写入尚未开放");
+          }
+          if (conversation.projectId) {
+            const project = batch.entities[1];
+            if (!project || project.deleted || validateAiWorkspaceProjectEntity(project.value).id !== conversation.projectId) invalid("对话所属项目不存在");
+            op.dependencies = [{ kind: "project", entityId: conversation.projectId, revision: project.revision }];
           }
           continue;
         }
@@ -553,7 +585,7 @@ export class AiWorkspaceV2Store {
       const entities: AiWorkspaceV2MutationAck["entities"] = [];
       for (const op of prepared) {
         const target = op.entityId;
-        if (op.kind !== "artifact" && op.kind !== "project" && op.kind !== "manifest") {
+        if (op.kind !== "artifact" && op.kind !== "project" && op.kind !== "conversation" && op.kind !== "manifest") {
           const relatedKind = target.startsWith("new-project-conversation:") ? "project" : "conversation";
           const relatedId = relatedKind === "project" ? target.slice("new-project-conversation:".length) : target;
           if (target !== "new-conversation" && !this.sql.all<{ entity_id: string }>(
@@ -583,6 +615,25 @@ export class AiWorkspaceV2Store {
             "SELECT COUNT(*) AS count FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='project' AND deleted=0", tenant, storedUser,
           )[0].count >= AI_WORKSPACE_LIMITS.projects) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "项目数量超过安全上限");
         }
+        if (op.kind === "conversation") {
+          if (meta.message_index_version !== 1 || current?.deleted) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "消息归属索引或对话记录已变化，请重新同步");
+          for (const dependency of op.dependencies ?? []) {
+            const project = this.sql.all<{ revision: number; deleted: number }>(
+              "SELECT revision,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='project' AND entity_id=?",
+              tenant, storedUser, dependency.entityId,
+            )[0];
+            if (!project || project.deleted || project.revision !== dependency.revision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "对话所属项目已变化，请重新同步");
+          }
+          if (!current && this.sql.all<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='conversation' AND deleted=0", tenant, storedUser,
+          )[0].count >= AI_WORKSPACE_LIMITS.conversations) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "对话数量超过安全上限");
+          const indexedIds = this.sql.all<{ message_id: string }>(
+            "SELECT message_id FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=? AND conversation_id=? ORDER BY message_id",
+            tenant, storedUser, target,
+          ).map(row => row.message_id);
+          const messageIds = op.conversation!.messages.map(message => message.id).sort();
+          if (canonical(indexedIds) !== canonical(messageIds)) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "对话消息归属索引不一致，请重新同步");
+        }
         if (op.kind === "artifact") {
           if (meta.image_index_version !== 1 || current?.deleted) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "图片成果索引或记录已变化，请重新同步");
           for (const dependency of op.dependencies ?? []) {
@@ -608,7 +659,9 @@ export class AiWorkspaceV2Store {
               tenant, storedUser, op.artifact!.conversationId, assetId, target);
           }
         }
-        const ordinal = current?.ordinal ?? (this.sql.all<{ max_ordinal: number | null }>("SELECT MAX(ordinal) AS max_ordinal FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=?", tenant, storedUser, op.kind)[0]?.max_ordinal ?? -1) + 1;
+        const ordinal = current?.ordinal ?? (op.kind === "conversation"
+          ? (this.sql.all<{ min_ordinal: number | null }>("SELECT MIN(ordinal) AS min_ordinal FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='conversation'", tenant, storedUser)[0]?.min_ordinal ?? 0) - 1
+          : (this.sql.all<{ max_ordinal: number | null }>("SELECT MAX(ordinal) AS max_ordinal FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=?", tenant, storedUser, op.kind)[0]?.max_ordinal ?? -1) + 1);
         const revision = op.expectedRevision + 1, deleted = op.action === "delete";
         this.sql.exec("INSERT INTO ai_workspace_v2_entities(tenant_id,user_id,kind,entity_id,revision,ordinal,byte_length,sha256,chunk_count,deleted) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,user_id,kind,entity_id) DO UPDATE SET revision=excluded.revision,ordinal=excluded.ordinal,byte_length=excluded.byte_length,sha256=excluded.sha256,chunk_count=excluded.chunk_count,deleted=excluded.deleted",
           tenant, storedUser, op.kind, target, revision, ordinal, op.bytes?.length ?? 0, op.sha256 ?? "", op.chunks?.length ?? 0, deleted ? 1 : 0);
