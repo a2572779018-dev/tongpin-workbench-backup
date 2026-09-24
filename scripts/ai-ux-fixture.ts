@@ -125,7 +125,7 @@ const runtime = await createRuntime(config, {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
     const instructions = typeof body.instructions === "string" ? body.instructions : "";
-    evidence(`transport ${method} ${url.pathname} stream=${String(body.stream)}`);
+    evidence(`transport ${method} ${url.pathname} stream=${String(body.stream)}${instructions.includes("受限 Hub 工作流") ? " workflow=INJECTED" : ""}`);
     if (url.pathname.endsWith("/models")) return Response.json({ data: [{ id: "fixture-model", object: "model" }, { id: "fixture-image", object: "model" }, { id: "minimax_h3", object: "model" }, { id: "sd-2-c6", object: "model" }] });
 
     // A provider-boundary "failure" switch. The product code that consumes this
