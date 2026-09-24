@@ -157,7 +157,7 @@ window.fetch = async (target, init) => {
   if (url.pathname === "/api/ai/videos/fixture-video-c") {
     const ready = Date.now() - videoCreatedAt > 7000;
     record(`video:c:${ready ? "completed" : "processing"}`);
-    return Response.json({ job: { id: "fixture-video-c", prompt: "隔离视频", seconds: 3, model: "minimax_h3", resolution: "768p", aspectRatio: "16:9", status: ready ? "completed" : "processing", progress: ready ? 100 : 0, createdAt: new Date(videoCreatedAt).toISOString(), updatedAt: new Date().toISOString(), quotaPoints: 0, reserved: !ready } });
+    return Response.json({ job: { id: "fixture-video-c", conversationId: "c", prompt: "隔离视频", seconds: 3, model: "minimax_h3", resolution: "768p", aspectRatio: "16:9", status: ready ? "completed" : "processing", progress: ready ? 100 : 0, createdAt: new Date(videoCreatedAt).toISOString(), updatedAt: new Date().toISOString(), quotaPoints: 0, reserved: !ready } });
   }
   if (url.pathname === "/api/ai/videos") {
     if (method === "POST") throw Error("Fixture forbids legacy paid /api/ai/videos POST");

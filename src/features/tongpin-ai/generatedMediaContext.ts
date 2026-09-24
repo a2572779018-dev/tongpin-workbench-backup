@@ -44,6 +44,23 @@ export function generatedMediaForFollowup(conversation: TongpinAIConversation | 
   }
 }
 
+/** An explicit upload owns "this image/video". Only an unambiguous mention of
+ * an earlier generated result may add that result to the same model request. */
+export function generatedMediaForMixedFollowup(conversation: TongpinAIConversation | null, artifacts: TongpinAIArtifact[], text: string): TongpinAIArtifact | undefined {
+  const references = [...text.matchAll(/(?:刚才|上面|前面|之前|此前|已)[^，。；;]{0,12}?(?:生成|制作|做出|产出)(?:的|出来的)?[\s，、]{0,3}(视频|短片|成片|图片|图像|照片)/g)]
+    .map(match => /视频|短片|成片/.test(match[1]) ? "video" : "image");
+  if (!references.length) return undefined;
+  if (new Set(references).size !== 1) throw Error("请先指定要讨论的一项生成成果；草稿已保留，本次未发送");
+  const kind = references[0];
+  const artifact = generatedMediaForFollowup(conversation, artifacts, kind === "video" ? "评价刚才生成的视频画面" : "评价刚才生成的图片画面");
+  if (!artifact) throw Error(`当前对话找不到刚才生成的${kind === "video" ? "视频" : "图片"}，请确认成果仍在本对话中；草稿已保留，本次未发送`);
+  if (kind === "image" && Array.isArray(artifact.data?.images)
+    && artifact.data.images.filter(image => image && typeof image === "object" && !Array.isArray(image) && !image.deleted && typeof image.assetId === "string").length > 1) {
+    throw Error("这条生成成果包含多张图片，请先明确选择哪一张；草稿已保留，本次未发送");
+  }
+  return artifact;
+}
+
 /** GET only. Re-reading an existing result must never generate/charge for a second video or image. */
 export async function readGeneratedMedia(artifact: TongpinAIArtifact, api: Api, accountId: string, cacheScope: string, signal: AbortSignal,
   extract: (file: File, signal?: AbortSignal) => Promise<ExtractedAttachment>): Promise<AiAttachment[]> {
@@ -67,7 +84,19 @@ export async function readGeneratedMedia(artifact: TongpinAIArtifact, api: Api, 
       return result.job;
     }, signal);
     if (job.status !== "completed") throw Error("视频任务尚未完成，暂不能继续对话");
+    if (job.id !== jobId || job.conversationId !== artifact.conversationId) throw Error("视频不属于当前对话或缺少可验证的对话记录，草稿已保留，本次未发送");
     signal.throwIfAborted();
+    if (videoBlobCache.get(cacheScope, jobId)) {
+      // A warm player Blob is not a lasting access grant. Check the current
+      // owner/provider before supplying its frames to another model request.
+      try {
+        const checked = await api<{ available: true }>(`${route}/content/check`, init, 30000);
+        if (checked.available !== true) throw Error("视频授权检查未通过，草稿已保留，本次未发送");
+      } catch (error) {
+        videoBlobCache.remove(cacheScope, jobId);
+        throw error;
+      }
+    }
     const blob = await videoBlobCache.loadBlob(cacheScope, jobId,
       sharedSignal => api<Blob>(`${route}/content`, { ...init, signal: sharedSignal }, 130000, "blob"), signal);
     signal.throwIfAborted();
@@ -79,9 +108,9 @@ export async function readGeneratedMedia(artifact: TongpinAIArtifact, api: Api, 
     if (images.length > AI_MEDIA_LIMITS.requestFrames) throw Error("图片过多，请单独选择需要评价的图片");
     for (const image of images) {
       const id = (image as { assetId: string }).assetId;
-      const asset = await api<AiImageAsset>(`/api/ai/assets/${encodeURIComponent(id)}`, init, 30000);
+      const asset = await api<AiImageAsset & { conversationId: string }>(`/api/ai/assets/${encodeURIComponent(id)}/conversation/${encodeURIComponent(artifact.conversationId)}`, init, 30000);
       signal.throwIfAborted();
-      if (asset.assetId !== id || asset.base64.length > AI_MEDIA_LIMITS.imageFileBytes * 4 / 3 + 4) throw Error("图片内容无法安全读取");
+      if (asset.assetId !== id || asset.conversationId !== artifact.conversationId || asset.base64.length > AI_MEDIA_LIMITS.imageFileBytes * 4 / 3 + 4) throw Error("图片内容或所属对话无法安全验证");
       const bytes = Uint8Array.from(atob(asset.base64), c => c.charCodeAt(0));
       await add(new File([bytes], `生成图片.${asset.mimeType === "image/jpeg" ? "jpg" : asset.mimeType === "image/webp" ? "webp" : "png"}`, { type: asset.mimeType }));
     }

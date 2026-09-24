@@ -375,16 +375,27 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     expect(JSON.stringify(generated)).not.toContain(PNG);
     expect((await api<{ base64: string }>(`/api/ai/assets/${assetId}`, member)).base64).toBe(PNG);
     expect(await api(`/api/ai/assets/${assetId}/check`, member)).toEqual({ assetId, mimeType: "image/png", byteLength: 68 });
+    const workspace = await api<AiWorkspaceSnapshot>("/api/ai/workspace", member);
+    const linkedState = structuredClone(workspace.state!);
+    linkedState.conversations.find(item => item.id === "conversation-one")!.messages.push({ id: "generated-image-message", role: "assistant", content: "图片已生成", artifactId: "generated-image-artifact", time: "14:00" });
+    linkedState.artifacts.push({ id: "generated-image-artifact", conversationId: "conversation-one", title: "生成图片", kind: "图片", summary: "", updatedLabel: "刚刚", sections: [], data: { images: [{ assetId }] } });
+    await api("/api/ai/workspace", member, { expectedRevision: workspace.revision, mutationId: crypto.randomUUID(), state: linkedState }, "PUT");
+    const boundRoute = `/api/ai/assets/${assetId}/conversation/conversation-one`;
+    expect(await api<{ base64: string; conversationId: string }>(boundRoute, member)).toMatchObject({ base64: PNG, conversationId: "conversation-one" });
+    await api(`/api/ai/assets/${assetId}/conversation/other-conversation`, member, undefined, "GET", 404);
+    await api(boundRoute, other, undefined, "GET", 404);
     await api(`/api/ai/assets/${assetId}/check`, other, undefined, "GET", 404);
     await api(`/api/ai/assets/${assetId}`, other, undefined, "GET", 404);
     expect((await api<{ imageResult: AiImageResponse }>(`/api/ai/requests/${request.requestId}`, member)).imageResult.images).toEqual(generated.images);
     await mf.dispose(); mf = start(); await mf.ready;
     expect((await api<{ base64: string }>(`/api/ai/assets/${assetId}`, member)).base64).toBe(PNG);
+    expect(await api<{ conversationId: string }>(boundRoute, member)).toMatchObject({ conversationId: "conversation-one" });
     await api("/api/ai/images", member, request);
     expect(postCount).toBe(before + 1);
     await api(`/api/ai/assets/${assetId}`, member, undefined, "DELETE");
     await api(`/api/ai/assets/${assetId}`, member, undefined, "GET", 404);
     await api(`/api/ai/assets/${assetId}/check`, member, undefined, "GET", 404);
+    await api(boundRoute, member, undefined, "GET", 404);
   });
   it("keeps an explicitly confirmed assistant identity after workerd restart without sharing another member's preferences", async () => {
     const profile = { name: "小频", tone: "concise", customStyle: "先给结论", preferences: "偏好简体中文", onboardingComplete: true, expression: "woozy" };

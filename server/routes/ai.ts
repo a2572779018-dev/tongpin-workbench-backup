@@ -8,6 +8,7 @@ import type { JsonStore } from "../store";
 import type { AiMode } from "../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../ai/tenant";
 import { createChatStreamResponse } from "../ai/chatStream";
+import { readGeneratedAssetReference } from "../ai/generatedAssetReference";
 import {
   createAiServiceMediaTaskOrchestrator,
   type MediaTaskConfirmation,
@@ -203,6 +204,8 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
       response.json({ task });
     });
     router.post("/images", async (request, response) => response.json(await scoped(request).generateImage(request.currentUser!.id, request.body)));
+    router.get("/assets/:id/conversation/:conversationId", async (request, response) => response.json(await readGeneratedAssetReference(scoped(request).store, request.currentUser!.id,
+      { assetId: request.params.id, conversationId: request.params.conversationId })));
     router.get("/assets/:id/check", (request, response) => response.json(scoped(request).checkAsset(request.currentUser!.id, request.params.id)));
     router.get("/assets/:id", (request, response) => response.json(scoped(request).getAsset(request.currentUser!.id, request.params.id)));
     router.delete("/assets/:id", (request, response) => { scoped(request).deleteAsset(request.currentUser!.id, request.params.id); response.json({ deleted: true }); });

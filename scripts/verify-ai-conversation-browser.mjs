@@ -162,6 +162,81 @@ try {
     const { page, context, errors } = await fixture("&readyVideo&fast");
     await row(page, "C 后台视频").click();
     await page.locator(".tp-ai-video-reply video").waitFor({ timeout: 15000 });
+    await page.locator('input[aria-label="选择附件文件"]').setInputFiles(fileURLToPath(new URL("../build/icon.png", import.meta.url)));
+    await page.getByRole("button", { name: "移除附件 icon.png" }).waitFor();
+    await page.locator("textarea").fill("比较这张上传图片和刚才生成的视频画面");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("stream:finished"), null, { timeout: 15000 });
+    const events = await evidence(page).innerText();
+    const attachments = prefix => JSON.parse(events.split("\n").find(line => line.startsWith(prefix)).slice(prefix.length));
+    const preflight = attachments("preflight-attachments:");
+    const streamed = attachments("stream-attachments:");
+    assert.deepEqual(streamed, preflight);
+    assert.equal(streamed[0].name, "icon.png");
+    assert.ok(streamed[0].visual);
+    assert.ok(streamed.slice(1).some(item => item.name.startsWith("生成成果-video-c-") && item.visual));
+    assert.ok(!streamed.some(item => item.name === "B.txt"));
+    assert.ok(!/media-task-post:|media-task-authorize:/.test(events));
+    assert.deepEqual(errors, []);
+    results.mixedGeneratedMedia = { uploadedImageAndGeneratedVideoInSamePreflightAndStream: true, noPaidMediaTask: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&readyVideo&fast");
+    await row(page, "C 后台视频").click();
+    await page.locator(".tp-ai-video-reply video").waitFor({ timeout: 15000 });
+    await page.locator('input[aria-label="选择附件文件"]').setInputFiles(fileURLToPath(new URL("../build/icon.png", import.meta.url)));
+    await page.getByRole("button", { name: "移除附件 icon.png" }).waitFor();
+    await page.locator("textarea").fill("只评价我上传的图片");
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("stream:finished"), null, { timeout: 15000 });
+    const events = await evidence(page).innerText();
+    const streamed = JSON.parse(events.split("\n").find(line => line.startsWith("stream-attachments:")).slice("stream-attachments:".length));
+    assert.deepEqual(streamed.map(item => item.name), ["icon.png"]);
+    assert.ok(!events.includes("video-content-check:fixture-video-c"), "an upload-only request must not read the old result");
+    assert.deepEqual(errors, []);
+    results.uploadOnlyVisual = { noImplicitGeneratedVideo: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&readyVideo&fast");
+    await row(page, "B 编辑中").click();
+    await page.locator('input[aria-label="选择附件文件"]').setInputFiles(fileURLToPath(new URL("../build/icon.png", import.meta.url)));
+    await page.getByRole("button", { name: "移除附件 icon.png" }).waitFor();
+    const prompt = "比较这张上传图片和刚才生成的视频画面";
+    await page.locator("textarea").fill(prompt);
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.getByText("当前对话找不到刚才生成的视频", { exact: false }).waitFor({ timeout: 15000 });
+    assert.equal(await page.locator("textarea").inputValue(), prompt);
+    assert.ok(await page.getByRole("button", { name: "移除附件 icon.png" }).isVisible());
+    assert.ok(!/preflight-attachments:|stream-attachments:|media-task-post:/.test(await evidence(page).innerText()));
+    assert.deepEqual(errors, []);
+    results.crossConversationGeneratedMedia = { blockedBeforePreflight: true, draftAndUploadPreserved: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&readyVideo&fast");
+    await row(page, "C 后台视频").click();
+    await page.waitForFunction(() => document.querySelector('output[aria-label="验收证据"]')?.textContent?.includes("video-content:fixture-video-c"), null, { timeout: 15000 });
+    await page.evaluate(() => localStorage.setItem(`${new URLSearchParams(location.search).get("run") ? `tongpin-conversation-acceptance:${new URLSearchParams(location.search).get("run")}` : ""}:deny-media`, "1"));
+    await page.locator('input[aria-label="选择附件文件"]').setInputFiles(fileURLToPath(new URL("../build/icon.png", import.meta.url)));
+    await page.getByRole("button", { name: "移除附件 icon.png" }).waitFor();
+    const prompt = "比较这张上传图片和刚才生成的视频画面";
+    await page.locator("textarea").fill(prompt);
+    await page.getByRole("button", { name: "发送消息", exact: true }).click();
+    await page.getByText("Synthetic media denied", { exact: false }).waitFor({ timeout: 15000 });
+    const events = await evidence(page).innerText();
+    assert.ok(events.includes("video-content-check:fixture-video-c"));
+    assert.ok(!/preflight-attachments:|stream-attachments:|media-task-post:/.test(events));
+    assert.equal(await page.locator("textarea").inputValue(), prompt);
+    assert.deepEqual(errors, []);
+    results.revokedGeneratedMedia = { warmCacheRechecked: true, blockedBeforePreflight: true, draftPreserved: true };
+    await context.close();
+  }
+  {
+    const { page, context, errors } = await fixture("&readyVideo&fast");
+    await row(page, "C 后台视频").click();
+    await page.locator(".tp-ai-video-reply video").waitFor({ timeout: 15000 });
     const files = Array.from({ length: 5 }, (_, index) => ({ name: `current-${index + 1}.txt`, mimeType: "text/plain", buffer: Buffer.from(`本轮明确上传资料 ${index + 1}`) }));
     await page.locator('input[aria-label="选择附件文件"]').setInputFiles(files);
     await page.getByRole("button", { name: "移除附件 current-5.txt" }).waitFor();

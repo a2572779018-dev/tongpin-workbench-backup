@@ -95,7 +95,10 @@ export function conversationAttachmentContext(current: AiWorkspaceDocument[], hi
   const priority = documentAttachments(current), ids = new Set(current.map(a => a.id));
   const old: AiAttachment[] = [];
   let omitted = 0;
-  for (const item of history as unknown[]) {
+  // A newly uploaded picture or clip is the only implicit visual referent.
+  // Including unrelated older files would quietly spend the remaining slots
+  // and could make "this picture" refer to somebody else's historical frame.
+  for (const item of (current.some(item => item.media) ? [] : history) as unknown[]) {
     try {
       if (!item || typeof item !== "object" || typeof (item as AiWorkspaceDocument).id !== "string") throw Error("invalid history attachment");
       const document = item as AiWorkspaceDocument;

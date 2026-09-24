@@ -4,6 +4,7 @@ import { ApiError, json, type UserRow } from "../platform";
 import type { AiMode } from "../../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
 import { createChatStreamResponse } from "../../../server/ai/chatStream";
+import { readGeneratedAssetReference } from "../../../server/ai/generatedAssetReference";
 import {
   createAiServiceMediaTaskOrchestrator,
   type MediaTaskConfirmation,
@@ -199,6 +200,9 @@ export async function handleAiRequest(request: Request, service: AiService, user
       return json({ task });
     }
     if (path === "/api/ai/images" && method === "POST") return json(await service.generateImage(user.id, await parseAiJson(request)));
+    const conversationAsset = path.match(/^\/api\/ai\/assets\/([^/]+)\/conversation\/([^/]+)$/);
+    if (conversationAsset && method === "GET") return json(await readGeneratedAssetReference(service.store, user.id,
+      { assetId: decodeURIComponent(conversationAsset[1]), conversationId: decodeURIComponent(conversationAsset[2]) }));
     const assetCheck = path.match(/^\/api\/ai\/assets\/([^/]+)\/check$/);
     if (assetCheck && method === "GET") return json(service.checkAsset(user.id, decodeURIComponent(assetCheck[1])));
     const assetMatch = path.match(/^\/api\/ai\/assets\/([^/]+)$/);

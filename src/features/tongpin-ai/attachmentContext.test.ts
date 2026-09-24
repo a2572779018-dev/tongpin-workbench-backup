@@ -75,6 +75,15 @@ describe("bounded conversation context", () => {
     expect(result).toHaveLength(5);
     expect(result.every(item => !item.text?.includes("历史附件未重送"))).toBe(true);
   });
+  it("does not mix unrelated historical imagery into an explicit new upload", () => {
+    const current = [{ id: "uploaded", name: "new.png", content: "", mimeType: "image/png", media: { kind: "image" as const, frames: [{ dataUrl: validFrame }] } }];
+    const history = [{ attachments: [{ id: "old", name: "old.png", content: "", mimeType: "image/png", media: { kind: "image" as const, frames: [{ dataUrl: frame("different-history-image") }] } }] }];
+    const onlyNew = toolAttachmentContext(current, [], history);
+    expect(onlyNew.map(item => item.name)).toEqual(["new.png"]);
+    const comparison = toolAttachmentContext(current, [], history, [{ name: "generated-video-frame", dataUrl: validFrame, text: "旧生成视频的采样画面" }]);
+    expect(comparison.map(item => item.name)).toEqual(["new.png", "generated-video-frame"]);
+    expect(comparison.some(item => item.text?.includes("历史附件未重送"))).toBe(false);
+  });
   it("refuses to silently drop current uploads when no video frame can fit", () => {
     const current = Array.from({ length: 5 }, (_, i) => ({ name: `current${i}`, text: `本轮 ${i}` }));
     const visual = [{ name: "frame", dataUrl: frame("frame"), text: "视频画面" }];
