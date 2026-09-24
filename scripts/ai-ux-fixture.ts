@@ -106,7 +106,7 @@ const runtime = await createRuntime(config, {
     const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
     const instructions = typeof body.instructions === "string" ? body.instructions : "";
     evidence(`transport ${method} ${url.pathname} stream=${String(body.stream)}`);
-    if (url.pathname.endsWith("/models")) return Response.json({ data: [{ id: "fixture-model", object: "model" }, { id: "fixture-image", object: "model" }] });
+    if (url.pathname.endsWith("/models")) return Response.json({ data: [{ id: "fixture-model", object: "model" }, { id: "fixture-image", object: "model" }, { id: "minimax_h3", object: "model" }, { id: "sd-2-c6", object: "model" }] });
 
     // --- image generation: the product only accepts b64_json, never a URL ---
     if (url.pathname.endsWith("/images/generations") || url.pathname.endsWith("/images/edits")) {
@@ -187,6 +187,9 @@ const adminPut = async (route: string, body: unknown) => {
 };
 await adminPut("provider", { name: "本地模拟模型", baseUrl: "https://fixture.example.com/v1", protocol: "responses", apiKey: "fixture-key-not-a-real-secret", quickModel: "fixture-model", deepModel: "fixture-model", maxOutputTokens: 2048, reasoningEffort: "", enabled: true, webSearchEnabled: true, webSearchQuotaTokens: 100, imageModel: "fixture-image", imageQuotaTokens: 1000 });
 await adminPut("video", { enabled: true, quotaPoints: 30, defaultModel: "minimax_h3", apiKey: "fixture-video-key-not-a-real-secret" });
+// Video generation requires the model to be verified against the provider list.
+const videoTest = await fetch(`${fixtureApi}/api/admin/ai/video/test`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${admin.accessToken}` }, body: "{}" });
+console.log("Video model verification:", videoTest.status, (await videoTest.text()).slice(0, 200));
 console.log("Local UX fixture listening on", fixtureApi, "; isolated data:", directory);
 console.log("Accounts: locked/setup/ready/long/exhausted/boss/search@tongpin.test; password: Fixture123!; text/image/video providers are simulated, no external calls.");
 console.log(`Simulated assets: PNG ${fixturePngBase64.length} b64 chars; video ${fixtureVideo.byteLength} bytes; presentation ${fixtureSlides.slides.length} slides.`);
