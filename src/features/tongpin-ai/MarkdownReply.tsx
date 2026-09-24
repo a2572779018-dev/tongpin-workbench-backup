@@ -9,6 +9,7 @@ import { splitMarkdownIntoBlocks, StableMarkdownBlocks } from "./librechatMarkdo
 import { codeBlockFromHast } from "./replyCodeData";
 import { remarkReplyEmphasis, replyUrlTransform } from "./replyMarkdown";
 import { ReplyFollowups } from "./ReplyFollowups";
+import { parseReplyChart, parseReplyFollowups } from "./replyRichBlocks";
 import { tableRowsFromHast, tableToCsv, tableToMarkdown, tableToTsv } from "./replyTableData";
 import { TypewriterText } from "./TypewriterText";
 import "./reply-markdown.css";
@@ -54,18 +55,14 @@ function ReplyTable({ node, children }: { node: unknown; children: ReactNode }) 
 
 function ReplyCode({ node, children }: { node: unknown; children: ReactNode }) {
   const { text, language } = useMemo(() => codeBlockFromHast(node), [node]);
-  // Optional rich blocks ride the fenced-code channel: a valid ```chart block
-  // becomes a labelled chart, a valid ```followups block becomes chips. Any
-  // malformed payload keeps rendering as plain code below.
-  if (language === "chart") {
-    const chart = <ChatChart body={text} />;
-    if (chart) return chart;
-  }
-  if (language === "followups") {
-    const followups = <ReplyFollowups body={text} />;
-    if (followups) return followups;
-  }
   const [feedback, setFeedback] = useState("");
+  // Optional rich blocks ride the fenced-code channel: a valid ```chart block
+  // becomes a labelled chart, a valid ```followups block becomes chips. A
+  // malformed payload keeps rendering as plain code below. The parser result
+  // (not the element, which is always truthy) decides the branch, and the hook
+  // above stays unconditional so the render order never changes mid-stream.
+  if (language === "chart" && parseReplyChart(text)) return <ChatChart body={text} />;
+  if (language === "followups" && parseReplyFollowups(text).length) return <ReplyFollowups body={text} />;
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);
