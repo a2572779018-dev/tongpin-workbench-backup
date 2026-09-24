@@ -100,7 +100,27 @@ function assemble(rows: ShadowChunk[]): AiWorkspaceState {
       ...(manifest.hasVideoDraftSettings ? { videoDraftSettings: keyed("videoDraftSettings") } : {}),
     };
     return validateAiWorkspaceState(state);
-  } catch { return corrupt(); }
+  } catch (error) {
+    // A safe rollback can fail simply because its current V2 account exceeds
+    // the old aggregate cap; do not misreport that as corrupted data.
+    if (error instanceof AiError && error.code === "AI_WORKSPACE_TOO_LARGE") throw error;
+    return corrupt();
+  }
+}
+
+/** Reuse V1 shape validation when a local migration needs to reconstruct an
+ * active V2 account. Active ordinals may be negative after prepend, unlike
+ * the contiguous ordinals in an inert shadow snapshot. */
+export function assembleV2Segments(segments: Segment[]): AiWorkspaceState {
+  const kinds: Kind[] = ["manifest", "project", "conversation", "artifact", "draft", "draftAttachment", "videoDraftSettings"];
+  const rows: ShadowChunk[] = [];
+  for (const kind of kinds) {
+    const entries = segments.filter(segment => segment.kind === kind).sort((a, b) => a.ordinal - b.ordinal);
+    if (entries.some((entry, index) => index > 0 && entry.ordinal === entries[index - 1].ordinal)) corrupt();
+    for (const [ordinal, entry] of entries.entries()) rows.push({ kind, entity_id: entry.entityId, ordinal, chunk_index: 0, data: JSON.stringify(entry.value) });
+  }
+  if (rows.length !== segments.length) corrupt();
+  return assemble(rows);
 }
 
 export class AiWorkspaceV2ShadowRepository {

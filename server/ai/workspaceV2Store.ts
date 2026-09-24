@@ -1,10 +1,10 @@
 import { AiError } from "./security";
-import { AI_WORKSPACE_LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceMessage, type AiWorkspaceProject } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceMessage, type AiWorkspaceProject, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
 import { AiStore } from "./storage";
 import type { AiSql } from "./storage";
 import { normalizeAiTenantId, tenantStorageKey } from "./tenant";
 import { AI_WORKSPACE_V2_ENTITY_BYTES, AiWorkspaceRepository, validateAiWorkspaceArtifactEntity, validateAiWorkspaceConversationEntity, validateAiWorkspaceDraft, validateAiWorkspaceDraftAttachments, validateAiWorkspaceProjectEntity, validateAiWorkspaceVideoDraftSetting } from "./workspace";
-import { AiWorkspaceV2ShadowRepository, canonical, split, type Segment } from "./workspaceV2Shadow";
+import { AiWorkspaceV2ShadowRepository, assembleV2Segments, canonical, split, type Segment } from "./workspaceV2Shadow";
 
 /**
  * Internal V2 preparation plus deliberately narrow leaf, project,
@@ -115,6 +115,16 @@ interface EntityRow { revision: number; ordinal: number; byte_length: number; sh
 interface ChunkRow { chunk_index: number; data: string }
 interface ActiveSnapshotEntry extends AiWorkspaceV2EntityRef { entity: EntityRow | undefined; rows: ChunkRow[] }
 interface ActiveSnapshot { epoch: number; entries: ActiveSnapshotEntry[] }
+interface MigrationSnapshot {
+  meta: MetaRow;
+  active: ActiveSnapshot;
+  entityRows: Array<{ kind: Segment["kind"]; entity_id: string; revision: number; ordinal: number; deleted: number; chunk_count: number }>;
+  chunkCount: number;
+  messageOwners: Array<{ message_id: string; conversation_id: string }>;
+  imageArtifacts: Array<{ conversation_id: string; asset_id: string; artifact_id: string }>;
+  conversationDirectory: Array<{ conversation_id: string; title: string; time_label: string; project_id: string | null; ordinal: number; revision: number }>;
+  projectDirectory: Array<{ project_id: string; title: string; time_label: string; ordinal: number; revision: number }>;
+}
 interface PreparedEntity { segment: Segment; bytes: Uint8Array; sha256: string; chunks: string[] }
 export interface AiWorkspaceV2PreparedSnapshot { sourceRevision: number; sourceHash: string; epoch: number; preparedAt: string; entityCount: number }
 export interface AiWorkspaceV2PreparedEntity { kind: Segment["kind"]; entityId: string; revision: number; ordinal: number; value: unknown }
@@ -140,6 +150,7 @@ const MAX_ACTIVE_BATCH_BYTES = 32 * 1024 * 1024;
 const MAX_IMAGE_ARTIFACT_INDEX_ROWS = 4096;
 const MAX_IMAGE_ARTIFACT_SCAN_ROWS = 8192;
 const ASSET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const lexical = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 
 function* indexedImageAssets(artifact: AiWorkspaceArtifact): Generator<string> {
   if ((artifact.kind !== "图片" && artifact.kind !== "image") || !Array.isArray(artifact.data?.images)) return;
@@ -211,7 +222,8 @@ function decodeChunks(rows: ChunkRow[], expected: EntityRow): Uint8Array {
 
 export class AiWorkspaceV2Store {
   private readonly shadow: AiWorkspaceV2ShadowRepository;
-  constructor(readonly sql: AiSql, readonly workspace: AiWorkspaceRepository) {
+  constructor(readonly sql: AiSql, readonly workspace: AiWorkspaceRepository,
+    private readonly migrationOptions: { allowLocalTestMigration?: boolean } = {}) {
     this.shadow = new AiWorkspaceV2ShadowRepository(sql, workspace);
   }
   initialize(): void {
@@ -293,7 +305,7 @@ export class AiWorkspaceV2Store {
       if (!current.state || current.revision !== source.sourceRevision || canonical(current.state) !== original ||
         shadowMeta?.source_revision !== source.sourceRevision || shadowMeta.source_hash !== source.sourceHash || shadowMeta.staged_at !== source.stagedAt) stale();
       const prior = this.sql.all<MetaRow>("SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0];
-      if (prior?.activated_at) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "已启用分实体工作台，不能再覆盖准备记录");
+      if (prior && prior.activated_at !== null) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "已启用分实体工作台，不能再覆盖准备记录");
       const epoch = (prior?.epoch ?? 0) + 1;
       this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=?", tenant, storedUser);
@@ -331,6 +343,128 @@ export class AiWorkspaceV2Store {
       this.sql.exec("INSERT INTO ai_workspace_v2_meta(tenant_id,user_id,source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version) VALUES(?,?,?,?,?,?,NULL,1,1) ON CONFLICT(tenant_id,user_id) DO UPDATE SET source_revision=excluded.source_revision,source_hash=excluded.source_hash,epoch=excluded.epoch,prepared_at=excluded.prepared_at,activated_at=NULL,image_index_version=1,message_index_version=1",
         tenant, storedUser, source.sourceRevision, source.sourceHash, epoch, preparedAt);
       return { sourceRevision: source.sourceRevision, sourceHash: source.sourceHash, epoch, preparedAt, entityCount: prepared.length };
+    });
+  }
+
+  private assertLocalTestMigration(userId: string, tenantId?: string): string {
+    const tenant = normalizeAiTenantId(tenantId);
+    if (!this.migrationOptions.allowLocalTestMigration || tenant !== "local-test" || !/^local-v2-test-[a-zA-Z0-9_-]+$/.test(userId)) unsupported();
+    new AiStore(this.sql, tenant).assertAccess(userId);
+    return tenant;
+  }
+
+  private captureMigrationSnapshot(tenant: string, storedUser: string): MigrationSnapshot {
+    const meta = this.sql.all<MetaRow>(
+      "SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?",
+      tenant, storedUser,
+    )[0];
+    if (!meta) stale();
+    const entityRows = this.sql.all<MigrationSnapshot["entityRows"][number]>(
+      "SELECT kind,entity_id,revision,ordinal,deleted,chunk_count FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? ORDER BY kind,entity_id",
+      tenant, storedUser,
+    );
+    if (!entityRows.length || entityRows.length > 4096 || entityRows.some(row => !ENTITY_KINDS.has(row.kind) || !row.entity_id)) corrupt();
+    const chunkCount = this.sql.all<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUser,
+    )[0]?.count ?? 0;
+    return {
+      meta, entityRows, chunkCount,
+      active: { epoch: meta.epoch, entries: this.captureActiveEntries(tenant, storedUser, entityRows.map(row => ({ kind: row.kind, entityId: row.entity_id }))) },
+      messageOwners: this.sql.all("SELECT message_id,conversation_id FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=? ORDER BY message_id", tenant, storedUser),
+      imageArtifacts: this.sql.all("SELECT conversation_id,asset_id,artifact_id FROM ai_workspace_v2_image_artifacts WHERE tenant_id=? AND user_id=? ORDER BY conversation_id,asset_id,artifact_id", tenant, storedUser),
+      conversationDirectory: this.sql.all("SELECT conversation_id,title,time_label,project_id,ordinal,revision FROM ai_workspace_v2_conversation_directory WHERE tenant_id=? AND user_id=? ORDER BY ordinal,conversation_id", tenant, storedUser),
+      projectDirectory: this.sql.all("SELECT project_id,title,time_label,ordinal,revision FROM ai_workspace_v2_project_directory WHERE tenant_id=? AND user_id=? ORDER BY ordinal,project_id", tenant, storedUser),
+    };
+  }
+
+  private async verifyMigrationSnapshot(snapshot: MigrationSnapshot): Promise<AiWorkspaceState> {
+    if (snapshot.meta.image_index_version !== 1 || snapshot.meta.message_index_version !== 1 ||
+      snapshot.chunkCount !== snapshot.entityRows.reduce((sum, row) => sum + row.chunk_count, 0)) corrupt();
+    const batch = await this.verifyActiveSnapshot(snapshot.active);
+    const entities = batch.entities;
+    if (entities.some(entity => !entity)) corrupt();
+    const live = entities.filter((entity): entity is AiWorkspaceV2ActiveEntity => Boolean(entity && !entity.deleted));
+    const state = assembleV2Segments(live.map(entity => ({ kind: entity.kind, entityId: entity.entityId, ordinal: entity.ordinal, value: entity.value })));
+    const expectedMessages = state.conversations.flatMap(conversation => conversation.messages.map(message => ({ message_id: message.id, conversation_id: conversation.id })))
+      .sort((a, b) => lexical(a.message_id, b.message_id));
+    if (canonical(expectedMessages) !== canonical(snapshot.messageOwners)) corrupt();
+    const expectedImages = state.artifacts.flatMap(artifact => [...indexedImageAssets(artifact)].map(assetId => ({ conversation_id: artifact.conversationId, asset_id: assetId, artifact_id: artifact.id })))
+      .sort((a, b) => lexical(canonical(a), canonical(b)));
+    if (canonical(expectedImages) !== canonical([...snapshot.imageArtifacts].sort((a, b) => lexical(canonical(a), canonical(b))))) corrupt();
+    const expectedConversations = live.filter(entity => entity.kind === "conversation").map(entity => {
+      const value = entity.value as AiWorkspaceConversation;
+      return { conversation_id: entity.entityId, title: value.title, time_label: value.timeLabel,
+        project_id: value.projectId ?? null, ordinal: entity.ordinal, revision: entity.revision };
+    }).sort((a, b) => a.ordinal - b.ordinal || lexical(a.conversation_id, b.conversation_id));
+    if (canonical(expectedConversations) !== canonical(snapshot.conversationDirectory)) corrupt();
+    const expectedProjects = live.filter(entity => entity.kind === "project").map(entity => {
+      const value = entity.value as AiWorkspaceProject;
+      return { project_id: entity.entityId, title: value.title, time_label: value.timeLabel, ordinal: entity.ordinal, revision: entity.revision };
+    }).sort((a, b) => a.ordinal - b.ordinal || lexical(a.project_id, b.project_id));
+    if (canonical(expectedProjects) !== canonical(snapshot.projectDirectory)) corrupt();
+    return state;
+  }
+
+  /** Local fixture only: no HTTP route, production constructor flag, or real
+   * member ID can activate this cutover. The V1 version flip is atomic. */
+  async activatePreparedForLocalTest(userId: string, expected: AiWorkspaceV2PreparedSnapshot, tenantId?: string): Promise<{ epoch: number; sourceRevision: number; activatedAt: string }> {
+    const tenant = this.assertLocalTestMigration(userId, tenantId), storedUser = tenantStorageKey(tenant, userId);
+    const captured = this.sql.transaction(() => ({ current: this.workspace.read(userId, tenant), migration: this.captureMigrationSnapshot(tenant, storedUser) }));
+    const { current, migration } = captured;
+    if (!current.state || current.revision !== expected.sourceRevision || migration.meta.activated_at !== null ||
+      migration.meta.source_revision !== expected.sourceRevision || migration.meta.source_hash !== expected.sourceHash ||
+      migration.meta.epoch !== expected.epoch || migration.meta.prepared_at !== expected.preparedAt ||
+      migration.entityRows.length !== expected.entityCount) stale();
+    const state = await this.verifyMigrationSnapshot(migration);
+    if (await hash(new TextEncoder().encode(canonical(current.state))) !== expected.sourceHash || canonical(state) !== canonical(current.state)) stale();
+    const fingerprint = canonical(migration);
+    const source = canonical(current.state);
+    const activatedAt = new Date().toISOString();
+    return this.sql.transaction(() => {
+      const latest = this.workspace.read(userId, tenant);
+      if (!latest.state || latest.revision !== expected.sourceRevision || canonical(latest.state) !== source ||
+        canonical(this.captureMigrationSnapshot(tenant, storedUser)) !== fingerprint) stale();
+      this.sql.exec("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id=? AND user_id=? AND activated_at IS NULL", activatedAt, tenant, storedUser);
+      this.sql.exec("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=? AND schema_version=1 AND revision=?", tenant, storedUser, expected.sourceRevision);
+      return { epoch: expected.epoch, sourceRevision: expected.sourceRevision, activatedAt };
+    });
+  }
+
+  /** Rebuild the latest V2 state, then write a *new* V1 revision in one SQL
+   * transaction. If the state exceeds V1 limits, V2 stays active and intact. */
+  async rollbackActiveForLocalTest(userId: string, tenantId?: string): Promise<AiWorkspaceSnapshot> {
+    const tenant = this.assertLocalTestMigration(userId, tenantId), storedUser = tenantStorageKey(tenant, userId);
+    const captured = this.sql.transaction(() => {
+      this.activeScope(userId, tenant);
+      return this.captureMigrationSnapshot(tenant, storedUser);
+    });
+    const state = await this.verifyMigrationSnapshot(captured);
+    const serialized = JSON.stringify(state); // assembleV2Segments enforces the V1 aggregate 8 MiB cap.
+    const chunks: string[] = [];
+    for (let start = 0; start < serialized.length;) {
+      let end = Math.min(start + 64000, serialized.length);
+      if (end < serialized.length && serialized.charCodeAt(end - 1) >= 0xd800 && serialized.charCodeAt(end - 1) <= 0xdbff) end--;
+      chunks.push(serialized.slice(start, end));
+      start = end;
+    }
+    const fingerprint = canonical(captured);
+    const updatedAt = new Date().toISOString();
+    return this.sql.transaction(() => {
+      const { meta } = this.activeScope(userId, tenant);
+      if (meta.epoch !== captured.meta.epoch || canonical(this.captureMigrationSnapshot(tenant, storedUser)) !== fingerprint) stale();
+      const revision = meta.source_revision + 1;
+      this.sql.exec("UPDATE ai_workspaces SET revision=?,schema_version=1,updated_at=?,data='@chunks-v1' WHERE tenant_id=? AND user_id=? AND schema_version=2 AND revision=?",
+        revision, updatedAt, tenant, storedUser, meta.source_revision);
+      this.sql.exec("DELETE FROM ai_workspace_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUser);
+      for (const [index, data] of chunks.entries()) this.sql.exec("INSERT INTO ai_workspace_chunks(user_id,tenant_id,chunk_index,data) VALUES(?,?,?,?)", storedUser, tenant, index, data);
+      for (const table of ["ai_workspace_v2_entity_chunks", "ai_workspace_v2_entities", "ai_workspace_v2_mutations", "ai_workspace_v2_message_appends",
+        "ai_workspace_v2_image_artifacts", "ai_workspace_v2_message_owners", "ai_workspace_v2_conversation_directory", "ai_workspace_v2_project_directory"] as const) {
+        this.sql.exec(`DELETE FROM ${table} WHERE tenant_id=? AND user_id=?`, tenant, storedUser);
+      }
+      // Preserve the epoch counter. A later local re-prepare must not reuse an
+      // epoch still cached by a pre-rollback V2 client.
+      this.sql.exec("UPDATE ai_workspace_v2_meta SET activated_at=NULL WHERE tenant_id=? AND user_id=?", tenant, storedUser);
+      return { revision, schemaVersion: 1 as const, updatedAt, state };
     });
   }
 
@@ -785,7 +919,7 @@ export class AiWorkspaceV2Store {
     }
     const requestHash = await hash(new TextEncoder().encode(canonical({ epoch: body.epoch, ops: canonicalOps })));
     const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
-    const needsPreflight = prepared.some(op => op.kind === "artifact" || op.kind === "conversation" || op.kind === "manifest" || op.kind === "draftAttachment");
+    const needsPreflight = prepared.some(op => op.kind === "artifact" || op.kind === "conversation" || op.kind === "manifest" || op.kind === "draftAttachment" || op.kind === "videoDraftSettings");
     const readReplay = (): AiWorkspaceV2MutationAck | null => this.sql.transaction(() => {
       // Replay is independent of today's parent/artifact shape. A later edit
       // must not turn an already committed mutation into a false rejection.
@@ -805,10 +939,12 @@ export class AiWorkspaceV2Store {
     }
     try {
       for (const op of prepared) {
-        if (op.kind === "draftAttachment") {
+        if (op.kind === "draftAttachment" || op.kind === "videoDraftSettings") {
           const current = await this.readActiveEntity(userId, "manifest", "root", tenant);
           if (!current || current.deleted) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台索引已变化，请重新同步");
-          if (!manifestValue(current.value).hasDraftAttachments) throw new AiError(409, "V2_OPERATION_NOT_READY", "请先开启草稿附件索引");
+          const manifest = manifestValue(current.value);
+          if (op.kind === "draftAttachment" && !manifest.hasDraftAttachments) throw new AiError(409, "V2_OPERATION_NOT_READY", "请先开启草稿附件索引");
+          if (op.kind === "videoDraftSettings" && !manifest.hasVideoDraftSettings) throw new AiError(409, "V2_OPERATION_NOT_READY", "当前账号尚未启用视频草稿参数");
           op.manifestRevision = current.revision;
           continue;
         }
@@ -915,14 +1051,14 @@ export class AiWorkspaceV2Store {
         const current = this.sql.all<EntityRow>("SELECT revision,ordinal,byte_length,sha256,chunk_count,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?",
           tenant, storedUser, op.kind, target)[0];
         if ((current?.revision ?? 0) !== op.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "此条工作台记录已更新，本次未覆盖任何内容");
-        if (op.kind === "draftAttachment") {
+        if (op.kind === "draftAttachment" || op.kind === "videoDraftSettings") {
           const manifest = this.sql.all<{ revision: number; deleted: number }>(
             "SELECT revision,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='manifest' AND entity_id='root'",
             tenant, storedUser,
           )[0];
-          if (!manifest || manifest.deleted || manifest.revision !== op.manifestRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "草稿附件索引已变化，请重新同步");
-          if (op.action === "delete" && (!current || current.deleted)) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "草稿附件已删除，请重新同步");
-          if (op.action === "put" && (!current || current.deleted) && this.sql.all<{ count: number }>(
+          if (!manifest || manifest.deleted || manifest.revision !== op.manifestRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "草稿索引已变化，请重新同步");
+          if (op.action === "delete" && (!current || current.deleted)) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "草稿参数已删除，请重新同步");
+          if (op.kind === "draftAttachment" && op.action === "put" && (!current || current.deleted) && this.sql.all<{ count: number }>(
             "SELECT COUNT(*) AS count FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='draftAttachment' AND deleted=0", tenant, storedUser,
           )[0].count >= AI_WORKSPACE_LIMITS.conversations + AI_WORKSPACE_LIMITS.projects + 1) {
             throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "草稿附件数量超过安全上限");
