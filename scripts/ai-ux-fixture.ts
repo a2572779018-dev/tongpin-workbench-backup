@@ -145,9 +145,27 @@ const runtime = await createRuntime(config, {
     if (instructions.includes("生成可编辑演示文稿的数据")) return jsonReply(fixtureSlides);
     if (instructions.includes("受限代理决策")) return jsonReply({ action: "complete", summary: "本地模拟：任务已完成。" });
     const request = { stream: Boolean(body.stream) };
-    const result = { status: "completed", output_text: fixtureAnswer, usage: { input_tokens: 100, output_tokens: 80, total_tokens: 180 } };
+    // The ordinary text send uses outputFormat "dispatch": the server parses a
+    // <tool_request> envelope out of the body. Detect the member's last turn so
+    // the real dispatch parser routes image/video/presentation correctly.
+    const lastUser = Array.isArray(body.input)
+      ? String((body.input as Array<{ role?: string; content?: string }>).filter(m => m?.role === "user").at(-1)?.content ?? "")
+      : Array.isArray(body.messages)
+        ? String((body.messages as Array<{ role?: string; content?: string }>).filter(m => m?.role === "user").at(-1)?.content ?? "")
+        : "";
+    const wantsPpt = /ppt|演示文稿|幻灯片|汇报材料/i.test(lastUser);
+    const wantsVideo = /视频|影片|动起来|生成视频/i.test(lastUser);
+    const wantsImage = /图片|图|画|海报|插画|照片|logo/i.test(lastUser);
+    const answerText = wantsPpt
+      ? `<tool_request>{"kind":"presentation","prompt":"本周进度汇报"}</tool_request>`
+      : wantsVideo
+        ? `<tool_request>{"kind":"video","prompt":"让参考图片里的猫轻轻转头并眨眼"}</tool_request>`
+        : wantsImage
+          ? `<tool_request>{"kind":"image","prompt":"一只橘色的猫坐在窗台上，柔和自然光"}</tool_request>`
+          : fixtureAnswer;
+    const result = { status: "completed", output_text: answerText, usage: { input_tokens: 100, output_tokens: 80, total_tokens: 180 } };
     const encoder = new TextEncoder();
-    const chunks = [fixtureAnswer.slice(0, 33), fixtureAnswer.slice(33, 67), fixtureAnswer.slice(67)];
+    const chunks = [answerText.slice(0, 33), answerText.slice(33, 67), answerText.slice(67)].filter(chunk => chunk);
     return new Response(new ReadableStream<Uint8Array>({
       async start(controller) {
         for (const [index, delta] of chunks.entries()) {
