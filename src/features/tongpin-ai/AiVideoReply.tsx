@@ -55,7 +55,12 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
   const settled = useRef(onSettled); settled.current = onSettled;
   useEffect(() => {
     if (!element.current || typeof IntersectionObserver === "undefined") { setVisible(true); return; }
-    const observer = new IntersectionObserver(entries => setVisible(entries.some(entry => entry.isIntersecting)), { rootMargin: "100px" });
+    // Lazy-load once per mount. Leaving the viewport must not tear down the
+    // authorized player and re-download the whole private video on return.
+    // A new mount still starts unverified and performs fresh GET authorization.
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: "100px" });
     observer.observe(element.current); return () => observer.disconnect();
   }, []);
   useEffect(() => visible ? videoBlobCache.retain(cacheScope, jobId) : undefined, [cacheScope, jobId, visible]);

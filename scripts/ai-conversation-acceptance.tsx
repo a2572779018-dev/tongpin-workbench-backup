@@ -163,7 +163,7 @@ window.fetch = async (target, init) => {
     return Response.json({ settings: { enabled: true, apiKeyConfigured: true, quotaPoints: 250, defaultModel: "minimax_h3", availableModels: ["minimax_h3"], modelsVerified: true }, jobs: [], quota });
   }
   if (url.pathname.startsWith("/api/ai/videos/")) {
-    if (url.pathname.endsWith("/content")) return nativeFetch("/scripts/video-chat-fixture.mp4");
+    if (url.pathname.endsWith("/content")) { record(`video-content:${decodeURIComponent(url.pathname.split("/")[4])}`); return nativeFetch("/scripts/video-chat-fixture.mp4"); }
     const id = decodeURIComponent(url.pathname.split("/")[4]);
     const task = [...tasks.values()].find(item => item.tool.serviceRequestId === id);
     const parameters = task?.videoParameters;
