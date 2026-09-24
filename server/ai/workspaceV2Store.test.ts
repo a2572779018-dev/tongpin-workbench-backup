@@ -86,6 +86,41 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(workspace.read("member-a")).toEqual(saved);
   });
 
+  it("prepares a tenant-scoped message owner index without activating V2", async () => {
+    const original = state("甲");
+    original.conversations.push({ id: "chat-b", projectId: "project-a", title: "第二段", timeLabel: "刚刚", messages: [
+      { id: "message-b", role: "user", content: "第二段消息", time: "10:01" },
+    ] });
+    const first = await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: original });
+    const other = state("乙");
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: other }, "tenant-b");
+    await shadow.stageFromV1("member-a"); await shadow.stageFromV1("member-a", "tenant-b");
+    await v2.prepareFromShadow("member-a"); await v2.prepareFromShadow("member-a", "tenant-b");
+    expect(database.prepare("SELECT tenant_id,user_id,message_id,conversation_id FROM ai_workspace_v2_message_owners ORDER BY tenant_id,message_id").all()).toEqual([
+      { tenant_id: "default", user_id: "member-a", message_id: "message-a", conversation_id: "chat-a" },
+      { tenant_id: "default", user_id: "member-a", message_id: "message-b", conversation_id: "chat-b" },
+      { tenant_id: "tenant-b", user_id: tenantStorageKey("tenant-b", "member-a"), message_id: "message-a", conversation_id: "chat-a" },
+    ]);
+    expect(database.prepare("SELECT message_index_version,activated_at FROM ai_workspace_v2_meta WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual({ message_index_version: 1, activated_at: null });
+    expect(database.prepare("SELECT schema_version FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual({ schema_version: 1 });
+    expect(workspace.read("member-a")).toEqual(first);
+  });
+
+  it("replaces the message owner index atomically when V1 is freshly prepared", async () => {
+    const first = state("甲");
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: first });
+    await shadow.stageFromV1("member-a"); await v2.prepareFromShadow("member-a");
+    const next = state("乙");
+    next.conversations[0].messages = [{ id: "message-new", role: "user", content: "新消息", time: "11:00" }];
+    await workspace.save("member-a", { expectedRevision: 1, mutationId: crypto.randomUUID(), state: next });
+    await shadow.stageFromV1("member-a");
+    expect((await v2.prepareFromShadow("member-a"))?.epoch).toBe(2);
+    expect(database.prepare("SELECT message_id,conversation_id FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a'").all()).toEqual([
+      { message_id: "message-new", conversation_id: "chat-a" },
+    ]);
+    expect(workspace.read("member-a").state).toEqual(next);
+  });
+
   it("reads only a scoped V2 conversation larger than the old account limit", async () => {
     await active();
     const large = state("甲").conversations[0];
@@ -164,6 +199,24 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     await expect(brokenV2.prepareFromShadow("member-a")).rejects.toThrow("fixture chunk write failed");
     expect(database.prepare("SELECT source_revision,epoch FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ source_revision: 1, epoch: 1 });
     expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_entities WHERE user_id='member-a'").get()).toEqual({ count: 7 });
+    expect(workspace.read("member-a").state).toEqual(next);
+  });
+
+  it("rolls back a failed message index insert with the earlier prepared snapshot intact", async () => {
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("甲") });
+    await shadow.stageFromV1("member-a"); await v2.prepareFromShadow("member-a");
+    const next = state("乙"); next.conversations[0].messages[0].id = "message-new";
+    await workspace.save("member-a", { expectedRevision: 1, mutationId: crypto.randomUUID(), state: next });
+    await shadow.stageFromV1("member-a");
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_message_owners")) throw new Error("fixture message index write failed");
+      sql.exec(query, ...bindings);
+    } };
+    await expect(new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken)).prepareFromShadow("member-a")).rejects.toThrow("fixture message index write failed");
+    expect(database.prepare("SELECT source_revision,epoch,message_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ source_revision: 1, epoch: 1, message_index_version: 1 });
+    expect(database.prepare("SELECT message_id,conversation_id FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a'").all()).toEqual([
+      { message_id: "message-a", conversation_id: "chat-a" },
+    ]);
     expect(workspace.read("member-a").state).toEqual(next);
   });
 
@@ -756,9 +809,33 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     `);
     v2.initialize(); v2.initialize();
     expect(database.prepare("SELECT image_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ image_index_version: 0 });
+    expect(database.prepare("SELECT message_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ message_index_version: 0 });
     const refreshed = await v2.prepareFromShadow("member-a");
     expect(refreshed?.epoch).toBe(2);
     expect(database.prepare("SELECT image_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ image_index_version: 1 });
+    expect(database.prepare("SELECT message_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ message_index_version: 1 });
+    expect(workspace.read("member-a").state).toEqual(state("甲"));
+  });
+
+  it("marks the immediately previous prepared meta table's message index as unverified", async () => {
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("甲") });
+    await shadow.stageFromV1("member-a"); await v2.prepareFromShadow("member-a");
+    database.exec(`
+      CREATE TABLE ai_workspace_v2_meta_before_message_index (
+        tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, source_revision INTEGER NOT NULL,
+        source_hash TEXT NOT NULL, epoch INTEGER NOT NULL, prepared_at TEXT NOT NULL,
+        activated_at TEXT, image_index_version INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(tenant_id,user_id)
+      );
+      INSERT INTO ai_workspace_v2_meta_before_message_index
+        SELECT tenant_id,user_id,source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version FROM ai_workspace_v2_meta;
+      DROP TABLE ai_workspace_v2_meta;
+      ALTER TABLE ai_workspace_v2_meta_before_message_index RENAME TO ai_workspace_v2_meta;
+    `);
+    v2.initialize(); v2.initialize();
+    expect(database.prepare("SELECT image_index_version,message_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ image_index_version: 1, message_index_version: 0 });
+    expect((await v2.prepareFromShadow("member-a"))?.epoch).toBe(2);
+    expect(database.prepare("SELECT image_index_version,message_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ image_index_version: 1, message_index_version: 1 });
     expect(workspace.read("member-a").state).toEqual(state("甲"));
   });
 

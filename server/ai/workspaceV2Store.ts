@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS ai_workspace_v2_meta (
   prepared_at TEXT NOT NULL,
   activated_at TEXT,
   image_index_version INTEGER NOT NULL DEFAULT 0,
+  message_index_version INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(tenant_id,user_id)
 );
 CREATE TABLE IF NOT EXISTS ai_workspace_v2_entities (
@@ -65,11 +66,19 @@ CREATE TABLE IF NOT EXISTS ai_workspace_v2_image_artifacts (
   PRIMARY KEY(tenant_id,user_id,conversation_id,asset_id,artifact_id)
 );
 CREATE INDEX IF NOT EXISTS ai_workspace_v2_image_artifacts_by_artifact ON ai_workspace_v2_image_artifacts(tenant_id,user_id,artifact_id);
+CREATE TABLE IF NOT EXISTS ai_workspace_v2_message_owners (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  PRIMARY KEY(tenant_id,user_id,message_id)
+);
+CREATE INDEX IF NOT EXISTS ai_workspace_v2_message_owners_by_conversation ON ai_workspace_v2_message_owners(tenant_id,user_id,conversation_id);
 `;
 
 const ENTITY_KINDS = new Set<Segment["kind"]>(["manifest", "project", "conversation", "artifact", "draft", "draftAttachment", "videoDraftSettings"]);
 const BINARY_CHUNK_BYTES = 48 * 1024; // Base64 data is at most 64 KiB per SQLite row.
-interface MetaRow { source_revision: number; source_hash: string; epoch: number; prepared_at: string; activated_at: string | null; image_index_version: number }
+interface MetaRow { source_revision: number; source_hash: string; epoch: number; prepared_at: string; activated_at: string | null; image_index_version: number; message_index_version: number }
 interface EntityRow { revision: number; ordinal: number; byte_length: number; sha256: string; chunk_count: number; deleted: number }
 interface ChunkRow { chunk_index: number; data: string }
 interface ActiveSnapshotEntry extends AiWorkspaceV2EntityRef { entity: EntityRow | undefined; rows: ChunkRow[] }
@@ -179,6 +188,9 @@ export class AiWorkspaceV2Store {
     if (!this.sql.all<{ name: string }>("PRAGMA table_info(ai_workspace_v2_meta)").some(column => column.name === "image_index_version")) {
       this.sql.exec("ALTER TABLE ai_workspace_v2_meta ADD COLUMN image_index_version INTEGER NOT NULL DEFAULT 0");
     }
+    if (!this.sql.all<{ name: string }>("PRAGMA table_info(ai_workspace_v2_meta)").some(column => column.name === "message_index_version")) {
+      this.sql.exec("ALTER TABLE ai_workspace_v2_meta ADD COLUMN message_index_version INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   private activeScope(userId: string, tenantId?: string): { tenant: string; storedUser: string; meta: MetaRow } {
@@ -186,7 +198,7 @@ export class AiWorkspaceV2Store {
     const tenant = normalizeAiTenantId(tenantId);
     new AiStore(this.sql, tenant).assertAccess(userId);
     const storedUser = tenantStorageKey(tenant, userId);
-    const meta = this.sql.all<MetaRow>("SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0];
+    const meta = this.sql.all<MetaRow>("SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0];
     const current = this.sql.all<{ schema_version: number; revision: number }>("SELECT schema_version,revision FROM ai_workspaces WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0];
     if (!meta?.activated_at || current?.schema_version !== 2) unsupported();
     if (current.revision !== meta.source_revision) stale();
@@ -215,6 +227,14 @@ export class AiWorkspaceV2Store {
       imageOwners.set(identity, artifact.id);
       imageIndex.push({ conversationId: artifact.conversationId, artifactId: artifact.id, assetId });
     }
+    const messageOwners: Array<{ conversationId: string; messageId: string }> = [];
+    const messageIds = new Set<string>();
+    for (const conversation of source.state.conversations) for (const message of conversation.messages) {
+      if (messageOwners.length >= AI_WORKSPACE_LIMITS.totalMessages) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "消息索引超出安全准备上限，原记录未被更改");
+      if (messageIds.has(message.id)) throw new AiError(409, "AI_WORKSPACE_AMBIGUOUS_REFERENCE", "消息标识重复，暂不能准备分实体迁移");
+      messageIds.add(message.id);
+      messageOwners.push({ conversationId: conversation.id, messageId: message.id });
+    }
     const original = canonical(source.state);
     const preparedAt = new Date().toISOString();
     return this.sql.transaction(() => {
@@ -224,13 +244,14 @@ export class AiWorkspaceV2Store {
       )[0];
       if (!current.state || current.revision !== source.sourceRevision || canonical(current.state) !== original ||
         shadowMeta?.source_revision !== source.sourceRevision || shadowMeta.source_hash !== source.sourceHash || shadowMeta.staged_at !== source.stagedAt) stale();
-      const prior = this.sql.all<MetaRow>("SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0];
+      const prior = this.sql.all<MetaRow>("SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0];
       if (prior?.activated_at) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "已启用分实体工作台，不能再覆盖准备记录");
       const epoch = (prior?.epoch ?? 0) + 1;
       this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_image_artifacts WHERE tenant_id=? AND user_id=?", tenant, storedUser);
+      this.sql.exec("DELETE FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       for (const item of prepared) {
         const { kind, entityId, ordinal } = item.segment;
         this.sql.exec("INSERT INTO ai_workspace_v2_entities(tenant_id,user_id,kind,entity_id,revision,ordinal,byte_length,sha256,chunk_count) VALUES(?,?,?,?,1,?,?,?,?)",
@@ -244,7 +265,11 @@ export class AiWorkspaceV2Store {
         "INSERT INTO ai_workspace_v2_image_artifacts(tenant_id,user_id,conversation_id,asset_id,artifact_id) VALUES(?,?,?,?,?)",
         tenant, storedUser, entry.conversationId, entry.assetId, entry.artifactId,
       );
-      this.sql.exec("INSERT INTO ai_workspace_v2_meta(tenant_id,user_id,source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version) VALUES(?,?,?,?,?,?,NULL,1) ON CONFLICT(tenant_id,user_id) DO UPDATE SET source_revision=excluded.source_revision,source_hash=excluded.source_hash,epoch=excluded.epoch,prepared_at=excluded.prepared_at,activated_at=NULL,image_index_version=1",
+      for (const entry of messageOwners) this.sql.exec(
+        "INSERT INTO ai_workspace_v2_message_owners(tenant_id,user_id,message_id,conversation_id) VALUES(?,?,?,?)",
+        tenant, storedUser, entry.messageId, entry.conversationId,
+      );
+      this.sql.exec("INSERT INTO ai_workspace_v2_meta(tenant_id,user_id,source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version) VALUES(?,?,?,?,?,?,NULL,1,1) ON CONFLICT(tenant_id,user_id) DO UPDATE SET source_revision=excluded.source_revision,source_hash=excluded.source_hash,epoch=excluded.epoch,prepared_at=excluded.prepared_at,activated_at=NULL,image_index_version=1,message_index_version=1",
         tenant, storedUser, source.sourceRevision, source.sourceHash, epoch, preparedAt);
       return { sourceRevision: source.sourceRevision, sourceHash: source.sourceHash, epoch, preparedAt, entityCount: prepared.length };
     });
@@ -262,7 +287,7 @@ export class AiWorkspaceV2Store {
     // chunks from a later preparation.
     const snapshot = this.sql.transaction(() => ({
       current: this.workspace.read(userId, tenant),
-      meta: this.sql.all<MetaRow>("SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0],
+      meta: this.sql.all<MetaRow>("SELECT source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version FROM ai_workspace_v2_meta WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0],
       entity: this.sql.all<EntityRow>("SELECT revision,ordinal,byte_length,sha256,chunk_count,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?", tenant, storedUser, kind, entityId)[0],
       rows: this.sql.all<ChunkRow>("SELECT chunk_index,data FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=? ORDER BY chunk_index", tenant, storedUser, kind, entityId),
     }));
