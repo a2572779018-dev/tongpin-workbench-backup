@@ -1,5 +1,5 @@
 import { AiError } from "./security";
-import { AI_WORKSPACE_LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceProject } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceMessage, type AiWorkspaceProject } from "../../shared/aiWorkspace";
 import { AiStore } from "./storage";
 import type { AiSql } from "./storage";
 import { normalizeAiTenantId, tenantStorageKey } from "./tenant";
@@ -8,7 +8,7 @@ import { AiWorkspaceV2ShadowRepository, canonical, split, type Segment } from ".
 
 /**
  * Internal V2 preparation plus deliberately narrow leaf, project,
- * empty/metadata-only conversation and owner-stable artifact CAS proofs.
+ * conversation append/metadata and owner-stable artifact CAS proofs.
  * No HTTP route or automatic migration calls this repository. A future client
  * still needs the other entity writers, media references, legacy exclusion and
  * all background readers before an account can be activated. V1 remains
@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS ai_workspace_v2_mutations (
   ack_json TEXT NOT NULL,
   PRIMARY KEY(tenant_id,user_id,mutation_id)
 );
+-- Message append receipts stay for the lifetime of this V2 epoch. Pruning a
+-- receipt would turn a delayed retry into a second write or a false conflict.
+CREATE TABLE IF NOT EXISTS ai_workspace_v2_message_appends (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  mutation_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  ack_json TEXT NOT NULL,
+  PRIMARY KEY(tenant_id,user_id,mutation_id)
+);
 CREATE TABLE IF NOT EXISTS ai_workspace_v2_image_artifacts (
   tenant_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
@@ -90,6 +100,7 @@ export interface AiWorkspaceV2ActiveEntity extends AiWorkspaceV2PreparedEntity {
 export interface AiWorkspaceV2EntityRef { kind: Segment["kind"]; entityId: string }
 export interface AiWorkspaceV2ActiveBatch { epoch: number; entities: Array<AiWorkspaceV2ActiveEntity | null> }
 export interface AiWorkspaceV2MutationAck { epoch: number; entities: Array<{ kind: "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "conversation" | "manifest"; entityId: string; revision: number; deleted: boolean }> }
+export interface AiWorkspaceV2AppendAck { epoch: number; entityId: string; revision: number; messageIds: string[] }
 type WritableKind = "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "conversation" | "manifest";
 interface ManifestValue { base: Record<string, unknown>; hasDraftAttachments: boolean; hasVideoDraftSettings: boolean }
 interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[]; artifact?: AiWorkspaceArtifact; conversation?: AiWorkspaceConversation; manifest?: ManifestValue; manifestRevision?: number; imageAssets?: string[]; dependencies?: Array<{ kind: "conversation" | "project"; entityId: string; revision: number }> }
@@ -250,6 +261,7 @@ export class AiWorkspaceV2Store {
       this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=?", tenant, storedUser);
+      this.sql.exec("DELETE FROM ai_workspace_v2_message_appends WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_image_artifacts WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       for (const item of prepared) {
@@ -391,6 +403,193 @@ export class AiWorkspaceV2Store {
       };
     });
     return snapshot ? { artifactId: snapshot.artifactId, batch: await this.verifyActiveSnapshot(snapshot.batch) } : null;
+  }
+
+  /** Append only: a client cannot replace older messages or manufacture an
+   * account-wide snapshot. Hashing and entity validation happen outside the
+   * synchronous SQL transaction; the transaction rechecks every dependency. */
+  async appendActiveMessages(userId: string, input: unknown, tenantId?: string): Promise<AiWorkspaceV2AppendAck> {
+    this.activeScope(userId, tenantId);
+    if (!input || typeof input !== "object" || Array.isArray(input)) invalid("消息追加请求无效");
+    const body = input as Record<string, unknown>;
+    if (Object.keys(body).some(key => !["epoch", "mutationId", "conversationId", "expectedRevision", "messages"].includes(key)) ||
+      !Number.isSafeInteger(body.epoch) || Number(body.epoch) < 1 || typeof body.mutationId !== "string" || !UUID.test(body.mutationId) ||
+      typeof body.conversationId !== "string" || !ID.test(body.conversationId) ||
+      !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 1 ||
+      !Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > 8) invalid("消息追加请求无效");
+    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
+    const conversationId = body.conversationId as string;
+    let incoming: AiWorkspaceMessage[];
+    try {
+      const source = JSON.stringify(body.messages);
+      if (!source || source.length > AI_WORKSPACE_V2_ENTITY_BYTES.conversation) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "追加消息超过单对话安全上限");
+      incoming = validateAiWorkspaceConversationEntity({ id: conversationId, title: "追加消息", timeLabel: "", messages: JSON.parse(source) }).messages;
+    } catch (error) {
+      if (error instanceof AiError) throw error;
+      return invalid("消息内容必须是有界的有效 JSON");
+    }
+    const requestHash = await hash(new TextEncoder().encode(canonical({ operation: "append-messages", epoch: body.epoch,
+      conversationId, expectedRevision: body.expectedRevision, messages: incoming })));
+    const readReplay = (): AiWorkspaceV2AppendAck | null => this.sql.transaction(() => {
+      const { meta } = this.activeScope(userId, tenant);
+      if (meta.epoch !== body.epoch) stale();
+      const prior = this.sql.all<{ request_hash: string; ack_json: string }>(
+        "SELECT request_hash,ack_json FROM ai_workspace_v2_message_appends WHERE tenant_id=? AND user_id=? AND mutation_id=?",
+        tenant, storedUser, body.mutationId as string,
+      )[0];
+      if (!prior) {
+        if (this.sql.all<{ mutation_id: string }>("SELECT mutation_id FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?",
+          tenant, storedUser, body.mutationId as string)[0]) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于其他操作");
+        return null;
+      }
+      if (prior.request_hash !== requestHash) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于不同内容，请重新同步");
+      try { return JSON.parse(prior.ack_json) as AiWorkspaceV2AppendAck; } catch { return corrupt(); }
+    });
+    const replay = readReplay();
+    if (replay) return replay;
+    try {
+      const base = await this.readActiveEntity(userId, "conversation", conversationId, tenant);
+      if (!base || base.deleted || base.revision !== body.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "对话版本已变化，请重新同步");
+      const old = validateAiWorkspaceConversationEntity(base.value);
+      if (old.id !== conversationId) corrupt();
+      const conversation = validateAiWorkspaceConversationEntity({ ...old, messages: [...old.messages, ...incoming] });
+      const appended = conversation.messages.slice(old.messages.length);
+      const messageIds = appended.map(message => message.id);
+      if (new Set(messageIds).size !== messageIds.length || old.messages.some(message => messageIds.includes(message.id))) invalid("追加消息标识重复");
+      const refs: AiWorkspaceV2EntityRef[] = [];
+      if (conversation.projectId) refs.push({ kind: "project", entityId: conversation.projectId });
+      const artifactIds = [...new Set(appended.flatMap(message => message.artifactId ? [message.artifactId] : []))];
+      for (const artifactId of artifactIds) refs.push({ kind: "artifact", entityId: artifactId });
+      const related = refs.length ? (await this.readActiveEntities(userId, refs, tenant)).entities : [];
+      const dependencies: Array<{ kind: "project" | "artifact"; entityId: string; revision: number; sha256: string; value?: AiWorkspaceArtifact }> = [];
+      for (const [index, ref] of refs.entries()) {
+        const entity = related[index];
+        if (!entity || entity.deleted) invalid("消息关联项目或成果不存在");
+        if (ref.kind === "project") {
+          if (validateAiWorkspaceProjectEntity(entity.value).id !== ref.entityId) invalid("对话所属项目不存在");
+          dependencies.push({ kind: "project", entityId: ref.entityId, revision: entity.revision,
+            sha256: await hash(new TextEncoder().encode(JSON.stringify(entity.value))) });
+        } else {
+          const artifact = validateAiWorkspaceArtifactEntity(entity.value);
+          if (artifact.id !== ref.entityId || artifact.conversationId !== conversationId || artifact.projectId !== conversation.projectId) invalid("消息关联成果不属于该对话");
+          dependencies.push({ kind: "artifact", entityId: ref.entityId, revision: entity.revision,
+            sha256: await hash(new TextEncoder().encode(JSON.stringify(entity.value))), value: artifact });
+        }
+      }
+      const bytes = new TextEncoder().encode(JSON.stringify(conversation));
+      const sha256 = await hash(bytes), chunks = encodeChunks(bytes);
+      const priorSha = await hash(new TextEncoder().encode(JSON.stringify(base.value)));
+      return this.sql.transaction(() => {
+        const { meta } = this.activeScope(userId, tenant);
+        if (meta.epoch !== body.epoch || meta.message_index_version !== 1) stale();
+        const prior = this.sql.all<{ request_hash: string; ack_json: string }>(
+          "SELECT request_hash,ack_json FROM ai_workspace_v2_message_appends WHERE tenant_id=? AND user_id=? AND mutation_id=?",
+          tenant, storedUser, body.mutationId as string,
+        )[0];
+        if (prior) {
+          if (prior.request_hash !== requestHash) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于不同内容，请重新同步");
+          try { return JSON.parse(prior.ack_json) as AiWorkspaceV2AppendAck; } catch { return corrupt(); }
+        }
+        if (this.sql.all<{ mutation_id: string }>("SELECT mutation_id FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?",
+          tenant, storedUser, body.mutationId as string)[0]) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于其他操作");
+        const current = this.sql.all<EntityRow>("SELECT revision,ordinal,byte_length,sha256,chunk_count,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id=?",
+          tenant, storedUser, conversationId)[0];
+        if (!current || current.deleted || current.revision !== body.expectedRevision || current.sha256 !== priorSha) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "对话已更新，本次未覆盖任何消息");
+        const indexedIds = this.sql.all<{ message_id: string }>(
+          "SELECT message_id FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=? AND conversation_id=? ORDER BY message_id",
+          tenant, storedUser, conversationId).map(row => row.message_id);
+        if (canonical(indexedIds) !== canonical(old.messages.map(message => message.id).sort())) stale();
+        const total = this.sql.all<{ count: number }>("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0].count;
+        if (total + appended.length > AI_WORKSPACE_LIMITS.totalMessages) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "账号消息数量超过安全上限");
+        for (const dependency of dependencies) {
+          const row = this.sql.all<{ revision: number; sha256: string; deleted: number }>(
+            "SELECT revision,sha256,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?",
+            tenant, storedUser, dependency.kind, dependency.entityId)[0];
+          if (!row || row.deleted || row.revision !== dependency.revision || row.sha256 !== dependency.sha256) stale();
+          if (dependency.kind !== "artifact") continue;
+          const artifact = dependency.value!;
+          if (artifact.kind === "图片" || artifact.kind === "image") {
+            const images = Array.isArray(artifact.data?.images) ? artifact.data.images : [];
+            const assetIds: string[] = [];
+            for (const image of images) {
+              if (!image || typeof image !== "object" || Array.isArray(image) || image.deleted) continue;
+              if (typeof image.assetId !== "string" || !ASSET_ID.test(image.assetId) ||
+                !this.sql.all<{ asset_id: string }>("SELECT asset_id FROM ai_workspace_v2_image_artifacts WHERE tenant_id=? AND user_id=? AND conversation_id=? AND asset_id=? AND artifact_id=?",
+                  tenant, storedUser, conversationId, image.assetId, artifact.id)[0] ||
+                !new AiStore(this.sql, tenant).assetMetadata(userId, image.assetId)) invalid("图片成果引用没有当前账号的真实资产");
+              assetIds.push(image.assetId);
+            }
+            if (assetIds.length) {
+              // The artifact JSON and assistant link are client-writable. A
+              // matching server-owned completed request is the provenance.
+              const directRequestId = artifact.id.startsWith("artifact-") ? artifact.id.slice("artifact-".length) : "";
+              const request = directRequestId && UUID.test(directRequestId) ? this.sql.all<{ data: string }>(
+                "SELECT data FROM ai_requests WHERE tenant_id=? AND user_id=? AND request_id=?",
+                tenant, storedUser, directRequestId)[0] : undefined;
+              const taskId = artifact.data?.mediaTaskRequestId;
+              const hasTaskTable = this.sql.all<{ name: string }>(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ai_media_task_runs'",
+              ).length === 1;
+              const task = hasTaskTable && typeof taskId === "string" && ID.test(taskId) ? this.sql.all<{ data: string }>(
+                "SELECT data FROM ai_media_task_runs WHERE tenant_id=? AND user_id=? AND request_id=? AND conversation_id=?",
+                tenant, storedUser, taskId, conversationId)[0] : undefined;
+              let directIds: string[] = [], taskIds: string[] = [];
+              try {
+                if (request) {
+                  const value = JSON.parse(request.data) as { kind?: string; status?: string; conversationId?: string; imageResult?: { images?: Array<{ assetId?: string }> } };
+                  if (value.kind === "image" && value.status === "completed" && value.conversationId === conversationId) directIds = value.imageResult?.images?.flatMap(image => typeof image.assetId === "string" ? [image.assetId] : []) ?? [];
+                }
+                if (task) {
+                  const value = JSON.parse(task.data) as { status?: string; conversationId?: string; tool?: { capability?: string; artifactIds?: string[]; partialArtifactIds?: string[] } };
+                  if (value.conversationId === conversationId && value.tool?.capability === "image") taskIds = value.status === "completed" ? value.tool?.artifactIds ?? [] : value.status === "partial" ? value.tool?.partialArtifactIds ?? [] : [];
+                }
+              } catch { corrupt(); }
+              if (!assetIds.every(id => directIds.includes(id)) && !assetIds.every(id => taskIds.includes(id))) invalid("图片成果没有当前对话的已完成生成记录");
+            }
+          }
+          const videoJobId = artifact.data?.videoJobId;
+          if (typeof videoJobId === "string") {
+            const job = this.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE tenant_id=? AND user_id=? AND id=?", tenant, storedUser, videoJobId)[0];
+            let video: { conversationId?: string; status?: string } | undefined;
+            try { video = job ? JSON.parse(job.data) as { conversationId?: string; status?: string } : undefined; } catch { corrupt(); }
+            if (!video || video.conversationId !== conversationId || (artifact.data?.videoStatus === "completed" || artifact.data?.mediaTaskStatus === "completed") && video.status !== "completed") invalid("视频成果引用没有当前对话的真实任务");
+          }
+          if (artifact.kind === "视频" && artifact.data?.mediaTaskStatus === "completed") {
+            const taskId = artifact.data?.mediaTaskRequestId;
+            const hasTaskTable = this.sql.all<{ name: string }>(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name='ai_media_task_runs'",
+            ).length === 1;
+            const task = hasTaskTable && typeof taskId === "string" && ID.test(taskId) ? this.sql.all<{ data: string }>(
+              "SELECT data FROM ai_media_task_runs WHERE tenant_id=? AND user_id=? AND request_id=? AND conversation_id=?",
+              tenant, storedUser, taskId, conversationId)[0] : undefined;
+            let value: { status?: string; conversationId?: string; tool?: { capability?: string; artifactIds?: string[] } } | undefined;
+            try { value = task ? JSON.parse(task.data) as typeof value : undefined; } catch { corrupt(); }
+            if (!value || value.status !== "completed" || value.conversationId !== conversationId || value.tool?.capability !== "video" ||
+              typeof videoJobId !== "string" || !value.tool.artifactIds?.includes(videoJobId)) invalid("视频成果没有当前对话的已完成生成记录");
+          }
+        }
+        for (const messageId of messageIds) {
+          if (this.sql.all<{ message_id: string }>("SELECT message_id FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=? AND message_id=?", tenant, storedUser, messageId)[0]) {
+            throw new AiError(409, "AI_WORKSPACE_CONFLICT", "消息标识已被当前账号使用");
+          }
+          this.sql.exec("INSERT INTO ai_workspace_v2_message_owners(tenant_id,user_id,message_id,conversation_id) VALUES(?,?,?,?)", tenant, storedUser, messageId, conversationId);
+        }
+        const revision = current.revision + 1;
+        this.sql.exec("UPDATE ai_workspace_v2_entities SET revision=?,byte_length=?,sha256=?,chunk_count=? WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id=?",
+          revision, bytes.length, sha256, chunks.length, tenant, storedUser, conversationId);
+        this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id=?", tenant, storedUser, conversationId);
+        for (const [index, data] of chunks.entries()) this.sql.exec("INSERT INTO ai_workspace_v2_entity_chunks(tenant_id,user_id,kind,entity_id,chunk_index,data) VALUES(?,?,'conversation',?,?,?)",
+          tenant, storedUser, conversationId, index, data);
+        const ack = { epoch: meta.epoch, entityId: conversationId, revision, messageIds };
+        this.sql.exec("INSERT INTO ai_workspace_v2_message_appends(tenant_id,user_id,mutation_id,request_hash,ack_json) VALUES(?,?,?,?,?)",
+          tenant, storedUser, body.mutationId as string, requestHash, JSON.stringify(ack));
+        return ack;
+      });
+    } catch (error) {
+      const replay = readReplay();
+      if (replay) return replay;
+      throw error;
+    }
   }
 
   /** CAS is implemented for draft/settings/attachments, restricted project/artifact/conversation puts and
@@ -577,6 +776,8 @@ export class AiWorkspaceV2Store {
     return this.sql.transaction(() => {
       const { meta } = this.activeScope(userId, tenant);
       if (meta.epoch !== body.epoch) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "分实体准备版本已变化，请重新同步");
+      if (this.sql.all<{ mutation_id: string }>("SELECT mutation_id FROM ai_workspace_v2_message_appends WHERE tenant_id=? AND user_id=? AND mutation_id=?",
+        tenant, storedUser, body.mutationId as string)[0]) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于其他操作");
       const prior = this.sql.all<{ request_hash: string; ack_json: string }>("SELECT request_hash,ack_json FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?", tenant, storedUser, body.mutationId as string)[0];
       if (prior) {
         if (prior.request_hash !== requestHash) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于不同内容，请重新同步");

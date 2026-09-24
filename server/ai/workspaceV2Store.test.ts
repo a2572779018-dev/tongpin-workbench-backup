@@ -106,6 +106,196 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(workspace.read("member-a")).toEqual(first);
   });
 
+  it("appends messages to one V2 conversation without rewriting the V1 account", async () => {
+    const prepared = await active();
+    const before = database.prepare("SELECT revision,schema_version,data FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get();
+    const input = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "message-b", role: "user" as const, content: "继续聊", time: "10:01" }] };
+    const ack = await v2.appendActiveMessages("member-a", input);
+    expect(ack).toMatchObject({ epoch: prepared.epoch, entityId: "chat-a", revision: 2, messageIds: ["message-b"] });
+    expect(await v2.appendActiveMessages("member-a", input)).toEqual(ack);
+    expect(await Promise.all([v2.appendActiveMessages("member-a", input), v2.appendActiveMessages("member-a", input)]))
+      .toEqual([ack, ack]);
+    expect((await v2.readActiveEntity("member-a", "conversation", "chat-a"))?.value).toMatchObject({
+      messages: [state("甲").conversations[0].messages[0], input.messages[0]],
+    });
+    expect(database.prepare("SELECT conversation_id FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a' AND message_id='message-b'").get()).toEqual({ conversation_id: "chat-a" });
+    expect(database.prepare("SELECT revision,schema_version,data FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual(before);
+  });
+
+  it("rejects reused message IDs across conversations and stale concurrent appends", async () => {
+    const prepared = await active();
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 0, action: "put", value: { id: "chat-b", projectId: "project-a", title: "另一个", timeLabel: "刚刚", messages: [] } },
+    ] });
+    const request = (conversationId: string, messageId: string, expectedRevision: number) => ({
+      epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId, expectedRevision,
+      messages: [{ id: messageId, role: "user" as const, content: "hello", time: "10:01" }],
+    });
+    const first = request("chat-a", "shared-message", 1);
+    await v2.appendActiveMessages("member-a", first);
+    await expect(v2.appendActiveMessages("member-a", request("chat-b", "shared-message", 1))).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    const second = request("chat-a", "another-message", 2);
+    const third = request("chat-a", "third-message", 2);
+    const outcomes = await Promise.allSettled([v2.appendActiveMessages("member-a", second), v2.appendActiveMessages("member-a", third)]);
+    expect(outcomes.filter(item => item.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter(item => item.status === "rejected")).toHaveLength(1);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual({ count: 3 });
+  });
+
+  it("rejects a reused mutation ID with altered content and isolates tenants", async () => {
+    const first = await active();
+    const second = await active("乙", "tenant-b");
+    const input = { epoch: first.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "same-message", role: "user" as const, content: "原文", time: "10:01" }] };
+    await v2.appendActiveMessages("member-a", input);
+    await expect(v2.appendActiveMessages("member-a", { ...input, messages: [{ ...input.messages[0], content: "改写" }] }))
+      .rejects.toMatchObject({ code: "AI_WORKSPACE_MUTATION_CONFLICT" });
+    expect(await v2.appendActiveMessages("member-a", { ...input, epoch: second.epoch }, "tenant-b"))
+      .toMatchObject({ revision: 2, messageIds: ["same-message"] });
+    expect((await v2.readActiveEntity("member-a", "conversation", "chat-a", "tenant-b"))?.value)
+      .toMatchObject({ messages: [state("乙").conversations[0].messages[0], input.messages[0]] });
+  });
+
+  it("keeps an append replay valid after more than 256 unrelated entity edits", async () => {
+    const prepared = await active();
+    const input = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "durable-message", role: "user" as const, content: "只保存一次", time: "10:01" }] };
+    const ack = await v2.appendActiveMessages("member-a", input);
+    let revision = 1;
+    for (let index = 0; index < 257; index++) {
+      await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+        { kind: "draft", entityId: "chat-a", expectedRevision: revision, action: "put", value: `草稿 ${index}` },
+      ] });
+      revision += 1;
+    }
+    expect(await v2.appendActiveMessages("member-a", input)).toEqual(ack);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a'").get())
+      .toEqual({ count: 2 });
+  });
+
+  it("requires actual same-conversation artifacts and account-owned image assets", async () => {
+    const prepared = await active();
+    const append = (artifactId: string) => v2.appendActiveMessages("member-a", {
+      epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "reply-b", role: "assistant", content: "图片", time: "10:01", artifactId }],
+    });
+    await expect(append("missing")).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "other-chat", expectedRevision: 0, action: "put", value: { id: "other-chat", projectId: "project-a", title: "其他对话", timeLabel: "刚刚", messages: [] } },
+    ] });
+    const other = { ...state("甲").artifacts[0], id: "artifact-other", conversationId: "other-chat" };
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: other.id, expectedRevision: 0, action: "put", value: other },
+    ] });
+    await expect(append(other.id)).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    expect((await v2.readActiveEntity("member-a", "conversation", "chat-a"))?.revision).toBe(1);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_owners WHERE user_id='member-a'").get()).toEqual({ count: 1 });
+  });
+
+  it("does not accept an unfinished video job as a completed video reference", async () => {
+    const original = state("甲");
+    const jobId = crypto.randomUUID();
+    const mediaTaskRequestId = crypto.randomUUID();
+    original.artifacts[0] = { ...original.artifacts[0], kind: "视频", data: { videoJobId: jobId, mediaTaskRequestId, mediaTaskStatus: "completed" } };
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: original });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    const stored = tenantStorageKey("default", "member-a");
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id=?").run(new Date().toISOString(), stored);
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id=?").run(stored);
+    database.prepare("INSERT INTO ai_video_jobs(user_id,id,tenant_id,data) VALUES(?,?,?,?)").run(stored, jobId, "default",
+      JSON.stringify({ conversationId: "chat-a", status: "processing" }));
+    const input = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "reply-video", role: "assistant" as const, content: "视频已生成", time: "10:01", artifactId: "artifact-a" }] };
+    await expect(v2.appendActiveMessages("member-a", input)).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    database.prepare("UPDATE ai_video_jobs SET data=? WHERE user_id=? AND id=?").run(JSON.stringify({ conversationId: "chat-a", status: "completed" }), stored, jobId);
+    await expect(v2.appendActiveMessages("member-a", input)).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    database.exec("CREATE TABLE ai_media_task_runs(tenant_id TEXT,user_id TEXT,request_id TEXT,conversation_id TEXT,data TEXT)");
+    database.prepare("INSERT INTO ai_media_task_runs(tenant_id,user_id,request_id,conversation_id,data) VALUES(?,?,?,?,?)").run("default", stored,
+      mediaTaskRequestId, "chat-a", JSON.stringify({ conversationId: "chat-a", status: "completed", tool: { capability: "image", artifactIds: [jobId] } }));
+    await expect(v2.appendActiveMessages("member-a", input)).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    database.prepare("UPDATE ai_media_task_runs SET data=? WHERE request_id=?").run(JSON.stringify({ conversationId: "chat-a", status: "completed",
+      tool: { capability: "video", artifactIds: [jobId] } }), mediaTaskRequestId);
+    expect(await v2.appendActiveMessages("member-a", input)).toMatchObject({ messageIds: ["reply-video"] });
+  });
+
+  it("does not turn a client-claimed image artifact into a generated-asset grant", async () => {
+    const assetId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const original = state("甲");
+    original.artifacts[0] = { ...original.artifacts[0], id: `artifact-${requestId}`, kind: "图片", data: {
+      images: [{ assetId }], mediaTaskRequestId: crypto.randomUUID(),
+    } };
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: original });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    const stored = tenantStorageKey("default", "member-a");
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id=?").run(new Date().toISOString(), stored);
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id=?").run(stored);
+    database.prepare("INSERT INTO ai_assets(id,tenant_id,user_id,mime_type,byte_length,created_at) VALUES(?,?,?,?,?,?)")
+      .run(tenantStorageKey("default", assetId), "default", stored, "image/png", 4, new Date().toISOString());
+    const input = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "reply-image", role: "assistant" as const, content: "图片已生成", time: "10:01", artifactId: original.artifacts[0].id }] };
+    await expect(v2.appendActiveMessages("member-a", input)).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    database.exec("CREATE TABLE ai_media_task_runs(tenant_id TEXT,user_id TEXT,request_id TEXT,conversation_id TEXT,data TEXT)");
+    database.prepare("INSERT INTO ai_media_task_runs(tenant_id,user_id,request_id,conversation_id,data) VALUES(?,?,?,?,?)").run("default", stored,
+      original.artifacts[0].data!.mediaTaskRequestId as string, "chat-a", JSON.stringify({ conversationId: "chat-a", status: "completed",
+        tool: { capability: "video", artifactIds: [assetId] } }));
+    await expect(v2.appendActiveMessages("member-a", input)).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    database.prepare("INSERT INTO ai_requests(user_id,request_id,tenant_id,data) VALUES(?,?,?,?)").run(stored, requestId, "default",
+      JSON.stringify({ requestId, conversationId: "other-chat", status: "completed", kind: "image", imageResult: { images: [{ assetId }] } }));
+    await expect(v2.appendActiveMessages("member-a", input)).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    database.prepare("DELETE FROM ai_requests WHERE user_id=? AND request_id=?").run(stored, requestId);
+    database.prepare("INSERT INTO ai_requests(user_id,request_id,tenant_id,data) VALUES(?,?,?,?)").run(stored, requestId, "default",
+      JSON.stringify({ requestId, conversationId: "chat-a", status: "completed", kind: "image", imageResult: { images: [{ assetId }] } }));
+    expect(await v2.appendActiveMessages("member-a", input)).toMatchObject({ messageIds: ["reply-image"] });
+    expect((await v2.readActiveEntity("member-a", "conversation", "chat-a"))?.revision).toBe(2);
+  });
+
+  it("enforces the account-wide message count before any append write", async () => {
+    const prepared = await active();
+    for (let index = 0; index < 4999; index++) {
+      database.prepare("INSERT INTO ai_workspace_v2_message_owners(tenant_id,user_id,message_id,conversation_id) VALUES('default','member-a',?,'other-chat')")
+        .run(`existing-${index}`);
+    }
+    await expect(v2.appendActiveMessages("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "overflow", role: "user", content: "不应保存", time: "10:01" }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    expect((await v2.readActiveEntity("member-a", "conversation", "chat-a"))?.revision).toBe(1);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_appends WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+  });
+
+  it("rolls back message ownership, conversation bytes and receipt on write failure", async () => {
+    const prepared = await active();
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "message-b", role: "user" as const, content: "继续", time: "10:01" }] };
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_entity_chunks") && (bindings[2] === "conversation" || query.includes("'conversation'"))) throw new Error("fixture append write failed");
+      sql.exec(query, ...bindings);
+    } };
+    await expect(new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken)).appendActiveMessages("member-a", request)).rejects.toThrow("fixture append write failed");
+    expect((await v2.readActiveEntity("member-a", "conversation", "chat-a"))?.revision).toBe(1);
+    expect(database.prepare("SELECT message_id FROM ai_workspace_v2_message_owners WHERE user_id='member-a' ORDER BY message_id").all()).toEqual([{ message_id: "message-a" }]);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_appends WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+  });
+
+  it("rolls back the whole append if the durable receipt insert fails", async () => {
+    const prepared = await active();
+    const input = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      messages: [{ id: "message-b", role: "user" as const, content: "继续", time: "10:01" }] };
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_message_appends")) throw new Error("fixture receipt write failed");
+      sql.exec(query, ...bindings);
+    } };
+    await expect(new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken)).appendActiveMessages("member-a", input))
+      .rejects.toThrow("fixture receipt write failed");
+    expect((await v2.readActiveEntity("member-a", "conversation", "chat-a"))?.revision).toBe(1);
+    expect(database.prepare("SELECT message_id FROM ai_workspace_v2_message_owners WHERE user_id='member-a' ORDER BY message_id").all())
+      .toEqual([{ message_id: "message-a" }]);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_appends WHERE user_id='member-a'").get())
+      .toEqual({ count: 0 });
+  });
+
   it("replaces the message owner index atomically when V1 is freshly prepared", async () => {
     const first = state("甲");
     await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: first });
