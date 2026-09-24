@@ -221,6 +221,27 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_image_artifacts WHERE user_id='member-a'").get()).toEqual({ count: 0 });
   });
 
+  it("replays an artifact mutation that commits while its identical request verifies parents", async () => {
+    const prepared = await active();
+    const artifact = { ...state("甲").artifacts[0], title: "并发更新" };
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: artifact.id, expectedRevision: 1, action: "put", value: artifact },
+    ] };
+    const delayed = new AiWorkspaceV2Store(sql, workspace);
+    const actualRead = delayed.readActiveEntities.bind(delayed);
+    let releaseRead!: () => void;
+    let enteredRead!: () => void;
+    const gate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const entered = new Promise<void>(resolve => { enteredRead = resolve; });
+    delayed.readActiveEntities = async (...args) => { enteredRead(); await gate; return actualRead(...args); };
+    const concurrent = delayed.mutateActive("member-a", request);
+    await entered;
+    const ack = await v2.mutateActive("member-a", request);
+    releaseRead();
+    expect(await concurrent).toEqual(ack);
+    expect(await v2.readActiveEntity("member-a", "artifact", artifact.id)).toMatchObject({ revision: 2, value: artifact });
+  });
+
   it("creates and updates one project with CAS, replay and stable identity", async () => {
     const prepared = await active();
     const created = { id: "project-b", title: "新项目", timeLabel: "现在", instructions: "只讨论工作" };
@@ -327,6 +348,105 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
       { kind: "project", entityId: project.id, expectedRevision: 0, action: "put", value: project },
     ] })).rejects.toThrow("fixture project write failed");
     expect(await v2.readActiveEntity("member-a", "project", project.id)).toBeNull();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+  });
+
+  it("enables only the manifest's attachment flag with CAS and concurrent exact replay", async () => {
+    const original = state("甲");
+    delete original.draftAttachments;
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: original });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-a'").run(new Date().toISOString());
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-a'").run();
+    const before = (await v2.readActiveEntity("member-a", "manifest", "root"))!.value as { base: object; hasDraftAttachments: boolean; hasVideoDraftSettings: boolean };
+    const v1PayloadBefore = database.prepare("SELECT data FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get();
+    expect(before.hasDraftAttachments).toBe(false);
+    const enabled = { ...before, hasDraftAttachments: true };
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "manifest", entityId: "root", expectedRevision: 1, action: "put", value: enabled },
+    ] };
+    const delayed = new AiWorkspaceV2Store(sql, workspace);
+    const actualRead = delayed.readActiveEntity.bind(delayed);
+    let releaseRead!: () => void;
+    let enteredRead!: () => void;
+    const gate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const entered = new Promise<void>(resolve => { enteredRead = resolve; });
+    delayed.readActiveEntity = async (...args) => { enteredRead(); await gate; return actualRead(...args); };
+    const concurrent = delayed.mutateActive("member-a", request);
+    await entered;
+    const ack = await v2.mutateActive("member-a", request);
+    releaseRead();
+    expect(await concurrent).toEqual(ack);
+    expect(ack).toMatchObject({ entities: [{ kind: "manifest", entityId: "root", revision: 2, deleted: false }] });
+    expect(await v2.mutateActive("member-a", request)).toEqual(ack);
+    expect(await v2.readActiveEntity("member-a", "manifest", "root")).toMatchObject({ revision: 2, value: enabled });
+    expect(database.prepare("SELECT data FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual(v1PayloadBefore);
+    await expect(v2.mutateActive("member-a", { ...request, mutationId: crypto.randomUUID() })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    await expect(v2.mutateActive("member-a", { ...request, ops: [{ ...request.ops[0], value: { ...enabled, base: { view: "skills" } } }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_MUTATION_CONFLICT" });
+  });
+
+  it("keeps the manifest flag and mutation receipt scoped to one tenant", async () => {
+    for (const tenant of ["default", "tenant-b"]) {
+      const original = state(tenant);
+      delete original.draftAttachments;
+      if (tenant === "tenant-b") original.view = "skills";
+      await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: original }, tenant);
+      await shadow.stageFromV1("member-a", tenant);
+      await v2.prepareFromShadow("member-a", tenant);
+      const stored = tenantStorageKey(tenant, "member-a");
+      database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id=? AND user_id=?").run(new Date().toISOString(), tenant, stored);
+      database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=?").run(tenant, stored);
+    }
+    const first = (await v2.readActiveEntity("member-a", "manifest", "root"))!.value as { base: object; hasDraftAttachments: boolean; hasVideoDraftSettings: boolean };
+    const second = (await v2.readActiveEntity("member-a", "manifest", "root", "tenant-b"))!.value;
+    const request = { epoch: 1, mutationId: crypto.randomUUID(), ops: [
+      { kind: "manifest", entityId: "root", expectedRevision: 1, action: "put", value: { ...first, hasDraftAttachments: true } },
+    ] };
+    await v2.mutateActive("member-a", request);
+    expect((await v2.readActiveEntity("member-a", "manifest", "root", "tenant-b"))?.value).toEqual(second);
+    await expect(v2.mutateActive("member-a", request, "tenant-b")).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE tenant_id='tenant-b'").get()).toEqual({ count: 0 });
+    const tenantRequest = { ...request, ops: [{ ...request.ops[0], value: { ...(second as object), hasDraftAttachments: true } }] };
+    expect(await v2.mutateActive("member-a", tenantRequest, "tenant-b")).toMatchObject({ entities: [{ revision: 2 }] });
+    await expect(v2.mutateActive("member-a", tenantRequest)).rejects.toMatchObject({ code: "AI_WORKSPACE_MUTATION_CONFLICT" });
+  });
+
+  it("rejects manifest field changes, mixed batches, deletion and interrupted writes", async () => {
+    const original = state("甲");
+    delete original.draftAttachments;
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: original });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-a'").run(new Date().toISOString());
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-a'").run();
+    const before = (await v2.readActiveEntity("member-a", "manifest", "root"))!.value as { base: object; hasDraftAttachments: boolean; hasVideoDraftSettings: boolean };
+    const enabled = { ...before, hasDraftAttachments: true };
+    const request = (value: unknown) => ({ epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "manifest", entityId: "root", expectedRevision: 1, action: "put", value },
+    ] });
+    await expect(v2.mutateActive("member-a", request({ ...enabled, base: { ...before.base, mode: "fast" } }))).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(v2.mutateActive("member-a", request({ ...enabled, hasVideoDraftSettings: false }))).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(v2.mutateActive("member-a", request(before))).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    let deep: unknown = "leaf";
+    for (let index = 0; index < 14; index++) deep = { child: deep };
+    await expect(v2.mutateActive("member-a", request({ ...enabled, base: { ...before.base, extra: deep } }))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", request({ ...enabled, base: { ...before.base, extra: "x".repeat(140_000) } }))).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    await expect(v2.mutateActive("member-a", request({ ...enabled, extra: true }))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", { ...request(enabled), ops: [{ kind: "manifest", entityId: "wrong", expectedRevision: 0, action: "put", value: enabled }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "manifest", entityId: "root", expectedRevision: 1, action: "delete" },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "manifest", entityId: "root", expectedRevision: 1, action: "put", value: enabled },
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "不可混写" },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_entities") && bindings[2] === "manifest") throw new Error("fixture manifest write failed");
+      sql.exec(query, ...bindings);
+    } };
+    await expect(new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken)).mutateActive("member-a", request(enabled))).rejects.toThrow("fixture manifest write failed");
+    expect(await v2.readActiveEntity("member-a", "manifest", "root")).toMatchObject({ revision: 1, value: before });
     expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE user_id='member-a'").get()).toEqual({ count: 0 });
   });
 

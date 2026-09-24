@@ -80,13 +80,15 @@ export interface AiWorkspaceV2PreparedEntity { kind: Segment["kind"]; entityId: 
 export interface AiWorkspaceV2ActiveEntity extends AiWorkspaceV2PreparedEntity { deleted: boolean }
 export interface AiWorkspaceV2EntityRef { kind: Segment["kind"]; entityId: string }
 export interface AiWorkspaceV2ActiveBatch { epoch: number; entities: Array<AiWorkspaceV2ActiveEntity | null> }
-export interface AiWorkspaceV2MutationAck { epoch: number; entities: Array<{ kind: "draft" | "videoDraftSettings" | "artifact" | "project"; entityId: string; revision: number; deleted: boolean }> }
-type WritableKind = "draft" | "videoDraftSettings" | "artifact" | "project";
-interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[]; artifact?: AiWorkspaceArtifact; imageAssets?: string[]; dependencies?: Array<{ kind: "conversation" | "project"; entityId: string; revision: number }> }
+export interface AiWorkspaceV2MutationAck { epoch: number; entities: Array<{ kind: "draft" | "videoDraftSettings" | "artifact" | "project" | "manifest"; entityId: string; revision: number; deleted: boolean }> }
+type WritableKind = "draft" | "videoDraftSettings" | "artifact" | "project" | "manifest";
+interface ManifestValue { base: Record<string, unknown>; hasDraftAttachments: boolean; hasVideoDraftSettings: boolean }
+interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[]; artifact?: AiWorkspaceArtifact; manifest?: ManifestValue; imageAssets?: string[]; dependencies?: Array<{ kind: "conversation" | "project"; entityId: string; revision: number }> }
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_DRAFT_BYTES = 96 * 1024;
 const MAX_VIDEO_DRAFT_BYTES = 2 * 1024;
+const MAX_MANIFEST_BYTES = 128 * 1024;
 const MAX_MUTATION_RECEIPTS = 256;
 const MAX_ACTIVE_BATCH_BYTES = 32 * 1024 * 1024;
 const MAX_IMAGE_ARTIFACT_INDEX_ROWS = 4096;
@@ -111,6 +113,25 @@ function corrupt(): never { throw new AiError(500, "AI_WORKSPACE_CORRUPT", "工�
 function stale(): never { throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台已更新，请重新准备分实体数据"); }
 function invalid(message: string): never { throw new AiError(400, "AI_WORKSPACE_INVALID", message); }
 function unsupported(): never { throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "分实体工作台尚未启用，不能写入准备数据"); }
+function manifestValue(value: unknown): ManifestValue {
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalid("工作台索引内容无效");
+  const manifest = value as Record<string, unknown>;
+  if (Object.keys(manifest).length !== 3 || Object.keys(manifest).some(key => !["base", "hasDraftAttachments", "hasVideoDraftSettings"].includes(key)) ||
+    !manifest.base || typeof manifest.base !== "object" || Array.isArray(manifest.base) ||
+    typeof manifest.hasDraftAttachments !== "boolean" || typeof manifest.hasVideoDraftSettings !== "boolean") invalid("工作台索引内容无效");
+  return manifest as unknown as ManifestValue;
+}
+function boundedManifestBase(value: Record<string, unknown>): string {
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  while (pending.length) {
+    const entry = pending.pop()!;
+    if (entry.depth > 12) invalid("工作台索引内容嵌套过深");
+    if (entry.value && typeof entry.value === "object") {
+      for (const child of Object.values(entry.value)) pending.push({ value: child, depth: entry.depth + 1 });
+    }
+  }
+  return canonical(value);
+}
 async function hash(bytes: Uint8Array): Promise<string> {
   const input = new Uint8Array(new ArrayBuffer(bytes.byteLength));
   input.set(bytes);
@@ -346,7 +367,8 @@ export class AiWorkspaceV2Store {
     return snapshot ? { artifactId: snapshot.artifactId, batch: await this.verifyActiveSnapshot(snapshot.batch) } : null;
   }
 
-  /** CAS is implemented for draft/settings and restricted project/artifact puts. No HTTP
+  /** CAS is implemented for draft/settings, restricted project/artifact puts and
+   * the manifest's attachment-presence flag. No HTTP
    * route, activation entry point or real-account migration yet. */
   async mutateActive(userId: string, input: unknown, tenantId?: string): Promise<AiWorkspaceV2MutationAck> {
     this.activeScope(userId, tenantId);
@@ -363,9 +385,10 @@ export class AiWorkspaceV2Store {
       const op = raw as Record<string, unknown>;
       if (Object.keys(op).some(key => !["kind", "entityId", "expectedRevision", "action", "value"].includes(key))) invalid("分实体操作包含不支持的字段");
       if (!ENTITY_KINDS.has(op.kind as Segment["kind"])) invalid("分实体类型无效");
-      if (op.kind !== "draft" && op.kind !== "videoDraftSettings" && op.kind !== "artifact" && op.kind !== "project") throw new AiError(409, "V2_OPERATION_NOT_READY", "此类工作台实体尚未开放逐条写入");
+      if (op.kind !== "draft" && op.kind !== "videoDraftSettings" && op.kind !== "artifact" && op.kind !== "project" && op.kind !== "manifest") throw new AiError(409, "V2_OPERATION_NOT_READY", "此类工作台实体尚未开放逐条写入");
       if (typeof op.entityId !== "string" || op.entityId.length > 160 ||
-        !(ID.test(op.entityId) || op.kind !== "artifact" && op.kind !== "project" && op.entityId.startsWith("new-project-conversation:") && ID.test(op.entityId.slice("new-project-conversation:".length)))) invalid("分实体标识无效");
+        !(ID.test(op.entityId) || op.kind !== "artifact" && op.kind !== "project" && op.kind !== "manifest" && op.entityId.startsWith("new-project-conversation:") && ID.test(op.entityId.slice("new-project-conversation:".length)))) invalid("分实体标识无效");
+      if (op.kind === "manifest" && op.entityId !== "root") invalid("工作台索引标识无效");
       if (!Number.isSafeInteger(op.expectedRevision) || Number(op.expectedRevision) < 0 || Number(op.expectedRevision) >= Number.MAX_SAFE_INTEGER) invalid("分实体版本无效");
       if (op.action !== "put" && op.action !== "delete") invalid("分实体操作类型无效");
       const identity = JSON.stringify([op.kind, op.entityId]);
@@ -374,10 +397,11 @@ export class AiWorkspaceV2Store {
       const normalized: PreparedMutationOp = { kind: op.kind, entityId: op.entityId, expectedRevision: Number(op.expectedRevision), action: op.action };
       const forHash: Record<string, unknown> = { kind: op.kind, entityId: op.entityId, expectedRevision: op.expectedRevision, action: op.action };
       if (op.action === "put") {
-        const validated = op.kind === "draft" ? validateAiWorkspaceDraft(op.value) : op.kind === "videoDraftSettings" ? validateAiWorkspaceVideoDraftSetting(op.value) : op.kind === "artifact" ? validateAiWorkspaceArtifactEntity(op.value) : validateAiWorkspaceProjectEntity(op.value);
-        const value = JSON.parse(JSON.stringify(validated)) as unknown;
+        const validated = op.kind === "draft" ? validateAiWorkspaceDraft(op.value) : op.kind === "videoDraftSettings" ? validateAiWorkspaceVideoDraftSetting(op.value) : op.kind === "artifact" ? validateAiWorkspaceArtifactEntity(op.value) : op.kind === "project" ? validateAiWorkspaceProjectEntity(op.value) : manifestValue(op.value);
+        let value: unknown;
+        try { value = JSON.parse(JSON.stringify(validated)) as unknown; } catch { invalid("分实体内容必须是有效 JSON"); }
         const bytes = new TextEncoder().encode(JSON.stringify(value));
-        if (bytes.length > (op.kind === "draft" ? MAX_DRAFT_BYTES : op.kind === "videoDraftSettings" ? MAX_VIDEO_DRAFT_BYTES : op.kind === "artifact" ? AI_WORKSPACE_V2_ENTITY_BYTES.artifact : AI_WORKSPACE_V2_ENTITY_BYTES.project)) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "分实体内容超出安全保存上限");
+        if (bytes.length > (op.kind === "draft" ? MAX_DRAFT_BYTES : op.kind === "videoDraftSettings" ? MAX_VIDEO_DRAFT_BYTES : op.kind === "artifact" ? AI_WORKSPACE_V2_ENTITY_BYTES.artifact : op.kind === "project" ? AI_WORKSPACE_V2_ENTITY_BYTES.project : MAX_MANIFEST_BYTES)) throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "分实体内容超出安全保存上限");
         normalized.bytes = bytes;
         normalized.sha256 = await hash(bytes);
         normalized.chunks = encodeChunks(bytes);
@@ -389,9 +413,12 @@ export class AiWorkspaceV2Store {
           normalized.imageAssets = Array.from(indexedImageAssets(artifact));
         } else if (op.kind === "project" && (value as AiWorkspaceProject).id !== op.entityId) {
           invalid("项目标识与保存目标不一致");
+        } else if (op.kind === "manifest") {
+          normalized.manifest = manifestValue(value);
+          boundedManifestBase(normalized.manifest.base);
         }
       } else {
-        if (op.kind === "artifact" || op.kind === "project") throw new AiError(409, "V2_OPERATION_NOT_READY", "项目或成果删除需要先处理关联，暂未开放");
+        if (op.kind === "artifact" || op.kind === "project" || op.kind === "manifest") throw new AiError(409, "V2_OPERATION_NOT_READY", "工作台索引、项目或成果删除尚未开放");
         if (op.value !== undefined) invalid("删除操作不能携带内容");
       }
       prepared.push(normalized);
@@ -400,56 +427,84 @@ export class AiWorkspaceV2Store {
     if (prepared.some(op => op.kind === "project") && prepared.some(op => op.kind !== "project")) {
       throw new AiError(409, "V2_OPERATION_NOT_READY", "项目与其他实体的组合保存尚未开放");
     }
+    if (prepared.some(op => op.kind === "manifest") && prepared.length !== 1) {
+      throw new AiError(409, "V2_OPERATION_NOT_READY", "工作台索引与其他实体的组合保存尚未开放");
+    }
     const requestHash = await hash(new TextEncoder().encode(canonical({ epoch: body.epoch, ops: canonicalOps })));
     const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
-    if (prepared.some(op => op.kind === "artifact")) {
+    const needsPreflight = prepared.some(op => op.kind === "artifact" || op.kind === "manifest");
+    const readReplay = (): AiWorkspaceV2MutationAck | null => this.sql.transaction(() => {
       // Replay is independent of today's parent/artifact shape. A later edit
       // must not turn an already committed mutation into a false rejection.
-      const replay = this.sql.transaction(() => {
-        const { meta } = this.activeScope(userId, tenant);
-        if (meta.epoch !== body.epoch) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "分实体准备版本已变化，请重新同步");
-        const prior = this.sql.all<{ request_hash: string; ack_json: string }>(
-          "SELECT request_hash,ack_json FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?",
-          tenant, storedUser, body.mutationId as string,
-        )[0];
-        if (!prior) return null;
-        if (prior.request_hash !== requestHash) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于不同内容，请重新同步");
-        try { return JSON.parse(prior.ack_json) as AiWorkspaceV2MutationAck; } catch { return corrupt(); }
-      });
+      const { meta } = this.activeScope(userId, tenant);
+      if (meta.epoch !== body.epoch) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "分实体准备版本已变化，请重新同步");
+      const prior = this.sql.all<{ request_hash: string; ack_json: string }>(
+        "SELECT request_hash,ack_json FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?",
+        tenant, storedUser, body.mutationId as string,
+      )[0];
+      if (!prior) return null;
+      if (prior.request_hash !== requestHash) throw new AiError(409, "AI_WORKSPACE_MUTATION_CONFLICT", "保存请求标识已用于不同内容，请重新同步");
+      try { return JSON.parse(prior.ack_json) as AiWorkspaceV2MutationAck; } catch { return corrupt(); }
+    });
+    if (needsPreflight) {
+      const replay = readReplay();
       if (replay) return replay;
     }
-    for (const op of prepared) {
-      if (op.kind !== "artifact") continue;
-      const artifact = op.artifact!;
-      const refs: AiWorkspaceV2EntityRef[] = [{ kind: "conversation", entityId: artifact.conversationId }];
-      if (artifact.projectId) refs.push({ kind: "project", entityId: artifact.projectId });
-      refs.push({ kind: "artifact", entityId: artifact.id });
-      const batch = await this.readActiveEntities(userId, refs, tenantId);
-      const conversationEntity = batch.entities[0];
-      if (!conversationEntity || conversationEntity.deleted) invalid("成果所属对话不存在");
-      const conversation = validateAiWorkspaceConversationEntity(conversationEntity.value);
-      if (conversation.id !== artifact.conversationId || conversation.projectId !== artifact.projectId) invalid("成果与对话的所属项目不一致");
-      const dependencies: NonNullable<PreparedMutationOp["dependencies"]> = [{ kind: "conversation", entityId: conversation.id, revision: conversationEntity.revision }];
-      if (artifact.projectId) {
-        const projectEntity = batch.entities[1];
-        if (!projectEntity || projectEntity.deleted || validateAiWorkspaceProjectEntity(projectEntity.value).id !== artifact.projectId) invalid("成果所属项目不存在");
-        dependencies.push({ kind: "project", entityId: artifact.projectId, revision: projectEntity.revision });
+    try {
+      for (const op of prepared) {
+        if (op.kind === "manifest") {
+          const current = await this.readActiveEntity(userId, "manifest", "root", tenant);
+          if (!current || current.deleted) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台索引已变化，请重新同步");
+          if (current.revision !== op.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台索引版本已变化，请重新同步");
+          const previous = manifestValue(current.value);
+          if (previous.hasDraftAttachments || !op.manifest!.hasDraftAttachments ||
+            previous.hasVideoDraftSettings !== op.manifest!.hasVideoDraftSettings ||
+            boundedManifestBase(previous.base) !== boundedManifestBase(op.manifest!.base)) {
+            throw new AiError(409, "V2_OPERATION_NOT_READY", "目前仅开放草稿附件存在标志的开启");
+          }
+          continue;
+        }
+        if (op.kind !== "artifact") continue;
+        const artifact = op.artifact!;
+        const refs: AiWorkspaceV2EntityRef[] = [{ kind: "conversation", entityId: artifact.conversationId }];
+        if (artifact.projectId) refs.push({ kind: "project", entityId: artifact.projectId });
+        refs.push({ kind: "artifact", entityId: artifact.id });
+        const batch = await this.readActiveEntities(userId, refs, tenantId);
+        const conversationEntity = batch.entities[0];
+        if (!conversationEntity || conversationEntity.deleted) invalid("成果所属对话不存在");
+        const conversation = validateAiWorkspaceConversationEntity(conversationEntity.value);
+        if (conversation.id !== artifact.conversationId || conversation.projectId !== artifact.projectId) invalid("成果与对话的所属项目不一致");
+        const dependencies: NonNullable<PreparedMutationOp["dependencies"]> = [{ kind: "conversation", entityId: conversation.id, revision: conversationEntity.revision }];
+        if (artifact.projectId) {
+          const projectEntity = batch.entities[1];
+          if (!projectEntity || projectEntity.deleted || validateAiWorkspaceProjectEntity(projectEntity.value).id !== artifact.projectId) invalid("成果所属项目不存在");
+          dependencies.push({ kind: "project", entityId: artifact.projectId, revision: projectEntity.revision });
+        }
+        const previous = batch.entities.at(-1);
+        if (previous?.deleted) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "已删除的成果不能通过旧保存请求恢复");
+        const priorImageAssets = new Set<string>();
+        if (previous) {
+          const owner = validateAiWorkspaceArtifactEntity(previous.value);
+          if (owner.conversationId !== artifact.conversationId || owner.projectId !== artifact.projectId) invalid("成果不能跨对话或项目搬迁");
+          for (const assetId of indexedImageAssets(owner)) priorImageAssets.add(assetId);
+        }
+        // Workspace artifacts are client-writable. Without a server-owned
+        // generation provenance record, newly claimed asset IDs could make
+        // another conversation's image appear generated in this one.
+        if (op.imageAssets!.some(assetId => !priorImageAssets.has(assetId))) {
+          throw new AiError(409, "V2_OPERATION_NOT_READY", "新增图片成果关联需要服务端来源核验，暂未开放");
+        }
+        op.dependencies = dependencies;
       }
-      const previous = batch.entities.at(-1);
-      if (previous?.deleted) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "已删除的成果不能通过旧保存请求恢复");
-      const priorImageAssets = new Set<string>();
-      if (previous) {
-        const owner = validateAiWorkspaceArtifactEntity(previous.value);
-        if (owner.conversationId !== artifact.conversationId || owner.projectId !== artifact.projectId) invalid("成果不能跨对话或项目搬迁");
-        for (const assetId of indexedImageAssets(owner)) priorImageAssets.add(assetId);
+    } catch (error) {
+      // A concurrent identical request may commit while this request is in
+      // async hash verification. Recheck its receipt before rejecting stale
+      // parents or a now-enabled manifest flag.
+      if (needsPreflight) {
+        const replay = readReplay();
+        if (replay) return replay;
       }
-      // Workspace artifacts are client-writable. Without a server-owned
-      // generation provenance record, newly claimed asset IDs could make
-      // another conversation's image appear generated in this one.
-      if (op.imageAssets!.some(assetId => !priorImageAssets.has(assetId))) {
-        throw new AiError(409, "V2_OPERATION_NOT_READY", "新增图片成果关联需要服务端来源核验，暂未开放");
-      }
-      op.dependencies = dependencies;
+      throw error;
     }
     return this.sql.transaction(() => {
       const { meta } = this.activeScope(userId, tenant);
@@ -462,7 +517,7 @@ export class AiWorkspaceV2Store {
       const entities: AiWorkspaceV2MutationAck["entities"] = [];
       for (const op of prepared) {
         const target = op.entityId;
-        if (op.kind !== "artifact" && op.kind !== "project") {
+        if (op.kind !== "artifact" && op.kind !== "project" && op.kind !== "manifest") {
           const relatedKind = target.startsWith("new-project-conversation:") ? "project" : "conversation";
           const relatedId = relatedKind === "project" ? target.slice("new-project-conversation:".length) : target;
           if (target !== "new-conversation" && !this.sql.all<{ entity_id: string }>(
