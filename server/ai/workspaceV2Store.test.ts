@@ -283,4 +283,50 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect((await reading)?.value).toBe("草稿甲");
     expect((await v2.readPreparedEntity("member-a", "draft", "chat-a"))?.value).toBe("草稿乙");
   });
+
+  it("reads multiple active entities at one tenant-scoped epoch and rejects a corrupted member", async () => {
+    const first = await active("甲");
+    await active("乙", "tenant-b");
+    const refs = [
+      { kind: "conversation" as const, entityId: "chat-a" },
+      { kind: "artifact" as const, entityId: "artifact-a" },
+      { kind: "draft" as const, entityId: "chat-a" },
+    ];
+    const snapshot = await v2.readActiveEntities("member-a", refs);
+    expect(snapshot.epoch).toBe(first.epoch);
+    expect(snapshot.entities.map(item => item?.value)).toEqual([state("甲").conversations[0], state("甲").artifacts[0], "草稿甲"]);
+    expect((await v2.readActiveEntities("member-a", refs, "tenant-b")).entities[2]?.value).toBe("草稿乙");
+    await expect(v2.readActiveEntities("member-a", [refs[0], refs[0]])).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.readActiveEntities("member-a", Array.from({ length: 33 }, (_, index) => ({ kind: "artifact", entityId: `missing-${index}` })))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    database.prepare("UPDATE ai_workspace_v2_entity_chunks SET data=? WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=? AND chunk_index=0")
+      .run("broken", "default", "member-a", "artifact", "artifact-a");
+    await expect(v2.readActiveEntities("member-a", refs)).rejects.toMatchObject({ code: "AI_WORKSPACE_CORRUPT" });
+  });
+
+  it("keeps a batch coherent when a draft changes during async verification", async () => {
+    const prepared = await active();
+    let releaseDigest!: () => void;
+    let enteredDigest!: () => void;
+    const hold = new Promise<void>(resolve => { releaseDigest = resolve; });
+    const entered = new Promise<void>(resolve => { enteredDigest = resolve; });
+    const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+    const spy = vi.spyOn(crypto.subtle, "digest").mockImplementation(async (algorithm, data) => {
+      enteredDigest();
+      await hold;
+      return originalDigest(algorithm, data);
+    });
+    const reading = v2.readActiveEntities("member-a", [{ kind: "draft", entityId: "chat-a" }, { kind: "videoDraftSettings", entityId: "chat-a" }]);
+    try {
+      await entered;
+      spy.mockRestore();
+      await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+        { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "更新后草稿" },
+      ] });
+    } finally {
+      spy.mockRestore();
+      releaseDigest();
+    }
+    expect((await reading).entities[0]?.value).toBe("草稿甲");
+    expect((await v2.readActiveEntity("member-a", "draft", "chat-a"))?.value).toBe("更新后草稿");
+  });
 });

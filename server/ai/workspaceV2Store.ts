@@ -64,6 +64,8 @@ interface PreparedEntity { segment: Segment; bytes: Uint8Array; sha256: string; 
 export interface AiWorkspaceV2PreparedSnapshot { sourceRevision: number; sourceHash: string; epoch: number; preparedAt: string; entityCount: number }
 export interface AiWorkspaceV2PreparedEntity { kind: Segment["kind"]; entityId: string; revision: number; ordinal: number; value: unknown }
 export interface AiWorkspaceV2ActiveEntity extends AiWorkspaceV2PreparedEntity { deleted: boolean }
+export interface AiWorkspaceV2EntityRef { kind: Segment["kind"]; entityId: string }
+export interface AiWorkspaceV2ActiveBatch { epoch: number; entities: Array<AiWorkspaceV2ActiveEntity | null> }
 export interface AiWorkspaceV2MutationAck { epoch: number; entities: Array<{ kind: "draft" | "videoDraftSettings"; entityId: string; revision: number; deleted: boolean }> }
 type WritableKind = "draft" | "videoDraftSettings";
 interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[] }
@@ -72,6 +74,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MAX_DRAFT_BYTES = 96 * 1024;
 const MAX_VIDEO_DRAFT_BYTES = 2 * 1024;
 const MAX_MUTATION_RECEIPTS = 256;
+const MAX_ACTIVE_BATCH_BYTES = 32 * 1024 * 1024;
 
 function corrupt(): never { throw new AiError(500, "AI_WORKSPACE_CORRUPT", "工作台分实体准备数据不完整，原记录未被更改"); }
 function stale(): never { throw new AiError(409, "AI_WORKSPACE_CONFLICT", "工作台已更新，请重新准备分实体数据"); }
@@ -207,32 +210,62 @@ export class AiWorkspaceV2Store {
     return { kind, entityId, revision: entity.revision, ordinal: entity.ordinal, value };
   }
 
+  /** Read a bounded set from one SQL snapshot, then verify every entity. No
+   * caller receives a partial batch when one referenced record is corrupt. */
+  async readActiveEntities(userId: string, refs: AiWorkspaceV2EntityRef[], tenantId?: string): Promise<AiWorkspaceV2ActiveBatch> {
+    if (!Array.isArray(refs) || !refs.length || refs.length > 32) invalid("工作台读取实体数量无效");
+    const identities = new Set<string>();
+    for (const ref of refs) {
+      if (!ref || !ENTITY_KINDS.has(ref.kind) || typeof ref.entityId !== "string" || !ref.entityId || ref.entityId.length > 160) invalid("工作台实体标识无效");
+      const identity = JSON.stringify([ref.kind, ref.entityId]);
+      if (identities.has(identity)) invalid("同一实体不能在单次请求中重复读取");
+      identities.add(identity);
+    }
+    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
+    const snapshot = this.sql.transaction(() => {
+      const { meta } = this.activeScope(userId, tenant);
+      return {
+        epoch: meta.epoch,
+        entries: refs.map(({ kind, entityId }) => ({
+          kind, entityId,
+          entity: this.sql.all<EntityRow>("SELECT revision,ordinal,byte_length,sha256,chunk_count,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?", tenant, storedUser, kind, entityId)[0],
+          rows: this.sql.all<ChunkRow>("SELECT chunk_index,data FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=? ORDER BY chunk_index", tenant, storedUser, kind, entityId),
+        })),
+      };
+    });
+    const entities: AiWorkspaceV2ActiveBatch["entities"] = [];
+    let totalBytes = 0;
+    for (const { kind, entityId, entity, rows } of snapshot.entries) {
+      if (!entity) {
+        if (rows.length) corrupt();
+        entities.push(null);
+        continue;
+      }
+      if (entity.deleted === 1) {
+        if (entity.byte_length !== 0 || entity.chunk_count !== 0 || rows.length || entity.sha256 !== "") corrupt();
+        entities.push({ kind, entityId, revision: entity.revision, ordinal: entity.ordinal, deleted: true, value: null });
+        continue;
+      }
+      if (entity.deleted !== 0) corrupt();
+      if (!Number.isSafeInteger(entity.byte_length) || entity.byte_length < 1 || totalBytes + entity.byte_length > MAX_ACTIVE_BATCH_BYTES) {
+        throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", "单次分实体读取超出安全上限，请缩小读取范围");
+      }
+      totalBytes += entity.byte_length;
+      const bytes = decodeChunks(rows, entity);
+      if (await hash(bytes) !== entity.sha256) corrupt();
+      let value: unknown;
+      try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)); } catch { return corrupt(); }
+      if (["project", "conversation", "artifact"].includes(kind) &&
+        (!value || typeof value !== "object" || Array.isArray(value) || (value as { id?: unknown }).id !== entityId)) corrupt();
+      entities.push({ kind, entityId, revision: entity.revision, ordinal: entity.ordinal, deleted: false, value });
+    }
+    return { epoch: snapshot.epoch, entities };
+  }
+
   /** Internal V2 read only. It intentionally cannot be reached through the V1
    * HTTP route, whose old clients must be rejected after any future cutover. */
   async readActiveEntity(userId: string, kind: Segment["kind"], entityId: string, tenantId?: string): Promise<AiWorkspaceV2ActiveEntity | null> {
-    if (!ENTITY_KINDS.has(kind) || typeof entityId !== "string" || !entityId || entityId.length > 160) invalid("工作台实体标识无效");
-    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
-    const snapshot = this.sql.transaction(() => {
-      this.activeScope(userId, tenant);
-      return {
-        entity: this.sql.all<EntityRow>("SELECT revision,ordinal,byte_length,sha256,chunk_count,deleted FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?", tenant, storedUser, kind, entityId)[0],
-        rows: this.sql.all<ChunkRow>("SELECT chunk_index,data FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=? ORDER BY chunk_index", tenant, storedUser, kind, entityId),
-      };
-    });
-    if (!snapshot.entity) return null;
-    const entity = snapshot.entity;
-    if (entity.deleted === 1) {
-      if (entity.byte_length !== 0 || entity.chunk_count !== 0 || snapshot.rows.length || entity.sha256 !== "") corrupt();
-      return { kind, entityId, revision: entity.revision, ordinal: entity.ordinal, deleted: true, value: null };
-    }
-    if (entity.deleted !== 0) corrupt();
-    const bytes = decodeChunks(snapshot.rows, entity);
-    if (await hash(bytes) !== entity.sha256) corrupt();
-    let value: unknown;
-    try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)); } catch { return corrupt(); }
-    if (["project", "conversation", "artifact"].includes(kind) &&
-      (!value || typeof value !== "object" || Array.isArray(value) || (value as { id?: unknown }).id !== entityId)) corrupt();
-    return { kind, entityId, revision: entity.revision, ordinal: entity.ordinal, deleted: false, value };
+    return (await this.readActiveEntities(userId, [{ kind, entityId }], tenantId)).entities[0];
   }
 
   /** CAS is implemented for only two low-risk leaf kinds. There is no HTTP
