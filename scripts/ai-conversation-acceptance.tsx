@@ -84,6 +84,10 @@ window.fetch = async (target, init) => {
   if (url.pathname === "/api/ai/status") return Response.json(status);
   if (url.pathname === "/api/ai/availability") return Response.json({ status, check: { state: "reachable", checkedAt: new Date().toISOString(), message: "isolated fixture" } });
   if (url.pathname === "/api/ai/persona") return Response.json({ revision: 1, profile: { ...defaultAiPersonaProfile(), name: "验收 AI", onboardingComplete: true, expression: "none" } });
+  // The entry probe always asks whether V2 storage is active for this account.
+  // This fixture exercises the V1 chat path, so it answers "not active" exactly
+  // as production does for an account that has not been migrated.
+  if (url.pathname === "/api/ai/workspace-v2/bootstrap") return Response.json({ schemaVersion: 1 });
   if (url.pathname === "/api/ai/workspace") {
     if (method === "PUT") {
       if (parameters.has("failSelectionSaveOnce") && !localStorage.getItem(`${storageKey}:selection-save-failed`)
