@@ -27,16 +27,16 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "快速、标准、深度、Pro 业务档位",
+      "数值图表",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "Agent Harness",
+      "数学公式渲染",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "多对话并行",
+      "追问建议",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "@computer",
+      "工具请求信封",
     );
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留任务、客户脉络图、AI 历史、密钥和已有成员额度",
