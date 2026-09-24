@@ -71,6 +71,12 @@ interface ChatWorkspaceProps {
   draft: string;
   enabledSkills: TongpinAISkill[];
   messages: TongpinAIMessage[];
+  hasMoreMessages?: boolean;
+  loadingEarlierMessages?: boolean;
+  onLoadEarlierMessages?: () => void;
+  /** The V2 cutover slice exposes chat only until media tools have a
+   * server-owned artifact writer; never route a tool through V1 autosave. */
+  textOnly?: boolean;
   mode: TongpinAIMode;
   notificationUnread: number;
   projectId?: string;
@@ -145,6 +151,10 @@ export function ChatWorkspace({
   draft,
   enabledSkills,
   messages,
+  hasMoreMessages = false,
+  loadingEarlierMessages = false,
+  onLoadEarlierMessages,
+  textOnly = false,
   mode,
   notificationUnread,
   projectId,
@@ -220,7 +230,7 @@ export function ChatWorkspace({
       ...tool,
       available: tool.id !== "computer" || computerAvailable,
     })),
-  ].filter(s => `${s.id} ${s.name}`.toLowerCase().includes(mention.query)) : [];
+  ].filter(s => !textOnly).filter(s => `${s.id} ${s.name}`.toLowerCase().includes(mention.query)) : [];
   function trackMention(value: string, caret: number) { setMention(activeSkillMention(value, caret)); setMentionIndex(0); }
   function chooseMention(id: string) {
     if (!mention || videoBusy || (id === "computer" && !computerAvailable)) return;
@@ -450,7 +460,7 @@ export function ChatWorkspace({
     const list = messageListRef.current;
     if (anchor && list) list.scrollTop = anchor.top + list.scrollHeight - anchor.height;
     historyAnchorRef.current = null;
-  }, [visibleCount]);
+  }, [visibleCount, messages.length]);
   useEffect(() => {
     const list = messageListRef.current;
     if (list && followResponseRef.current) list.scrollTop = isEmpty ? 0 : list.scrollHeight;
@@ -535,8 +545,16 @@ export function ChatWorkspace({
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
     const { mentionedTools, requestedTool } = resolveToolIntent(draft);
+    if (textOnly && (mentionedTools.length > 0 || requestedTool)) {
+      setFileError("当前对话仅支持文字与附件问答，图片、视频和 PPT 生成尚未接入这条保存路径。");
+      return;
+    }
     if (mentionedTools.length > 1) {
       setFileError("一次只能选择一个 @ 工具，请移除多余工具后重试。");
+      return;
+    }
+    if (textOnly && (requestedTool === "image" || requestedTool === "video" || mentionedTools.some(tool => ["image", "video", "ppt", "computer"].includes(tool)))) {
+      setFileError("当前分实体对话暂未接入生成工具，请切换已支持的账号版本后使用；本次未发送、未扣费。");
       return;
     }
     if (mentionedTools[0] === "computer") {
@@ -720,12 +738,13 @@ export function ChatWorkspace({
           </div>
         ) : (
           <>
-            {hiddenCount > 0 && <button type="button" className="tp-ai-load-earlier" onClick={() => {
+            {(hiddenCount > 0 || hasMoreMessages) && <button type="button" className="tp-ai-load-earlier" disabled={loadingEarlierMessages} onClick={() => {
               const list = messageListRef.current;
               if (list) historyAnchorRef.current = { height: list.scrollHeight, top: list.scrollTop };
               followResponseRef.current = false;
-              setHistoryWindow({ conversationId, count: visibleCount + CHAT_MESSAGE_PAGE_SIZE });
-            }}>加载更早的消息（还有 {hiddenCount} 条）</button>}
+              if (hiddenCount > 0) setHistoryWindow({ conversationId, count: visibleCount + CHAT_MESSAGE_PAGE_SIZE });
+              else onLoadEarlierMessages?.();
+            }}>{loadingEarlierMessages ? "正在加载…" : hiddenCount > 0 ? `加载更早的消息（还有 ${hiddenCount} 条）` : "加载更早的消息"}</button>}
             {messages.slice(hiddenCount).map(message => {
               const artifact = message.artifactId ? artifactById.get(message.artifactId) : undefined;
               const isVideoArtifact = artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string";
@@ -871,7 +890,7 @@ export function ChatWorkspace({
                 >
                   <Plus size={20} />
                 </button>
-                <button
+                {!textOnly && <button
                   ref={toolsTriggerRef}
                   disabled={videoOpen || videoBusy || responding}
                   type="button"
@@ -887,7 +906,7 @@ export function ChatWorkspace({
                   {enabledSkills.length > 0 && (
                     <small>{enabledSkills.length}</small>
                   )}
-                </button>
+                </button>}
                 {menu && (
                   <div
                     ref={menuRef}
@@ -933,7 +952,7 @@ export function ChatWorkspace({
                           onClick={() => { setMenu(null); videoInputRef.current?.click(); }}>
                           <Video size={18} /><span>上传视频</span>
                         </button>
-                        <button
+                        {!textOnly && <button
                           type="button"
                           role="menuitem"
                           disabled={responding || readingFiles || composerTool === "image" || !onAddFiles}
@@ -942,12 +961,12 @@ export function ChatWorkspace({
                         >
                           <Sparkles size={18} />
                           <span>导入技能说明</span>
-                        </button>
-                        <div role="separator" />
-                        <button type="button" role="menuitem" disabled={responding || readingFiles || !onSubmitVideo} onClick={() => { openVideoComposer(); }}>
+                        </button>}
+                        {!textOnly && <div role="separator" />}
+                        {!textOnly && <button type="button" role="menuitem" disabled={responding || readingFiles || !onSubmitVideo} onClick={() => { openVideoComposer(); }}>
                           <Video size={18} /><span>生成视频</span>
-                        </button>
-                        <button
+                        </button>}
+                        {!textOnly && <button
                           type="button"
                           role="menuitem"
                           disabled={responding || readingFiles || !serviceConnected || !onComposerToolChange}
@@ -958,8 +977,8 @@ export function ChatWorkspace({
                         >
                           <Presentation size={18} />
                           <span>生成 PPT</span>
-                        </button>
-                        <button
+                        </button>}
+                        {!textOnly && <button
                           type="button"
                           role="menuitem"
                           disabled={responding || readingFiles || !imageEnabled || !imageReferencesAllowed || !onComposerToolChange}
@@ -971,7 +990,7 @@ export function ChatWorkspace({
                         >
                           <ImageIcon size={18} />
                           <span>生成图片</span>
-                        </button>
+                        </button>}
                       </>
                     ) : (
                       <>

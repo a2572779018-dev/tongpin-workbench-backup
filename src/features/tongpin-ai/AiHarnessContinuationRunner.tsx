@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import type { AiHarnessTrace } from "../../../shared/ai";
 import type { AiVideoJob } from "../../../shared/aiVideo";
 import type { AiWorkspaceSnapshot } from "../../../shared/aiWorkspace";
+import type { AiWorkspaceV2Bootstrap } from "../../../shared/aiWorkspaceV2";
 import { useAuth } from "../../auth/AuthContext";
 import { ApiRequestError } from "../../lib/api";
 import { registerAiWorkspaceActivityListener } from "./workspaceLeaveGuard";
@@ -121,6 +122,12 @@ export function startBackgroundAiContinuation(
   const headers = { "X-Tongpin-Account": accountId };
 
   async function discoverWork() {
+    // An activated V2 account must never be scanned through the old
+    // whole-account workspace endpoint. The V2 view recovers its own pending
+    // chat requests from durable message IDs; other tool recovery is not yet
+    // part of the local V2 vertical slice.
+    const version = await api<AiWorkspaceV2Bootstrap>("/api/ai/workspace-v2/bootstrap", { headers, signal: controller.signal }, 30_000);
+    if (version.schemaVersion === 2) return;
     const snapshot = await api<AiWorkspaceSnapshot>("/api/ai/workspace", { headers, signal: controller.signal }, 30_000);
     if (!live) return;
     const discovered = collectBackgroundAiWork(snapshot);

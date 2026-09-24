@@ -1,0 +1,19 @@
+.tp-ai-v2-sidebar .tp-ai-sidebar__primary-actions button { display: flex; align-items: center; gap: .55rem; width: 100%; }
+.tp-ai-v2-sidebar .tp-ai-sidebar__brand-name { display: grid; }
+.tp-ai-v2-list { min-height: 0; overflow: auto; padding: .65rem; flex: 1; }
+.tp-ai-v2-list button { border: 0; box-shadow: none; background: transparent; }
+.tp-ai-v2-project { margin-bottom: .75rem; }
+.tp-ai-v2-project-title { display: flex; align-items: center; gap: .4rem; padding: .4rem .5rem; color: #70675a; font-size: .75rem; font-weight: 700; }
+.tp-ai-v2-project-title > button { margin-left: auto; display: grid; place-items: center; padding: .2rem; border-radius: .35rem; }
+.tp-ai-v2-project > button, .tp-ai-v2-conversation > button:first-child { display: flex; align-items: center; gap: .4rem; width: 100%; min-width: 0; padding: .5rem .55rem; text-align: left; border-radius: .5rem; font-size: .8rem; }
+.tp-ai-v2-project > button span, .tp-ai-v2-conversation > button span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tp-ai-v2-project > button.is-active, .tp-ai-v2-conversation > button.is-active { background: #f1e6ba; }
+.tp-ai-v2-conversation { display: flex; align-items: center; min-width: 0; }
+.tp-ai-v2-conversation > button:first-child { flex: 1; }
+.tp-ai-v2-conversation > button:last-child { flex: none; display: grid; place-items: center; padding: .3rem; border-radius: .35rem; }
+.tp-ai-v2-conversation i, .tp-ai-v2-project i { color: #a66819; font-size: 1.1rem; font-style: normal; }
+.tp-ai-v2-empty { display: grid; align-content: center; justify-items: center; gap: 1rem; background: #fffaf2; }
+.tp-ai-v2-empty button { padding: .65rem 1rem; border: 1px solid #9b8646; border-radius: .5rem; background: #f5dc83; }
+.tp-ai-v2-notice { position: absolute; z-index: 100; right: 1rem; bottom: 1rem; display: flex; align-items: center; gap: 1rem; max-width: min(42rem, calc(100% - 2rem)); padding: .7rem .9rem; border: 1px solid #b56c4d; border-radius: .6rem; background: #fff5e9; box-shadow: 3px 3px 0 #252321; font-size: .8rem; }
+.tp-ai-v2-notice button { padding: .2rem .4rem; border: 0; background: transparent; text-decoration: underline; }
+.tp-ai-v2.is-sidebar-collapsed .tp-ai-v2-sidebar .tp-ai-sidebar__primary-actions button { justify-content: center; }

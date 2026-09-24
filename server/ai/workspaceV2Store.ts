@@ -84,6 +84,28 @@ CREATE TABLE IF NOT EXISTS ai_workspace_v2_message_owners (
   PRIMARY KEY(tenant_id,user_id,message_id)
 );
 CREATE INDEX IF NOT EXISTS ai_workspace_v2_message_owners_by_conversation ON ai_workspace_v2_message_owners(tenant_id,user_id,conversation_id);
+CREATE TABLE IF NOT EXISTS ai_workspace_v2_conversation_directory (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  time_label TEXT NOT NULL,
+  project_id TEXT,
+  ordinal INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  PRIMARY KEY(tenant_id,user_id,conversation_id)
+);
+CREATE INDEX IF NOT EXISTS ai_workspace_v2_conversation_directory_order ON ai_workspace_v2_conversation_directory(tenant_id,user_id,ordinal);
+CREATE TABLE IF NOT EXISTS ai_workspace_v2_project_directory (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  time_label TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  PRIMARY KEY(tenant_id,user_id,project_id)
+);
 `;
 
 const ENTITY_KINDS = new Set<Segment["kind"]>(["manifest", "project", "conversation", "artifact", "draft", "draftAttachment", "videoDraftSettings"]);
@@ -101,9 +123,12 @@ export interface AiWorkspaceV2EntityRef { kind: Segment["kind"]; entityId: strin
 export interface AiWorkspaceV2ActiveBatch { epoch: number; entities: Array<AiWorkspaceV2ActiveEntity | null> }
 export interface AiWorkspaceV2MutationAck { epoch: number; entities: Array<{ kind: "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "conversation" | "manifest"; entityId: string; revision: number; deleted: boolean }> }
 export interface AiWorkspaceV2AppendAck { epoch: number; entityId: string; revision: number; messageIds: string[] }
+export interface AiWorkspaceV2ConversationDirectory { epoch: number; conversations: Array<{ entityId: string; title: string; timeLabel: string; projectId?: string; ordinal: number; revision: number }> }
+export interface AiWorkspaceV2ProjectDirectory { epoch: number; projects: Array<{ entityId: string; title: string; timeLabel: string; ordinal: number; revision: number }> }
+export interface AiWorkspaceV2MessagePage { epoch: number; revision: number; messages: AiWorkspaceMessage[]; hasMore: boolean; nextBefore: string | null }
 type WritableKind = "draft" | "draftAttachment" | "videoDraftSettings" | "artifact" | "project" | "conversation" | "manifest";
 interface ManifestValue { base: Record<string, unknown>; hasDraftAttachments: boolean; hasVideoDraftSettings: boolean }
-interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[]; artifact?: AiWorkspaceArtifact; conversation?: AiWorkspaceConversation; manifest?: ManifestValue; manifestRevision?: number; imageAssets?: string[]; dependencies?: Array<{ kind: "conversation" | "project"; entityId: string; revision: number }> }
+interface PreparedMutationOp { kind: WritableKind; entityId: string; expectedRevision: number; action: "put" | "delete"; bytes?: Uint8Array; sha256?: string; chunks?: string[]; artifact?: AiWorkspaceArtifact; project?: AiWorkspaceProject; conversation?: AiWorkspaceConversation; manifest?: ManifestValue; manifestRevision?: number; imageAssets?: string[]; dependencies?: Array<{ kind: "conversation" | "project"; entityId: string; revision: number }> }
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_DRAFT_BYTES = 96 * 1024;
@@ -216,6 +241,18 @@ export class AiWorkspaceV2Store {
     return { tenant, storedUser, meta };
   }
 
+  /** Schema probe only. A V1 caller receives no workspace contents. */
+  workspaceVersion(userId: string, tenantId?: string): 1 | 2 {
+    if (!ID.test(userId)) invalid("工作台账号标识无效");
+    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
+    new AiStore(this.sql, tenant).assertAccess(userId);
+    const row = this.sql.all<{ schema_version: number }>("SELECT schema_version FROM ai_workspaces WHERE tenant_id=? AND user_id=?", tenant, storedUser)[0];
+    if (!row || row.schema_version === 1) return 1;
+    if (row.schema_version !== 2) unsupported();
+    this.activeScope(userId, tenant);
+    return 2;
+  }
+
   /** Explicit internal preparation only. No route, background job or live-account activation invokes it. */
   async prepareFromShadow(userId: string, tenantId?: string): Promise<AiWorkspaceV2PreparedSnapshot | null> {
     const tenant = normalizeAiTenantId(tenantId);
@@ -264,6 +301,8 @@ export class AiWorkspaceV2Store {
       this.sql.exec("DELETE FROM ai_workspace_v2_message_appends WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_image_artifacts WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       this.sql.exec("DELETE FROM ai_workspace_v2_message_owners WHERE tenant_id=? AND user_id=?", tenant, storedUser);
+      this.sql.exec("DELETE FROM ai_workspace_v2_conversation_directory WHERE tenant_id=? AND user_id=?", tenant, storedUser);
+      this.sql.exec("DELETE FROM ai_workspace_v2_project_directory WHERE tenant_id=? AND user_id=?", tenant, storedUser);
       for (const item of prepared) {
         const { kind, entityId, ordinal } = item.segment;
         this.sql.exec("INSERT INTO ai_workspace_v2_entities(tenant_id,user_id,kind,entity_id,revision,ordinal,byte_length,sha256,chunk_count) VALUES(?,?,?,?,1,?,?,?,?)",
@@ -280,6 +319,14 @@ export class AiWorkspaceV2Store {
       for (const entry of messageOwners) this.sql.exec(
         "INSERT INTO ai_workspace_v2_message_owners(tenant_id,user_id,message_id,conversation_id) VALUES(?,?,?,?)",
         tenant, storedUser, entry.messageId, entry.conversationId,
+      );
+      for (const [ordinal, conversation] of source.state.conversations.entries()) this.sql.exec(
+        "INSERT INTO ai_workspace_v2_conversation_directory(tenant_id,user_id,conversation_id,title,time_label,project_id,ordinal,revision) VALUES(?,?,?,?,?,?,?,1)",
+        tenant, storedUser, conversation.id, conversation.title, conversation.timeLabel, conversation.projectId ?? null, ordinal,
+      );
+      for (const [ordinal, project] of source.state.projects.entries()) this.sql.exec(
+        "INSERT INTO ai_workspace_v2_project_directory(tenant_id,user_id,project_id,title,time_label,ordinal,revision) VALUES(?,?,?,?,?,?,1)",
+        tenant, storedUser, project.id, project.title, project.timeLabel, ordinal,
       );
       this.sql.exec("INSERT INTO ai_workspace_v2_meta(tenant_id,user_id,source_revision,source_hash,epoch,prepared_at,activated_at,image_index_version,message_index_version) VALUES(?,?,?,?,?,?,NULL,1,1) ON CONFLICT(tenant_id,user_id) DO UPDATE SET source_revision=excluded.source_revision,source_hash=excluded.source_hash,epoch=excluded.epoch,prepared_at=excluded.prepared_at,activated_at=NULL,image_index_version=1,message_index_version=1",
         tenant, storedUser, source.sourceRevision, source.sourceHash, epoch, preparedAt);
@@ -381,6 +428,69 @@ export class AiWorkspaceV2Store {
     return (await this.readActiveEntities(userId, [{ kind, entityId }], tenantId)).entities[0];
   }
 
+  /** Lightweight account-scoped conversation directory. It never reads or
+   * returns message bodies; directory rows and entity revisions move together. */
+  listActiveConversations(userId: string, tenantId?: string): AiWorkspaceV2ConversationDirectory {
+    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
+    return this.sql.transaction(() => {
+      const { meta } = this.activeScope(userId, tenant);
+      const rows = this.sql.all<{ conversation_id: string; title: string; time_label: string; project_id: string | null; ordinal: number; revision: number; entity_revision: number | null; deleted: number | null }>(
+        "SELECT d.conversation_id,d.title,d.time_label,d.project_id,d.ordinal,d.revision,e.revision AS entity_revision,e.deleted FROM ai_workspace_v2_conversation_directory d LEFT JOIN ai_workspace_v2_entities e ON e.tenant_id=d.tenant_id AND e.user_id=d.user_id AND e.kind='conversation' AND e.entity_id=d.conversation_id WHERE d.tenant_id=? AND d.user_id=? ORDER BY d.ordinal ASC",
+        tenant, storedUser,
+      );
+      const entities = this.sql.all<{ count: number }>("SELECT COUNT(*) AS count FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='conversation' AND deleted=0", tenant, storedUser)[0]?.count ?? 0;
+      if (rows.length !== entities || rows.some(row => row.deleted !== 0 || row.entity_revision !== row.revision || !ID.test(row.conversation_id))) corrupt();
+      return { epoch: meta.epoch, conversations: rows.map(row => ({ entityId: row.conversation_id, title: row.title, timeLabel: row.time_label,
+        ...(row.project_id ? { projectId: row.project_id } : {}), ordinal: row.ordinal, revision: row.revision })) };
+    });
+  }
+
+  listActiveProjects(userId: string, tenantId?: string): AiWorkspaceV2ProjectDirectory {
+    const tenant = normalizeAiTenantId(tenantId), storedUser = tenantStorageKey(tenant, userId);
+    return this.sql.transaction(() => {
+      const { meta } = this.activeScope(userId, tenant);
+      const rows = this.sql.all<{ project_id: string; title: string; time_label: string; ordinal: number; revision: number; entity_revision: number | null; deleted: number | null }>(
+        "SELECT d.project_id,d.title,d.time_label,d.ordinal,d.revision,e.revision AS entity_revision,e.deleted FROM ai_workspace_v2_project_directory d LEFT JOIN ai_workspace_v2_entities e ON e.tenant_id=d.tenant_id AND e.user_id=d.user_id AND e.kind='project' AND e.entity_id=d.project_id WHERE d.tenant_id=? AND d.user_id=? ORDER BY d.ordinal ASC",
+        tenant, storedUser,
+      );
+      const entities = this.sql.all<{ count: number }>("SELECT COUNT(*) AS count FROM ai_workspace_v2_entities WHERE tenant_id=? AND user_id=? AND kind='project' AND deleted=0", tenant, storedUser)[0]?.count ?? 0;
+      if (rows.length !== entities || rows.some(row => row.deleted !== 0 || row.entity_revision !== row.revision || !ID.test(row.project_id))) corrupt();
+      return { epoch: meta.epoch, projects: rows.map(row => ({ entityId: row.project_id, title: row.title, timeLabel: row.time_label,
+        ordinal: row.ordinal, revision: row.revision })) };
+    });
+  }
+
+  /** Stable backwards page of one validated conversation. A newly appended
+   * tail does not shift the `before` message ID used for earlier pages. */
+  async pageActiveMessages(userId: string, conversationId: string, options: { before?: string | null; limit?: number } = {}, tenantId?: string): Promise<AiWorkspaceV2MessagePage> {
+    if (!ID.test(conversationId) || (options.before != null && !ID.test(options.before)) ||
+      !Number.isSafeInteger(options.limit ?? 30) || (options.limit ?? 30) < 1 || (options.limit ?? 30) > 50) invalid("消息分页参数无效");
+    const entity = await this.readActiveEntity(userId, "conversation", conversationId, tenantId);
+    if (!entity || entity.deleted) throw new AiError(404, "AI_CONVERSATION_NOT_FOUND", "没有找到这段对话");
+    const conversation = validateAiWorkspaceConversationEntity(entity.value);
+    if (conversation.id !== conversationId) corrupt();
+    const end = options.before == null ? conversation.messages.length : conversation.messages.findIndex(message => message.id === options.before);
+    if (end < 0) invalid("消息分页游标不存在");
+    const start = Math.max(0, end - (options.limit ?? 30));
+    const messages = conversation.messages.slice(start, end);
+    return { epoch: (await this.readActiveEntities(userId, [{ kind: "manifest", entityId: "root" }], tenantId)).epoch,
+      revision: entity.revision, messages, hasMore: start > 0, nextBefore: start > 0 ? messages[0]?.id ?? null : null };
+  }
+
+  /** Rename without requiring a browser to download and resubmit every message.
+   * The existing entity CAS and message-index checks remain authoritative. */
+  async renameActiveConversation(userId: string, input: { epoch: number; mutationId: string; conversationId: string; expectedRevision: number; title: string }, tenantId?: string): Promise<AiWorkspaceV2MutationAck> {
+    if (!ID.test(input.conversationId) || typeof input.title !== "string") invalid("对话标题无效");
+    const current = await this.readActiveEntity(userId, "conversation", input.conversationId, tenantId);
+    if (!current || current.deleted) throw new AiError(404, "AI_CONVERSATION_NOT_FOUND", "没有找到这段对话");
+    if (current.revision !== input.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "对话已更新，请刷新后再重命名");
+    const conversation = validateAiWorkspaceConversationEntity(current.value);
+    return this.mutateActive(userId, { epoch: input.epoch, mutationId: input.mutationId, ops: [{
+      kind: "conversation", entityId: input.conversationId, expectedRevision: input.expectedRevision,
+      action: "put", value: { ...conversation, title: input.title },
+    }] }, tenantId);
+  }
+
   /** Index is only a candidate locator. Capture it with the conversation and
    * artifact in one SQL snapshot; caller must still validate their linkage and
    * current asset ownership before granting a reference. */
@@ -452,6 +562,11 @@ export class AiWorkspaceV2Store {
       if (!base || base.deleted || base.revision !== body.expectedRevision) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "对话版本已变化，请重新同步");
       const old = validateAiWorkspaceConversationEntity(base.value);
       if (old.id !== conversationId) corrupt();
+      for (const message of incoming) {
+        if (message.role === "assistant" && message.requestId && old.messages.some(prior => prior.role === "assistant" && prior.requestId === message.requestId)) {
+          throw new AiError(409, "AI_WORKSPACE_CONFLICT", "这次 AI 回复已保存，请刷新对话");
+        }
+      }
       const conversation = validateAiWorkspaceConversationEntity({ ...old, messages: [...old.messages, ...incoming] });
       const appended = conversation.messages.slice(old.messages.length);
       const messageIds = appended.map(message => message.id);
@@ -577,6 +692,8 @@ export class AiWorkspaceV2Store {
         const revision = current.revision + 1;
         this.sql.exec("UPDATE ai_workspace_v2_entities SET revision=?,byte_length=?,sha256=?,chunk_count=? WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id=?",
           revision, bytes.length, sha256, chunks.length, tenant, storedUser, conversationId);
+        this.sql.exec("UPDATE ai_workspace_v2_conversation_directory SET revision=? WHERE tenant_id=? AND user_id=? AND conversation_id=? AND revision=?",
+          revision, tenant, storedUser, conversationId, current.revision);
         this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id=?", tenant, storedUser, conversationId);
         for (const [index, data] of chunks.entries()) this.sql.exec("INSERT INTO ai_workspace_v2_entity_chunks(tenant_id,user_id,kind,entity_id,chunk_index,data) VALUES(?,?,'conversation',?,?,?)",
           tenant, storedUser, conversationId, index, data);
@@ -639,8 +756,9 @@ export class AiWorkspaceV2Store {
           if (artifact.id !== op.entityId) invalid("成果标识与保存目标不一致");
           normalized.artifact = artifact;
           normalized.imageAssets = Array.from(indexedImageAssets(artifact));
-        } else if (op.kind === "project" && (value as AiWorkspaceProject).id !== op.entityId) {
-          invalid("项目标识与保存目标不一致");
+        } else if (op.kind === "project") {
+          if ((value as AiWorkspaceProject).id !== op.entityId) invalid("项目标识与保存目标不一致");
+          normalized.project = value as AiWorkspaceProject;
         } else if (op.kind === "conversation") {
           const conversation = value as AiWorkspaceConversation;
           if (conversation.id !== op.entityId) invalid("对话标识与保存目标不一致");
@@ -866,6 +984,16 @@ export class AiWorkspaceV2Store {
         const revision = op.expectedRevision + 1, deleted = op.action === "delete";
         this.sql.exec("INSERT INTO ai_workspace_v2_entities(tenant_id,user_id,kind,entity_id,revision,ordinal,byte_length,sha256,chunk_count,deleted) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,user_id,kind,entity_id) DO UPDATE SET revision=excluded.revision,ordinal=excluded.ordinal,byte_length=excluded.byte_length,sha256=excluded.sha256,chunk_count=excluded.chunk_count,deleted=excluded.deleted",
           tenant, storedUser, op.kind, target, revision, ordinal, op.bytes?.length ?? 0, op.sha256 ?? "", op.chunks?.length ?? 0, deleted ? 1 : 0);
+        if (op.kind === "conversation") {
+          const conversation = op.conversation!;
+          this.sql.exec("INSERT INTO ai_workspace_v2_conversation_directory(tenant_id,user_id,conversation_id,title,time_label,project_id,ordinal,revision) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,user_id,conversation_id) DO UPDATE SET title=excluded.title,time_label=excluded.time_label,project_id=excluded.project_id,ordinal=excluded.ordinal,revision=excluded.revision",
+            tenant, storedUser, target, conversation.title, conversation.timeLabel, conversation.projectId ?? null, ordinal, revision);
+        }
+        if (op.kind === "project") {
+          const project = op.project!;
+          this.sql.exec("INSERT INTO ai_workspace_v2_project_directory(tenant_id,user_id,project_id,title,time_label,ordinal,revision) VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant_id,user_id,project_id) DO UPDATE SET title=excluded.title,time_label=excluded.time_label,ordinal=excluded.ordinal,revision=excluded.revision",
+            tenant, storedUser, target, project.title, project.timeLabel, ordinal, revision);
+        }
         this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?", tenant, storedUser, op.kind, target);
         for (const [index, data] of (op.chunks ?? []).entries()) this.sql.exec("INSERT INTO ai_workspace_v2_entity_chunks(tenant_id,user_id,kind,entity_id,chunk_index,data) VALUES(?,?,?,?,?,?)", tenant, storedUser, op.kind, target, index, data);
         entities.push({ kind: op.kind, entityId: target, revision, deleted });

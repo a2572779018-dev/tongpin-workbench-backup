@@ -31,6 +31,7 @@ import type { AiStore } from "./ai/storage";
 import { createAiRouter } from "./routes/ai";
 import { AiWorkspaceRepository } from "./ai/workspace";
 import { AiWorkspaceV2Store } from "./ai/workspaceV2Store";
+import { createAiWorkspaceV2Router } from "./ai/workspaceV2Routes";
 import { createAiWorkspaceRouter } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "./ai/persona";
 import { createAiPersonaRouter } from "./ai/personaRoutes";
@@ -102,7 +103,8 @@ export async function createRuntime(
   )));
   const aiWorkspace = new AiWorkspaceRepository(ai.store.sql);
   aiWorkspace.initialize();
-  new AiWorkspaceV2Store(ai.store.sql, aiWorkspace).initialize();
+  const aiWorkspaceV2 = new AiWorkspaceV2Store(ai.store.sql, aiWorkspace);
+  aiWorkspaceV2.initialize();
   const aiPersona = new AiPersonaRepository(ai.store.sql);
   aiPersona.initialize();
   const dify: DifyRouteOptions = {
@@ -147,6 +149,7 @@ export async function createRuntime(
   );
   // Workspace snapshots have a separate authenticated, chunk-backed limit; do not grow every API body limit.
   app.use("/api/ai/workspace", createAiWorkspaceRouter(aiWorkspace, requireAuth));
+  app.use("/api/ai/workspace-v2", createAiWorkspaceV2Router(aiWorkspaceV2, requireAuth));
   app.use("/api/ai/persona", createAiPersonaRouter(aiPersona, requireAuth));
   app.use("/api/ai/chat", express.json({ limit: 1600 * 1024 }));
   app.use("/api/ai/preflight", express.json({ limit: 1600 * 1024 }));

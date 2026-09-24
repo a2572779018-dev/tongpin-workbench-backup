@@ -123,6 +123,34 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT revision,schema_version,data FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual(before);
   });
 
+  it("lists only light conversation metadata and pages messages without returning the account snapshot", async () => {
+    const prepared = await active();
+    const created = await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "conversation", entityId: "chat-b", expectedRevision: 0, action: "put", value: { id: "chat-b", title: "第二段", timeLabel: "刚刚", messages: [] } },
+    ] });
+    expect(created.entities[0].revision).toBe(1);
+    const directory = await v2.listActiveConversations("member-a");
+    expect(directory.conversations.map(({ entityId, title, revision }) => ({ entityId, title, revision }))).toEqual([
+      { entityId: "chat-b", title: "第二段", revision: 1 },
+      { entityId: "chat-a", title: "对话甲", revision: 1 },
+    ]);
+    expect(JSON.stringify(directory)).not.toContain("你好甲");
+    expect(v2.listActiveProjects("member-a")).toMatchObject({ projects: [{ entityId: "project-a", title: "项目甲", revision: 1 }] });
+    const appended = await v2.appendActiveMessages("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(),
+      conversationId: "chat-a", expectedRevision: 1, messages: [
+        { id: "message-b", role: "user", content: "再见", time: "10:01" },
+        { id: "message-c", role: "assistant", content: "下次见", time: "10:02" },
+      ] });
+    expect(appended.revision).toBe(2);
+    expect((await v2.listActiveConversations("member-a")).conversations.find(item => item.entityId === "chat-a")?.revision).toBe(2);
+    const latest = await v2.pageActiveMessages("member-a", "chat-a", { limit: 1 });
+    expect(latest).toMatchObject({ epoch: prepared.epoch, revision: 2, messages: [{ id: "message-c" }], hasMore: true, nextBefore: "message-c" });
+    const older = await v2.pageActiveMessages("member-a", "chat-a", { limit: 1, before: latest.nextBefore });
+    expect(older).toMatchObject({ messages: [{ id: "message-b" }], hasMore: true, nextBefore: "message-b" });
+    const oldest = await v2.pageActiveMessages("member-a", "chat-a", { limit: 1, before: older.nextBefore });
+    expect(oldest).toMatchObject({ messages: [{ id: "message-a" }], hasMore: false, nextBefore: null });
+  });
+
   it("rejects reused message IDs across conversations and stale concurrent appends", async () => {
     const prepared = await active();
     await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [

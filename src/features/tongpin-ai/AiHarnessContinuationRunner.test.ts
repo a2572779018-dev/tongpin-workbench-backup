@@ -142,6 +142,7 @@ describe("App-root AI continuation discovery", () => {
     const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
       paths.push({ path, method: init?.method ?? "GET", account: new Headers(init?.headers).get("X-Tongpin-Account") });
       if (init?.method === "POST") providerCalls += 1;
+      if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
       if (path === "/api/ai/workspace") return snapshot() as T;
       if (path.startsWith("/api/ai/videos/")) return { job: { id: "44444444-4444-4444-8444-444444444444", status: "completed" } as AiVideoJob } as T;
       return { trace: trace("planned") } as T;
@@ -150,6 +151,7 @@ describe("App-root AI continuation discovery", () => {
     await vi.waitFor(() => expect(paths.filter(item => item.path.startsWith("/api/ai/runs/"))).toHaveLength(2));
     stopFirst();
     const firstMount = [
+      { path: "/api/ai/workspace-v2/bootstrap", method: "GET", account: "member-a" },
       { path: "/api/ai/workspace", method: "GET", account: "member-a" },
       { path: "/api/ai/videos/44444444-4444-4444-8444-444444444444", method: "GET", account: "member-a" },
       { path: "/api/ai/runs/33333333-3333-4333-8333-333333333333", method: "GET", account: "member-a" },
@@ -172,6 +174,7 @@ describe("App-root AI continuation discovery", () => {
     const calls: string[] = [];
     const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
       if (path === "/api/ai/workspace") return value as T;
       if (path.startsWith("/api/ai/videos/")) return { job: { id: "44444444-4444-4444-8444-444444444444", status: "completed" } as AiVideoJob } as T;
       return { trace: trace("planned") } as T;
@@ -180,10 +183,24 @@ describe("App-root AI continuation discovery", () => {
     await vi.waitFor(() => expect(calls).toContain("GET /api/ai/runs/88888888-8888-4888-8888-888888888888"));
     stop();
     expect(calls).toEqual([
+      "GET /api/ai/workspace-v2/bootstrap",
       "GET /api/ai/workspace",
       "GET /api/ai/videos/44444444-4444-4444-8444-444444444444",
       "GET /api/ai/runs/88888888-8888-4888-8888-888888888888",
     ]);
+  });
+
+  it("does not read the legacy whole-account workspace for an activated V2 account", async () => {
+    const calls: string[] = [];
+    const api: BackgroundAiApi = async <T,>(path: string) => {
+      calls.push(path);
+      if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 2, epoch: 1 } as T;
+      throw new Error(`unexpected legacy read: ${path}`);
+    };
+    const stop = startBackgroundAiContinuation(api, "member-a", { idleScanDelayMs: 60_000 });
+    await vi.waitFor(() => expect(calls).toContain("/api/ai/workspace-v2/bootstrap"));
+    stop();
+    expect(calls).toEqual(["/api/ai/workspace-v2/bootstrap"]);
   });
 
   it("observes a persisted parent plan after page unload without invoking the model", async () => {
@@ -197,6 +214,7 @@ describe("App-root AI continuation discovery", () => {
     const calls: string[] = [];
     const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
       if (path === "/api/ai/workspace") return value as T;
       return { trace: trace("planned") } as T;
     };
@@ -212,6 +230,7 @@ describe("App-root AI continuation discovery", () => {
     try {
       let workspaceReads = 0;
       const api: BackgroundAiApi = async <T,>(path: string) => {
+        if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
         if (path !== "/api/ai/workspace") throw new Error("unexpected request");
         workspaceReads += 1;
         if (workspaceReads === 1) throw new Error("offline");
@@ -243,6 +262,7 @@ describe("App-root AI continuation discovery", () => {
       const calls: string[] = [];
       const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
         calls.push(`${init?.method ?? "GET"} ${path}`);
+        if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
         if (path === "/api/ai/workspace") return value as T;
         if (path.startsWith("/api/ai/videos/")) {
           if (++videoReads === 1) throw new ApiRequestError(404, "NOT_FOUND", "not created yet");
@@ -274,6 +294,7 @@ describe("App-root AI continuation discovery", () => {
       };
       let videoReads = 0, runReads = 0, workspaceReads = 0;
       const api: BackgroundAiApi = async <T,>(path: string) => {
+        if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
         if (path === "/api/ai/workspace") { workspaceReads += 1; return value as T; }
         if (path.startsWith("/api/ai/videos/")) videoReads += 1;
         else if (path.startsWith("/api/ai/runs/")) runReads += 1;
@@ -313,6 +334,7 @@ describe("App-root AI continuation discovery", () => {
     late.state!.conversations[0].messages = [{ id: "late", role: "assistant", content: "处理中", time: "10:00", requestId: "77777777-7777-4777-8777-777777777777", trace: trace("planned") }];
     const api: BackgroundAiApi = async <T,>(path: string) => {
       calls.push(path);
+      if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
       if (path === "/api/ai/workspace") return (++workspaceReads === 1 ? empty : late) as T;
       return { trace: trace("planned") } as T;
     };
@@ -330,6 +352,7 @@ describe("App-root AI continuation discovery", () => {
     late.state!.conversations[0].messages = [{ id: "late", role: "assistant", content: "处理中", time: "10:00", requestId: "77777777-7777-4777-8777-777777777777", trace: trace("planned") }];
     const api: BackgroundAiApi = async <T,>(path: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/ai/workspace-v2/bootstrap") return { schemaVersion: 1 } as T;
       if (path === "/api/ai/workspace") return (++workspaceReads === 1 ? empty : late) as T;
       return { trace: trace("planned") } as T;
     };

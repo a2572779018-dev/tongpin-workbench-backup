@@ -4,6 +4,7 @@ import { handleAiRequest } from "./ai/routes";
 import { createDifyToolResponse, type DifyRouteOptions } from "../../server/ai/difyRuntimeRoutes";
 import { AiWorkspaceRepository } from "../../server/ai/workspace";
 import { AiWorkspaceV2Store } from "../../server/ai/workspaceV2Store";
+import { handleAiWorkspaceV2Request } from "../../server/ai/workspaceV2Protocol";
 import { handleAiWorkspaceRequest } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "../../server/ai/persona";
 import { handleAiPersonaRequest } from "./ai/personaRoutes";
@@ -569,6 +570,7 @@ function isDurableObjectRowWriteLimit(error: unknown): boolean {
 export class TongpinCore extends DurableObject<WorkerEnv> {
   private readonly ai: ReturnType<typeof createWorkerAi>;
   private readonly aiWorkspace: AiWorkspaceRepository;
+  private readonly aiWorkspaceV2: AiWorkspaceV2Store;
   private readonly aiPersona: AiPersonaRepository;
   private readonly sql: SqlStorage;
   private aiSchemaReady = false;
@@ -592,6 +594,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       ).toArray().length === 1,
     );
     this.aiWorkspace = new AiWorkspaceRepository(this.ai.store.sql);
+    this.aiWorkspaceV2 = new AiWorkspaceV2Store(this.ai.store.sql, this.aiWorkspace);
     this.aiPersona = new AiPersonaRepository(this.ai.store.sql);
     this.loraSource = new ExplorerLoraChainDataSource(
       env.LORA_EXPLORER_API ?? LORA_EXPLORER_API,
@@ -627,7 +630,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   private initializeAiSchema(): void {
     this.ai.store.initialize();
     this.aiWorkspace.initialize();
-    new AiWorkspaceV2Store(this.ai.store.sql, this.aiWorkspace).initialize();
+    this.aiWorkspaceV2.initialize();
     this.aiPersona.initialize();
     this.aiSchemaReady = true;
   }
@@ -874,6 +877,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         this.ensureAiSchemaReady();
         const user = await this.requireUser(request, path.startsWith("/api/admin/") ? ["admin"] : undefined);
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
+        if (path.startsWith("/api/ai/workspace-v2/")) return await handleAiWorkspaceV2Request(request, this.aiWorkspaceV2, user);
         if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);
         return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray(), task => this.ctx.waitUntil(task));
       }

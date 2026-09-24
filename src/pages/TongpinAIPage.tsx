@@ -47,6 +47,7 @@ import { sameHarnessTrace } from "../features/tongpin-ai/runTracePolling";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
 import { ArtifactPreview } from "../features/tongpin-ai/ArtifactPreview";
 import { ChatWorkspace } from "../features/tongpin-ai/ChatWorkspace";
+import { TongpinAIWorkspaceV2 } from "../features/tongpin-ai/TongpinAIWorkspaceV2";
 import { TONGPIN_AI_SKILLS } from "../features/tongpin-ai/mockData";
 import { ProjectWorkspaceEmpty } from "../features/tongpin-ai/ProjectWorkspaceEmpty";
 import { SkillMarketplace } from "../features/tongpin-ai/SkillMarketplace";
@@ -122,6 +123,7 @@ function WorkspaceLoader({ user }: { user: User }) {
     key={entry.persona.revision} snapshot={entry.persona} accountId={user.id}
     onSaved={() => setAttempt(value => value + 1)}
   /></section>;
+  if (entry.kind === "ready-v2") return <TongpinAIWorkspaceV2 user={user} initial={entry.workspace} status={entry.status} persona={entry.persona} />;
   return <TongpinAIWorkspace user={user} initialSnapshot={entry.workspace} initialStatus={entry.status} persona={entry.persona}
     onPersonaSaved={persona => setEntry(current => current?.kind === "ready" ? { ...current, persona } : current)} />;
 }

@@ -107,6 +107,9 @@ export const ChatMessageRow = memo(function ChatMessageRow({
         message.role === "assistant" && message.status !== "error"
           ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}<MarkdownReply content={message.content} typing={message.status === "typing"} /></>
           : <p>{message.content}</p>}
+      {message.artifactId && !artifact ? <button type="button" className="tp-ai-artifact-card" onClick={() => onOpenArtifact(message.artifactId!)}>
+        成果暂未加载，点击重试
+      </button> : null}
       {imageSelection?.status === "awaiting_selection" && artifact && onSelectGeneratedImage && onCancelGeneratedImageSelection
         ? <GeneratedImageSelectionCard key={artifact.id} assetIds={imageSelection.assetIds} onSelect={assetId => onSelectGeneratedImage(artifact.id, assetId)} onCancel={() => onCancelGeneratedImageSelection(artifact.id)} />
         : artifact?.kind === "参考图片选择" ? null
