@@ -161,9 +161,13 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   it("creates additive AI tables in the real DO and keeps admin/member boundaries", async () => {
     const storage = await mf.unsafeGetDurableObjectStorage(WORKER_NAME, "TongpinCore", { name: "primary" });
     const tables = await storage.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_%'");
-    expect(tables.map(item => item.name)).toEqual(expect.arrayContaining(["ai_settings", "ai_quotas", "ai_requests", "ai_usage", "ai_workspaces", "ai_workspace_v2_shadow_meta", "ai_workspace_v2_shadow_segments", "ai_assets", "ai_asset_chunks"]));
+    expect(tables.map(item => item.name)).toEqual(expect.arrayContaining(["ai_settings", "ai_quotas", "ai_requests", "ai_usage", "ai_workspaces", "ai_workspace_v2_shadow_meta", "ai_workspace_v2_shadow_segments", "ai_workspace_v2_meta", "ai_workspace_v2_entities", "ai_workspace_v2_entity_chunks", "ai_workspace_v2_mutations", "ai_assets", "ai_asset_chunks"]));
     expect(await storage.exec("SELECT user_id FROM ai_workspace_v2_shadow_meta")).toEqual([]);
     expect(await storage.exec("SELECT user_id FROM ai_workspace_v2_shadow_segments")).toEqual([]);
+    expect(await storage.exec("SELECT user_id FROM ai_workspace_v2_meta")).toEqual([]);
+    expect(await storage.exec("SELECT user_id FROM ai_workspace_v2_entities")).toEqual([]);
+    expect(await storage.exec("SELECT user_id FROM ai_workspace_v2_entity_chunks")).toEqual([]);
+    expect(await storage.exec("SELECT user_id FROM ai_workspace_v2_mutations")).toEqual([]);
     await api<ErrorBody>("/api/admin/ai/provider", member, undefined, "GET", 403);
     await api<ErrorBody>("/api/ai/status", admin, undefined, "GET", 403);
     expect(await api<AiStatus>("/api/ai/status", member)).toMatchObject({ accessGranted: false, quota: { remainingTokens: 0 } });

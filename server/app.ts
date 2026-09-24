@@ -30,6 +30,7 @@ import type { AiTransport } from "./ai/provider";
 import type { AiStore } from "./ai/storage";
 import { createAiRouter } from "./routes/ai";
 import { AiWorkspaceRepository } from "./ai/workspace";
+import { AiWorkspaceV2Store } from "./ai/workspaceV2Store";
 import { createAiWorkspaceRouter } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "./ai/persona";
 import { createAiPersonaRouter } from "./ai/personaRoutes";
@@ -101,6 +102,7 @@ export async function createRuntime(
   )));
   const aiWorkspace = new AiWorkspaceRepository(ai.store.sql);
   aiWorkspace.initialize();
+  new AiWorkspaceV2Store(ai.store.sql, aiWorkspace).initialize();
   const aiPersona = new AiPersonaRepository(ai.store.sql);
   aiPersona.initialize();
   const dify: DifyRouteOptions = {

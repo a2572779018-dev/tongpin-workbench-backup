@@ -11,7 +11,7 @@ import { AiWorkspaceRepository, validateAiWorkspaceState } from "./workspace";
  * complete V2 client and all server readers have been migrated.
  */
 type Kind = "manifest" | "project" | "conversation" | "artifact" | "draft" | "draftAttachment" | "videoDraftSettings";
-interface Segment { kind: Kind; entityId: string; ordinal: number; value: unknown }
+export interface Segment { kind: Kind; entityId: string; ordinal: number; value: unknown }
 interface ShadowMeta { source_revision: number; source_hash: string; staged_at: string }
 interface ShadowChunk { kind: string; entity_id: string; ordinal: number; chunk_index: number; data: string }
 export interface AiWorkspaceV2ShadowSnapshot {
@@ -23,7 +23,7 @@ export interface AiWorkspaceV2ShadowSnapshot {
   state: AiWorkspaceState;
 }
 
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`).join(",")}}`;
   return JSON.stringify(value);
@@ -42,7 +42,7 @@ function sqlChunks(serialized: string): string[] {
   }
   return result;
 }
-function split(state: AiWorkspaceState): Segment[] {
+export function split(state: AiWorkspaceState): Segment[] {
   const { projects, conversations, artifacts, drafts, draftAttachments, videoDraftSettings, ...base } = state;
   return [
     { kind: "manifest", entityId: "root", ordinal: 0, value: { base, hasDraftAttachments: draftAttachments !== undefined, hasVideoDraftSettings: videoDraftSettings !== undefined } },

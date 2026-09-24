@@ -3,6 +3,7 @@ import { createWorkerAi } from "./ai/runtime";
 import { handleAiRequest } from "./ai/routes";
 import { createDifyToolResponse, type DifyRouteOptions } from "../../server/ai/difyRuntimeRoutes";
 import { AiWorkspaceRepository } from "../../server/ai/workspace";
+import { AiWorkspaceV2Store } from "../../server/ai/workspaceV2Store";
 import { handleAiWorkspaceRequest } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "../../server/ai/persona";
 import { handleAiPersonaRequest } from "./ai/personaRoutes";
@@ -626,6 +627,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   private initializeAiSchema(): void {
     this.ai.store.initialize();
     this.aiWorkspace.initialize();
+    new AiWorkspaceV2Store(this.ai.store.sql, this.aiWorkspace).initialize();
     this.aiPersona.initialize();
     this.aiSchemaReady = true;
   }
