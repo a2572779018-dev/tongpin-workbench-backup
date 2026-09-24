@@ -8,6 +8,7 @@ import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AiWorkspaceRepository } from "./workspace";
 import { AiWorkspaceV2ShadowRepository } from "./workspaceV2Shadow";
 import { AiWorkspaceV2Store } from "./workspaceV2Store";
+import { readCurrentConversation } from "./workspaceCurrentReads";
 import { tenantStorageKey } from "./tenant";
 
 function adapter(database: DatabaseSync): AiSql {
@@ -72,6 +73,32 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations").get()).toEqual({ count: 0 });
     expect(database.prepare("SELECT schema_version FROM ai_workspaces WHERE user_id='member-a'").get()).toEqual({ schema_version: 1 });
     expect(workspace.read("member-a")).toEqual(saved);
+  });
+
+  it("reads only a scoped V2 conversation larger than the old account limit", async () => {
+    await active();
+    const large = state("甲").conversations[0];
+    large.messages = Array.from({ length: 72 }, (_, index) => ({
+      id: `message-${index}`, role: "user", content: "中".repeat(42_000), time: "10:00",
+    }));
+    const bytes = Buffer.from(JSON.stringify(large), "utf8");
+    expect(bytes.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), byte => byte.toString(16).padStart(2, "0")).join("");
+    const chunks: string[] = [];
+    for (let start = 0; start < bytes.length; start += 48 * 1024) chunks.push(bytes.subarray(start, start + 48 * 1024).toString("base64"));
+    const storedUser = tenantStorageKey("default", "member-a");
+    sql.transaction(() => {
+      sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id='chat-a'", "default", storedUser);
+      sql.exec("UPDATE ai_workspace_v2_entities SET revision=2,byte_length=?,sha256=?,chunk_count=? WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id='chat-a'", bytes.byteLength, digest, chunks.length, "default", storedUser);
+      for (const [index, data] of chunks.entries()) sql.exec("INSERT INTO ai_workspace_v2_entity_chunks(tenant_id,user_id,kind,entity_id,chunk_index,data) VALUES(?,?,?,?,?,?)", "default", storedUser, "conversation", "chat-a", index, data);
+    });
+    expect(() => workspace.read("member-a")).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_VERSION_UNSUPPORTED" }));
+    const current = await readCurrentConversation(new AiStore(sql), "member-a", "chat-a");
+    expect(current).toMatchObject({ schemaVersion: 2, revision: 2, conversation: { id: "chat-a", messages: expect.any(Array) } });
+    expect(current?.conversation.messages).toHaveLength(72);
+    expect(await readCurrentConversation(new AiStore(sql), "member-a", "missing")).toBeNull();
+    expect(await readCurrentConversation(new AiStore(sql, "tenant-b"), "member-a", "chat-a")).toBeNull();
+    await expect(readCurrentConversation(new AiStore(sql), "ungranted", "chat-a")).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
   });
 
   it("uses bounded binary chunks, verifies hashes, and survives a database reopen", async () => {

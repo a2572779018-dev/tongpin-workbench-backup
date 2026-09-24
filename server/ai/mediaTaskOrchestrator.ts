@@ -20,7 +20,7 @@ import { AiError } from "./security";
 import type { AiService } from "./service";
 import { tenantStorageKey } from "./tenant";
 import { validateToolPlan } from "./toolPlans";
-import { AiWorkspaceRepository } from "./workspace";
+import { readCurrentConversation } from "./workspaceCurrentReads";
 
 const MAX_TASK_LIFETIME_MS = 30 * 60_000;
 const VIDEO_POLL_MS = 10_000;
@@ -81,11 +81,11 @@ function submissionMayCarryGrant(input: SubmitMediaTask): boolean {
 
 /** Capture only text from this account's already-saved conversation. A link
  * in historical content is untrusted input, not a fetch instruction. */
-function frozenConversationContext(service: MediaTaskService, userId: string, conversationId: string, requestText: string): {
+async function frozenConversationContext(service: MediaTaskService, userId: string, conversationId: string, requestText: string): Promise<{
   contextMessages: MediaTaskContextMessage[]; contextRevision?: number;
-} {
-  const saved = new AiWorkspaceRepository(service.store.sql).read(userId, service.store.tenantId);
-  const conversation = saved.state?.conversations.find(item => item.id === conversationId);
+}> {
+  const saved = await readCurrentConversation(service.store, userId, conversationId);
+  const conversation = saved?.conversation;
   if (!conversation) return { contextMessages: [] };
   const eligible = conversation.messages.filter(item => (item.role === "user" || item.role === "assistant")
     && (item.status === undefined || item.status === "ready") && typeof item.content === "string" && item.content.trim());
@@ -103,7 +103,7 @@ function frozenConversationContext(service: MediaTaskService, userId: string, co
     collected.push({ sourceMessageId: message.id, role: message.role, content: clipped });
     remaining -= clipped.length;
   }
-  return { contextMessages: collected.reverse(), contextRevision: saved.revision };
+  return { contextMessages: collected.reverse(), contextRevision: saved!.revision };
 }
 
 /** Concrete bridge to the existing one-time chat plan, image reservation and
@@ -135,8 +135,7 @@ export class AiServiceMediaTaskOrchestrator {
     if (input.sourceAssetIds.length > 5) rejected("AI_ATTACHMENT_INVALID", "图片任务最多使用五张参考图", 400);
     const attachments: AiAttachment[] = [];
     const fingerprints: string[] = [];
-    const saved = new AiWorkspaceRepository(this.service.store.sql).read(userId, this.service.store.tenantId);
-    const conversation = saved.state?.conversations.find(item => item.id === input.conversationId);
+    const conversation = (await readCurrentConversation(this.service.store, userId, input.conversationId))?.conversation;
     let totalBytes = 0;
     for (const assetId of input.sourceAssetIds) {
       const matchingDocuments = (conversation?.messages ?? [])
@@ -242,7 +241,7 @@ export class AiServiceMediaTaskOrchestrator {
     const source = await this.scopedSources(userId, input);
     const cost = this.estimatedPoints(userId, input.intent);
     if (input.intent === "video") this.service.video.bindPlanModel(input.tier, input.videoParameters!.model);
-    const context = frozenConversationContext(this.service, userId, input.conversationId, input.requestText);
+    const context = await frozenConversationContext(this.service, userId, input.conversationId, input.requestText);
     const modelConfigVersion = await this.configurationVersion(input.intent, input.tier);
     let authorizationScope: MediaTaskAuthorizationScope | null = null;
     if (submissionMayCarryGrant(input)) {

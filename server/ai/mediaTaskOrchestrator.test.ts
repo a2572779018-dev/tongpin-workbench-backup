@@ -6,6 +6,9 @@ import { createNodeAi } from "./node";
 import { AiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 import type { AiTransport } from "./provider";
 import { AiWorkspaceRepository } from "./workspace";
+import { AiWorkspaceV2ShadowRepository } from "./workspaceV2Shadow";
+import { AiWorkspaceV2Store } from "./workspaceV2Store";
+import { tenantStorageKey } from "./tenant";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const PNG_ALT = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
@@ -335,6 +338,32 @@ describe("real AiService media orchestration", () => {
     expect(serialized).not.toContain("untrusted.example");
     expect(body.messages.filter((item: { content: string }) => item.content.includes("画一张蓝色科技海报"))).toHaveLength(1);
     expect((await orchestrator.submit("member", input(run.requestId))).runId).toBe(run.runId);
+  });
+
+  it("reads context from the matching V2 conversation without reopening the V1 account snapshot", async () => {
+    await workspace.save("member", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: {
+      view: "chat", mode: "quick", projects: [], artifacts: [], drafts: {}, enabledSkillIds: [],
+      activeConversationId: "conversation-a", activeProjectId: null,
+      conversations: [{ id: "conversation-a", title: "海报", timeLabel: "刚刚", messages: [
+        { id: "earlier-v2", role: "user", content: "沿用蓝色品牌色", time: "10:00" },
+        { id: "current-v2", role: "user", content: "画一张蓝色科技海报", time: "10:01" },
+      ] }],
+    } });
+    const shadow = new AiWorkspaceV2ShadowRepository(node.store.sql, workspace);
+    const v2 = new AiWorkspaceV2Store(node.store.sql, workspace); v2.initialize();
+    await shadow.stageFromV1("member");
+    await v2.prepareFromShadow("member");
+    const storedUser = tenantStorageKey(node.store.tenantId, "member");
+    node.store.sql.transaction(() => {
+      node.store.sql.exec("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id=? AND user_id=?", new Date().toISOString(), node.store.tenantId, storedUser);
+      node.store.sql.exec("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=?", node.store.tenantId, storedUser);
+    });
+    expect(() => workspace.read("member")).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_VERSION_UNSUPPORTED" }));
+    const run = await orchestrator.submit("member", input());
+    expect(orchestrator.runtime.snapshot("member", run.runId)).toMatchObject({ contextMessages: [
+      { sourceMessageId: "earlier-v2", role: "user", content: "沿用蓝色品牌色" },
+    ], contextRevision: 1 });
+    expect(transport).not.toHaveBeenCalled();
   });
 
   it("uses no history when the requested conversation was not saved and rejects other-account lookups", async () => {

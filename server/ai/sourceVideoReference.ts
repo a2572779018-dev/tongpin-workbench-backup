@@ -2,7 +2,7 @@ import { aiVideoReferenceFingerprint, AI_VIDEO_REFERENCE_FINGERPRINT } from "../
 import type { AiWorkspaceDocument } from "../../shared/aiWorkspace";
 import { AiError } from "./security";
 import type { AiStore } from "./storage";
-import { AiWorkspaceRepository } from "./workspace";
+import { readCurrentConversation } from "./workspaceCurrentReads";
 
 export interface SourceVideoReferenceBinding {
   conversationId: string;
@@ -31,10 +31,8 @@ function sourceInput(value: unknown): Omit<SourceVideoReferenceBinding, "frameFi
   };
 }
 
-function originalVideoDocument(store: AiStore, userId: string, source: ReturnType<typeof sourceInput>): AiWorkspaceDocument {
-  store.assertAccess(userId);
-  const state = new AiWorkspaceRepository(store.sql).read(userId, store.tenantId).state;
-  const conversation = state?.conversations.find(item => item.id === source.conversationId);
+async function originalVideoDocument(store: AiStore, userId: string, source: ReturnType<typeof sourceInput>): Promise<AiWorkspaceDocument> {
+  const conversation = (await readCurrentConversation(store, userId, source.conversationId))?.conversation;
   const matches = conversation?.messages
     .filter(message => message.role === "user")
     .flatMap(message => message.attachments ?? [])
@@ -46,7 +44,7 @@ function originalVideoDocument(store: AiStore, userId: string, source: ReturnTyp
 }
 
 async function selectedFrame(store: AiStore, userId: string, source: ReturnType<typeof sourceInput>) {
-  const document = originalVideoDocument(store, userId, source);
+  const document = await originalVideoDocument(store, userId, source);
   const index = document.media?.selectedFrameIndex;
   const frame = Number.isInteger(index) && Number(index) >= 0 ? document.media?.frames[Number(index)] : undefined;
   if (!frame || frame.timeSeconds !== source.timeSeconds || !frame.dataUrl.startsWith("data:image/jpeg;base64,")) {

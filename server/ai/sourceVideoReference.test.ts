@@ -9,6 +9,8 @@ import { tenantStorageKey } from "./tenant";
 import type { AiTransport } from "./provider";
 import { AiVideoService } from "./videoService";
 import { AiWorkspaceRepository } from "./workspace";
+import { AiWorkspaceV2ShadowRepository } from "./workspaceV2Shadow";
+import { AiWorkspaceV2Store } from "./workspaceV2Store";
 
 const JPEG = `data:image/jpeg;base64,${Buffer.from([255, 216, 255, 192, 0, 17, 8, 0, 1, 0, 1, 3, 1, 17, 0, 2, 17, 0, 3, 17, 0, 0, 0, 255, 217]).toString("base64")}`;
 const CONVERSATION = "video-source-conversation";
@@ -49,6 +51,18 @@ describe("video reference originating from an uploaded video frame", () => {
     });
     return video.submit("member", { requestId, planRequestId, conversationId, prompt, model: "minimax_h3", seconds: 15, resolution: "768p", aspectRatio: "16:9", referenceIds: [referenceId] });
   };
+  const activatePreparedV2 = async () => {
+    const shadow = new AiWorkspaceV2ShadowRepository(store.sql, workspace);
+    const v2 = new AiWorkspaceV2Store(store.sql, workspace); v2.initialize();
+    await shadow.stageFromV1("member", store.tenantId);
+    await v2.prepareFromShadow("member", store.tenantId);
+    const storedUser = tenantStorageKey(store.tenantId, "member");
+    store.sql.transaction(() => {
+      store.sql.exec("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id=? AND user_id=?", new Date().toISOString(), store.tenantId, storedUser);
+      store.sql.exec("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=?", store.tenantId, storedUser);
+    });
+    return storedUser;
+  };
 
   beforeEach(async () => {
     database = new DatabaseSync(":memory:"); store = new AiStore(sqlite(database), "source-video-tenant"); store.initialize();
@@ -75,6 +89,27 @@ describe("video reference originating from an uploaded video frame", () => {
     expect(body.images).toHaveLength(1);
     const content = await video.referenceContent(body.images[0].split("/").at(-1)!);
     expect(Buffer.from(await content.arrayBuffer()).toString("base64")).toBe(JPEG.split(",")[1]);
+  });
+
+  it("rechecks the selected frame from the active V2 conversation rather than a V1 whole-account read", async () => {
+    await activatePreparedV2();
+    expect(() => workspace.read("member", store.tenantId)).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_VERSION_UNSUPPORTED" }));
+    const reference = await upload();
+    await submit(reference.id);
+    expect(transport).toHaveBeenCalledTimes(1);
+    await expect(upload({ ...sourceVideo, conversationId: "other-conversation" })).rejects.toMatchObject({ code: "AI_VIDEO_SOURCE_NOT_FOUND" });
+  });
+
+  it("fails closed before a paid V2 video submission when the source conversation is deleted", async () => {
+    const storedUser = await activatePreparedV2();
+    const reference = await upload();
+    store.sql.transaction(() => {
+      store.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id=?", store.tenantId, storedUser, CONVERSATION);
+      store.sql.exec("UPDATE ai_workspace_v2_entities SET deleted=1,revision=revision+1,byte_length=0,sha256='',chunk_count=0 WHERE tenant_id=? AND user_id=? AND kind='conversation' AND entity_id=?", store.tenantId, storedUser, CONVERSATION);
+    });
+    await expect(submit(reference.id)).rejects.toMatchObject({ code: "AI_VIDEO_SOURCE_NOT_FOUND" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(store.quota("member").reservedTokens).toBe(0);
   });
 
   it("rejects fabricated source documents, conversations and times before storing or charging", async () => {
