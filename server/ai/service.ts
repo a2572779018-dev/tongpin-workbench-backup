@@ -16,7 +16,7 @@ import { AI_CHAT_CONTEXT_LIMITS, AiCurrentContextTooLongError, fitAiChatMessages
 import { claimToolPlan, toolPlanContextFingerprint, toolPlanExpiry, validateToolPlan } from "./toolPlans";
 import { verifiedBaiAgentModels } from "./modelVerification";
 import { AiHarness, parseHarnessContinuationDecision, requestCapability, validConversationId, type ResolvedHarnessRoute } from "./harness";
-import { parsePublicExplanation, parseProviderPublicSummary, providerPublicSummaryFromResponse, supportsPublicExplanation } from "./publicExplanation";
+import { parsePublicExplanation, parseProviderPublicSummary, providerPublicSummaryFromResponse, stripToolRequestMarkup, supportsPublicExplanation } from "./publicExplanation";
 import { parseAiDispatchDecision } from "./dispatch";
 import type { AiRunEvent, AiRunEventPayload } from "../../shared/aiRunEvents";
 import { createVisibleStream } from "./visibleStream";
@@ -903,7 +903,7 @@ export class AiService {
       }
       const content = dispatch
         ? dispatch.kind === "text" ? dispatch.content : dispatch.clarification ?? ""
-        : toolClarification ?? (presentation ? `已生成《${presentation.title}》，共 ${presentation.slides.length} 页。` : toolPlan ? `已整理${toolPlan.kind === "video" ? "视频" : toolPlan.kind === "image" ? "图片" : "PPT"}任务，请确认后生成。` : computerPlan ? "已整理一个本机操作，请在系统确认框中核对。" : publicExplanation.content);
+        : toolClarification ?? (presentation ? `已生成《${presentation.title}》，共 ${presentation.slides.length} 页。` : toolPlan ? `已整理${toolPlan.kind === "video" ? "视频" : toolPlan.kind === "image" ? "图片" : "PPT"}任务，请确认后生成。` : computerPlan ? "已整理一个本机操作，请在系统确认框中核对。" : stripToolRequestMarkup(publicExplanation.content));
       const toolCapability = toolPlan ? toolPlan.kind === "image" ? "image" : toolPlan.kind === "video" ? "video" : "presentation" : computerPlan ? "computer" : undefined;
       const toolSummary = toolPlan?.summary ?? computerPlan?.summary;
       const dispatchSummary = dispatch?.kind === "text" ? dispatch.analysisSummary : undefined;

@@ -34,6 +34,18 @@ function stripPrivateReasoningMarkup(content: string): string {
   return visible.replace(/<\/?(?:think|reasoning_content)\b[^>]*>/gi, "");
 }
 
+/** A tool envelope is a control message, not prose. It may never be shown as the
+ * assistant's answer, and a truncated one must not leak its payload either.
+ * Only applied to an ordinary text answer, never to a request whose output
+ * format is the tool envelope itself. */
+export function stripToolRequestMarkup(content: string): string {
+  return content
+    .replace(/<tool_request\b[^>]*>[\s\S]*?<\/tool_request\s*>/gi, "")
+    .replace(/<tool_request\b[^>]*>[\s\S]*$/gi, "")
+    .replace(/<\/?tool_request\b[^>]*>/gi, "")
+    .trim();
+}
+
 function stripAnalysisMarkup(content: string): string {
   return content
     .replace(/<analysis_summary\b[^>]*>[\s\S]*?<\/analysis_summary\s*>/gi, "")
