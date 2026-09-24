@@ -108,20 +108,29 @@ const runtime = await createRuntime(config, {
     evidence(`transport ${method} ${url.pathname} stream=${String(body.stream)}`);
     if (url.pathname.endsWith("/models")) return Response.json({ data: [{ id: "fixture-model", object: "model" }, { id: "fixture-image", object: "model" }, { id: "minimax_h3", object: "model" }, { id: "sd-2-c6", object: "model" }] });
 
+    // A provider-boundary "failure" switch. The product code that consumes this
+    // must still go through the real task machine and settle as failed/cancelled;
+    // it is never wired to bypass quota or to inject a success card.
+    const prompt = String(body.prompt ?? "");
+    const wantsFailure = /失败|模拟失败|fail/i.test(prompt);
+
     // --- image generation: the product only accepts b64_json, never a URL ---
     if (url.pathname.endsWith("/images/generations") || url.pathname.endsWith("/images/edits")) {
       imageCalls += 1;
-      evidence(`image ${url.pathname.split("/").pop()} #${imageCalls} model=${String(body.model ?? "?")}`);
+      evidence(`image ${url.pathname.split("/").pop()} #${imageCalls} model=${String(body.model ?? "?")} fail=${wantsFailure}`);
+      if (wantsFailure) {
+        return new Response(`data: ${JSON.stringify({ type: "error", error: { message: "fixture simulated provider failure" } })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+      }
       return Response.json({ data: [{ b64_json: fixturePngBase64 }] });
     }
 
     // --- video: submit / query / content, all through this boundary ---
     if (url.pathname.endsWith("/videos") && method === "POST") {
       const images = Array.isArray(body.images) ? body.images.map(value => String(value).split("/").pop()) : [];
-      evidence(`video-submit images=[${images.join(",")}] seconds=${String(body.seconds)} resolution=${String(body.resolution)} model=${String(body.model)} prompt="${String(body.prompt ?? "").slice(0, 40)}"`);
+      evidence(`video-submit images=[${images.join(",")}] seconds=${String(body.seconds)} resolution=${String(body.resolution)} model=${String(body.model)} prompt="${String(body.prompt ?? "").slice(0, 40)}" fail=${wantsFailure}`);
       const id = `video_fixture_${++videoSeq}`;
-      videoJobs.set(id, Date.now());
-      return Response.json({ id, status: "queued", progress: 0 });
+      videoJobs.set(id, wantsFailure ? -1 : Date.now());
+      return Response.json({ id, status: wantsFailure ? "failed" : "queued", progress: 0 });
     }
     if (url.pathname.endsWith("/content")) {
       evidence(`video-content bytes=${fixtureVideo.byteLength}`);
@@ -129,7 +138,9 @@ const runtime = await createRuntime(config, {
     }
     if (/\/videos\/[^/]+$/.test(url.pathname) && method === "GET") {
       const id = url.pathname.split("/").pop()!;
-      const elapsed = Date.now() - (videoJobs.get(id) ?? Date.now());
+      const startedAt = videoJobs.get(id);
+      if (startedAt === -1) { evidence(`video-status ${id} failed`); return Response.json({ id, status: "failed", progress: 0 }); }
+      const elapsed = Date.now() - (startedAt ?? Date.now());
       const state = elapsed < 1200 ? { status: "queued", progress: 0 } : elapsed < 3000 ? { status: "processing", progress: 60 } : { status: "completed", progress: 100 };
       evidence(`video-status ${id} ${state.status} ${state.progress}`);
       return Response.json({ id, ...state });
@@ -139,8 +150,15 @@ const runtime = await createRuntime(config, {
     // The product asks for a structured envelope through a deterministic
     // instruction block, not through a field the provider would see. Match those
     // blocks exactly so the real planner/parser code is what gets exercised.
-    if (instructions.includes("图片生成工具整理任务")) return jsonReply({ kind: "image", summary: "准备图片", prompt: IMAGE_PROMPT });
-    if (instructions.includes("视频生成工具整理任务")) return jsonReply({ kind: "video", summary: "准备视频", prompt: VIDEO_PROMPT });
+    const bodyUsers = Array.isArray(body.input)
+      ? (body.input as Array<{ role?: string; content?: string }>).filter(m => m?.role === "user")
+      : Array.isArray(body.messages)
+        ? (body.messages as Array<{ role?: string; content?: string }>).filter(m => m?.role === "user")
+        : [];
+    const lastUser = String(bodyUsers.at(-1)?.content ?? "");
+    const failMark = /失败|模拟失败|fail/i.test(lastUser) ? "（模拟失败）" : "";
+    if (instructions.includes("图片生成工具整理任务")) return jsonReply({ kind: "image", summary: "准备图片", prompt: `${IMAGE_PROMPT}${failMark}` });
+    if (instructions.includes("视频生成工具整理任务")) return jsonReply({ kind: "video", summary: "准备视频", prompt: `${VIDEO_PROMPT}${failMark}` });
     if (instructions.includes("PPT 生成器整理任务")) return jsonReply({ kind: "presentation", summary: "准备演示文稿", prompt: "本周进度汇报" });
     if (instructions.includes("生成可编辑演示文稿的数据")) return jsonReply(fixtureSlides);
     if (instructions.includes("受限代理决策")) return jsonReply({ action: "complete", summary: "本地模拟：任务已完成。" });
@@ -148,20 +166,15 @@ const runtime = await createRuntime(config, {
     // The ordinary text send uses outputFormat "dispatch": the server parses a
     // <tool_request> envelope out of the body. Detect the member's last turn so
     // the real dispatch parser routes image/video/presentation correctly.
-    const lastUser = Array.isArray(body.input)
-      ? String((body.input as Array<{ role?: string; content?: string }>).filter(m => m?.role === "user").at(-1)?.content ?? "")
-      : Array.isArray(body.messages)
-        ? String((body.messages as Array<{ role?: string; content?: string }>).filter(m => m?.role === "user").at(-1)?.content ?? "")
-        : "";
     const wantsPpt = /ppt|演示文稿|幻灯片|汇报材料/i.test(lastUser);
     const wantsVideo = /视频|影片|动起来|生成视频/i.test(lastUser);
     const wantsImage = /图片|图|画|海报|插画|照片|logo/i.test(lastUser);
     const answerText = wantsPpt
-      ? `<tool_request>{"kind":"presentation","prompt":"本周进度汇报"}</tool_request>`
+      ? `<tool_request>{"kind":"presentation","prompt":"本周进度汇报${failMark}"}</tool_request>`
       : wantsVideo
-        ? `<tool_request>{"kind":"video","prompt":"让参考图片里的猫轻轻转头并眨眼"}</tool_request>`
+        ? `<tool_request>{"kind":"video","prompt":"让参考图片里的猫轻轻转头并眨眼${failMark}"}</tool_request>`
         : wantsImage
-          ? `<tool_request>{"kind":"image","prompt":"一只橘色的猫坐在窗台上，柔和自然光"}</tool_request>`
+          ? `<tool_request>{"kind":"image","prompt":"一只橘色的猫坐在窗台上，柔和自然光${failMark}"}</tool_request>`
           : fixtureAnswer;
     const result = { status: "completed", output_text: answerText, usage: { input_tokens: 100, output_tokens: 80, total_tokens: 180 } };
     const encoder = new TextEncoder();
