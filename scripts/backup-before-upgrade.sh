@@ -2,6 +2,9 @@
 # 同频 0.1.48 -> 0.1.49 升级前备份（只读复制，不删除任何数据）
 # 用法：bash scripts/backup-before-upgrade.sh [备份根目录]
 # 默认备份到 ~/tongpin-upgrade-backup/<时间戳>/
+# 注意：使用 cp -X 跳过扩展属性复制，规避 macOS Sequoia 对
+#   com.apple.provenance 的拦截（cp -R 复制带该属性的 app.asar 会
+#   报 Operation not permitted）。-p 保留时间戳，-X 不复制 xattr。
 set -euo pipefail
 
 BACKUP_ROOT="${1:-$HOME/tongpin-upgrade-backup}"
@@ -17,14 +20,14 @@ echo "目标目录：$DEST"
 
 if [ -d "$APP_DATA" ]; then
   echo "[1/2] 备份应用数据：$APP_DATA"
-  cp -R "$APP_DATA" "$DEST/应用数据-同频"
+  cp -RpX "$APP_DATA" "$DEST/应用数据-同频"
 else
   echo "[1/2] 跳过：未找到应用数据 $APP_DATA"
 fi
 
 if [ -d "$APP_BUNDLE" ]; then
   echo "[2/2] 备份当前应用：$APP_BUNDLE"
-  cp -R "$APP_BUNDLE" "$DEST/同频.app-0.1.48"
+  cp -RpX "$APP_BUNDLE" "$DEST/同频.app-0.1.48"
   # 记录当前版本与签名身份，便于回滚核验
   /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null > "$DEST/原版本.txt" || echo "0.1.48" > "$DEST/原版本.txt"
   codesign -dv "$APP_BUNDLE" 2>&1 | grep -E "Signature=|Identifier=" >> "$DEST/原版本.txt" || true
