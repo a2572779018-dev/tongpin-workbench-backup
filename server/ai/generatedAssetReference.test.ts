@@ -151,6 +151,29 @@ describe("generated image to real video-reference mapping", () => {
     expect(await v2.readActiveImageSourceEntities("member", conversationId, assetId, other.tenantId)).toBeNull();
     expect(await source()).toMatchObject({ assetId, conversationId });
   });
+  it("preserves existing V2 image ownership and removes its index when the image is removed", async () => {
+    const { v2 } = await activatePreparedV2();
+    const nextAssetId = store.saveAsset("member", "image/png", PNG, Buffer.from(PNG, "base64").length).assetId;
+    const updated = { ...state().artifacts[0], title: "标题已更新" };
+    const mutationId = crypto.randomUUID();
+    const request = { epoch: 1, mutationId, ops: [{ kind: "artifact", entityId: updated.id, expectedRevision: 1, action: "put", value: updated }] };
+    const ack = await v2.mutateActive("member", request, store.tenantId);
+    expect(ack).toMatchObject({ entities: [{ kind: "artifact", entityId: "image-artifact", revision: 2, deleted: false }] });
+    expect(await v2.mutateActive("member", request, store.tenantId)).toEqual(ack);
+    expect((await v2.readActiveImageSourceEntities("member", conversationId, assetId, store.tenantId))?.artifactId).toBe("image-artifact");
+    await expect(v2.mutateActive("member", { epoch: 1, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: updated.id, expectedRevision: 2, action: "put", value: { ...updated, data: { images: [{ assetId: nextAssetId }] } } },
+    ] }, store.tenantId)).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    expect(await source()).toMatchObject({ assetId, conversationId });
+    await v2.mutateActive("member", { epoch: 1, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: updated.id, expectedRevision: 2, action: "put", value: { ...updated, data: { images: [] } } },
+    ] }, store.tenantId);
+    expect(await v2.readActiveImageSourceEntities("member", conversationId, assetId, store.tenantId)).toBeNull();
+    expect(await v2.mutateActive("member", request, store.tenantId)).toEqual(ack);
+    await expect(source()).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    await expect(video.generatedReferenceSource("member", { conversationId, assetId: nextAssetId })).rejects.toMatchObject({ code: "AI_GENERATED_REFERENCE_NOT_FOUND" });
+    expect(transport).not.toHaveBeenCalled();
+  });
   it("also accepts legacy machine-name image artifacts", async () => {
     const legacy = state(); legacy.artifacts[0].kind = "image"; await save(legacy);
     expect(await source()).toMatchObject({ assetId, conversationId, mimeType: "image/png" });

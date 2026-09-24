@@ -56,6 +56,17 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=?").run(tenant, stored);
     return prepared!;
   };
+  const activeImage = async (assetId: string, label = "甲", tenant = "default") => {
+    const value = state(label);
+    value.artifacts[0] = { ...value.artifacts[0], kind: "图片", data: { images: [{ assetId }] } };
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: value }, tenant);
+    await shadow.stageFromV1("member-a", tenant);
+    const prepared = (await v2.prepareFromShadow("member-a", tenant))!;
+    const stored = tenantStorageKey(tenant, "member-a");
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id=? AND user_id=?").run(new Date().toISOString(), tenant, stored);
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=?").run(tenant, stored);
+    return { prepared, artifact: value.artifacts[0] };
+  };
 
   it("prepares independent entities without activating V2 or changing the V1 record", async () => {
     const original = state("甲");
@@ -177,6 +188,109 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT epoch FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ epoch: prepared.epoch });
   });
 
+  it("rejects forged new image ownership and a duplicate index before changing an existing artifact", async () => {
+    const assetId = crypto.randomUUID();
+    const { prepared, artifact } = await activeImage(assetId);
+    const duplicate = { ...artifact, id: "artifact-b" };
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: duplicate.id, expectedRevision: 0, action: "put", value: duplicate },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    const stored = tenantStorageKey("default", "member-a");
+    sql.exec("INSERT INTO ai_workspace_v2_image_artifacts(tenant_id,user_id,conversation_id,asset_id,artifact_id) VALUES(?,?,?,?,?)",
+      "default", stored, "chat-a", assetId, "artifact-b");
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: artifact.id, expectedRevision: 1, action: "put", value: { ...artifact, title: "安全改名" } },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_AMBIGUOUS_REFERENCE" });
+    expect(await v2.readActiveEntity("member-a", "artifact", "artifact-b")).toBeNull();
+    expect(await v2.readActiveEntity("member-a", "artifact", "artifact-a")).toMatchObject({ revision: 1, value: artifact });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+  });
+
+  it("creates a non-image artifact and replays its receipt after the parent changes", async () => {
+    const prepared = await active();
+    const artifact = { ...state("甲").artifacts[0], id: "artifact-b", title: "新文档" };
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: artifact.id, expectedRevision: 0, action: "put", value: artifact },
+    ] };
+    const ack = await v2.mutateActive("member-a", request);
+    expect(ack).toMatchObject({ entities: [{ kind: "artifact", entityId: "artifact-b", revision: 1, deleted: false }] });
+    expect(await v2.readActiveEntity("member-a", "artifact", artifact.id)).toMatchObject({ value: artifact, revision: 1 });
+    database.prepare("UPDATE ai_workspace_v2_entities SET revision=revision+1 WHERE tenant_id='default' AND user_id='member-a' AND kind='conversation' AND entity_id='chat-a'").run();
+    expect(await v2.mutateActive("member-a", request)).toEqual(ack);
+    await expect(v2.mutateActive("member-a", { ...request, ops: [{ ...request.ops[0], value: { ...artifact, title: "其他内容" } }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_MUTATION_CONFLICT" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_image_artifacts WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+  });
+
+  it("fences artifact ownership changes, deletes and old preparations without a valid image index", async () => {
+    const prepared = await active();
+    const original = state("甲").artifacts[0];
+    const request = (value: unknown) => ({ epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: "artifact-a", expectedRevision: 1, action: "put", value },
+    ] });
+    await expect(v2.mutateActive("member-a", request({ ...original, conversationId: "missing" }))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", request({ ...original, projectId: undefined }))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: "artifact-a", expectedRevision: 1, action: "delete" },
+    ] })).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    database.prepare("UPDATE ai_workspace_v2_meta SET image_index_version=0 WHERE user_id='member-a'").run();
+    await expect(v2.readActiveImageSourceEntities("member-a", "chat-a", crypto.randomUUID())).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    await expect(v2.mutateActive("member-a", request(original))).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect(await v2.readActiveEntity("member-a", "artifact", "artifact-a")).toMatchObject({ revision: 1, value: original });
+  });
+
+  it("rolls back an artifact's existing image index if its entity write fails", async () => {
+    const assetId = crypto.randomUUID();
+    const { prepared, artifact } = await activeImage(assetId);
+    const updated = { ...artifact, title: "不应保存" };
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_entities")) throw new Error("fixture artifact write failed");
+      sql.exec(query, ...bindings);
+    } };
+    const brokenV2 = new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken));
+    await expect(brokenV2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: updated.id, expectedRevision: 1, action: "put", value: updated },
+    ] })).rejects.toThrow("fixture artifact write failed");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_image_artifacts WHERE user_id='member-a'").get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE user_id='member-a'").get()).toEqual({ count: 0 });
+    expect(await v2.readActiveEntity("member-a", "artifact", "artifact-a")).toMatchObject({ revision: 1, value: artifact });
+  });
+
+  it("keeps identical image IDs isolated across V2 tenants and fences changed parent revisions", async () => {
+    const assetId = crypto.randomUUID();
+    const first = await activeImage(assetId, "甲");
+    const second = await activeImage(assetId, "乙", "tenant-b");
+    const mutation = (label: string, epoch: number) => ({ epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: "artifact-a", expectedRevision: 1, action: "put", value: { ...state(label).artifacts[0], kind: "图片", data: { images: [{ assetId }] }, title: "安全改名" } },
+    ] });
+    await v2.mutateActive("member-a", mutation("乙", second.prepared.epoch), "tenant-b");
+    expect((await v2.readActiveImageSourceEntities("member-a", "chat-a", assetId))?.artifactId).toBe("artifact-a");
+    expect((await v2.readActiveImageSourceEntities("member-a", "chat-a", assetId, "tenant-b"))?.artifactId).toBe("artifact-a");
+    let transactions = 0;
+    const racing: AiSql = { ...sql, transaction<T>(action: () => T): T {
+      transactions++;
+      if (transactions === 3) sql.exec("UPDATE ai_workspace_v2_entities SET revision=revision+1 WHERE tenant_id='default' AND user_id='member-a' AND kind='conversation' AND entity_id='chat-a'");
+      return sql.transaction(action);
+    } };
+    const racingV2 = new AiWorkspaceV2Store(racing, new AiWorkspaceRepository(racing));
+    await expect(racingV2.mutateActive("member-a", mutation("甲", first.prepared.epoch))).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect((await v2.readActiveImageSourceEntities("member-a", "chat-a", assetId))?.artifactId).toBe("artifact-a");
+    expect((await v2.readActiveEntity("member-a", "artifact", "artifact-a"))?.revision).toBe(1);
+  });
+
+  it("preserves the account-wide artifact count limit for V2 creates", async () => {
+    const full = state("满");
+    full.artifacts = Array.from({ length: 500 }, (_, index) => ({ ...full.artifacts[0], id: `artifact-${index}` }));
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: full });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-a'").run(new Date().toISOString());
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-a'").run();
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "artifact", entityId: "artifact-extra", expectedRevision: 0, action: "put", value: { ...full.artifacts[0], id: "artifact-extra" } },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    expect(await v2.readActiveEntity("member-a", "artifact", "artifact-extra")).toBeNull();
+  });
+
   it("replays the same receipt, rejects a reused ID, and rolls back an invalid batch", async () => {
     const prepared = await active();
     const mutationId = crypto.randomUUID();
@@ -280,6 +394,28 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     v2.initialize();
     expect(database.prepare("PRAGMA table_info(ai_workspace_v2_entities)").all().some(row => row.name === "deleted")).toBe(true);
     expect((await v2.readActiveEntity("member-a", "draft", "chat-a"))?.value).toBe("草稿甲");
+  });
+
+  it("marks an older prepared meta table's image index as unverified until a fresh preparation", async () => {
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("甲") });
+    await shadow.stageFromV1("member-a"); await v2.prepareFromShadow("member-a");
+    database.exec(`
+      CREATE TABLE ai_workspace_v2_meta_before_image_index (
+        tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, source_revision INTEGER NOT NULL,
+        source_hash TEXT NOT NULL, epoch INTEGER NOT NULL, prepared_at TEXT NOT NULL,
+        activated_at TEXT, PRIMARY KEY(tenant_id,user_id)
+      );
+      INSERT INTO ai_workspace_v2_meta_before_image_index
+        SELECT tenant_id,user_id,source_revision,source_hash,epoch,prepared_at,activated_at FROM ai_workspace_v2_meta;
+      DROP TABLE ai_workspace_v2_meta;
+      ALTER TABLE ai_workspace_v2_meta_before_image_index RENAME TO ai_workspace_v2_meta;
+    `);
+    v2.initialize(); v2.initialize();
+    expect(database.prepare("SELECT image_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ image_index_version: 0 });
+    const refreshed = await v2.prepareFromShadow("member-a");
+    expect(refreshed?.epoch).toBe(2);
+    expect(database.prepare("SELECT image_index_version FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ image_index_version: 1 });
+    expect(workspace.read("member-a").state).toEqual(state("甲"));
   });
 
   it("reads one coherent prepared snapshot even when V1 is replaced during async hashing", async () => {
