@@ -32,6 +32,24 @@ CREATE TABLE IF NOT EXISTS ai_workspace_chunks (
   PRIMARY KEY(user_id, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS ai_workspace_mutations_revision ON ai_workspace_mutations(user_id, revision DESC);
+CREATE TABLE IF NOT EXISTS ai_workspace_v2_shadow_meta (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  source_revision INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  staged_at TEXT NOT NULL,
+  PRIMARY KEY(tenant_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS ai_workspace_v2_shadow_segments (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY(tenant_id,user_id,kind,entity_id,chunk_index)
+);
 `;
 
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
