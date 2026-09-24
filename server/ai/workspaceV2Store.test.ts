@@ -450,6 +450,121 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE user_id='member-a'").get()).toEqual({ count: 0 });
   });
 
+  it("writes, clears and re-adds a scoped draft attachment container with CAS", async () => {
+    const prepared = await active();
+    const originalV1 = database.prepare("SELECT data FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get();
+    const documents = [
+      { id: "draft-a", name: "需求.txt", mimeType: "text/plain", content: "第一版" },
+      { id: "draft-b", name: "说明.md", mimeType: "text/markdown", content: "请保留" },
+    ];
+    const put = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "chat-a", expectedRevision: 1, action: "put", value: documents },
+    ] };
+    const ack = await v2.mutateActive("member-a", put);
+    expect(ack).toMatchObject({ entities: [{ kind: "draftAttachment", entityId: "chat-a", revision: 2, deleted: false }] });
+    expect(await v2.readActiveEntity("member-a", "draftAttachment", "chat-a")).toMatchObject({ revision: 2, value: documents });
+    expect(await v2.mutateActive("member-a", put)).toEqual(ack);
+    await expect(v2.mutateActive("member-a", { ...put, mutationId: crypto.randomUUID() })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    await expect(v2.mutateActive("member-a", { ...put, ops: [{ ...put.ops[0], value: [] }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_MUTATION_CONFLICT" });
+    const cleared = await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "chat-a", expectedRevision: 2, action: "put", value: [] },
+    ] });
+    expect(cleared).toMatchObject({ entities: [{ revision: 3, deleted: false }] });
+    expect((await v2.readActiveEntity("member-a", "draftAttachment", "chat-a"))?.value).toEqual([]);
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "chat-a", expectedRevision: 3, action: "delete" },
+    ] });
+    expect(await v2.readActiveEntity("member-a", "draftAttachment", "chat-a")).toMatchObject({ revision: 4, deleted: true, value: null });
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "chat-a", expectedRevision: 4, action: "put", value: documents },
+    ] });
+    expect(await v2.readActiveEntity("member-a", "draftAttachment", "chat-a")).toMatchObject({ revision: 5, deleted: false, value: documents });
+    expect(database.prepare("SELECT data FROM ai_workspaces WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual(originalV1);
+  });
+
+  it("rejects malformed attachment data, missing parents and absent manifest flag", async () => {
+    const original = state("甲");
+    delete original.draftAttachments;
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: original });
+    await shadow.stageFromV1("member-a");
+    const prepared = (await v2.prepareFromShadow("member-a"))!;
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-a'").run(new Date().toISOString());
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-a'").run();
+    const request = (entityId: string, value: unknown) => ({ epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId, expectedRevision: 0, action: "put", value },
+    ] });
+    const doc = { id: "draft-a", name: "需求.txt", mimeType: "text/plain", content: "正常内容" };
+    await expect(v2.mutateActive("member-a", request("chat-a", [doc]))).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    const manifest = (await v2.readActiveEntity("member-a", "manifest", "root"))!;
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "manifest", entityId: "root", expectedRevision: manifest.revision, action: "put", value: { ...(manifest.value as object), hasDraftAttachments: true } },
+    ] });
+    await expect(v2.mutateActive("member-a", request("missing", [doc]))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", request("chat-a", undefined))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", request("chat-a", [doc, doc]))).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", request("chat-a", Array.from({ length: 21 }, (_, i) => ({ ...doc, id: `doc-${i}` }))))).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    await expect(v2.mutateActive("member-a", request("chat-a", [{ ...doc, content: "x".repeat(100_001) }]))).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    await expect(v2.mutateActive("member-a", request("chat-a", [{ ...doc, media: { kind: "image", frames: [{ dataUrl: "data:image/png;base64,invalid" }] } }]))).rejects.toMatchObject({ code: "AI_IMAGE_INVALID" });
+    expect(await v2.readActiveEntity("member-a", "draftAttachment", "chat-a")).toBeNull();
+    await expect(v2.mutateActive("ungranted", request("chat-a", [doc]))).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
+  });
+
+  it("fences manifest changes and rolls back an interrupted attachment write", async () => {
+    const prepared = await active();
+    const doc = { id: "draft-b", name: "补充.txt", mimeType: "text/plain", content: "补充" };
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "chat-a", expectedRevision: 1, action: "put", value: [doc] },
+    ] };
+    const changing = new AiWorkspaceV2Store(sql, workspace);
+    const actualRead = changing.readActiveEntity.bind(changing);
+    changing.readActiveEntity = async (...args) => {
+      const result = await actualRead(...args);
+      if (args[1] === "manifest") database.prepare("UPDATE ai_workspace_v2_entities SET revision=revision+1 WHERE tenant_id='default' AND user_id='member-a' AND kind='manifest' AND entity_id='root'").run();
+      return result;
+    };
+    await expect(changing.mutateActive("member-a", request)).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect((await v2.readActiveEntity("member-a", "draftAttachment", "chat-a"))?.revision).toBe(1);
+    const broken: AiSql = { ...sql, exec(query, ...bindings) {
+      if (query.startsWith("INSERT INTO ai_workspace_v2_entity_chunks") && bindings[2] === "draftAttachment") throw new Error("fixture attachment write failed");
+      sql.exec(query, ...bindings);
+    } };
+    await expect(new AiWorkspaceV2Store(broken, new AiWorkspaceRepository(broken)).mutateActive("member-a", request)).rejects.toThrow("fixture attachment write failed");
+    expect((await v2.readActiveEntity("member-a", "draftAttachment", "chat-a"))?.revision).toBe(1);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE mutation_id=?").get(request.mutationId)).toEqual({ count: 0 });
+  });
+
+  it("accepts new-conversation attachment drafts but rejects nonexistent project drafts atomically", async () => {
+    const prepared = await active();
+    const value = [{ id: "draft-new", name: "准备.txt", mimeType: "text/plain", content: "未发送" }];
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "new-conversation", expectedRevision: 0, action: "put", value },
+      { kind: "draftAttachment", entityId: "new-project-conversation:project-a", expectedRevision: 0, action: "put", value },
+    ] });
+    expect((await v2.readActiveEntity("member-a", "draftAttachment", "new-conversation"))?.value).toEqual(value);
+    expect((await v2.readActiveEntity("member-a", "draftAttachment", "new-project-conversation:project-a"))?.value).toEqual(value);
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "chat-a", expectedRevision: 1, action: "put", value },
+      { kind: "draftAttachment", entityId: "new-project-conversation:missing", expectedRevision: 0, action: "put", value },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    expect((await v2.readActiveEntity("member-a", "draftAttachment", "chat-a"))?.revision).toBe(1);
+  });
+
+  it("rejects an attachment mutation above the total 16 MiB write limit without a partial commit", async () => {
+    const prepared = await active();
+    const value = Array.from({ length: 20 }, (_, index) => ({
+      id: `draft-${index}`, name: "资料.txt", mimeType: "text/plain", content: "中".repeat(100_000),
+    }));
+    const request = { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draftAttachment", entityId: "chat-a", expectedRevision: 1, action: "put", value },
+      { kind: "draftAttachment", entityId: "new-conversation", expectedRevision: 0, action: "put", value },
+      { kind: "draftAttachment", entityId: "new-project-conversation:project-a", expectedRevision: 0, action: "put", value },
+    ] };
+    await expect(v2.mutateActive("member-a", request)).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    expect((await v2.readActiveEntity("member-a", "draftAttachment", "chat-a"))?.revision).toBe(1);
+    expect(await v2.readActiveEntity("member-a", "draftAttachment", "new-conversation")).toBeNull();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE mutation_id=?").get(request.mutationId)).toEqual({ count: 0 });
+  });
+
   it("fences artifact ownership changes, deletes and old preparations without a valid image index", async () => {
     const prepared = await active();
     const original = state("甲").artifacts[0];

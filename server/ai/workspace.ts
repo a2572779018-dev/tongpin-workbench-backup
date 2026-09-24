@@ -1,4 +1,4 @@
-import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceDocument, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
@@ -76,6 +76,14 @@ type ObjectValue = Record<string, unknown>;
 export function validateAiWorkspaceDraft(value: unknown): string {
   string(value, "草稿", LIMITS.draftCharacters);
   return value;
+}
+
+/** One V2 attachment container uses the same document/media checks as V1. */
+export function validateAiWorkspaceDraftAttachments(value: unknown): AiWorkspaceDocument[] {
+  if (!Array.isArray(value)) invalid("草稿附件格式不正确");
+  documents(value, "草稿附件");
+  jsonValue(value);
+  return boundedEntity(JSON.parse(JSON.stringify(value)) as AiWorkspaceDocument[], AI_WORKSPACE_V2_ENTITY_BYTES.draftAttachment);
 }
 
 export function validateAiWorkspaceVideoDraftSetting(value: unknown): Record<string, unknown> {
@@ -405,6 +413,7 @@ export const AI_WORKSPACE_V2_ENTITY_BYTES = {
   project: 8 * 1024 * 1024,
   conversation: 16 * 1024 * 1024,
   artifact: 8 * 1024 * 1024,
+  draftAttachment: 8 * 1024 * 1024,
 } as const;
 
 function boundedEntity<T>(value: T, maxBytes: number): T {
