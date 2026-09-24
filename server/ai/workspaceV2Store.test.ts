@@ -2,12 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiWorkspaceState } from "../../shared/aiWorkspace";
 import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AiWorkspaceRepository } from "./workspace";
 import { AiWorkspaceV2ShadowRepository } from "./workspaceV2Shadow";
 import { AiWorkspaceV2Store } from "./workspaceV2Store";
+import { tenantStorageKey } from "./tenant";
 
 function adapter(database: DatabaseSync): AiSql {
   return {
@@ -44,6 +45,16 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     }
   });
   afterEach(async () => { database.close(); await rm(directory, { recursive: true }); });
+  const active = async (label = "甲", tenant = "default") => {
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state(label) }, tenant);
+    await shadow.stageFromV1("member-a", tenant);
+    const prepared = await v2.prepareFromShadow("member-a", tenant);
+    expect(prepared).not.toBeNull();
+    const stored = tenantStorageKey(tenant, "member-a");
+    database.prepare("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id=? AND user_id=?").run(new Date().toISOString(), tenant, stored);
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id=? AND user_id=?").run(tenant, stored);
+    return prepared!;
+  };
 
   it("prepares independent entities without activating V2 or changing the V1 record", async () => {
     const original = state("甲");
@@ -116,5 +127,160 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
     expect(database.prepare("SELECT source_revision,epoch FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ source_revision: 1, epoch: 1 });
     expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_entities WHERE user_id='member-a'").get()).toEqual({ count: 7 });
     expect(workspace.read("member-a").state).toEqual(next);
+  });
+
+  it("rejects inactive writes and keeps V1 authoritative", async () => {
+    const saved = await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("甲") });
+    await shadow.stageFromV1("member-a");
+    const prepared = await v2.prepareFromShadow("member-a");
+    await expect(v2.mutateActive("member-a", { epoch: prepared!.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "新草稿" }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_VERSION_UNSUPPORTED" });
+    expect(workspace.read("member-a")).toEqual(saved);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations").get()).toEqual({ count: 0 });
+  });
+
+  it("uses per-entity CAS so two independent drafts do not conflict", async () => {
+    const prepared = await active();
+    const first = await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "对话草稿已更新" }] });
+    const second = await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "new-conversation", expectedRevision: 0, action: "put", value: "新对话草稿" }] });
+    expect(first).toMatchObject({ epoch: prepared.epoch, entities: [{ entityId: "chat-a", revision: 2 }] });
+    expect(second).toMatchObject({ epoch: prepared.epoch, entities: [{ entityId: "new-conversation", revision: 1 }] });
+    expect(await v2.readActiveEntity("member-a", "draft", "chat-a")).toMatchObject({ revision: 2, value: "对话草稿已更新" });
+    expect(await v2.readActiveEntity("member-a", "draft", "new-conversation")).toMatchObject({ revision: 1, value: "新对话草稿" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "过期版本" }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect(database.prepare("SELECT epoch FROM ai_workspace_v2_meta WHERE user_id='member-a'").get()).toEqual({ epoch: prepared.epoch });
+  });
+
+  it("replays the same receipt, rejects a reused ID, and rolls back an invalid batch", async () => {
+    const prepared = await active();
+    const mutationId = crypto.randomUUID();
+    const request = { epoch: prepared.epoch, mutationId, ops: [{ kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "第一次" }] };
+    const ack = await v2.mutateActive("member-a", request);
+    await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "chat-a", expectedRevision: 2, action: "put", value: "第二次" }] });
+    expect(await v2.mutateActive("member-a", request)).toEqual(ack);
+    await expect(v2.mutateActive("member-a", { ...request, ops: [{ ...request.ops[0], value: "篡改" }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_MUTATION_CONFLICT" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draft", entityId: "new-conversation", expectedRevision: 0, action: "put", value: "不应写入" },
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "过期" },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect(await v2.readActiveEntity("member-a", "draft", "new-conversation")).toBeNull();
+    expect((await v2.readActiveEntity("member-a", "draft", "chat-a"))?.value).toBe("第二次");
+  });
+
+  it("keeps deletion tombstones so an old revision cannot recreate an entity", async () => {
+    const prepared = await active();
+    const created = await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "new-conversation", expectedRevision: 0, action: "put", value: "待删除" }] });
+    const deleted = await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "new-conversation", expectedRevision: 1, action: "delete" }] });
+    expect(created.entities[0].revision).toBe(1);
+    expect(deleted.entities[0].revision).toBe(2);
+    expect(await v2.readActiveEntity("member-a", "draft", "new-conversation")).toMatchObject({ revision: 2, deleted: true, value: null });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "new-conversation", expectedRevision: 0, action: "put", value: "旧请求复活" }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+  });
+
+  it("validates draft targets, size, allowed kinds, epoch and tenant access", async () => {
+    const prepared = await active();
+    const mutate = (kind: string, entityId: string, value: unknown) => v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind, entityId, expectedRevision: 0, action: "put", value }] });
+    await expect(mutate("draft", "missing", "bad")).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(mutate("draft", "new-project-conversation:missing", "bad")).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(mutate("draft", "new-conversation", "x".repeat(24_001))).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
+    await expect(mutate("conversation", "chat-a", state("篡改").conversations[0])).rejects.toMatchObject({ code: "V2_OPERATION_NOT_READY" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch + 1, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "bad" }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "bad" }] }, "tenant-b")).rejects.toMatchObject({ code: "AI_WORKSPACE_VERSION_UNSUPPORTED" });
+    await expect(v2.mutateActive("ungranted", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [{ kind: "draft", entityId: "new-conversation", expectedRevision: 0, action: "put", value: "bad" }] })).rejects.toMatchObject({ code: "AI_ACCESS_NOT_GRANTED" });
+  });
+
+  it("uses V1 video-setting validation, fences old clients, and isolates the same account in another tenant", async () => {
+    const first = await active("甲");
+    const second = await active("乙", "tenant-b");
+    expect(() => workspace.read("member-a")).toThrow("工作台记录版本已更新");
+    const settings = { model: "sd-2.5-c1", seconds: 30, resolution: "720p", aspectRatio: "16:9" };
+    const ack = await v2.mutateActive("member-a", { epoch: second.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "videoDraftSettings", entityId: "chat-a", expectedRevision: 1, action: "put", value: settings },
+    ] }, "tenant-b");
+    expect(ack.entities).toMatchObject([{ kind: "videoDraftSettings", entityId: "chat-a", revision: 2, deleted: false }]);
+    expect((await v2.readActiveEntity("member-a", "videoDraftSettings", "chat-a", "tenant-b"))?.value).toEqual(settings);
+    expect((await v2.readActiveEntity("member-a", "videoDraftSettings", "chat-a"))?.value).toEqual(state("甲").videoDraftSettings!["chat-a"]);
+    expect((await v2.readActiveEntity("member-a", "draft", "chat-a"))?.value).toBe("草稿甲");
+    await expect(v2.mutateActive("member-a", { epoch: first.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "videoDraftSettings", entityId: "chat-a", expectedRevision: 1, action: "put", value: { ...settings, seconds: 31 } },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+    await expect(v2.mutateActive("member-a", { epoch: first.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "重复" },
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "delete" },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_INVALID" });
+  });
+
+  it("does not trust a prepared V2 snapshot after the source V1 revision changes", async () => {
+    const prepared = await active();
+    database.prepare("UPDATE ai_workspaces SET revision=revision+1 WHERE tenant_id=? AND user_id=?").run("default", "member-a");
+    await expect(v2.readActiveEntity("member-a", "draft", "chat-a")).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    await expect(v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "不能覆盖" },
+    ] })).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+  });
+
+  it("keeps idempotency receipts bounded while stale retries remain fenced by entity revisions", async () => {
+    const prepared = await active();
+    const firstId = crypto.randomUUID();
+    const firstRequest = { epoch: prepared.epoch, mutationId: firstId, ops: [
+      { kind: "draft", entityId: "chat-a", expectedRevision: 1, action: "put", value: "第 1 次" },
+    ] };
+    await v2.mutateActive("member-a", firstRequest);
+    for (let revision = 2; revision <= 260; revision++) {
+      await v2.mutateActive("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), ops: [
+        { kind: "draft", entityId: "chat-a", expectedRevision: revision, action: "put", value: `第 ${revision} 次` },
+      ] });
+    }
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_mutations WHERE tenant_id=? AND user_id=?").get("default", "member-a")).toEqual({ count: 256 });
+    await expect(v2.mutateActive("member-a", firstRequest)).rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
+    expect((await v2.readActiveEntity("member-a", "draft", "chat-a"))?.value).toBe("第 260 次");
+  });
+
+  it("adds tombstone support to an existing prepared table on repeat initialization", async () => {
+    await active();
+    database.exec(`
+      CREATE TABLE ai_workspace_v2_entities_before_tombstones (
+        tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, entity_id TEXT NOT NULL,
+        revision INTEGER NOT NULL, ordinal INTEGER NOT NULL, byte_length INTEGER NOT NULL,
+        sha256 TEXT NOT NULL, chunk_count INTEGER NOT NULL,
+        PRIMARY KEY(tenant_id,user_id,kind,entity_id)
+      );
+      INSERT INTO ai_workspace_v2_entities_before_tombstones
+        SELECT tenant_id,user_id,kind,entity_id,revision,ordinal,byte_length,sha256,chunk_count FROM ai_workspace_v2_entities;
+      DROP TABLE ai_workspace_v2_entities;
+      ALTER TABLE ai_workspace_v2_entities_before_tombstones RENAME TO ai_workspace_v2_entities;
+    `);
+    v2.initialize();
+    v2.initialize();
+    expect(database.prepare("PRAGMA table_info(ai_workspace_v2_entities)").all().some(row => row.name === "deleted")).toBe(true);
+    expect((await v2.readActiveEntity("member-a", "draft", "chat-a"))?.value).toBe("草稿甲");
+  });
+
+  it("reads one coherent prepared snapshot even when V1 is replaced during async hashing", async () => {
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: state("甲") });
+    await shadow.stageFromV1("member-a");
+    await v2.prepareFromShadow("member-a");
+    let releaseDigest!: () => void;
+    let enteredDigest!: () => void;
+    const hold = new Promise<void>(resolve => { releaseDigest = resolve; });
+    const entered = new Promise<void>(resolve => { enteredDigest = resolve; });
+    const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+    const spy = vi.spyOn(crypto.subtle, "digest").mockImplementation(async (algorithm, data) => {
+      enteredDigest();
+      await hold;
+      return originalDigest(algorithm, data);
+    });
+    const reading = v2.readPreparedEntity("member-a", "draft", "chat-a");
+    try {
+      await entered;
+      spy.mockRestore();
+      await workspace.save("member-a", { expectedRevision: 1, mutationId: crypto.randomUUID(), state: state("乙") });
+      await shadow.stageFromV1("member-a");
+      await v2.prepareFromShadow("member-a");
+    } finally {
+      spy.mockRestore();
+      releaseDigest();
+    }
+    expect((await reading)?.value).toBe("草稿甲");
+    expect((await v2.readPreparedEntity("member-a", "draft", "chat-a"))?.value).toBe("草稿乙");
   });
 });

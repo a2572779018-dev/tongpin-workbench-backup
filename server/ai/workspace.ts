@@ -72,6 +72,21 @@ const HARNESS_STEP_FIELDS = [
 ] as const;
 type ObjectValue = Record<string, unknown>;
 
+/** Reuse the exact V1 field rules when a future V2 protocol writes one entity. */
+export function validateAiWorkspaceDraft(value: unknown): string {
+  string(value, "草稿", LIMITS.draftCharacters);
+  return value;
+}
+
+export function validateAiWorkspaceVideoDraftSetting(value: unknown): Record<string, unknown> {
+  const draft = record(value, "视频草稿参数", ["model", "seconds", "resolution", "aspectRatio"]);
+  if (draft.model !== undefined && (typeof draft.model !== "string" || !videoModel(draft.model))) invalid("视频草稿模型无效");
+  boundedInteger(draft.seconds, "视频草稿时长", 1, 30);
+  if (!["480p", "720p", "768p", "1080p"].includes(String(draft.resolution))) invalid("视频草稿清晰度无效");
+  if (!["16:9", "9:16", "1:1"].includes(String(draft.aspectRatio))) invalid("视频草稿画幅无效");
+  return draft;
+}
+
 function invalid(message: string): never { throw new AiError(400, "AI_WORKSPACE_INVALID", message); }
 function tooLarge(message: string): never { throw new AiError(413, "AI_WORKSPACE_TOO_LARGE", message); }
 function record(value: unknown, label: string, keys?: readonly string[]): ObjectValue {
@@ -344,7 +359,7 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
   if (Object.keys(drafts).length > LIMITS.conversations + LIMITS.projects + 1) tooLarge("草稿数量超过上限");
   for (const [key, draft] of Object.entries(drafts)) {
     if (key !== "new-conversation" && !conversationIds.has(key) && !(key.startsWith("new-project-conversation:") && projectIds.has(key.slice("new-project-conversation:".length)))) invalid("草稿所属对话或项目不存在");
-    string(draft, "草稿", LIMITS.draftCharacters);
+    validateAiWorkspaceDraft(draft);
   }
   if (state.draftAttachments !== undefined) {
     const attachments = record(state.draftAttachments, "草稿附件");
@@ -359,11 +374,7 @@ export function validateAiWorkspaceState(value: unknown): AiWorkspaceState {
     if (Object.keys(settings).length > LIMITS.conversations + LIMITS.projects + 1) tooLarge("视频草稿数量超过上限");
     for (const [key, value] of Object.entries(settings)) {
       if (key !== "new-conversation" && !conversationIds.has(key) && !(key.startsWith("new-project-conversation:") && projectIds.has(key.slice("new-project-conversation:".length)))) invalid("视频草稿所属对话或项目不存在");
-      const draft = record(value, "视频草稿参数", ["model", "seconds", "resolution", "aspectRatio"]);
-      if (draft.model !== undefined && (typeof draft.model !== "string" || !videoModel(draft.model))) invalid("视频草稿模型无效");
-      boundedInteger(draft.seconds, "视频草稿时长", 1, 30);
-      if (!["480p", "720p", "768p", "1080p"].includes(String(draft.resolution))) invalid("视频草稿清晰度无效");
-      if (!["16:9", "9:16", "1:1"].includes(String(draft.aspectRatio))) invalid("视频草稿画幅无效");
+      validateAiWorkspaceVideoDraftSetting(value);
     }
   }
   const skillIds = new Set<string>();
