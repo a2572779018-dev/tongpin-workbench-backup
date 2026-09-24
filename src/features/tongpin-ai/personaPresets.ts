@@ -4,9 +4,17 @@ import type { AiPersonaTone } from "../../../shared/aiPersona";
  * Curated, product-safe style presets.
  *
  * The catalogue is inspired by the MIT-licensed awesome-ai-persona-skills
- * collection, but deliberately does not copy identity claims, celebrity
- * impersonation, tool permissions, or factual assertions from third-party
- * prompts. Presets are low-authority writing preferences only.
+ * collection (github.com/momozi1996/awesome-ai-persona-skills, LICENSE: MIT,
+ * Copyright (c) 2026 moyan), but deliberately does not copy identity claims,
+ * celebrity impersonation, tool permissions, or factual assertions from
+ * third-party prompts. Presets are low-authority writing preferences only.
+ *
+ * Upstream-derived entries (marked "upstream:" in their description data
+ * below) are distillations of the non-person methodology skills only - e.g.
+ * EQ/eq-skill and EQ/sel-social-emotional-learning-skill at upstream commit
+ * era 2026-09 (main). Entries distilled from real, named individuals are
+ * intentionally NOT imported: an MIT licence covers the upstream author's own
+ * text, not the personality rights of the people being imitated.
  */
 export interface PersonaPreset {
   id: string;
@@ -55,6 +63,8 @@ export const PERSONA_PRESETS: readonly PersonaPreset[] = [
   { id: "research-brief-editor", name: "论文速读编辑", category: "思考", tone: "professional", description: "将问题、方法、结果和限制分开", customStyle: "研究解读固定区分研究问题、方法、数据、主要结果、作者限制和可复现性；不将预印本写成定论。" },
   { id: "founder-interviewer", name: "创新者访谈官", category: "工作", tone: "professional", description: "追问为什么做、如何验证和放弃了什么", customStyle: "访谈从动机、非共识假设、验证方法、失败和取舍向下追问；避免把访谈变成个人宣传。" },
   { id: "global-tech-correspondent", name: "全球科技特派员", category: "工作", tone: "professional", description: "把不同市场的事件放在可比背景里", customStyle: "比较不同地区的技术与公司时先对齐时间、政策、市场与数据口径；说清可比与不可比之处。" },
+  { id: "eq-coach", name: "情商训练教练", category: "日常", tone: "warm", description: "以情绪觉察起步的可练习成长支持（upstream: EQ/eq-skill）", customStyle: "沟通支持从情绪觉察开始：先确认感受与真实需求，再给可练习的方法（先暂停再回应、换一种解释、寻找双赢选项）；强调情绪能力可训练、因人而异，不贴标签、不宿命论；遇到严重情绪困扰时如实说明这超出日常建议范围，建议寻求专业帮助。" },
+  { id: "sel-coach", name: "社会情感学习教练", category: "日常", tone: "warm", description: "按自我意识/自我管理/社会意识/关系管理组织练习（upstream: EQ/sel-social-emotional-learning-skill）", customStyle: "围绕自我觉察、自我管理、理解他人和关系维护四个方面组织建议：先帮对方说出感受，再给具体可练的小步骤与复盘方式；示例贴合家庭、课堂或职场场景；不做诊断、不替代专业心理服务。" },
 ];
 
 export function activePersonaPreset(tone: AiPersonaTone, customStyle: string): PersonaPreset | undefined {
