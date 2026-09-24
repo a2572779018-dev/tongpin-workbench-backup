@@ -39,6 +39,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
   let lastChatInstructions = "";
   let streamingBody: ReadableStream<Uint8Array> | undefined;
   let videoCompleted = false;
+  let videoProbeCount = 0;
   const outboundUrls: string[] = [];
   const provider: AiProviderInput = { name: "Workerd fixture", baseUrl: "https://ai-fixture.example.com", apiKey: TEST_API_KEY, protocol: "responses", quickModel: "fixture-fast", deepModel: "fixture-deep", maxOutputTokens: 2048, reasoningEffort: "", enabled: true, imageModel: "fixture-image", imageQuotaTokens: 1000 };
   const outbound: V4FetchHandler = async request => {
@@ -52,7 +53,10 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     if (url.hostname === "www.75api.com") {
       expect(request.headers.get("Authorization")).toBe("Bearer h3-deployment-fixture-only");
       if (url.pathname === "/v1/models") return MfResponse.json({ data: [{ id: "minimax_h3" }] });
-      if (url.pathname.endsWith("/content")) return new MfResponse("mp4-fixture", { headers: { "Content-Type": "video/mp4" } });
+      if (url.pathname.endsWith("/content")) {
+        if (request.headers.get("Range") === "bytes=0-0") videoProbeCount++;
+        return new MfResponse("mp4-fixture", { headers: { "Content-Type": "video/mp4" } });
+      }
       if (request.method === "POST") { postCount++; expect(await request.json()).toMatchObject({ model: "minimax_h3", seconds: "15" }); }
       return MfResponse.json({ id: "task_workerd_h3_fixture", status: videoCompleted ? "completed" : "queued", progress: videoCompleted ? 100 : 0 });
     }
@@ -366,6 +370,8 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     expect(generated.usage).toMatchObject({ totalTokens: 1000, inputTokens: 0, outputTokens: 0, convertedTokens: 1000, estimated: true });
     expect(JSON.stringify(generated)).not.toContain(PNG);
     expect((await api<{ base64: string }>(`/api/ai/assets/${assetId}`, member)).base64).toBe(PNG);
+    expect(await api(`/api/ai/assets/${assetId}/check`, member)).toEqual({ assetId, mimeType: "image/png", byteLength: 68 });
+    await api(`/api/ai/assets/${assetId}/check`, other, undefined, "GET", 404);
     await api(`/api/ai/assets/${assetId}`, other, undefined, "GET", 404);
     expect((await api<{ imageResult: AiImageResponse }>(`/api/ai/requests/${request.requestId}`, member)).imageResult.images).toEqual(generated.images);
     await mf.dispose(); mf = start(); await mf.ready;
@@ -374,6 +380,7 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     expect(postCount).toBe(before + 1);
     await api(`/api/ai/assets/${assetId}`, member, undefined, "DELETE");
     await api(`/api/ai/assets/${assetId}`, member, undefined, "GET", 404);
+    await api(`/api/ai/assets/${assetId}/check`, member, undefined, "GET", 404);
   });
   it("keeps an explicitly confirmed assistant identity after workerd restart without sharing another member's preferences", async () => {
     const profile = { name: "小频", tone: "concise", customStyle: "先给结论", preferences: "偏好简体中文", onboardingComplete: true, expression: "woozy" };
@@ -454,6 +461,10 @@ describe.sequential("AI production Worker and SQLite Durable Object integration"
     videoCompleted = true;
     expect((await api<{ job: AiVideoJob }>(`/api/ai/videos/${request.requestId}`, member)).job.status).toBe("completed");
     await api(`/api/ai/videos/${request.requestId}/content`, other, undefined, "GET", 404);
+    const beforeProbe = videoProbeCount;
+    expect(await api(`/api/ai/videos/${request.requestId}/content/check`, member)).toEqual({ available: true });
+    expect(videoProbeCount).toBe(beforeProbe + 1);
+    await api(`/api/ai/videos/${request.requestId}/content/check`, other, undefined, "GET", 404);
     const response = await mf.dispatchFetch(`http://tongpin-fixture.local/api/ai/videos/${request.requestId}/content`, { headers: { Authorization: `Bearer ${member.accessToken}`, "X-Tongpin-Account": member.user.id } });
     expect(response.status).toBe(200); expect(response.headers.get("content-type")).toBe("video/mp4"); expect(await response.text()).toBe("mp4-fixture");
     expect(postCount).toBe(before + 1);

@@ -458,4 +458,21 @@ export class AiVideoService {
     const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({ transform(chunk, c) { size += chunk.byteLength; if (size > 64 * 1024 * 1024) throw new Error("Video size limit"); c.enqueue(chunk); } }));
     return new Response(body, { headers: { "Content-Type": "video/mp4", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Disposition": 'inline; filename="tongpin-video.mp4"' } });
   }
+  /** Verify current ownership and that the provider still serves the file, but cancel before reading the media body. */
+  async checkContent(userId: string, id: string): Promise<{ available: true }> {
+    this.store.assertAccess(userId); const job = this.raw(userId, id);
+    if (job.status !== "completed" || !job.providerId) throw new AiError(409, "AI_VIDEO_NOT_READY", "视频尚未生成完成");
+    const key = await (await this.box()).decrypt(job.encryptedKey);
+    const response = await this.transport(h3VideoContentUrl(BASE, job.providerId), {
+      method: "GET", headers: { Authorization: `Bearer ${key}`, Accept: "video/mp4", Range: "bytes=0-0" },
+      signal: AbortSignal.timeout(30000), maxResponseBytes: 64 * 1024 * 1024,
+    });
+    if (!response.ok) throw await readProviderHttpError(response, "video");
+    if (!response.body || !/^video\/mp4(?:;|$)/i.test(response.headers.get("content-type") ?? "")) {
+      await response.body?.cancel();
+      throw new AiError(502, "AI_VIDEO_CONTENT_INVALID", "视频服务未返回 MP4 文件，请联系管理员");
+    }
+    await response.body.cancel();
+    return { available: true };
+  }
 }

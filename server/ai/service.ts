@@ -1,4 +1,4 @@
-import { AI_BUSINESS_TIER_LABELS, AI_BUSINESS_TIERS, type AiChatBudget, type AiChatPreflight, type AiChatPreflightReason, type AiChatRequest, type AiChatResponse, type AiHarnessCapability, type AiHarnessConfig, type AiHarnessTrace, type AiImageAsset, type AiImageRequest, type AiImageResponse, type AiMember, type AiObservabilityDashboard, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult, type AiQuota, type AiRequestResult, type AiStatus, type AiUsage } from "../../shared/ai";
+import { AI_BUSINESS_TIER_LABELS, AI_BUSINESS_TIERS, type AiChatBudget, type AiChatPreflight, type AiChatPreflightReason, type AiChatRequest, type AiChatResponse, type AiHarnessCapability, type AiHarnessConfig, type AiHarnessTrace, type AiImageAsset, type AiImageMimeType, type AiImageRequest, type AiImageResponse, type AiMember, type AiObservabilityDashboard, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult, type AiQuota, type AiRequestResult, type AiStatus, type AiUsage } from "../../shared/ai";
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import { AiStore, type StoredProvider, type StoredRequest } from "./storage";
 import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, providerBody, readProviderHttpError, readBoundedJson, readProviderResponse, supportsOfficialPublicSummary, type AiTransport } from "./provider";
@@ -600,6 +600,11 @@ export class AiService {
   }
   getAsset(userId: string, assetId: string): AiImageAsset {
     const asset = this.store.asset(userId, assetId);
+    if (!asset) throw new AiError(404, "AI_ASSET_NOT_FOUND", "图片不存在或已删除");
+    return asset;
+  }
+  checkAsset(userId: string, assetId: string): { assetId: string; mimeType: AiImageMimeType; byteLength: number } {
+    const asset = this.store.assetMetadata(userId, assetId);
     if (!asset) throw new AiError(404, "AI_ASSET_NOT_FOUND", "图片不存在或已删除");
     return asset;
   }

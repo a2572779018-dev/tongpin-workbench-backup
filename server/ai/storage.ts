@@ -264,6 +264,15 @@ export class AiStore {
     const chunks = this.sql.all<{ data: string }>("SELECT data FROM ai_asset_chunks WHERE asset_id=? ORDER BY chunk_index", storedAssetId);
     return { assetId, mimeType: row.mime_type, base64: chunks.map(chunk => chunk.data).join("") };
   }
+  /** Reauthorize an immutable image without reading or returning its base64 chunks. */
+  assetMetadata(userId: string, assetId: string): { assetId: string; mimeType: AiImageMimeType; byteLength: number } | null {
+    const storedAssetId = tenantStorageKey(this.tenantId, assetId);
+    const row = this.sql.all<{ mime_type: AiImageMimeType; byte_length: number }>(
+      "SELECT mime_type,byte_length FROM ai_assets WHERE id=? AND tenant_id=? AND user_id=?",
+      storedAssetId, this.tenantId, this.userKey(userId),
+    )[0];
+    return row ? { assetId, mimeType: row.mime_type, byteLength: row.byte_length } : null;
+  }
   deleteAsset(userId: string, assetId: string): void {
     this.sql.transaction(() => {
       const storedAssetId = tenantStorageKey(this.tenantId, assetId);

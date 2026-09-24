@@ -20,7 +20,7 @@ const quota = { limitTokens: 1000000, remainingTokens: 999900, usedTokens: 100, 
 const imageEdit = parameters.has("imageEdit");
 const status = { configured: true, accessGranted: true, imageEnabled: true, imageQuotaTokens: 120, imageEditTiers: imageEdit ? ["deep"] : [], visionEnabled: !imageEdit, webSearchEnabled: false, quota, defaultMode: "quick" };
 let snapshot: AiWorkspaceSnapshot = JSON.parse(localStorage.getItem(storageKey) ?? "null") ?? { revision: 1, schemaVersion: 1, updatedAt: new Date().toISOString(), state: { ...serializeWorkspace(hydrateWorkspace(null)), mode: "deep" as const, activeConversationId: "a", activeProjectId: "project-a", projects: [{ id: "project-a", title: "A 项目", timeLabel: "", instructions: "A immutable project instructions" }], conversations: [{ id: "a", title: "A 异步任务", projectId: "project-a", timeLabel: "", messages: [] }, { id: "b", title: "B 编辑中", timeLabel: "", messages: [] }, { id: "c", title: "C 后台视频", timeLabel: "", messages: [{ id: "video-c-reply", role: "assistant", content: "视频生成任务", artifactId: "video-c", status: "ready", time: "" }] }], artifacts: [{ id: "video-c", conversationId: "c", title: "隔离合成视频", kind: "视频", summary: "仅验证后台状态", updatedLabel: "", sections: [], data: { videoJobId: "fixture-video-c", videoStatus: "processing" } }], drafts: { a: "@image 生成一只橘猫", b: "B 的草稿不能丢" }, draftAttachments: { b: [{ id: "b-ref", name: "B.txt", mimeType: "text/plain", content: "B 的参考不能串入 A" }] } } };
-const videoCreatedAt = Number(localStorage.getItem(`${storageKey}:video-start`) ?? Date.now());
+const videoCreatedAt = Number(localStorage.getItem(`${storageKey}:video-start`) ?? (parameters.has("readyVideo") ? Date.now() - 10_000 : Date.now()));
 localStorage.setItem(`${storageKey}:video-start`, String(videoCreatedAt));
 const evidence: string[] = [];
 type SyntheticTask = {
@@ -163,6 +163,12 @@ window.fetch = async (target, init) => {
     return Response.json({ settings: { enabled: true, apiKeyConfigured: true, quotaPoints: 250, defaultModel: "minimax_h3", availableModels: ["minimax_h3"], modelsVerified: true }, jobs: [], quota });
   }
   if (url.pathname.startsWith("/api/ai/videos/")) {
+    if (url.pathname.endsWith("/content/check")) {
+      record(`video-content-check:${decodeURIComponent(url.pathname.split("/")[4])}`);
+      return localStorage.getItem(`${storageKey}:deny-media`) === "1"
+        ? Response.json({ error: { code: "AI_VIDEO_NOT_FOUND", message: "Synthetic media denied" } }, { status: 404 })
+        : Response.json({ available: true });
+    }
     if (url.pathname.endsWith("/content")) { record(`video-content:${decodeURIComponent(url.pathname.split("/")[4])}`); return nativeFetch("/scripts/video-chat-fixture.mp4"); }
     const id = decodeURIComponent(url.pathname.split("/")[4]);
     const task = [...tasks.values()].find(item => item.tool.serviceRequestId === id);
@@ -201,10 +207,13 @@ window.fetch = async (target, init) => {
     return Response.json({ id });
   }
   if (url.pathname.startsWith("/api/ai/assets/") && method === "GET") {
-    const assetId = decodeURIComponent(url.pathname.split("/").at(-1)!);
+    const checked = url.pathname.endsWith("/check");
+    const assetId = decodeURIComponent(url.pathname.split("/")[4]);
     const task = [...tasks.values()].find(item => item.tool.capability === "image" && item.tool.artifactIds?.includes(assetId));
-    return task && taskOnRead(task).status === "completed"
-      ? Response.json({ assetId, mimeType: "image/png", base64: pixel.split(",")[1] })
+    if (task && taskOnRead(task).status === "completed") record(`image-${checked ? "check" : "content"}:${assetId}`);
+    if (localStorage.getItem(`${storageKey}:deny-media`) === "1") return Response.json({ error: { code: "AI_ASSET_NOT_FOUND", message: "Synthetic media denied" } }, { status: 404 });
+    return task && task.status === "completed"
+      ? Response.json(checked ? { assetId, mimeType: "image/png", byteLength: atob(pixel.split(",")[1]).length } : { assetId, mimeType: "image/png", base64: pixel.split(",")[1] })
       : Response.json({ error: { code: "AI_ASSET_NOT_FOUND", message: "尚未生成" } }, { status: 404 });
   }
   if (url.pathname === "/api/ai/preflight") return Response.json({ canSend: true, quota, budget: { inputTokens: 20, maxOutputTokens: 1000, searchInputReserve: 0 } });
@@ -245,8 +254,9 @@ window.fetch = async (target, init) => {
 };
 function Preview() {
   const { session, login } = useAuth(); const [events, setEvents] = useState("");
+  const [aiVisible, setAiVisible] = useState(true);
   useEffect(() => { void login(user.email, "synthetic-only", false); }, [login]);
   useEffect(() => { const update = () => setEvents(evidence.join("\n")); window.addEventListener("fixture-evidence", update); return () => window.removeEventListener("fixture-evidence", update); }, []);
-  return <main style={{ height: "100vh", background: "#faf7ee" }}><div style={{ height: 42, padding: 8 }}>真实组件 · 合成数据 · 禁止外部请求</div><div style={{ height: "calc(100vh - 142px)" }}>{session ? <TongpinAIPage user={user} /> : "正在准备"}</div><output aria-label="验收证据" style={{ whiteSpace: "pre-wrap", display: "block", height: 100, overflow: "auto", fontSize: 12 }}>{events}</output></main>;
+  return <main style={{ height: "100vh", background: "#faf7ee" }}><div style={{ height: 42, padding: 8 }}>真实组件 · 合成数据 · 禁止外部请求 {parameters.has("pageSwitch") ? <button type="button" onClick={() => setAiVisible(value => !value)}>切换测试页面</button> : null}</div><div style={{ height: "calc(100vh - 142px)" }}>{session ? aiVisible ? <TongpinAIPage user={user} /> : <p>合成其他页面</p> : "正在准备"}</div><output aria-label="验收证据" style={{ whiteSpace: "pre-wrap", display: "block", height: 100, overflow: "auto", fontSize: 12 }}>{events}</output></main>;
 }
 createRoot(document.getElementById("root")!).render(<AuthProvider><Preview /></AuthProvider>);

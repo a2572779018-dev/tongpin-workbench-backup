@@ -415,6 +415,23 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(transport.mock.lastCall?.[1].maxResponseBytes).toBe(64 * 1024 * 1024);
     expect((await response.arrayBuffer()).byteLength).toBe(4);
   });
+  it("checks a warm video's current owner and provider availability without downloading its body", async () => {
+    const req = input(); transport.mockResolvedValue(task("completed", 100)); await runtime.service.video.submit("a", req);
+    const used = runtime.service.quota("a").usedTokens;
+    const callsBeforeDenied = transport.mock.calls.length;
+    await expect(runtime.service.video.checkContent("b", req.requestId)).rejects.toMatchObject({ status: 404 });
+    expect(transport).toHaveBeenCalledTimes(callsBeforeDenied);
+    const cancelled = vi.fn();
+    transport.mockResolvedValue(new Response(new ReadableStream<Uint8Array>({ cancel: cancelled }), { headers: { "Content-Type": "video/mp4" } }));
+    await expect(runtime.service.video.checkContent("a", req.requestId)).resolves.toEqual({ available: true });
+    expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(transport.mock.lastCall?.[0]).toBe("https://www.75api.com/v1/videos/task_fixture_12345678/content");
+    expect(transport.mock.lastCall?.[1].method).toBe("GET");
+    expect(transport.mock.lastCall?.[1].headers.Range).toBe("bytes=0-0");
+    expect(runtime.service.quota("a").usedTokens).toBe(used);
+    transport.mockResolvedValue(new Response("gone", { status: 404, headers: { "Content-Type": "text/plain" } }));
+    await expect(runtime.service.video.checkContent("a", req.requestId)).rejects.toMatchObject({ code: "AI_PROVIDER_REJECTED" });
+  });
   it("GET model test does not submit or reserve quota", async () => {
     transport.mockResolvedValue(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2.5-c1" }, { id: "unrelated" }] }));
     const check = await runtime.service.video.test();

@@ -109,6 +109,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.post("/video-references/generated-asset", async (request, response) => response.json(await video(request).generatedReferenceSource(request.currentUser!.id, request.body)));
     router.post("/videos", async (request, response) => response.json({ job: await video(request).submit(request.currentUser!.id, request.body) }));
     router.get("/videos/:id", async (request, response) => response.json({ job: await video(request).refresh(request.currentUser!.id, request.params.id) }));
+    router.get("/videos/:id/content/check", async (request, response) => response.json(await video(request).checkContent(request.currentUser!.id, request.params.id)));
     router.get("/videos/:id/content", async (request, response) => {
       const result = await video(request).content(request.currentUser!.id, request.params.id);
       result.headers.forEach((value, key) => response.set(key, value));
@@ -202,6 +203,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
       response.json({ task });
     });
     router.post("/images", async (request, response) => response.json(await scoped(request).generateImage(request.currentUser!.id, request.body)));
+    router.get("/assets/:id/check", (request, response) => response.json(scoped(request).checkAsset(request.currentUser!.id, request.params.id)));
     router.get("/assets/:id", (request, response) => response.json(scoped(request).getAsset(request.currentUser!.id, request.params.id)));
     router.delete("/assets/:id", (request, response) => { scoped(request).deleteAsset(request.currentUser!.id, request.params.id); response.json({ deleted: true }); });
     router.get("/requests/:id", (request, response) => response.json(scoped(request).getRequestResult(request.currentUser!.id, request.params.id)));

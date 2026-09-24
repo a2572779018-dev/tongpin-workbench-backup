@@ -82,6 +82,8 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (path === "/api/ai/video-references" && method === "POST") return json(await service.video.uploadReference(user.id, await parseAiJson(request)));
     if (path === "/api/ai/video-references/generated-asset" && method === "POST") return json(await service.video.generatedReferenceSource(user.id, await parseAiJson(request)));
     if (path === "/api/ai/videos" && method === "POST") return json({ job: await service.video.submit(user.id, await parseAiJson(request)) });
+    const videoContentCheck = path.match(/^\/api\/ai\/videos\/([^/]+)\/content\/check$/);
+    if (videoContentCheck && method === "GET") return json(await service.video.checkContent(user.id, videoContentCheck[1]));
     const videoMatch = path.match(/^\/api\/ai\/videos\/([^/]+)(\/content)?$/);
     if (videoMatch && method === "GET") return videoMatch[2] ? await service.video.content(user.id, videoMatch[1]) : json({ job: await service.video.refresh(user.id, videoMatch[1]) });
     if (path === "/api/admin/ai/provider" && method === "GET") return json({ provider: service.provider() });
@@ -197,6 +199,8 @@ export async function handleAiRequest(request: Request, service: AiService, user
       return json({ task });
     }
     if (path === "/api/ai/images" && method === "POST") return json(await service.generateImage(user.id, await parseAiJson(request)));
+    const assetCheck = path.match(/^\/api\/ai\/assets\/([^/]+)\/check$/);
+    if (assetCheck && method === "GET") return json(service.checkAsset(user.id, decodeURIComponent(assetCheck[1])));
     const assetMatch = path.match(/^\/api\/ai\/assets\/([^/]+)$/);
     if (assetMatch && method === "GET") return json(service.getAsset(user.id, decodeURIComponent(assetMatch[1])));
     if (assetMatch && method === "DELETE") { service.deleteAsset(user.id, decodeURIComponent(assetMatch[1])); return json({ deleted: true }); }

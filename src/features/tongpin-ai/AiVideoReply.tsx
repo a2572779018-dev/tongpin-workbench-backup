@@ -77,8 +77,16 @@ export function AiVideoReply({ jobId, onSettled, savedRequest, submissionError, 
       update({ job: next }); setError("");
       if (["completed", "failed", "uncertain"].includes(next.status)) settled.current?.();
       if (next.status === "completed") {
-        // Re-authorize the private content on every mount. A warm Blob alone
-        // cannot prove that access or the provider file still exists.
+        // A warm Blob alone is never an authorization grant. Verify current
+        // account access and provider availability without downloading the MP4.
+        const warm = videoBlobCache.get(cacheScope, jobId);
+        if (warm) {
+          const checked = await api<{ available: true }>(`/api/ai/videos/${encodeURIComponent(jobId)}/content/check`, { headers, signal: controller.signal }, 30000);
+          if (checked.available !== true) throw new Error("视频授权检查未通过，请重新查询");
+          if (!live) return;
+          update({ url: videoBlobCache.objectUrl(cacheScope, jobId) ?? "", duration: videoBlobCache.snapshot(cacheScope, jobId)?.duration });
+          return;
+        }
         const blob = await api<Blob>(`/api/ai/videos/${encodeURIComponent(jobId)}/content`, { headers, signal: controller.signal }, 130000, "blob");
         if (!live) return;
         videoBlobCache.put(cacheScope, jobId, blob);

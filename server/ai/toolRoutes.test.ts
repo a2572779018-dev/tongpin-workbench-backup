@@ -79,7 +79,7 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
   });
 
   it("requires authentication and denies admin access to personal tool APIs", async () => {
-    for (const endpoint of ["/api/ai/assets/unknown", "/api/ai/requests/unknown"]) {
+    for (const endpoint of ["/api/ai/assets/unknown", "/api/ai/assets/unknown/check", "/api/ai/requests/unknown"]) {
       await request(runtime.app).get(endpoint).expect(401);
       await request(runtime.app).get(endpoint).set(headers("admin")).expect(403);
     }
@@ -186,7 +186,7 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
   });
   it.each(["wrong-account", ""])("rejects a wrong or empty X-Tongpin-Account %j before tool actions", async boundAccount => {
     const binding = headers("a", boundAccount);
-    for (const endpoint of ["/api/ai/assets/unknown", "/api/ai/requests/unknown"]) {
+    for (const endpoint of ["/api/ai/assets/unknown", "/api/ai/assets/unknown/check", "/api/ai/requests/unknown"]) {
       const result = await request(runtime.app).get(endpoint).set(binding).expect(409);
       expect(result.body.error.code).toBe("AI_ACCOUNT_CHANGED");
     }
@@ -204,6 +204,11 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     expect(runtime.aiStore.quota(sessions.b.id).usedTokens).toBe(beforeB);
     const asset = await request(runtime.app).get(`/api/ai/assets/${assetId}`).set(headers("a")).expect(200);
     expect(asset.headers["cache-control"]).toBe("no-store"); expect(asset.body.base64).toBe(PNG);
+    const checked = await request(runtime.app).get(`/api/ai/assets/${assetId}/check`).set(headers("a")).expect(200);
+    expect(checked.headers["cache-control"]).toBe("no-store");
+    expect(checked.body).toEqual({ assetId, mimeType: "image/png", byteLength: 68 });
+    expect(JSON.stringify(checked.body)).not.toContain(PNG);
+    await request(runtime.app).get(`/api/ai/assets/${assetId}/check`).set(headers("b")).expect(404);
     const recovered = await request(runtime.app).get(`/api/ai/requests/${requestId}`).set(headers("a")).expect(200);
     expect(recovered.body).toMatchObject({ status: "completed", imageResult: { images: [{ assetId }] } });
     for (const endpoint of [`/api/ai/assets/${assetId}`, `/api/ai/requests/${requestId}`]) {
@@ -220,6 +225,7 @@ describe.sequential("AI tool APIs through real isolated Node authentication", ()
     await request(runtime.app).get(`/api/ai/assets/${assetId}`).set(headers("a")).expect(200);
     await request(runtime.app).delete(`/api/ai/assets/${assetId}`).set(headers("a")).expect(200);
     await request(runtime.app).get(`/api/ai/assets/${assetId}`).set(headers("a")).expect(404);
+    await request(runtime.app).get(`/api/ai/assets/${assetId}/check`).set(headers("a")).expect(404);
     await request(runtime.app).get(`/api/ai/requests/${requestId}`).set(headers("a")).expect(200);
     expect(runtime.aiStore.quota(sessions.a.id).usedTokens).toBe(used);
     expect(transport).toHaveBeenCalledTimes(1);

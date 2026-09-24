@@ -481,6 +481,8 @@ describe("Reviewed AI capabilities through transactional service", () => {
     expect(JSON.parse(transport.mock.calls[0][1].body!)).toMatchObject({ n: 1, output_format: "jpeg", model: "gpt-image-test" });
     expect(transport.mock.calls[0][1].body).not.toContain("不能污染图片的小频");
     expect(runtime.service.getAsset("member", assetId)).toEqual({ assetId, mimeType: "image/png", base64: PNG });
+    expect(runtime.service.checkAsset("member", assetId)).toEqual({ assetId, mimeType: "image/png", byteLength: 68 });
+    expect(() => runtime.service.checkAsset("other", assetId)).toThrow();
     expect(() => runtime.service.getAsset("other", assetId)).toThrow();
     expect(() => runtime.service.getRequestResult("other", request.requestId)).toThrow();
     expect(runtime.service.getRequestResult("member", request.requestId).imageResult?.images).toEqual(result.images);
@@ -490,6 +492,7 @@ describe("Reviewed AI capabilities through transactional service", () => {
     expect(() => runtime.service.deleteAsset("other", assetId)).toThrow();
     runtime.service.deleteAsset("member", assetId);
     expect(() => runtime.service.getAsset("member", assetId)).toThrow();
+    expect(() => runtime.service.checkAsset("member", assetId)).toThrow();
     expect(runtime.service.quota("member").usedTokens).toBe(1000);
     await runtime.service.generateImage("member", request);
     expect(transport).toHaveBeenCalledTimes(1);

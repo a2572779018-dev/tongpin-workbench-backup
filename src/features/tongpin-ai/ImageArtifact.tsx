@@ -38,6 +38,15 @@ export function ImageArtifact({ assetId, mimeType, title = "AI 生成图片", on
     if (!accountId || !/^[A-Za-z0-9_-]{8,160}$/.test(assetId)) { setLoading(false); setError("图片标识无效，请重新生成"); return; }
     const release = videoBlobCache.retain(cacheScope, cacheId);
     void (async () => {
+      const warm = videoBlobCache.get(cacheScope, cacheId);
+      if (warm) {
+        const checked = await api<{ assetId: string; mimeType: AiImageMimeType; byteLength: number }>(`/api/ai/assets/${encodeURIComponent(assetId)}/check`, { signal: controller.signal, headers: { "X-Tongpin-Account": accountId } }, 30_000);
+        if (checked.assetId !== assetId || checked.byteLength !== warm.size || checked.mimeType !== warm.type || mimeType && checked.mimeType !== mimeType) {
+          videoBlobCache.remove(cacheScope, cacheId);
+          throw new Error("图片授权或内容已变化，请重新加载");
+        }
+        return warm;
+      }
       const asset = await api<AiImageAsset>(`/api/ai/assets/${encodeURIComponent(assetId)}`, { signal: controller.signal, headers: { "X-Tongpin-Account": accountId } }, 30_000);
       if (asset.assetId !== assetId || mimeType && asset.mimeType !== mimeType) throw new Error("图片响应不匹配，请重新加载");
       return decodePrivateImage(asset);

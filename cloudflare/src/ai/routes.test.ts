@@ -98,6 +98,11 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     transport.mockResolvedValue(new Response("mp4-fixture", { headers: { "content-type": "video/mp4" } }));
     const content = await invoke(`/api/ai/videos/${request.requestId}/content`, "GET", a);
     expect(content.headers.get("cache-control")).toBe("no-store"); expect(await content.text()).toBe("mp4-fixture");
+    const warmCheck = await invoke(`/api/ai/videos/${request.requestId}/content/check`, "GET", a);
+    expect(warmCheck.status).toBe(200);
+    expect(warmCheck.headers.get("cache-control")).toBe("no-store");
+    expect(await warmCheck.json()).toEqual({ available: true });
+    expect((await invoke(`/api/ai/videos/${request.requestId}/content/check`, "GET", b)).status).toBe(404);
   });
   it("derives video scope from the authenticated Worker principal instead of a caller header", async () => {
     const alphaAdmin = { ...admin, tenant_id: "tenant-alpha" } as UserRow;
@@ -262,6 +267,10 @@ describe("Cloudflare AI route contract with shared transactional service", () =>
     const asset = await invoke(`/api/ai/assets/${assetId}`, "GET", a);
     expect(asset.headers.get("cache-control")).toBe("no-store");
     expect(await asset.json()).toMatchObject({ assetId, mimeType: "image/png", base64: PNG });
+    const checked = await invoke(`/api/ai/assets/${assetId}/check`, "GET", a);
+    expect(checked.status).toBe(200);
+    expect(await checked.json()).toEqual({ assetId, mimeType: "image/png", byteLength: 68 });
+    expect((await invoke(`/api/ai/assets/${assetId}/check`, "GET", b)).status).toBe(404);
     const cached = await invoke(`/api/ai/requests/${requestId}`, "GET", a);
     expect(await cached.json()).toMatchObject({ status: "completed", imageResult: { images: [{ assetId }] } });
     for (const path of [`/api/ai/assets/${assetId}?userId=a`, `/api/ai/requests/${requestId}?userId=a`]) {

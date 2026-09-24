@@ -17,6 +17,7 @@ try {
   const node = await video.elementHandle();
   const evidence = () => page.locator('output[aria-label="验收证据"]').innerText();
   const count = text => (text.match(/video-content:fixture-video-c/g) ?? []).length;
+  const checks = text => (text.match(/video-content-check:fixture-video-c/g) ?? []).length;
   const first = count(await evidence());
   assert.equal(first, 1, "first mount must authorize video content exactly once");
 
@@ -37,11 +38,12 @@ try {
   assert.equal(await node.evaluate(element => element.isConnected), false, "leaving the conversation must release its player");
   await page.locator('.tp-ai-conversation-row__select[title="C 后台视频"]').click();
   await page.locator(".tp-ai-video-reply").scrollIntoViewIfNeeded();
-  await page.waitForFunction(() => (document.querySelector('output[aria-label="验收证据"]')?.textContent?.match(/video-content:fixture-video-c/g) ?? []).length === 2);
+  await page.waitForFunction(() => (document.querySelector('output[aria-label="验收证据"]')?.textContent?.match(/video-content-check:fixture-video-c/g) ?? []).length === 1);
   await video.waitFor();
-  assert.equal(count(await evidence()), 2, "a new mount must re-authorize private video content");
+  assert.equal(count(await evidence()), 1, "a new mount must not download the full video again");
+  assert.equal(checks(await evidence()), 1, "a new mount must reauthorize provider content before showing cached bytes");
   assert.deepEqual(errors, []);
-  process.stdout.write(JSON.stringify({ playerRetained: true, sameMountDownloads: first, newMountDownloads: 2 }) + "\n");
+  process.stdout.write(JSON.stringify({ playerRetained: true, sameMountDownloads: first, afterRemountDownloads: 1, afterRemountChecks: 1 }) + "\n");
 } finally {
   await context.close();
   await browser.close();
