@@ -74,6 +74,9 @@ interface DesktopSessionBridge {
     value: string;
   }): Promise<boolean>;
   openAiSource(url: string): Promise<"opened" | "cancelled" | "blocked" | "failed" | "busy">;
+  saveAiFile(input: { filename: string; bytes: ArrayBuffer }): Promise<
+    { state: "saved"; filePath: string } | { state: "cancelled" } | { state: "busy" }
+  >;
   onDesktopNoticeAcknowledge(
     callback: (notificationId: string) => void,
   ): () => void;

@@ -38,6 +38,7 @@ const {
   validateLoraExplorerUrl,
 } = require("./lora-explorer-policy.cjs");
 const { createAiSourceOpener } = require("./ai-source-policy.cjs");
+const { createAiFileSaver } = require("./ai-file-save.cjs");
 const {
   normalizeDesktopNoticeAction,
 } = require("./desktop-notice-action-policy.cjs");
@@ -1586,6 +1587,15 @@ function registerDesktopIpc() {
       return choice.response === 0;
     },
     openExternal: (sourceUrl) => shell.openExternal(sourceUrl),
+  }));
+
+  ipcMain.handle("ai-file:save", createAiFileSaver({
+    assertSender: assertMainRendererEvent,
+    showSaveDialog: (options) => {
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error("同频窗口已关闭");
+      return dialog.showSaveDialog(mainWindow, options);
+    },
+    downloadsPath: () => app.getPath("downloads"),
   }));
 
   ipcMain.handle("session:load", async (event) => {

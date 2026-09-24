@@ -30,6 +30,18 @@ function extension(filename: string): string {
  * The anchor fallback can only confirm that the browser accepted the download, so its wording stays explicit.
  */
 export async function saveBlobWithFeedback(blob: Blob, filename: string): Promise<AiDownloadFeedback> {
+  if (window.tongpin?.saveAiFile) {
+    try {
+      const result = await window.tongpin.saveAiFile({ filename, bytes: await blob.arrayBuffer() });
+      if (result.state === "cancelled") return emit({ state: "cancelled", filename, message: `已取消保存“${filename}”。` });
+      if (result.state === "busy") return emit({ state: "error", filename, message: "已有文件正在保存，请稍后再试。" });
+      if (result.state !== "saved" || !result.filePath) throw new Error("保存结果无效");
+      return emit({ state: "saved", filename, message: `已保存到 ${result.filePath}` });
+    } catch {
+      // A failed desktop save must never silently start a second browser download.
+      return emit({ state: "error", filename, message: `“${filename}”保存失败，请重试。` });
+    }
+  }
   const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
   if (picker) {
     let writable: Awaited<ReturnType<WritableFileHandle["createWritable"]>> | undefined;

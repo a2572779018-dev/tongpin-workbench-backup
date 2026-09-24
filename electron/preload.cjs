@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld("tongpin", {
   openLoraExplorer: (target) =>
     ipcRenderer.invoke("lora-explorer:open", target),
   openAiSource: (url) => ipcRenderer.invoke("ai-source:open", url),
+  saveAiFile: (input) => ipcRenderer.invoke("ai-file:save", input),
   onDesktopNoticeAcknowledge: (callback) => {
     const listener = (_event, notificationId) =>
       callback(String(notificationId));

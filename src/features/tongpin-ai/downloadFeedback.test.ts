@@ -45,4 +45,31 @@ describe("generated file download feedback", () => {
     (window as Window & { showSaveFilePicker?: unknown }).showSaveFilePicker = vi.fn().mockRejectedValue(new DOMException("cancel", "AbortError"));
     await expect(saveBlobWithFeedback(new Blob(["x"]), "x.png")).resolves.toMatchObject({ state: "cancelled" });
   });
+
+  it("waits for the native desktop save and reports its actual path", async () => {
+    let finish!: (result: { state: "saved"; filePath: string }) => void;
+    const saveAiFile = vi.fn((_input: { filename: string; bytes: ArrayBuffer }) => new Promise<{ state: "saved"; filePath: string }>(resolve => { finish = resolve; }));
+    Object.assign(window, { tongpin: { saveAiFile }, showSaveFilePicker: vi.fn() });
+    const feedback = vi.fn();
+    window.addEventListener(AI_DOWNLOAD_FEEDBACK_EVENT, feedback);
+    const pending = saveBlobWithFeedback(new Blob(["ok"]), "同频视频.mp4");
+    await vi.waitFor(() => expect(saveAiFile).toHaveBeenCalledOnce());
+    expect(feedback).not.toHaveBeenCalled();
+    finish({ state: "saved", filePath: "/Downloads/同频视频.mp4" });
+    await expect(pending).resolves.toMatchObject({ state: "saved", message: expect.stringContaining("/Downloads/同频视频.mp4") });
+    expect(click).not.toHaveBeenCalled();
+    expect((window as Window & { showSaveFilePicker?: ReturnType<typeof vi.fn> }).showSaveFilePicker).not.toHaveBeenCalled();
+    const input = saveAiFile.mock.calls[0][0];
+    expect(input.filename).toBe("同频视频.mp4");
+    expect(new TextDecoder().decode(input.bytes)).toBe("ok");
+  });
+
+  it("never falls back to browser download after native cancellation or failure", async () => {
+    const saveAiFile = vi.fn().mockResolvedValueOnce({ state: "cancelled" }).mockRejectedValueOnce(new Error("disk full")).mockResolvedValueOnce({ state: "busy" });
+    Object.assign(window, { tongpin: { saveAiFile }, showSaveFilePicker: vi.fn() });
+    await expect(saveBlobWithFeedback(new Blob(["x"]), "x.png")).resolves.toMatchObject({ state: "cancelled" });
+    await expect(saveBlobWithFeedback(new Blob(["x"]), "x.png")).resolves.toMatchObject({ state: "error" });
+    await expect(saveBlobWithFeedback(new Blob(["x"]), "x.png")).resolves.toMatchObject({ state: "error", message: expect.stringContaining("已有文件") });
+    expect(click).not.toHaveBeenCalled();
+  });
 });
