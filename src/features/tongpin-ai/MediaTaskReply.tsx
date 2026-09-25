@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { mediaTaskFailureText } from "./mediaTaskFailure";
 import { useAuth } from "../../auth/AuthContext";
 import { ApiRequestError } from "../../lib/api";
 import { AiVideoReply } from "./AiVideoReply";
@@ -211,7 +212,7 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
     {imageIds.map((assetId, index) => <ImageArtifact key={assetId} assetId={assetId} title={task?.status === "partial" ? `部分结果 ${index + 1}` : `生成图片 ${index + 1}`} />)}
     {videoJobId ? <AiVideoReply key={videoJobId} jobId={videoJobId} /> : null}
     {task?.status === "completed" && !videoJobId && !imageIds.length ? <p role="alert">任务已标记完成，但未返回可显示的成果；请核对原任务。</p> : null}
-    {task?.status === "failed" ? <p>本次任务未完成，不会自动重新生成。</p> : null}
+    {task?.status === "failed" ? <p>本次任务未完成，不会自动重新生成。原因：{mediaTaskFailureText(task.errorCode ?? task.tool?.errorCode)}</p> : null}
     {task?.status === "unknown" ? <p>服务端尚无法确认结果。请只查询原任务，不要重新发送生成请求。</p> : null}
     {task?.cancelRequested && !["completed", "failed", "cancelled"].includes(task.status) ? <p role="status">已请求停止，服务商结果与费用仍需核对；不会自动重新生成。</p> : null}
     {task?.status === "cancelled" ? <p>此任务已取消，未开始新的生成请求。</p> : null}
