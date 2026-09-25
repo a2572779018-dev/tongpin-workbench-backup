@@ -1,3 +1,4 @@
+import { parseH3VideoInput } from "./videoProvider";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -432,12 +433,22 @@ describe("durable H3 jobs and isolated quotas", () => {
     transport.mockResolvedValue(new Response("gone", { status: 404, headers: { "Content-Type": "text/plain" } }));
     await expect(runtime.service.video.checkContent("a", req.requestId)).rejects.toMatchObject({ code: "AI_PROVIDER_REJECTED" });
   });
+  it("accepts 75API's renamed MiniMax templates only with a reference image", async () => {
+    transport.mockResolvedValue(Response.json({ data: [{ id: "minimax_h3_内置提示词优化" }, { id: "sd-2.0-fast" }] }));
+    const check = await runtime.service.video.test();
+    expect(check.availableModels).toEqual(["minimax_h3_内置提示词优化", "sd-2.0-fast"]);
+    expect(() => parseH3VideoInput({ model: "minimax_h3_内置提示词优化", prompt: "海边日落", seconds: 5, resolution: "768p", aspectRatio: "16:9" }))
+      .toThrow(expect.objectContaining({ code: "AI_VIDEO_IMAGE_REQUIRED" }));
+    expect(parseH3VideoInput({ model: "sd-2.0-fast", prompt: "海边日落", seconds: 5, resolution: "720p", aspectRatio: "16:9" })).toMatchObject({ model: "sd-2.0-fast" });
+  });
   it("GET model test does not submit or reserve quota", async () => {
     transport.mockResolvedValue(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2.5-c1" }, { id: "unrelated" }] }));
     const check = await runtime.service.video.test();
     expect(check).toMatchObject({ ok: true, models: [
       { id: "minimax_h3", listed: true },
       { id: "minimax_h3_no_audios_1080", listed: false },
+      { id: "minimax_h3_内置提示词优化", listed: false },
+      { id: "minimax_h3_no_audios_内置提示词优化", listed: false },
       { id: "sd-2-c6", listed: false },
       { id: "sd-2.0-fast", listed: false },
       { id: "sd-2.5-c1", listed: true },

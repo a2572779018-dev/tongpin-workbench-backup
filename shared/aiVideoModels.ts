@@ -3,6 +3,11 @@ export type VideoResolution = "480p" | "720p" | "768p" | "1080p";
 export const VIDEO_MODELS = [
   { id: "minimax_h3", label: "MiniMax H3", resolutions: ["480p", "768p"], minSeconds: 5, maxSeconds: 15, maxImages: 8, requiresImage: false, generationEnabled: true, unavailableReason: "" },
   { id: "minimax_h3_no_audios_1080", label: "MiniMax H3 · 1080p", resolutions: ["1080p"], minSeconds: 1, maxSeconds: 10, maxImages: 9, requiresImage: true, generationEnabled: true, unavailableReason: "" },
+  // 75API renamed its MiniMax H3 templates (2026-09): the plain ids above are
+  // no longer granted to current keys, and both new templates reject a request
+  // without at least one reference image (upstream field image_path).
+  { id: "minimax_h3_内置提示词优化", label: "MiniMax H3 · 提示词优化（需参考图）", resolutions: ["480p", "768p"], minSeconds: 5, maxSeconds: 15, maxImages: 8, requiresImage: true, generationEnabled: true, unavailableReason: "" },
+  { id: "minimax_h3_no_audios_内置提示词优化", label: "MiniMax H3 · 无音频 · 提示词优化（需参考图）", resolutions: ["1080p"], minSeconds: 1, maxSeconds: 10, maxImages: 9, requiresImage: true, generationEnabled: true, unavailableReason: "" },
   { id: "sd-2-c6", label: "SD 2.0", resolutions: ["720p"], minSeconds: 5, maxSeconds: 15, maxImages: 9, requiresImage: false, generationEnabled: true, unavailableReason: "" },
   { id: "sd-2.0-fast", label: "SD 2.0 Fast", resolutions: ["480p", "720p"], minSeconds: 5, maxSeconds: 15, maxImages: 9, requiresImage: false, generationEnabled: true, unavailableReason: "" },
   { id: "sd-2.5-c1", label: "SD 2.5", resolutions: ["720p"], minSeconds: 30, maxSeconds: 30, maxImages: 9, requiresImage: false, generationEnabled: true, unavailableReason: "" },
