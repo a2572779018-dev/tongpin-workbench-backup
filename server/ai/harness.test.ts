@@ -74,6 +74,29 @@ describe("AI Harness", () => {
     return discovery;
   }
 
+  it("offers the model only the tools its tier enables and never starts a closed tool", async () => {
+    const input = harnessInput();
+    input.tiers.quick.capabilities = ["chat", "vision", "image", "video", "presentation"];
+    await runtime.service.saveHarness(input);
+    await runtime.service.discoverHarnessProvider("primary");
+    runtime.service.setQuota("member", "admin", { limitTokens: 100_000 });
+    transport.mockImplementationOnce(async () => complete('<tool_request>{"kind":"computer","prompt":"打开 nodejs.org 查看 LTS 版本"}</tool_request>'));
+    const request = { requestId: crypto.randomUUID(), mode: "quick" as const, outputFormat: "dispatch" as const, messages: [{ role: "user" as const, content: "联网查一下 Node.js 当前 LTS 版本" }] };
+    const response = await runtime.service.chat("member", request);
+    const body = JSON.parse(transport.mock.calls.at(-1)![1].body!);
+    const system = String(body.messages[0].content);
+    expect(system).toContain('"kind":"image|video|presentation"');
+    expect(system).toContain("本档位未开放操作电脑");
+    expect(response.dispatch).toMatchObject({ kind: "text" });
+    expect(response.dispatch?.kind === "text" && response.dispatch.content).toContain("没有开放电脑操作");
+    const all = harnessInput();
+    all.tiers.quick.capabilities = ["chat"];
+    await runtime.service.saveHarness(all);
+    await runtime.service.discoverHarnessProvider("primary");
+    await runtime.service.chat("member", { ...request, requestId: crypto.randomUUID() });
+    expect(String(JSON.parse(transport.mock.calls.at(-1)![1].body!).messages[0].content)).toContain("没有开放任何生成或电脑操作工具");
+  });
+
   it("encrypts provider keys, binds /models discovery to the saved key/config, and never exposes provider model IDs to members", async () => {
     await configure();
     const disk = await readFile(path.join(directory, "test.json.ai.sqlite"));

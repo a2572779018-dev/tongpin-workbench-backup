@@ -326,6 +326,8 @@ export interface AiToolPlan {
 /** A first-turn server decision only. Tool decisions never authorize or execute
  * a paid/state-changing action; the client must enter the existing plan and
  * explicit-confirmation flow. */
+export type AiDispatchToolKind = "image" | "video" | "presentation" | "computer";
+export const AI_DISPATCH_TOOL_KINDS: readonly AiDispatchToolKind[] = ["image", "video", "presentation", "computer"];
 export type AiDispatchDecision =
   | { kind: "text"; content: string; /** Optional public evidence summary, never hidden reasoning. */ analysisSummary?: string }
   | { kind: "image" | "video" | "presentation" | "computer"; prompt: string; clarification?: string };
@@ -352,6 +354,9 @@ export interface AiChatRequest {
   videoParameters?: AiVideoPlanParameters;
   webSearch?: boolean;
   webSearchMode?: "auto";
+  /** Server-owned: tool kinds the resolved tier actually permits. Never read
+   * from the client body; set after route resolution. Undefined = legacy (all). */
+  dispatchKinds?: AiDispatchToolKind[];
 }
 export type AiChatPreflightReason = null | "quota_exhausted" | "search_quota_insufficient" | "quota_insufficient" | "request_in_progress";
 /** Conservative quota reservations, not actual provider usage or currency prices. */

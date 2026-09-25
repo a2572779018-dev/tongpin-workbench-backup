@@ -1,4 +1,4 @@
-import { AI_BUSINESS_TIER_LABELS, AI_BUSINESS_TIERS, type AiChatBudget, type AiChatPreflight, type AiChatPreflightReason, type AiChatRequest, type AiChatResponse, type AiHarnessCapability, type AiHarnessConfig, type AiHarnessTrace, type AiImageAsset, type AiImageMimeType, type AiImageRequest, type AiImageResponse, type AiMember, type AiObservabilityDashboard, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult, type AiQuota, type AiRequestResult, type AiStatus, type AiUsage } from "../../shared/ai";
+import { AI_BUSINESS_TIER_LABELS, AI_BUSINESS_TIERS, AI_DISPATCH_TOOL_KINDS, type AiChatBudget, type AiChatPreflight, type AiChatPreflightReason, type AiChatRequest, type AiChatResponse, type AiHarnessCapability, type AiHarnessConfig, type AiHarnessTrace, type AiImageAsset, type AiImageMimeType, type AiImageRequest, type AiImageResponse, type AiMember, type AiObservabilityDashboard, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult, type AiQuota, type AiRequestResult, type AiStatus, type AiUsage } from "../../shared/ai";
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import { AiStore, type StoredProvider, type StoredRequest } from "./storage";
 import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, providerBody, readProviderHttpError, readBoundedJson, readProviderResponse, supportsOfficialPublicSummary, type AiTransport } from "./provider";
@@ -547,9 +547,11 @@ export class AiService {
       const deep = request.mode === "deep" || request.mode === "pro";
       route = { ...route, modelId: deep ? provider.deepModel : provider.quickModel, protocol: provider.protocol, maxOutputTokens: provider.maxOutputTokens, reasoningEffort: deep ? provider.reasoningEffort : "" };
     }
+    // Tools the model may request are bounded by the tier, not by prompt text.
+    if (!route.legacy) request.dispatchKinds = AI_DISPATCH_TOOL_KINDS.filter(kind => route.capabilities.includes(kind));
     if (request.webSearchMode === "auto") {
       const latestUserText = request.messages.filter(message => message.role === "user").at(-1)?.content ?? "";
-      request.webSearch = Boolean((route.legacy || route.policy.strategy !== "direct") && route.policy.autoWebSearch && needsOnlineEvidence(latestUserText) && provider.protocol === "responses" && provider.webSearchEnabled && provider.webSearchQuotaTokens);
+      request.webSearch = Boolean(route.policy.autoWebSearch && needsOnlineEvidence(latestUserText) && provider.protocol === "responses" && provider.webSearchEnabled && provider.webSearchQuotaTokens);
     }
     if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
     if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) {
@@ -867,7 +869,14 @@ export class AiService {
       let dispatch: AiChatResponse["dispatch"];
       let computerPlan: AiChatResponse["computerPlan"];
       if (request.outputFormat === "dispatch") {
-        try { dispatch = parseAiDispatchDecision(publicExplanation.content, request.mode, { allowPlainText: true }); }
+        try {
+          dispatch = parseAiDispatchDecision(publicExplanation.content, request.mode, { allowPlainText: true });
+          // A model that ignores the tier allowlist must not start a closed tool.
+          if (dispatch.kind !== "text" && request.dispatchKinds && !request.dispatchKinds.includes(dispatch.kind)) {
+            const label = { image: "图片生成", video: "视频生成", presentation: "PPT 生成", computer: "电脑操作" }[dispatch.kind];
+            dispatch = { kind: "text", content: `当前档位没有开放${label}，这次没有调用该工具。你可以换用已开放该能力的档位，或直接告诉我需要的文字结果。` };
+          }
+        }
         catch (error) {
           const safe = error instanceof AiError ? error : new AiError(502, "AI_DISPATCH_INVALID", "同频 AI 返回的任务类型不正确");
           this.store.sql.transaction(() => settleChat(reserved, usage, validUsage ? "failed" : "uncertain", "任务分派结果未通过应用校验，已记录模型生成用量", undefined, safe));

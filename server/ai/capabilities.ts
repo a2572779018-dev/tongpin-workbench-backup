@@ -1,3 +1,4 @@
+import { AI_DISPATCH_TOOL_KINDS, type AiDispatchToolKind } from "../../shared/ai";
 import type { AiAttachment, AiChatRequest, AiComputerPlan, AiImageMimeType, AiPresentation, AiSource, AiToolPlan, AiToolPlanKind, AiVideoPlanParameters } from "../../shared/ai";
 import { AI_VIDEO_REFERENCE_FINGERPRINT } from "../../shared/aiVideoReferences";
 import { AiError } from "./security";
@@ -30,8 +31,15 @@ const TOOL_PLAN: Record<AiToolPlanKind, string> = {
   presentation: '你正在为同频的 PPT 生成器整理任务，不是在生成或导出 PPT。只输出一个 JSON 对象，不使用 Markdown 代码块：{"kind":"presentation","summary":"给用户确认的一句话摘要","prompt":"交给演示文稿生成步骤的完整要求"}。保留用户明确的主题、受众、用途、页数、结构、语言与禁用项；不虚构事实，不声称已经生成或导出。summary 最多 240 字，prompt 最多 12000 字。',
 };
 const TOOL_CLARIFICATION = '如果本次提供的历史和当前请求中都缺少要生成的具体主题（例如仅说“帮我生成一张图片”），不要擅自选主题，不输出空 prompt 或半成品方案。改为只输出 {"kind":"clarification","question":"需要向用户补问的一个简短问题"}。用户已给出具体主题时，合理补充非关键默认值，正常输出工具方案，不为了流程反复确认。question 最多 500 字。';
-function dispatchInstruction(_request: AiChatRequest): string {
-  return `普通问答、写作、分析、讨论生成功能、排错、询价，以及“帮我写图片/视频/PPT 提示词”，直接用自然语言回答，可在必要时使用 Markdown；不要把整篇回答包装成 JSON。只有用户明确要求创建产物或操作电脑时，才单独输出 <tool_request>{"kind":"image|video|presentation|computer","prompt":"保留用户原意的完整任务"}</tool_request>。如缺少不可推断的核心信息，在工具对象中额外加入 "clarification":"只问一个必要问题"。工具对象仅包含以上字段，不夹带正文、工具参数或隐藏推理；这是待授权的请求，不是已执行结果，不得声称已生成或已控制电脑。`;
+const DISPATCH_KIND_LABELS: Record<AiDispatchToolKind, string> = { image: "图片", video: "视频", presentation: "PPT", computer: "操作电脑" };
+function dispatchInstruction(request: AiChatRequest): string {
+  const kinds = request.dispatchKinds ?? AI_DISPATCH_TOOL_KINDS;
+  const base = "普通问答、写作、分析、讨论生成功能、排错、询价，以及“帮我写图片/视频/PPT 提示词”，直接用自然语言回答，可在必要时使用 Markdown；不要把整篇回答包装成 JSON。";
+  if (!kinds.length) return `${base}本档位没有开放任何生成或电脑操作工具：始终用自然语言回答，不输出 <tool_request>，不声称可以生成产物或控制电脑。`;
+  const labels = kinds.map(kind => DISPATCH_KIND_LABELS[kind]).join("、");
+  const closed = AI_DISPATCH_TOOL_KINDS.filter(kind => !kinds.includes(kind)).map(kind => DISPATCH_KIND_LABELS[kind]);
+  const closedNote = closed.length ? `本档位未开放${closed.join("、")}，不得请求这些工具；联网查询、打开网页等需求不属于电脑操作，直接用已有知识或已提供的搜索结果回答。` : "";
+  return `${base}只有用户明确要求${labels}时，才单独输出 <tool_request>{"kind":"${kinds.join("|")}","prompt":"保留用户原意的完整任务"}</tool_request>。${closedNote}如缺少不可推断的核心信息，在工具对象中额外加入 "clarification":"只问一个必要问题"。工具对象仅包含以上字段，不夹带正文、工具参数或隐藏推理；这是待授权的请求，不是已执行结果，不得声称已生成或已控制电脑。`;
 }
 export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRequest, "skillIds" | "workflowId" | "projectContext" | "attachments" | "outputFormat" | "toolPlanRequestId" | "videoParameters" | "webSearch" | "webSearchMode"> {
   if (p.webSearchMode !== undefined && p.webSearchMode !== "auto") throw new AiError(400, "AI_INPUT_INVALID", "搜索模式不正确");
