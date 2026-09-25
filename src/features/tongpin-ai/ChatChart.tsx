@@ -49,7 +49,7 @@ export function ChatChart({ body }: { body: string }) {
           const x = xOf(index) - barWidth / 2;
           const top = yOf(point.value);
           const height = Math.abs(zeroY - top) || 1;
-          return <g key={point.label}>
+          return <g key={`${index}-${point.label}`}>
             <rect x={x} y={Math.min(top, zeroY)} width={barWidth} height={height} className="tp-ai-chart__bar" rx={3} />
             <text x={x + barWidth / 2} y={Math.min(top, zeroY) - 6} textAnchor="middle" className="tp-ai-chart__value">{point.value}</text>
             <text x={x + barWidth / 2} y={HEIGHT - PADDING.bottom + 18} textAnchor="middle" className="tp-ai-chart__label">{point.label}</text>
@@ -57,7 +57,7 @@ export function ChatChart({ body }: { body: string }) {
         })
         : <g>
           <polyline className="tp-ai-chart__line" points={series.map((point, index) => `${xOf(index)},${yOf(point.value)}`).join(" ")} />
-          {series.map((point, index) => <g key={point.label}>
+          {series.map((point, index) => <g key={`${index}-${point.label}`}>
             <circle cx={xOf(index)} cy={yOf(point.value)} r={4} className="tp-ai-chart__dot" />
             <text x={xOf(index)} y={yOf(point.value) - 10} textAnchor="middle" className="tp-ai-chart__value">{point.value}</text>
             <text x={xOf(index)} y={HEIGHT - PADDING.bottom + 18} textAnchor="middle" className="tp-ai-chart__label">{point.label}</text>
@@ -70,7 +70,7 @@ export function ChatChart({ body }: { body: string }) {
     </div>
     {showData ? <table className="tp-ai-chart__data">
       <thead><tr><th scope="col">项目</th><th scope="col">数值（{unit}）</th></tr></thead>
-      <tbody>{series.map(point => <tr key={point.label}><td>{point.label}</td><td>{point.value}</td></tr>)}</tbody>
+      <tbody>{series.map((point, index) => <tr key={`${index}-${point.label}`}><td>{point.label}</td><td>{point.value}</td></tr>)}</tbody>
     </table> : null}
   </figure>;
 }

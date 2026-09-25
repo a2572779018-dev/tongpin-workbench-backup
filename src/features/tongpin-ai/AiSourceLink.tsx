@@ -1,8 +1,24 @@
 import { useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { AiSource } from "../../../shared/ai";
+import { displaySources, sourceLabel } from "./sourceDisplay";
 
 export function AiSourceLink({ source }: { source: AiSource }) {
-  return <li><AiSourceAnchor href={source.url}>{source.title || source.url}</AiSourceAnchor></li>;
+  return <li><AiSourceAnchor href={source.url}>{sourceLabel(source)}</AiSourceAnchor></li>;
+}
+
+/** Deduplicated citation list; beyond the first few, the rest fold away. */
+export function AiSourceList({ sources }: { sources: readonly AiSource[] | undefined }) {
+  const [expanded, setExpanded] = useState(false);
+  const { visible, folded } = displaySources(sources);
+  if (!visible.length) return null;
+  const shown = expanded ? [...visible, ...folded] : visible;
+  return <div className="tp-ai-message-sources-block">
+    <ul className="tp-ai-message-sources" aria-label="参考来源">
+      {shown.map((source, index) => <AiSourceLink key={`${source.url}-${index}`} source={source} />)}
+    </ul>
+    {folded.length ? <button type="button" className="tp-ai-message-sources__toggle" aria-expanded={expanded}
+      onClick={() => setExpanded(current => !current)}>{expanded ? "收起来源" : `展开其余 ${folded.length} 个来源`}</button> : null}
+  </div>;
 }
 
 /** Both inline citations and the source list use the desktop's existing URL policy. */

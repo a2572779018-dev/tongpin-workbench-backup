@@ -3,7 +3,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import type { AiHarnessTrace } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
 import { AnalysisSummary } from "./AnalysisSummary";
-import { AiSourceLink } from "./AiSourceLink";
+import { AiSourceList } from "./AiSourceLink";
 import { MarkdownReply } from "./MarkdownReply";
 import { ReplyWaiting } from "./ReplyWaiting";
 import { memberVisibleHarnessSteps } from "./tracePresentation";
@@ -118,9 +118,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
         <span><small>{artifact.kind}</small><strong>{artifact.title}</strong></span>
         <span className="tp-ai-artifact-card__action">打开</span>
       </button>}
-      {message.sources?.length ? <ul className="tp-ai-message-sources" aria-label="参考来源">
-        {message.sources.map((source, index) => <AiSourceLink key={`${source.url}-${index}`} source={source} />)}
-      </ul> : null}
+      {message.sources?.length ? <AiSourceList sources={message.sources} /> : null}
       {message.role === "assistant" && message.trace ? <RunTrace requestId={harnessTraceRequestId(message)} initial={message.trace} onChange={trace => onTraceChange?.(message.id, trace)} /> : null}
       {message.status === "error" && retryable && <div className="tp-ai-message__controls">
         <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, message.retryDisposition === "regenerate" ? "regenerate" : undefined)}>{message.retryDisposition === "regenerate" ? "重新生成" : "查询原任务"}</button>
