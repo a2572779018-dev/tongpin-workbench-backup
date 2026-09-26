@@ -1156,7 +1156,7 @@ export function ChatWorkspace({
           </form>
           )}
         </div>
-        <p className="tp-ai-composer-hint">{computerRequest ? "每个动作都需要一次原生确认；关闭即停止本机会话" : composerHintText({ responding, steerAvailable, draft, escapeStops })}</p>
+        <p className="tp-ai-composer-hint">{computerRequest ? "本次电脑操作已一次授权，超出范围的动作会再次询问；按 Esc 或点「停止」可随时中止" : composerHintText({ responding, steerAvailable, draft, escapeStops })}</p>
       </footer>
     </section>
   );
