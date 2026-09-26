@@ -1,0 +1,542 @@
+{
+ "format": "tongpin-opensquilla-router-bundle",
+ "formatVersion": 1,
+ "router": {
+  "name": "OpenSquilla SquillaRouter",
+  "version": "v4.2",
+  "phase": "phase3",
+  "modelVersion": "v4",
+  "bgeModel": "BAAI/bge-small-zh-v1.5",
+  "license": "Apache-2.0",
+  "upstream": "https://github.com/TokenRhythm/opensquilla",
+  "upstreamCommit": "d27ba0e7ac452392b7c8e38f2f7f43cd5d6912c6",
+  "upstreamBundle": "src/opensquilla/squilla_router/models/v4.2_phase3_inference",
+  "upstreamSha256": {
+   "bge_onnx/config.json": "a7ef8b7733d4d54670d88617be0a426b56152296844e5ff603ef6fda92633da0",
+   "bge_onnx/model.onnx": "87847793fac866d65b19cee2e73a6b2a2446a1262ab0911b1dbf9b3e9399ef9d",
+   "bge_onnx/special_tokens_map.json": "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",
+   "bge_onnx/tokenizer.json": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26",
+   "bge_onnx/tokenizer_config.json": "470cff6e0353b08e2a6e9b4f61729ecdc47ccb3ced335fa5520e9ce334572d59",
+   "bge_onnx/vocab.txt": "45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c",
+   "features/bge_pca.joblib": "9ee12bcd481a94516b074160e39f0b909c089393d73ffbf0167d3beba995fc23",
+   "features/config.pkl": "9e1225d053527975dca018deab6e3ae3fea2070ded20cd01ef0e7eea711cce82",
+   "features/meta.json": "fa7c412e32fee37088e03480494e3d0b8ed859b12222e37f22e33aec3778a3de",
+   "features/svd.pkl": "5d2af9e78565e58e919fb83c7a01973e394436fd43cf6813c7cd2280aa140172",
+   "features/tfidf.pkl": "bb90fb1af13ff1b15104d22b8d1dfc712ae32bf8d7db959ca56b3d7c92872293",
+   "inference_manifest.json": "1addef2deddaac2a60800eb631c5878765a49ad100ede4d54022d2d3bf8e2df2",
+   "lgbm_aux.bin": "e8749e412d2db861928cb9d8a9b39cdd134a4d71091430ffae014337d4b1aed4",
+   "lgbm_main.bin": "5f312db09577bbaf30f87358941974eef6edce7f1424d0e9de21cbd38a646d53",
+   "mlp/model.onnx": "e7358ac3f827e8f38a6384ba4f7c6f3227c18898ced95d145adb9272c72137d6",
+   "mlp/scaler.joblib": "be1d8d9615ac5d20d26b7287dae485f13804b22fdb42c3aea1e1a9186914b9ee",
+   "router.runtime.yaml": "ef2cbab9bc00ba295bf58d44f171f6f76b477a5a39149a4112cc7e74bbbccb5b",
+   "version.json": "806a413d0a8caa5f6b566060c0131b38466e68efce0b09b2d4902f4aef8bfd1c"
+  }
+ },
+ "inference": {
+  "featureDim": 390,
+  "mlpInputDim": 1536,
+  "routeClasses": [
+   "R0",
+   "R1",
+   "R2",
+   "R3"
+  ],
+  "temperature": 0.8092449307441711,
+  "perClassAlpha": [
+   0.5,
+   0.05,
+   0.5,
+   0.8500000000000001
+  ],
+  "tfidfDims": 102,
+  "svdComponents": 100,
+  "vocabularySize": 10000,
+  "pcaDim": 64,
+  "embeddingDim": 512,
+  "bgeMaxLength": 510,
+  "auxHead": true
+ },
+ "runtimeConfig": {
+  "route_classes": [
+   "R0",
+   "R1",
+   "R2",
+   "R3"
+  ],
+  "tier_mapping": {
+   "R0": "S",
+   "R1": "M",
+   "R2": "L",
+   "R3": "XL"
+  },
+  "tier_registry": {
+   "S": [
+    "qwen/qwen3.7-flash"
+   ],
+   "M": [
+    "deepseek/deepseek-v4-flash-0731"
+   ],
+   "L": [
+    "deepseek/deepseek-v4-pro-0813"
+   ],
+   "XL": [
+    "z-ai/glm-5.3"
+   ]
+  },
+  "tier_explanations": {
+   "S": {
+    "route_class": "R0",
+    "model": "qwen/qwen3.7-flash",
+    "intent": "Fast direct answers for trivial turns, acknowledgements, simple rewrites, and short factual responses.",
+    "expected_controls": "No explicit thinking; P0 prompt hint may shorten responses."
+   },
+   "M": {
+    "route_class": "R1",
+    "model": "deepseek/deepseek-v4-flash-0731",
+    "intent": "General-purpose default for routine product, coding, writing, and comparison tasks with bounded complexity.",
+    "expected_controls": "Light or default thinking; P1 prompt policy unless the task is clearly trivial or high risk."
+   },
+   "L": {
+    "route_class": "R2",
+    "model": "deepseek/deepseek-v4-pro-0813",
+    "intent": "Reasoning tier for debugging, multi-signal diagnosis, multi-step implementation plans, and non-trivial technical analysis.",
+    "expected_controls": "High thinking; P1/P2 prompt policy depending on flags and difficulty."
+   },
+   "XL": {
+    "route_class": "R3",
+    "model": "z-ai/glm-5.3",
+    "intent": "Highest GLM tier for architecture design, cross-system tradeoffs, high-risk production decisions, and complex recovery turns.",
+    "expected_controls": "High thinking; P1/P2 prompt policy depending on flags and difficulty."
+   }
+  },
+  "thresholds": {
+   "margin_upgrade": 0.1,
+   "high_confidence": 0.7,
+   "r1_rescue": {
+    "from_r0_max_gap": 0.1
+   },
+   "cascade_stage1_threshold": 0.4,
+   "under_routing_safety": 0.45,
+   "kv_cache_aware": true
+  },
+  "flag_rules": {
+   "high_risk": {
+    "keywords_zh": [
+     "生产",
+     "部署",
+     "回滚",
+     "迁移",
+     "删除",
+     "客户",
+     "法务",
+     "财务"
+    ],
+    "keywords_en": [
+     "deploy",
+     "rollback",
+     "migration",
+     "delete",
+     "overwrite",
+     "production",
+     "customer-facing"
+    ]
+   },
+   "debug": {
+    "keywords": [
+     "error",
+     "bug",
+     "exception",
+     "traceback",
+     "failed",
+     "root cause",
+     "报错",
+     "根因",
+     "修复"
+    ],
+    "patterns": [
+     "Traceback \\(most recent",
+     "stderr:",
+     "FAILED"
+    ]
+   },
+   "repo_arch": {
+    "keywords": [
+     "repo",
+     "codebase",
+     "monorepo",
+     "architecture",
+     "重构",
+     "架构",
+     "module",
+     "dependency"
+    ]
+   },
+   "strict_format": {
+    "keywords": [
+     "JSON",
+     "YAML",
+     "CSV",
+     "schema",
+     "只返回",
+     "不要解释",
+     "按格式"
+    ]
+   },
+   "long_context": {
+    "char_threshold": 6000,
+    "code_block_threshold": 1500,
+    "log_block_threshold": 1500,
+    "file_ref_threshold": 2
+   }
+  },
+  "thinking_mode_rules": {
+   "T0": {
+    "max_class": "R0",
+    "min_margin": 0.5
+   },
+   "T1": {
+    "max_class": "R1",
+    "min_margin": 0.4
+   },
+   "T2": {
+    "default": true
+   },
+   "T3": {
+    "min_class": "R2",
+    "flags": [
+     "debug",
+     "long_context",
+     "high_risk"
+    ]
+   }
+  },
+  "prompt_policies": {
+   "P0": {
+    "hint_zh": "直接作答，缩短思考长度，避免无关展开。",
+    "hint_en": "Answer directly, keep thinking short, avoid irrelevant expansion.",
+    "conditions": {
+     "max_difficulty": 0.8,
+     "min_margin": 0.4,
+     "no_flags": [
+      "high_risk",
+      "strict_format",
+      "debug"
+     ]
+    }
+   },
+   "P1": {
+    "hint_zh": "",
+    "hint_en": ""
+   },
+   "P2": {
+    "hint_zh": "充分分析，覆盖关键约束，避免遗漏。",
+    "hint_en": "Analyze thoroughly, cover key constraints, avoid omissions.",
+    "conditions": {
+     "any_flag": [
+      "high_risk",
+      "long_context",
+      "debug",
+      "strict_format"
+     ]
+    }
+   }
+  },
+  "optuna": {
+   "alpha": 1.0,
+   "beta": 0.3,
+   "gamma": 0.3
+  },
+  "context_rules": {
+   "deep_conversation_threshold": 4,
+   "heavy_context_tokens": 2000,
+   "heavy_context_min_class": "R1",
+   "deep_conversation_min_class": "R1"
+  },
+  "trajectory": {
+   "delta_threshold": 0.3,
+   "history_max_turns": 5
+  },
+  "v4": {
+   "aux_head_inference": false,
+   "bge_model_name": "BAAI/bge-small-zh-v1.5",
+   "bge_backend": "onnx",
+   "bge_onnx_dir": "bge_onnx",
+   "pca_dim": 64,
+   "feature_dim": 390,
+   "history_user_max_turns": 4,
+   "bge_truncate_tokens": 510,
+   "aux_downgrade": {
+    "enabled": false,
+    "threshold": 0.55
+   },
+   "sticky_tier": {
+    "enabled": false,
+    "max_user_len": 200
+   }
+  }
+ },
+ "gatewayPolicy": {
+  "default_tier": "c1",
+  "confidence_threshold": 0.5,
+  "confidence_high_tier_margin": 0.05,
+  "kv_cache_anti_downgrade_enabled": true,
+  "kv_cache_anti_downgrade_window_seconds": 600,
+  "complaint_upgrade_enabled": true,
+  "complaint_upgrade_steps": 1,
+  "complaint_upgrade_max_chars": 160,
+  "routing_history_window_seconds": 1800,
+  "max_routing_history": 5,
+  "router_history_user_max_turns": 4,
+  "router_history_user_max_chars": 8000,
+  "router_prev_assistant_max_chars": 8000,
+  "complaint_terms": [
+   "不对",
+   "不行",
+   "不对劲",
+   "还是不对",
+   "完全不对",
+   "不是这样",
+   "你搞错了",
+   "你说错了",
+   "回答错了",
+   "理解错了",
+   "搞错重点了",
+   "错了",
+   "答非所问",
+   "没理解",
+   "没听懂",
+   "太差",
+   "太敷衍",
+   "敷衍",
+   "没用",
+   "废话",
+   "离谱",
+   "乱说",
+   "瞎说",
+   "胡扯",
+   "答得太差",
+   "质量太差",
+   "不满意",
+   "胡说",
+   "漏了",
+   "遗漏了",
+   "没提到",
+   "没覆盖",
+   "跑题了",
+   "偏题了",
+   "不是我要的",
+   "没按要求",
+   "没有按要求",
+   "重写",
+   "重新来",
+   "重新回答",
+   "再来一版",
+   "换个说法",
+   "重新组织",
+   "按我说的重来",
+   "你没有回答",
+   "垃圾",
+   "傻逼",
+   "sb",
+   "蠢",
+   "废物",
+   "滚",
+   "妈的",
+   "操",
+   "艹",
+   "wrong",
+   "incorrect",
+   "not correct",
+   "you are wrong",
+   "completely wrong",
+   "totally wrong",
+   "not what i asked",
+   "you misunderstood",
+   "that's not right",
+   "this is not right",
+   "bad answer",
+   "terrible answer",
+   "awful answer",
+   "horrible answer",
+   "poor answer",
+   "lazy answer",
+   "low quality",
+   "poor quality",
+   "try again",
+   "redo",
+   "rewrite",
+   "start over",
+   "answer again",
+   "you missed",
+   "missed the point",
+   "off topic",
+   "irrelevant",
+   "not helpful",
+   "garbage",
+   "trash",
+   "crap",
+   "sucks",
+   "stupid",
+   "idiot",
+   "moron",
+   "dumb",
+   "pathetic",
+   "ridiculous",
+   "fuck",
+   "fucking",
+   "shit",
+   "damn",
+   "wtf",
+   "asshole",
+   "bullshit",
+   "nonsense",
+   "useless"
+  ],
+  "thinking_mode_order": {
+   "T0": 0,
+   "T1": 1,
+   "T2": 2,
+   "T3": 3
+  }
+ },
+ "lightgbm": {
+  "lgbm-main.bin": {
+   "numClass": 4,
+   "numFeatures": 390,
+   "objective": "multiclass num_class:4",
+   "trees": 5548,
+   "sections": {
+    "nodeOffsets": {
+     "offset": 0,
+     "length": 5549,
+     "dtype": "u4"
+    },
+    "leafOffsets": {
+     "offset": 22200,
+     "length": 5549,
+     "dtype": "u4"
+    },
+    "splitFeature": {
+     "offset": 44400,
+     "length": 343976,
+     "dtype": "u2"
+    },
+    "decisionType": {
+     "offset": 732352,
+     "length": 343976,
+     "dtype": "u1"
+    },
+    "leftChild": {
+     "offset": 1076328,
+     "length": 343976,
+     "dtype": "i2"
+    },
+    "rightChild": {
+     "offset": 1764280,
+     "length": 343976,
+     "dtype": "i2"
+    },
+    "threshold": {
+     "offset": 2452232,
+     "length": 343976,
+     "dtype": "f8"
+    },
+    "leafValue": {
+     "offset": 5204040,
+     "length": 349524,
+     "dtype": "f8"
+    }
+   }
+  },
+  "lgbm-aux.bin": {
+   "numClass": 4,
+   "numFeatures": 390,
+   "objective": "multiclass num_class:4",
+   "trees": 1228,
+   "sections": {
+    "nodeOffsets": {
+     "offset": 0,
+     "length": 1229,
+     "dtype": "u4"
+    },
+    "leafOffsets": {
+     "offset": 4920,
+     "length": 1229,
+     "dtype": "u4"
+    },
+    "splitFeature": {
+     "offset": 9840,
+     "length": 28334,
+     "dtype": "u2"
+    },
+    "decisionType": {
+     "offset": 66512,
+     "length": 28334,
+     "dtype": "u1"
+    },
+    "leftChild": {
+     "offset": 94848,
+     "length": 28334,
+     "dtype": "i2"
+    },
+    "rightChild": {
+     "offset": 151520,
+     "length": 28334,
+     "dtype": "i2"
+    },
+    "threshold": {
+     "offset": 208192,
+     "length": 28334,
+     "dtype": "f8"
+    },
+    "leafValue": {
+     "offset": 434864,
+     "length": 29562,
+     "dtype": "f8"
+    }
+   }
+  }
+ },
+ "files": {
+  "bge-pca.f32": {
+   "sha256": "74c17eef56a58c628065a3aa67320f8c739c70f68d1e7e9576706d06a1b89c17",
+   "bytes": 133120
+  },
+  "bge.onnx": {
+   "sha256": "87847793fac866d65b19cee2e73a6b2a2446a1262ab0911b1dbf9b3e9399ef9d",
+   "bytes": 23902398
+  },
+  "lgbm-aux.bin": {
+   "sha256": "2865adc96aebc0e1ec473a532a014825f915347406e842e8830d5a6da42a46c0",
+   "bytes": 671360
+  },
+  "lgbm-main.bin": {
+   "sha256": "09928c3d19234d06ae45d94d72529ef342b6f3c1c1b06c29ef127e06da2cb556",
+   "bytes": 8000232
+  },
+  "mlp-scaler.f64": {
+   "sha256": "6f535e3b9138c299eb849548e1c586a019d9b71fe5526e5408d6a73413c1c067",
+   "bytes": 24576
+  },
+  "mlp.onnx": {
+   "sha256": "e7358ac3f827e8f38a6384ba4f7c6f3227c18898ced95d145adb9272c72137d6",
+   "bytes": 2367544
+  },
+  "svd-components.f64": {
+   "sha256": "b6aaa05d2098e127a7957f0d78b13e5575535515b1c203d45fd93bff29e031c4",
+   "bytes": 8000000
+  },
+  "tfidf-idf.f64": {
+   "sha256": "5774fe80526e6d7c519bcc0e71a2fef1d627cef99a2e4979952e0cb482bab5fa",
+   "bytes": 80000
+  },
+  "tfidf-vocab.json": {
+   "sha256": "8bf37b5d5327cb91dd575733e0c965b0f9e48b5d68206284eac95e2ec8e48a34",
+   "bytes": 73332
+  },
+  "tokenizer.json": {
+   "sha256": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26",
+   "bytes": 439125
+  }
+ }
+}
