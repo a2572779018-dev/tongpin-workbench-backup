@@ -9,7 +9,7 @@ export interface AiAgentScheduler {
 /** Process-local fallback for self-hosted Node deployments. Cloudflare uses
  * its scheduler to invoke the same service cycle inside the Durable Object. */
 export function createAiAgentScheduler(
-  service: Pick<AiService, "runBackgroundAgentCycle"> & Partial<Pick<AiService, "runBackgroundMediaCycle">>,
+  service: Pick<AiService, "runBackgroundAgentCycle"> & Partial<Pick<AiService, "runBackgroundMediaCycle" | "runBackgroundMemoryCycle">>,
   options: { intervalMs?: number; batchSize?: number; initialDelayMs?: number } = {},
 ): AiAgentScheduler {
   const intervalMs = Math.max(5_000, Math.min(5 * 60_000, options.intervalMs ?? 15_000));
@@ -34,6 +34,7 @@ export function createAiAgentScheduler(
     active = Promise.allSettled([
       service.runBackgroundAgentCycle(batchSize),
       ...(service.runBackgroundMediaCycle ? [service.runBackgroundMediaCycle(batchSize)] : []),
+      ...(service.runBackgroundMemoryCycle ? [service.runBackgroundMemoryCycle(batchSize)] : []),
     ])
       .then(() => undefined)
       // A failed tick is isolated; persisted runs remain available to a later

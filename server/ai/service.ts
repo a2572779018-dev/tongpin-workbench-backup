@@ -28,6 +28,7 @@ import { describeAiRichContent } from "../../shared/aiRichContent";
 import { citationsForContent } from "./citations";
 import { withPendingGuidance } from "./runGuidance";
 import { AiVoiceService } from "./voice";
+import { AiMemberMemoryService } from "./memberMemoryService";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -216,12 +217,14 @@ export class AiService {
   readonly video: AiVideoService;
   readonly harness: AiHarness;
   readonly voice: AiVoiceService;
+  readonly memberMemory: AiMemberMemoryService;
   private readonly availabilityProbe: AvailabilityProbe;
   constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "", private readonly isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
     this.harness = new AiHarness(store, box, transport);
     this.video = new AiVideoService(store, box, transport, videoKey, this.harness);
     this.voice = new AiVoiceService(store, box, transport);
     this.availabilityProbe = new AvailabilityProbe(transport, box);
+    this.memberMemory = new AiMemberMemoryService({ store, harness: this.harness, box, transport, isPrincipalActive: isBackgroundPrincipalActive });
   }
   forTenant(tenantId: string): AiService {
     const scoped = this.store.forTenant(tenantId);
@@ -516,6 +519,8 @@ export class AiService {
     }
     return result;
   }
+  /** Journaled member-memory reviews that were not started in-process. */
+  runBackgroundMemoryCycle(limit = 4) { return this.memberMemory.runBackgroundCycle(limit, tenantId => this.forTenant(tenantId).memberMemory); }
   cancelHarnessRun(userId: string, requestId: string): AiHarnessTrace { return this.harness.cancelWaitingRun(userId, requestId); }
   quota(userId: string): AiQuota { this.recover(userId); return this.store.quota(userId); }
   status(userId: string): AiStatus {
@@ -555,7 +560,7 @@ export class AiService {
     });
   }
   memberUsage(userId: string) {
-    return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.kind === "voice" ? entry.billingKind === "text_to_speech_conversion" ? "语音朗读" : "语音输入" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
+    return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "memory" ? "记忆整理" : entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.kind === "voice" ? entry.billingKind === "text_to_speech_conversion" ? "语音朗读" : "语音输入" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
   }
   private chatSelection(request: AiChatRequest): { provider: StoredProvider; route: ResolvedHarnessRoute } {
     const saved = this.store.provider();
@@ -617,7 +622,7 @@ export class AiService {
     this.bindVideoTierParameters(request);
     const { provider, route } = this.chatSelection(request);
     const model = route.modelId;
-    const persona = new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile;
+    const persona = this.memberMemory.withMemory(new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile, userId, request, false);
     return this.chatPreflight(userId, request, provider, persona, model);
   }
   getAsset(userId: string, assetId: string): AiImageAsset {
@@ -741,7 +746,7 @@ export class AiService {
     const key = await (await this.box()).decrypt(route.encryptedKey);
     const idempotencyKey = await providerIdempotencyKey(this.store.tenantId, userId, request.requestId, "chat");
     const model = route.modelId;
-    const persona = new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile;
+    const persona = this.memberMemory.withMemory(new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile, userId, request, true);
     const reserved = this.store.sql.transaction(() => {
       // Recheck after asynchronous hashing / key decryption.
       if (this.store.request(userId, request.requestId)) throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "AI 正在处理这条消息，请稍候");
@@ -982,6 +987,8 @@ export class AiService {
       const finalResponse = { ...memberChatResult(this.store.request(userId, request.requestId)!.result!), quota: this.store.quota(userId) };
       emitSettledUsage();
       emit({ type: "run_finished", data: { response: finalResponse } });
+      // Hermes-style learning loop: journaled, started after the reply is returned.
+      this.memberMemory.afterReply(userId, request, finalResponse);
       return finalResponse;
     } catch (error) {
       const safe = error instanceof AiError ? error : new AiError(502, "AI_CONNECTION_FAILED", "AI 服务连接失败或超时，请稍后重试；不确定用量已记录，请管理员核对");

@@ -8,6 +8,7 @@ import { handleAiWorkspaceV2Request } from "../../server/ai/workspaceV2Protocol"
 import { handleAiWorkspaceRequest } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "../../server/ai/persona";
 import { handleAiPersonaRequest } from "./ai/personaRoutes";
+import { handleAiMemberMemoryRequest, isAiMemberMemoryPath } from "./ai/memberMemoryRoutes";
 import type {
   AppNotification,
   BossWorkReportStatus,
@@ -925,17 +926,19 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         if (path === "/api/ai/workspace") return await handleAiWorkspaceRequest(request, this.aiWorkspace, user);
         if (path.startsWith("/api/ai/workspace-v2/")) return await handleAiWorkspaceV2Request(request, this.aiWorkspaceV2, user);
         if (path === "/api/ai/persona") return await handleAiPersonaRequest(request, this.aiPersona, user);
+        if (isAiMemberMemoryPath(path)) return await handleAiMemberMemoryRequest(request, this.ai.service, user);
         return await handleAiRequest(request, this.ai.service, user, () => this.sql.exec<UserRow>("SELECT * FROM users ORDER BY created_at DESC").toArray(), task => this.ctx.waitUntil(task));
       }
 
       if (path === AI_INTERNAL_AGENT_TICK_PATH) {
         if (method !== "POST") throw new ApiError(405, "METHOD_NOT_ALLOWED", "请求方法不允许");
         this.ensureAiSchemaReady();
-        const [agent, media] = await Promise.all([
+        const [agent, media, memory] = await Promise.all([
           this.ai.service.runBackgroundAgentCycle(4),
           this.ai.service.runBackgroundMediaCycle(4),
+          this.ai.service.runBackgroundMemoryCycle(4),
         ]);
-        return json({ agent, media });
+        return json({ agent, media, memory });
       }
 
       if (path === LORA_INTERNAL_COLLECT_PATH) {

@@ -39,6 +39,7 @@ import { createAiWorkspaceV2Router } from "./ai/workspaceV2Routes";
 import { createAiWorkspaceRouter } from "./ai/workspaceRoutes";
 import { AiPersonaRepository } from "./ai/persona";
 import { createAiPersonaRouter } from "./ai/personaRoutes";
+import { createAiMemberMemoryRouter } from "./ai/memberMemoryRoutes";
 import { createAiAgentScheduler, type AiAgentScheduler } from "./ai/backgroundAgent";
 import { aiTenantIdFromPrincipal } from "./ai/tenant";
 import { createDifyToolResponse, type DifyRouteOptions } from "./ai/difyRuntimeRoutes";
@@ -157,6 +158,8 @@ export async function createRuntime(
   app.use("/api/ai/persona", createAiPersonaRouter(aiPersona, requireAuth));
   // Relationship-graph mirror uploads parse their own (authenticated, 5 MB) body.
   app.use("/api/relationship-graphs", createRelationshipGraphsRouter(store, requireAuth));
+  app.use("/api/ai/memory", createAiMemberMemoryRouter(ai.service, requireAuth, "member"));
+  app.use("/api/admin/ai/memory", createAiMemberMemoryRouter(ai.service, requireAuth, "admin"));
   app.use("/api/ai/chat", express.json({ limit: 1600 * 1024 }));
   app.use("/api/ai/preflight", express.json({ limit: 1600 * 1024 }));
   app.post("/api/dify/tools/invoke", express.raw({ type: "application/json", limit: "16kb" }), async (request, response) => {

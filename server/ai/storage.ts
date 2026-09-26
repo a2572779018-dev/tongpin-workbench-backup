@@ -3,6 +3,8 @@ import { AiError } from "./security";
 import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey, tenantStorageValue } from "./tenant";
 import { aiLatencyThresholds } from "./observabilityThresholds";
 import type { AiRunEvent, AiRunEventPayload } from "../../shared/aiRunEvents";
+import { applyAiModuleMigrations } from "./aiMigrations";
+import { MEMBER_MEMORY_MIGRATIONS } from "./memberMemoryStore";
 
 export interface AiSql {
   exec(query: string, ...bindings: Array<string | number | null>): void;
@@ -147,6 +149,8 @@ export class AiStore {
     // Never opt historical/abandoned runs into paid background continuation.
     if (!harnessRunColumns.some(column => column.name === "background_capable")) this.sql.exec("ALTER TABLE ai_harness_runs ADD COLUMN background_capable INTEGER NOT NULL DEFAULT 0");
     this.sql.exec("CREATE INDEX IF NOT EXISTS ai_usage_tenant_user_time ON ai_usage(tenant_id,user_id,created_at DESC); CREATE INDEX IF NOT EXISTS ai_harness_runs_tenant_user ON ai_harness_runs(tenant_id,user_id,request_id); CREATE INDEX IF NOT EXISTS ai_observability_tenant_time ON ai_observability_events(tenant_id,created_at DESC); CREATE INDEX IF NOT EXISTS ai_observability_alerts_tenant_time ON ai_observability_alerts(tenant_id,last_seen_at DESC); CREATE INDEX IF NOT EXISTS ai_video_jobs_tenant_user ON ai_video_jobs(tenant_id,user_id,id); CREATE INDEX IF NOT EXISTS ai_video_references_tenant_user ON ai_video_references(tenant_id,user_id,id); CREATE UNIQUE INDEX IF NOT EXISTS ai_video_references_public ON ai_video_references(public_id) WHERE public_id IS NOT NULL;");
+    // Numbered, module-owned migrations (ai_schema_migrations): member memory v1.
+    applyAiModuleMigrations(this.sql, "member_memory", MEMBER_MEMORY_MIGRATIONS);
   }
   provider(): StoredProvider | null {
     const row = this.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id=? AND tenant_id=?", this.settingKey("provider"), this.tenantId)[0];

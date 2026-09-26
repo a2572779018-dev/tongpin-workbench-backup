@@ -223,7 +223,7 @@ export interface AiUsage {
   estimated: boolean;
   /** Quota units explicitly configured by an administrator, not provider token counts. */
   convertedTokens?: number;
-  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search" | "speech_to_text_conversion" | "text_to_speech_conversion";
+  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search" | "speech_to_text_conversion" | "text_to_speech_conversion" | "memory_conversion";
   /** Observed provider search invocations, never inferred from generated text or citations. */
   searchCalls?: number;
   /** Separates actual text-token reporting from administrator-defined tool conversion estimates. */
@@ -247,7 +247,7 @@ export interface AiUsageEntry extends AiUsage {
   id: string;
   userId: string;
   requestId: string | null;
-  kind: "chat" | "image" | "video" | "voice" | "quota";
+  kind: "chat" | "image" | "video" | "voice" | "quota" | "memory";
   status: "completed" | "failed" | "uncertain" | "adjusted";
   model: string | null;
   mode: AiMode | null;
