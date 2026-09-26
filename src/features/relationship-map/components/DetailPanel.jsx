@@ -44,6 +44,7 @@ export function DetailPanel({
   onEditPerson,
   onDeletePerson,
   onClose,
+  readOnly = false,
 }) {
   const panelRef = useRef(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
@@ -75,12 +76,12 @@ export function DetailPanel({
       <div className="detail-panel__topline">
         <span className="detail-kicker">客户详情</span>
         <div className="detail-panel__top-actions">
-          {!privacy ? (
+          {!privacy && !readOnly ? (
             <button className="icon-button icon-button--small" type="button" onClick={() => onEditPerson(person.id)} aria-label={`编辑${visualName}的客户资料`} title="编辑客户" data-person-focus-fallback="detail">
               <PencilSimple size={17} weight="bold" />
             </button>
           ) : null}
-          {person.id !== "self" ? (
+          {person.id !== "self" && !readOnly ? (
             <button className="icon-button icon-button--small person-delete-button" type="button" onClick={() => onDeletePerson(person.id)} aria-label={`删除客户${visualName}`} title="删除客户">
               <Trash size={17} weight="bold" />
             </button>
@@ -117,6 +118,11 @@ export function DetailPanel({
           </label>
           {privacy ? (
             <span className="detail-identity-color__private">已隐藏</span>
+          ) : readOnly ? (
+            <span className={`identity-color-select identity-color-select--${identityColorKey} identity-color-readonly`}>
+              <span className="identity-color-swatch" aria-hidden="true" />
+              <span>{identityColorLabel(identityColorKey, normalizedColorSemantics)}</span>
+            </span>
           ) : (
             <div className={`identity-color-select identity-color-select--${identityColorKey}`}>
               <span className="identity-color-swatch" aria-hidden="true" />
@@ -149,9 +155,11 @@ export function DetailPanel({
       <section className="detail-section detail-relations">
         <div className="detail-section__heading">
           <h3>相关关系</h3>
-          <button className="mini-action-button" type="button" onClick={() => onAddRelation(person.id)} data-relation-focus-fallback="detail">
-            <Plus size={14} weight="bold" />新增
-          </button>
+          {readOnly ? null : (
+            <button className="mini-action-button" type="button" onClick={() => onAddRelation(person.id)} data-relation-focus-fallback="detail">
+              <Plus size={14} weight="bold" />新增
+            </button>
+          )}
         </div>
         {relations.length > 0 ? (
           <ul className="detail-relation-list">
@@ -165,6 +173,7 @@ export function DetailPanel({
                   </div>
                   {relation.note ? <p>{privacy ? "关系备注已隐藏" : relation.note}</p> : null}
                 </div>
+                {readOnly ? null : (
                 <div className="detail-relation-list__actions">
                   {!privacy ? (
                     <button
@@ -187,11 +196,12 @@ export function DetailPanel({
                     <Trash size={15} weight="bold" />
                   </button>
                 </div>
+                )}
               </li>
             ))}
           </ul>
         ) : (
-          <p className="detail-empty-state">暂无相关连接，可从这里新增。</p>
+          <p className="detail-empty-state">{readOnly ? "暂无相关连接。" : "暂无相关连接，可从这里新增。"}</p>
         )}
       </section>
 

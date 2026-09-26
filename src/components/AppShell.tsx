@@ -89,6 +89,7 @@ export type AppView =
   | "relations"
   | "ai"
   | "boss"
+  | "member-graphs"
   | "admin"
   | "admin-ai"
   | "lora-chain";
@@ -98,6 +99,7 @@ const PAGE_TITLES: Record<AppView, string> = {
   relations: "客户脉络图",
   ai: "同频 AI",
   boss: "全员进度",
+  "member-graphs": "成员客户脉络图",
   admin: "账号与权限",
   "admin-ai": "AI 管理",
   "lora-chain": "LORA 链驾驶舱",
@@ -1153,6 +1155,11 @@ export function AppShell({
               view: "boss" as const,
               label: "全员进度",
               icon: UsersRound,
+            },
+            {
+              view: "member-graphs" as const,
+              label: "成员客户脉络图",
+              icon: Network,
             },
             {
               view: "lora-chain" as const,

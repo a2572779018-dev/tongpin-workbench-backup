@@ -14,8 +14,14 @@ describe("LORA dashboard client access", () => {
 
   it("keeps the exact navigation order for every role", () => {
     expect(visibleAppViews("member")).toEqual(["home", "relations", "ai"]);
-    expect(visibleAppViews("boss")).toEqual(["home", "boss", "lora-chain", "ai"]);
+    expect(visibleAppViews("boss")).toEqual(["home", "boss", "member-graphs", "lora-chain", "ai"]);
     expect(visibleAppViews("admin")).toEqual(["admin", "admin-ai"]);
+  });
+
+  it("shows members' relationship graphs to the boss only (read-only view)", () => {
+    expect(roleAllowsAppView("boss", "member-graphs")).toBe(true);
+    expect(roleAllowsAppView("member", "member-graphs")).toBe(false);
+    expect(roleAllowsAppView("admin", "member-graphs")).toBe(false);
   });
 
   it("allows the relationship map for members only", () => {

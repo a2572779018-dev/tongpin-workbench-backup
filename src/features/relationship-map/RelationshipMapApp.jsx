@@ -152,6 +152,45 @@ export function initialGraphState(storageKey, allowLocalStorage) {
   return { graph: previewFallback, storage, storageError: null, restored: false };
 }
 
+/**
+ * Boss read-only viewer: normalize a member's synced snapshot through the same
+ * strict parser as imports. Never touches localStorage or the encrypted vault.
+ */
+export function readOnlyGraphState(input) {
+  try {
+    const document = parseGraphDocument(input);
+    return {
+      graph: {
+        title: document.title,
+        colorSemantics: document.colorSemantics,
+        people: document.people,
+        connections: document.connections,
+      },
+      storage: null,
+      storageError: null,
+      restored: true,
+      readOnlyError: null,
+    };
+  } catch (error) {
+    return {
+      graph: blankGraphState(),
+      storage: null,
+      storageError: null,
+      restored: false,
+      readOnlyError: error instanceof Error && error.message ? error.message : "数据格式无效",
+    };
+  }
+}
+
+function notifySecureGraph(callback, snapshot) {
+  if (typeof callback !== "function") return;
+  try {
+    callback(snapshot);
+  } catch {
+    // The boss mirror is best effort and must never affect local saving.
+  }
+}
+
 export function readableRelationshipStorageError(error) {
   const rawMessage = error instanceof Error
     ? error.message
@@ -203,10 +242,18 @@ export function RelationshipMapApp({
   themeStorageKey,
   notificationUnread = 0,
   onOpenNotifications,
+  readOnlyGraph = null,
+  readOnlyNote = "",
+  onSecureGraphLoaded,
+  onSecureGraphSaved,
+  bossSyncStatus = null,
 }) {
+  const readOnly = readOnlyGraph !== null && readOnlyGraph !== undefined;
   const initialState = useMemo(
-    () => initialGraphState(storageKey, allowLocalStorage),
-    [allowLocalStorage, storageKey],
+    () => (readOnly
+      ? readOnlyGraphState(readOnlyGraph)
+      : initialGraphState(storageKey, allowLocalStorage)),
+    [allowLocalStorage, readOnly, readOnlyGraph, storageKey],
   );
   const initialGraph = initialState.graph;
   const [visualTheme, setVisualTheme] = useState(() => readVisualTheme(themeStorageKey));
@@ -232,7 +279,9 @@ export function RelationshipMapApp({
   const [pendingRelink, setPendingRelink] = useState(null);
   const [importNotice, setImportNotice] = useState(null);
   const [storageStatus, setStorageStatus] = useState(
-    secureStorage
+    readOnly
+      ? "只读查看"
+      : secureStorage
       ? "正在载入本机数据"
       : allowLocalStorage
         ? initialState.storage
@@ -240,9 +289,13 @@ export function RelationshipMapApp({
           : "请手动导出保存"
         : "本机安全存储服务不可用",
   );
-  const [storageReady, setStorageReady] = useState(allowLocalStorage && !secureStorage);
+  const [storageReady, setStorageReady] = useState(
+    readOnly ? !initialState.readOnlyError : allowLocalStorage && !secureStorage,
+  );
   const [storageLoadError, setStorageLoadError] = useState(
-    !allowLocalStorage && !secureStorage
+    readOnly
+      ? initialState.readOnlyError
+      : !allowLocalStorage && !secureStorage
       ? "本机安全存储服务暂时不可用，请重新打开同频后重试。"
       : null,
   );
@@ -261,6 +314,11 @@ export function RelationshipMapApp({
   const persistPromisesRef = useRef(new Map());
   const persistTailRef = useRef(Promise.resolve(true));
   const secureOpenPromiseRef = useRef(null);
+  // Refs keep the vault-open effect independent of callback identity.
+  const secureGraphLoadedRef = useRef(onSecureGraphLoaded);
+  const secureGraphSavedRef = useRef(onSecureGraphSaved);
+  secureGraphLoadedRef.current = onSecureGraphLoaded;
+  secureGraphSavedRef.current = onSecureGraphSaved;
 
   const activeElementWithinApp = useCallback(() => {
     const root = appRootRef.current?.getRootNode();
@@ -282,14 +340,16 @@ export function RelationshipMapApp({
   }, []);
 
   const openQuickPerson = useCallback((parentId = "self") => {
+    if (readOnly) return;
     modalReturnFocusRef.current = activeElementWithinApp();
     setPersonEditor({ mode: "create", initialParentId: parentId || "self" });
-  }, [activeElementWithinApp]);
+  }, [activeElementWithinApp, readOnly]);
 
   const markGraphChanged = useCallback(() => {
+    if (readOnly) return;
     setStorageStatus("待保存到本机");
     setMutationRevision((current) => current + 1);
-  }, []);
+  }, [readOnly]);
 
   const selectedPerson = useMemo(
     () => graphPeople.find((person) => person.id === selectedId) ?? null,
@@ -426,13 +486,14 @@ export function RelationshipMapApp({
             visibleChildCount: (hierarchy.childrenById.get(node.id) ?? [])
               .filter((childId) => treeVisibleIds.has(childId)).length,
             hiddenDescendantCount: hiddenDescendantCount(node.id, hierarchy, treeVisibleIds),
+            readOnly,
             onOpenDetails: openQuickDetails,
-            onAddPerson: openQuickPerson,
+            onAddPerson: readOnly ? undefined : openQuickPerson,
             onToggleExpand: toggleBranch,
           },
         };
       }),
-    [detailOpen, graphColorSemantics, graphConnections, graphPeople, hierarchy, layoutExpandedIds, nodes, openQuickDetails, openQuickPerson, privacy, query, selectedId, toggleBranch, treeVisibleIds, visibleNodeIds, visibleSearchMatches],
+    [detailOpen, graphColorSemantics, graphConnections, graphPeople, hierarchy, layoutExpandedIds, nodes, openQuickDetails, openQuickPerson, privacy, query, readOnly, selectedId, toggleBranch, treeVisibleIds, visibleNodeIds, visibleSearchMatches],
   );
 
   const renderedEdges = useMemo(
@@ -613,35 +674,40 @@ export function RelationshipMapApp({
   }, []);
 
   const openCreateRelation = useCallback((sourceId) => {
+    if (readOnly) return;
     rememberModalTrigger();
     setRelationEditor({ mode: "create", initialSource: sourceId || selectedId || "self" });
-  }, [rememberModalTrigger, selectedId]);
+  }, [readOnly, rememberModalTrigger, selectedId]);
 
   const openEditRelation = useCallback((index) => {
+    if (readOnly) return;
     rememberModalTrigger();
     setRelationEditor({ mode: "edit", index });
-  }, [rememberModalTrigger]);
+  }, [readOnly, rememberModalTrigger]);
 
   const openDeleteDialog = useCallback((index) => {
+    if (readOnly) return;
     rememberModalTrigger();
     setPendingDeleteIndex(index);
-  }, [rememberModalTrigger]);
+  }, [readOnly, rememberModalTrigger]);
 
   const openCreatePerson = useCallback((parentId = "self") => {
+    if (readOnly) return;
     rememberModalTrigger();
     setPersonEditor({ mode: "create", initialParentId: parentId || "self" });
-  }, [rememberModalTrigger]);
+  }, [readOnly, rememberModalTrigger]);
 
   const openEditPerson = useCallback((personId) => {
+    if (readOnly) return;
     rememberModalTrigger();
     setPersonEditor({ mode: "edit", personId });
-  }, [rememberModalTrigger]);
+  }, [readOnly, rememberModalTrigger]);
 
   const openPersonDeleteDialog = useCallback((personId) => {
-    if (personId === "self") return;
+    if (readOnly || personId === "self") return;
     rememberModalTrigger();
     setPendingPersonDeleteId(personId);
-  }, [rememberModalTrigger]);
+  }, [readOnly, rememberModalTrigger]);
 
   useEffect(() => {
     if (selectedPerson && !visibleNodeIds.has(selectedPerson.id)) closeDetails();
@@ -684,6 +750,8 @@ export function RelationshipMapApp({
   }, [initialState.storageError, showImportNotice]);
 
   useEffect(() => {
+    // The boss viewer renders a synced snapshot; it never opens any vault.
+    if (readOnly) return undefined;
     if (!secureStorage) {
       if (!allowLocalStorage) {
         setStorageReady(false);
@@ -728,6 +796,10 @@ export function RelationshipMapApp({
       }
       setStorageLoadError(null);
       setStorageReady(true);
+      notifySecureGraph(secureGraphLoadedRef.current, {
+        content: result.content,
+        revision: result.revision,
+      });
     }).catch((error) => {
       if (cancelled) return;
       const scopeToken = secureScopeTokenRef.current;
@@ -741,7 +813,7 @@ export function RelationshipMapApp({
     return () => {
       cancelled = true;
     };
-  }, [allowLocalStorage, secureStorage, setEdges, setNodes, storageRetryRevision]);
+  }, [allowLocalStorage, readOnly, secureStorage, setEdges, setNodes, storageRetryRevision]);
 
   const retrySecureStorageOpen = useCallback(() => {
     setStorageLoadError(null);
@@ -765,6 +837,7 @@ export function RelationshipMapApp({
     };
     const runPersist = async () => {
       let result;
+      let savedContent = null;
       if (secureStorage) {
         let prepared = preparedSnapshotRef.current;
         if (!prepared || prepared.mutationRevision !== mutationRevision) {
@@ -792,6 +865,7 @@ export function RelationshipMapApp({
           try {
             await saveWithCurrentScope();
             result = { ok: true, revision };
+            savedContent = prepared.content;
           } catch (firstError) {
             const firstMessage = firstError instanceof Error ? firstError.message : "";
             const canReopen = /安全会话|登录账号已变更|重新打开/.test(firstMessage);
@@ -815,6 +889,7 @@ export function RelationshipMapApp({
                 secureScopeTokenRef.current = reopened.scopeToken;
                 await saveWithCurrentScope();
                 result = { ok: true, revision };
+                savedContent = prepared.content;
               } catch (retryError) {
                 result = {
                   ok: false,
@@ -840,6 +915,13 @@ export function RelationshipMapApp({
         lastStorageErrorRef.current = null;
         if (latestMutationRevisionRef.current === mutationRevision) {
           setStorageStatus(secureStorage ? "已加密保存到本机" : "已保存到本机");
+        }
+        // Only after the encrypted local save succeeded; upload failures stay isolated.
+        if (savedContent !== null) {
+          notifySecureGraph(secureGraphSavedRef.current, {
+            content: savedContent,
+            revision: result.revision,
+          });
         }
         return true;
       }
@@ -925,6 +1007,7 @@ export function RelationshipMapApp({
   }, [applyGraphDocument, showImportNotice]);
 
   const openImportDialog = useCallback(async () => {
+    if (readOnly) return;
     if (window.murmurDesktop?.openGraph) {
       try {
         const result = await window.murmurDesktop.openGraph();
@@ -935,7 +1018,7 @@ export function RelationshipMapApp({
       return;
     }
     fileInputRef.current?.click();
-  }, [importGraphContent, showImportNotice]);
+  }, [importGraphContent, readOnly, showImportNotice]);
 
   const saveJson = useCallback(async (defaultName, content) => {
     const blob = new Blob([content], { type: "application/json;charset=utf-8" });
@@ -1101,7 +1184,7 @@ export function RelationshipMapApp({
   }, [graphConnections, graphPeople, layout, markGraphChanged, nodes, pendingDeleteIndex, restoreModalTrigger, setEdges, showImportNotice]);
 
   const changePersonIdentityColor = useCallback((personId, colorKey) => {
-    if (personId === "self") return;
+    if (readOnly || personId === "self") return;
     const normalizedColorKey = normalizeIdentityColorKey(colorKey);
     setGraphPeople((currentPeople) => currentPeople.map((person) => person.id === personId
       ? { ...person, colorKey: normalizedColorKey }
@@ -1114,7 +1197,7 @@ export function RelationshipMapApp({
       "success",
       `身份颜色已设为${identityColorLabel(normalizedColorKey, graphColorSemantics)}`,
     );
-  }, [graphColorSemantics, markGraphChanged, setNodes, showImportNotice]);
+  }, [graphColorSemantics, markGraphChanged, readOnly, setNodes, showImportNotice]);
 
   const savePerson = useCallback((draft, nextColorSemantics) => {
     const editingPerson = personEditor?.mode === "edit"
@@ -1208,6 +1291,29 @@ export function RelationshipMapApp({
     ? displayName(selectedPerson, privacy, graphPeople.findIndex((person) => person.id === selectedPerson.id))
     : "";
 
+  if (!storageReady && readOnly) {
+    return (
+      <main
+        ref={appRootRef}
+        className={`app-shell relationship-theme--${visualTheme} is-storage-loading is-read-only`}
+      >
+        <section className="secure-storage-gate is-error" aria-live="polite">
+          <div className="secure-storage-card" role="alert">
+            <span className="secure-storage-card__icon" aria-hidden="true">
+              <ShieldCheck size={32} weight="duotone" />
+            </span>
+            <p className="secure-storage-card__eyebrow">只读查看</p>
+            <h2>无法显示这份客户脉络图</h2>
+            <p className="secure-storage-card__error">{storageLoadError}</p>
+            <p className="secure-storage-card__reassurance">
+              成员本机的加密数据不受影响，成员下次保存后会重新同步。
+            </p>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   if (!storageReady) {
     const recoveryHint = relationshipStorageRecoveryHint(
       storageLoadError,
@@ -1259,17 +1365,23 @@ export function RelationshipMapApp({
     );
   }
 
+  const bossNote = readOnly
+    ? (readOnlyNote ? { tone: "muted", text: readOnlyNote } : null)
+    : typeof bossSyncStatus?.text === "string" && bossSyncStatus.text
+      ? bossSyncStatus
+      : null;
+
   return (
     <main
       ref={appRootRef}
-      className={`app-shell relationship-theme--${visualTheme}`}
+      className={`app-shell relationship-theme--${visualTheme}${readOnly ? " is-read-only" : ""}`}
     >
       <header className="app-header">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true"><Graph size={25} weight="duotone" /></span>
           <div>
             <h1>客户脉络图</h1>
-            <p>客户合作管理</p>
+            <p>{readOnly ? "只读查看" : "客户合作管理"}</p>
           </div>
         </div>
 
@@ -1297,6 +1409,8 @@ export function RelationshipMapApp({
         </form>
 
         <div className="header-actions">
+          {readOnly ? null : (
+            <>
           <button
             className="data-button person-add-button"
             type="button"
@@ -1315,6 +1429,8 @@ export function RelationshipMapApp({
           <button className="data-button data-button--icon" type="button" onClick={exportGraphData} aria-label="导出关系数据" title="导出关系数据">
             <DownloadSimple size={19} weight="bold" />
           </button>
+            </>
+          )}
           <button
             className={`data-button style-button ${visualTheme === "tongpin" ? "is-active" : ""}`}
             type="button"
@@ -1356,6 +1472,7 @@ export function RelationshipMapApp({
         </div>
       </header>
 
+      {readOnly ? null : (
       <input
         ref={fileInputRef}
         className="visually-hidden"
@@ -1373,6 +1490,7 @@ export function RelationshipMapApp({
           importGraphContent(await file.text(), file.name);
         }}
       />
+      )}
 
       {importNotice ? (
         <div className={`import-notice import-notice--${importNotice.type}`} role="status" aria-live="polite">
@@ -1389,27 +1507,41 @@ export function RelationshipMapApp({
           onNodesChange={onNodesChange}
           onInit={setFlowInstance}
           onNodeClick={(_, node) => selectAndFocusPerson(node)}
-          onNodeDragStop={handleNodeDragStop}
+          onNodeDragStop={readOnly ? undefined : handleNodeDragStop}
           onPaneClick={closeDetails}
           fitView
           fitViewOptions={{ padding: 0.14, minZoom: visualTheme === "tongpin" ? 0.5 : 0.68, maxZoom: 1.05 }}
           minZoom={0.32}
           maxZoom={1.8}
+          nodesDraggable={!readOnly}
           nodesConnectable={false}
           nodesFocusable={false}
           edgesFocusable={false}
           elementsSelectable
           zoomOnDoubleClick={false}
           proOptions={{ hideAttribution: true }}
-          aria-label="可展开、拖拽和缩放的客户脉络图"
+          aria-label={readOnly ? "可展开和缩放的只读客户脉络图" : "可展开、拖拽和缩放的客户脉络图"}
         >
           <Background variant={BackgroundVariant.Dots} gap={28} size={1.4} color="#c9cdcf" />
           <Controls className="clay-controls" position="bottom-right" showInteractive={false} />
         </ReactFlow>
 
-        <div className="privacy-status" aria-live="polite">
+        <div className={`privacy-status${bossNote ? " has-boss-note" : ""}`} aria-live="polite">
           <span className={`status-light ${privacy ? "is-active" : ""}`} />
-          <span>{privacy ? "客户身份已脱敏" : `${graphPeople.length - 1} 位客户 · ${storageStatus}`}</span>
+          <span className="privacy-status__copy">
+            <span>{privacy ? "客户身份已脱敏" : `${graphPeople.length - 1} 位客户 · ${storageStatus}`}</span>
+            {bossNote ? (
+              <small
+                className={`boss-sync-note boss-sync-note--${bossNote.tone || "muted"}`}
+                aria-live="off"
+                title={readOnly
+                  ? "成员保存后同步的只读副本，成员本机加密文件仍是原始数据"
+                  : "保存到本机后会自动上传一份只读副本供老板查看，本机加密文件仍是原始数据"}
+              >
+                {bossNote.text}
+              </small>
+            ) : null}
+          </span>
         </div>
 
         <div className="graph-legend" aria-label="客户脉络图例">
@@ -1451,6 +1583,7 @@ export function RelationshipMapApp({
             onEditPerson={openEditPerson}
             onDeletePerson={openPersonDeleteDialog}
             onClose={closeDetailPanel}
+            readOnly={readOnly}
           />
         ) : null}
       </section>

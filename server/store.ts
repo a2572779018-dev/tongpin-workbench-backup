@@ -20,6 +20,7 @@ const EMPTY_DATABASE: DatabaseShape = {
   taskRolloverDecisions: [],
   taskAuditEvents: [],
   bossWorkReportStatuses: [],
+  relationshipGraphSnapshots: [],
   ...createEmptyLoraDatabaseFields(),
 };
 
@@ -256,6 +257,12 @@ export class JsonStore {
       }
       if (!Array.isArray(parsed.bossWorkReportStatuses)) {
         parsed.bossWorkReportStatuses = [];
+        migrated = true;
+      }
+      // Additive field without a version bump: an older server binary still
+      // opens (and preserves) this file if the release has to be rolled back.
+      if (!Array.isArray(parsed.relationshipGraphSnapshots)) {
+        parsed.relationshipGraphSnapshots = [];
         migrated = true;
       }
       const loraArrayFields = [

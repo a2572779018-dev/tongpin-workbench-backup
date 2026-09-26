@@ -12,6 +12,7 @@ import { RelationshipMapErrorBoundary } from "./components/RelationshipMapErrorB
 import { AdminConsole } from "./pages/AdminConsole";
 import { AuthPage } from "./pages/AuthPage";
 import { BossDashboard } from "./pages/BossDashboard";
+import { BossRelationshipGraphs } from "./pages/BossRelationshipGraphs";
 import { LoraChainDashboard } from "./pages/LoraChainDashboard";
 import { MemberHome } from "./pages/MemberHome";
 import {
@@ -199,6 +200,8 @@ export function App() {
       <AdminConsole />
     ) : view === "boss" && session.user.role === "boss" ? (
       <BossDashboard />
+    ) : view === "member-graphs" && session.user.role === "boss" ? (
+      <BossRelationshipGraphs />
     ) : (
       <MemberHome layout={homeLayout} />
     );

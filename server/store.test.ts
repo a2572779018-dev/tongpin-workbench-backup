@@ -114,6 +114,7 @@ describe("JsonStore 中央服务持久化", () => {
     expect(snapshot.taskRolloverDecisions).toEqual([]);
     expect(snapshot.taskAuditEvents).toEqual([]);
     expect(snapshot.bossWorkReportStatuses).toEqual([]);
+    expect(snapshot.relationshipGraphSnapshots).toEqual([]);
     expect(snapshot.bossLoraReportOpens).toEqual([]);
     expect(snapshot.loraTransactions).toEqual([]);
     expect(snapshot.loraCollectorState.checkpointBlock).toBeNull();

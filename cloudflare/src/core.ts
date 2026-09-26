@@ -108,10 +108,15 @@ import {
   DATABASE_MIGRATION_4,
   DATABASE_MIGRATION_5,
   DATABASE_MIGRATION_6,
+  DATABASE_MIGRATION_7,
   DATABASE_SCHEMA,
   LORA_INSERT_ADDRESS_BASELINE,
   LORA_RETENTION_QUERIES,
 } from "./schema";
+import {
+  handleRelationshipGraphRequest,
+  isRelationshipGraphPath,
+} from "./relationshipGraphs";
 
 import {
   generateCode,
@@ -574,6 +579,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   private readonly aiPersona: AiPersonaRepository;
   private readonly sql: SqlStorage;
   private aiSchemaReady = false;
+  private readonly relationshipGraphSchema = { ready: false };
   private readonly loraSource: ExplorerLoraChainDataSource;
   private loraCollectionInFlight: Promise<LoraDashboardData> | null = null;
   private loraAggregateCollectionInFlight: Promise<LoraDashboardData> | null =
@@ -672,7 +678,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           .exec<{ name: string }>(
             `SELECT name FROM sqlite_master
              WHERE type = 'table'
-               AND name IN ('users', 'tasks', 'lora_chain_checkpoint', 'boss_work_report_statuses')`,
+               AND name IN ('users', 'tasks', 'lora_chain_checkpoint', 'boss_work_report_statuses', 'relationship_graph_snapshots')`,
           )
           .toArray()
           .map((row) => row.name),
@@ -698,6 +704,22 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
             );
           });
         }
+        // The same early exit skips every later numbered migration; add the
+        // additive relationship-graph mirror tables here as well.
+        if (!existingTables.has("relationship_graph_snapshots")) {
+          this.ctx.storage.transactionSync(() => {
+            this.sql.exec(DATABASE_MIGRATION_7);
+            this.sql.exec(`
+              CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
+                id INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+              );
+            `);
+            this.sql.exec(
+              "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (7)",
+            );
+          });
+        }
         return;
       }
     } catch (error) {
@@ -712,7 +734,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           ),
         )?.version ?? 0,
       );
-      if (currentVersion >= 6) return;
+      if (currentVersion >= 7) return;
     } catch {
       // A fresh database does not have the migration table yet.
     }
@@ -836,6 +858,14 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         this.sql.exec(DATABASE_MIGRATION_6);
         this.sql.exec(
           "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (6)",
+        );
+      });
+    }
+    if (version < 7) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec(DATABASE_MIGRATION_7);
+        this.sql.exec(
+          "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (7)",
         );
       });
     }
@@ -1029,6 +1059,15 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       );
       if (profileMatch && method === "PATCH") {
         return await this.changeUserProfile(request, profileMatch[1]);
+      }
+
+      if (isRelationshipGraphPath(path)) {
+        return await handleRelationshipGraphRequest(request, path, {
+          sql: this.sql,
+          transactionSync: (action) => this.ctx.storage.transactionSync(action),
+          requireUser: (current, roles) => this.requireUser(current, roles),
+          schema: this.relationshipGraphSchema,
+        });
       }
 
       if (path === "/api/boss/lora-chain/dashboard" && method === "GET") {

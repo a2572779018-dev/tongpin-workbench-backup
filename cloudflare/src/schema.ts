@@ -391,6 +391,30 @@ export const DATABASE_MIGRATION_6 = `
     ON boss_work_report_statuses(boss_user_id, read_at, report_date DESC);
 `;
 
+// Latest read-only mirror of each member's 客户脉络图. The graph text is split
+// into chunks because one Durable Object SQLite row is capped at 2 MB.
+export const DATABASE_MIGRATION_7 = `
+  CREATE TABLE IF NOT EXISTS relationship_graph_snapshots (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    local_version INTEGER NOT NULL CHECK (local_version >= 1),
+    content_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    contact_count INTEGER NOT NULL,
+    connection_count INTEGER NOT NULL,
+    avatars_omitted INTEGER NOT NULL DEFAULT 0,
+    byte_length INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL CHECK (chunk_count >= 1)
+  );
+  CREATE TABLE IF NOT EXISTS relationship_graph_snapshot_chunks (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    data TEXT NOT NULL,
+    PRIMARY KEY (user_id, chunk_index)
+  );
+`;
+
 export const LORA_RETENTION_QUERIES = {
   blocks:
     "DELETE FROM lora_chain_blocks WHERE datetime(timestamp) < datetime(?)",

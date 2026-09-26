@@ -1,4 +1,12 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import { createPortal } from "react-dom";
 import reactFlowCss from "@xyflow/react/dist/style.css?inline";
 // The relationship editor intentionally stays in its original JS module so the
@@ -12,7 +20,22 @@ import {
 } from "../features/relationship-map/data/graphStorage.js";
 import relationshipMapCss from "../features/relationship-map/relationship-map.css?inline";
 import tongpinThemeCss from "../features/relationship-map/tongpin-theme.css?inline";
+import { useAuth } from "../auth/AuthContext";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
+import {
+  RELATIONSHIP_GRAPH_ME_PATH,
+  type RelationshipGraphOwnSnapshotResponse,
+  type RelationshipGraphSnapshotMeta,
+} from "../../shared/relationshipGraphMirror";
+import {
+  buildRelationshipGraphMirror,
+  createAvatarThumbnail,
+  createRelationshipGraphSync,
+  describeRelationshipGraphSync,
+  type RelationshipGraphSnapshotEvent,
+  type RelationshipGraphSync,
+  type RelationshipGraphSyncStatus,
+} from "../lib/relationshipGraphSync";
 
 const hostCss = `
 :host {
@@ -61,16 +84,10 @@ const hostCss = `
 }
 `;
 
-export function RelationshipMapPage({
-  userId,
-  previewMode = false,
-}: {
-  userId: string;
-  previewMode?: boolean;
-}) {
+/** Isolated shadow root carrying the editor's own CSS (member page and boss viewer). */
+function useRelationshipMapShadowMount(resetKey: string) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [mountNode, setMountNode] = useState<HTMLDivElement | null>(null);
-  const notificationToolbar = useNotificationToolbar();
 
   useLayoutEffect(() => {
     const host = hostRef.current;
@@ -85,10 +102,109 @@ export function RelationshipMapPage({
     mount.className = "relationship-map-mount";
     shadowRoot.append(style, mount);
     setMountNode(mount);
-  }, [userId]);
+  }, [resetKey]);
+
+  return { hostRef, mountNode };
+}
+
+type MirrorEvent = { kind: "loaded" | "saved"; snapshot: RelationshipGraphSnapshotEvent };
+
+/**
+ * Member → boss mirror. Rendered only for real members (never in preview), so
+ * the preview keeps working without an AuthProvider. Uploads use the renderer
+ * session (with its refresh) and are bound to this account via the header.
+ */
+function RelationshipGraphMirrorBridge({
+  userId,
+  controllerRef,
+  lastEventRef,
+  onStatus,
+}: {
+  userId: string;
+  controllerRef: MutableRefObject<RelationshipGraphSync | null>;
+  lastEventRef: MutableRefObject<MirrorEvent | null>;
+  onStatus: (status: RelationshipGraphSyncStatus) => void;
+}) {
+  const { api } = useAuth();
+
+  useEffect(() => {
+    const headers = { "X-Tongpin-Account": userId };
+    const thumbnails = new Map<string, Promise<string | null>>();
+    const thumbnail = (dataUrl: string) => {
+      let pending = thumbnails.get(dataUrl);
+      if (!pending) {
+        pending = createAvatarThumbnail(dataUrl).catch(() => null);
+        thumbnails.set(dataUrl, pending);
+      }
+      return pending;
+    };
+    const controller = createRelationshipGraphSync({
+      upload: (request) =>
+        api<{ snapshot: RelationshipGraphSnapshotMeta }>(
+          RELATIONSHIP_GRAPH_ME_PATH,
+          { method: "PUT", headers, body: JSON.stringify(request) },
+          60_000,
+        ),
+      fetchRemote: () =>
+        api<RelationshipGraphOwnSnapshotResponse>(RELATIONSHIP_GRAPH_ME_PATH, { headers }),
+      buildMirror: (content, revision) =>
+        buildRelationshipGraphMirror(content, revision, { thumbnail }),
+      onStatus,
+    });
+    controllerRef.current = controller;
+    // Replay an open/save that happened before this effect ran.
+    const last = lastEventRef.current;
+    if (last?.kind === "saved") controller.noteSaved(last.snapshot);
+    else if (last?.kind === "loaded") controller.noteLoaded(last.snapshot);
+    return () => {
+      if (controllerRef.current === controller) controllerRef.current = null;
+      controller.dispose({ flush: true });
+    };
+  }, [api, controllerRef, lastEventRef, onStatus, userId]);
+
+  return null;
+}
+
+export function RelationshipMapPage({
+  userId,
+  previewMode = false,
+}: {
+  userId: string;
+  previewMode?: boolean;
+}) {
+  const { hostRef, mountNode } = useRelationshipMapShadowMount(userId);
+  const notificationToolbar = useNotificationToolbar();
+  const mirrorControllerRef = useRef<RelationshipGraphSync | null>(null);
+  const mirrorLastEventRef = useRef<MirrorEvent | null>(null);
+  const [mirrorStatus, setMirrorStatus] = useState<RelationshipGraphSyncStatus>({
+    phase: "idle",
+    syncedAt: null,
+    avatarsOmitted: 0,
+  });
+  const noteSecureGraphLoaded = useCallback((snapshot: RelationshipGraphSnapshotEvent) => {
+    mirrorLastEventRef.current = { kind: "loaded", snapshot };
+    mirrorControllerRef.current?.noteLoaded(snapshot);
+  }, []);
+  const noteSecureGraphSaved = useCallback((snapshot: RelationshipGraphSnapshotEvent) => {
+    mirrorLastEventRef.current = { kind: "saved", snapshot };
+    mirrorControllerRef.current?.noteSaved(snapshot);
+  }, []);
+  const bossSyncStatus = useMemo(
+    () => (previewMode ? null : describeRelationshipGraphSync(mirrorStatus)),
+    [mirrorStatus, previewMode],
+  );
 
   return (
     <main className="relationship-map-page" aria-label="客户脉络图">
+      {previewMode ? null : (
+        <RelationshipGraphMirrorBridge
+          key={userId}
+          userId={userId}
+          controllerRef={mirrorControllerRef}
+          lastEventRef={mirrorLastEventRef}
+          onStatus={setMirrorStatus}
+        />
+      )}
       <div key={userId} ref={hostRef} className="relationship-map-host" />
       {mountNode
         ? createPortal(
@@ -109,10 +225,46 @@ export function RelationshipMapPage({
               onOpenNotifications={
                 notificationToolbar?.openNotificationDrawer
               }
+              onSecureGraphLoaded={previewMode ? undefined : noteSecureGraphLoaded}
+              onSecureGraphSaved={previewMode ? undefined : noteSecureGraphSaved}
+              bossSyncStatus={bossSyncStatus}
             />,
             mountNode,
           )
         : null}
     </main>
+  );
+}
+
+/**
+ * Boss viewer: the same editor components in read-only mode, fed by a member's
+ * synced snapshot. No vault, no localStorage graph, no import/export.
+ */
+export function RelationshipMapReadOnlyView({
+  viewerKey,
+  graph,
+  note,
+}: {
+  viewerKey: string;
+  graph: unknown;
+  note: string;
+}) {
+  const { hostRef, mountNode } = useRelationshipMapShadowMount(viewerKey);
+
+  return (
+    <div className="relationship-map-page relationship-map-page--read-only">
+      <div key={viewerKey} ref={hostRef} className="relationship-map-host" />
+      {mountNode
+        ? createPortal(
+            <RelationshipMapApp
+              key={viewerKey}
+              readOnlyGraph={graph}
+              readOnlyNote={note}
+              themeStorageKey="tongpin.relationship-map.boss-viewer.theme.v1"
+            />,
+            mountNode,
+          )
+        : null}
+    </div>
   );
 }

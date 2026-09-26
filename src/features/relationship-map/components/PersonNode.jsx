@@ -151,19 +151,21 @@ function PersonNodeComponent({ data, selected }) {
             <span>{data.privacy ? "本地资料" : data.lastContact || "暂无联系记录"}</span>
           </div>
 
-          <button
-            className="quick-card-add nodrag nopan"
-            type="button"
-            aria-label={`在${data.visualName}下新增客户`}
-            title="在此新增客户"
-            onPointerDown={stopGraphGesture}
-            onClick={(event) => {
-              event.stopPropagation();
-              data.onAddPerson?.(data.id);
-            }}
-          >
-            <UserPlus size={15} weight="bold" aria-hidden="true" />
-          </button>
+          {data.readOnly ? null : (
+            <button
+              className="quick-card-add nodrag nopan"
+              type="button"
+              aria-label={`在${data.visualName}下新增客户`}
+              title="在此新增客户"
+              onPointerDown={stopGraphGesture}
+              onClick={(event) => {
+                event.stopPropagation();
+                data.onAddPerson?.(data.id);
+              }}
+            >
+              <UserPlus size={15} weight="bold" aria-hidden="true" />
+            </button>
+          )}
         </aside>
       </NodeToolbar>
     </div>

@@ -348,6 +348,25 @@ body,
   box-shadow: none;
 }
 
+.relationship-theme--tongpin .boss-sync-note {
+  color: #5c5540;
+}
+
+.relationship-theme--tongpin .boss-sync-note--ok {
+  color: #2f6a1d;
+}
+
+.relationship-theme--tongpin .boss-sync-note--warn {
+  color: #a3262f;
+}
+
+.relationship-theme--tongpin .detail-identity-color .identity-color-readonly {
+  color: #1f1f1f;
+  border: 2px solid #1f1f1f;
+  background: #fffdf7;
+  box-shadow: 2px 2px 0 #1f1f1f;
+}
+
 .relationship-theme--tongpin .layout-toggle {
   color: #fffdf7;
   border: 2px solid #1f1f1f;

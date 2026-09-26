@@ -22,6 +22,10 @@ import { createBossRouter, silentRealtimeHub } from "./routes/boss";
 import { createContactsRouter } from "./routes/contacts";
 import { createNotificationsRouter } from "./routes/notifications";
 import { createLoraChainRouter } from "./routes/lora-chain";
+import {
+  createBossRelationshipGraphsRouter,
+  createRelationshipGraphsRouter,
+} from "./routes/relationship-graphs";
 import { createTasksRouter } from "./routes/tasks";
 import { createWorkReportsRouter } from "./routes/work-reports";
 import { JsonStore } from "./store";
@@ -151,6 +155,8 @@ export async function createRuntime(
   app.use("/api/ai/workspace", createAiWorkspaceRouter(aiWorkspace, requireAuth));
   app.use("/api/ai/workspace-v2", createAiWorkspaceV2Router(aiWorkspaceV2, requireAuth));
   app.use("/api/ai/persona", createAiPersonaRouter(aiPersona, requireAuth));
+  // Relationship-graph mirror uploads parse their own (authenticated, 5 MB) body.
+  app.use("/api/relationship-graphs", createRelationshipGraphsRouter(store, requireAuth));
   app.use("/api/ai/chat", express.json({ limit: 1600 * 1024 }));
   app.use("/api/ai/preflight", express.json({ limit: 1600 * 1024 }));
   app.post("/api/dify/tools/invoke", express.raw({ type: "application/json", limit: "16kb" }), async (request, response) => {
@@ -205,6 +211,10 @@ export async function createRuntime(
   app.use(
     "/api/boss/work-reports",
     createWorkReportsRouter(store, requireAuth, realtime),
+  );
+  app.use(
+    "/api/boss/relationship-graphs",
+    createBossRelationshipGraphsRouter(store, requireAuth),
   );
   app.use("/api/boss", createBossRouter(store, requireAuth, realtime));
   app.use(

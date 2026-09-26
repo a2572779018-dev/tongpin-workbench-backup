@@ -198,6 +198,22 @@ export interface BossWorkReportStatus {
   readAt: string | null;
 }
 
+/** Latest read-only mirror of one member's 客户脉络图 (the member's local vault stays authoritative). */
+export interface RelationshipGraphSnapshot {
+  userId: string;
+  tenantId: string;
+  localVersion: number;
+  contentHash: string;
+  updatedAt: string;
+  syncedAt: string;
+  contactCount: number;
+  connectionCount: number;
+  avatarsOmitted: number;
+  bytes: number;
+  /** Canonical JSON text, kept opaque so the JSON store never walks graph internals. */
+  graphJson: string;
+}
+
 export interface DatabaseShape {
   version: 6;
   users: User[];
@@ -210,6 +226,7 @@ export interface DatabaseShape {
   taskRolloverDecisions: TaskRolloverDecision[];
   taskAuditEvents: TaskAuditEvent[];
   bossWorkReportStatuses: BossWorkReportStatus[];
+  relationshipGraphSnapshots: RelationshipGraphSnapshot[];
   bossLoraReportOpens: BossLoraReportOpen[];
   loraBlocks: LoraIndexedBlock[];
   loraTransactions: LoraIndexedTransaction[];

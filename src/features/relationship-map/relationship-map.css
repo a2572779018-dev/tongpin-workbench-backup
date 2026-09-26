@@ -900,6 +900,51 @@ button:disabled {
   box-shadow: 0 0 0 2px rgba(128, 97, 62, 0.16);
 }
 
+.privacy-status__copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.privacy-status.has-boss-note {
+  padding-block: 6px;
+}
+
+.boss-sync-note {
+  max-width: 280px;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boss-sync-note--ok {
+  color: var(--bronze);
+}
+
+.boss-sync-note--warn {
+  color: var(--oxblood);
+}
+
+.detail-identity-color .identity-color-readonly {
+  width: auto;
+  max-width: 62%;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px 0 34px;
+  overflow: hidden;
+  color: var(--text-dark);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  font-size: 10px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .graph-legend {
   left: 24px;
   bottom: 22px;
