@@ -405,6 +405,9 @@ export class AiVideoService {
       const task = await submitH3Video(this.transport, { baseUrl: BASE, apiKey: key }, input);
       job = this.applyTask(userId, id, task);
     } catch (error) {
+      // Operator trace only: fixed error code + allowlisted diagnostic, never
+      // the prompt, key, reference URLs or raw provider text.
+      console.warn("[video-submit]", JSON.stringify({ job: id, model: input.model ?? "minimax_h3", code: error instanceof AiError ? error.code : "UNEXPECTED", name: error instanceof Error ? error.name : typeof error, diagnostic: error instanceof AiError ? error.diagnostic ?? null : null }));
       this.store.sql.transaction(() => {
         job = this.raw(userId, id);
         job.status = error instanceof AiError && (error.definitelyNotSent || error.diagnostic?.billing === "rejected") ? "failed" : "uncertain";
@@ -422,17 +425,24 @@ export class AiVideoService {
       const job = this.raw(userId, id);
       if (!job.reserved) return job;
       job.providerId = task.id; job.progress = task.progress; job.updatedAt = now();
-      job.status = task.status === "failed" ? "uncertain" : task.status;
-      job.error = task.status === "failed" ? "服务商任务失败，费用尚需管理员核对" : undefined;
+      // New API refunds its task pre-charge when the upstream task ends in
+      // `failed`, so a provider-confirmed failure releases the member's
+      // reservation instead of parking it for manual reconciliation.
+      job.status = task.status;
+      const reason = task.errorCode === "reference_image_download_failed" ? "服务商无法下载参考图" : task.errorCode === "content_policy_violation" || task.errorCode === "moderation_blocked" ? "内容未通过服务商审核" : task.errorCode ? `服务商错误 ${task.errorCode}` : "服务商任务失败";
+      job.error = task.status === "failed" ? `${reason}，已释放预留额度` : undefined;
+      if (task.status === "failed") console.warn("[video-task]", JSON.stringify({ job: id, provider: task.id, errorCode: task.errorCode ?? null }));
       if (task.status === "completed") this.settle(job, job.quotaPoints);
-      else if (task.status === "failed" && job.planRequestId) this.harness?.finishApprovedTool(userId, job.planRequestId, "video", "uncertain");
+      else if (task.status === "failed") this.settle(job, 0);
       this.write(job); return job;
     });
   }
   async refresh(userId: string, id: string): Promise<AiVideoJob> {
     this.store.assertAccess(userId); this.recover(userId);
     const job = this.raw(userId, id);
-    if (!job.providerId || !job.reserved || job.status === "uncertain" || Date.now() - job.pollAt < 10000) return this.public(job);
+    // An uncertain job that already has a provider task ID may be re-queried:
+    // a GET never resubmits, and the provider result settles the reservation.
+    if (!job.providerId || !job.reserved || Date.now() - job.pollAt < 10000) return this.public(job);
     this.store.sql.transaction(() => { const current = this.raw(userId, id); current.pollAt = Date.now(); this.write(current); });
     try { const key = await (await this.box()).decrypt(job.encryptedKey); return this.public(this.applyTask(userId, id, await queryH3Video(this.transport, { baseUrl: BASE, apiKey: key }, job.providerId))); }
     catch (error) { throw error instanceof AiError ? error : new AiError(502, "AI_VIDEO_QUERY_FAILED", "视频进度查询失败，可稍后重试；不会重复提交视频"); }

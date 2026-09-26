@@ -175,6 +175,21 @@ describe("durable H3 jobs and isolated quotas", () => {
     await expect(runtime.service.video.submit("a", req)).resolves.toMatchObject({ id: req.requestId, status: "queued", reserved: true });
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it("releases the reservation when the provider confirms a failed task, with an allowlisted reason", async () => {
+    const req = input(); transport.mockResolvedValueOnce(Response.json({ id: "task_fixture_12345678", status: "failed", progress: 0, error: { code: "reference_image_download_failed", message: "https://secret.example/x" } }));
+    const job = await runtime.service.video.submit("a", req);
+    expect(job).toMatchObject({ status: "failed", reserved: false, error: expect.stringContaining("服务商无法下载参考图") });
+    expect(JSON.stringify(job)).not.toContain("secret.example");
+    expect(runtime.service.quota("a")).toMatchObject({ reservedTokens: 0, usedTokens: 0 });
+  });
+  it("re-queries an uncertain job that has a provider task ID, without resubmitting", async () => {
+    const req = input(); await runtime.service.video.submit("a", req);
+    const row = runtime.store.sql.all<{ user_id: string; data: string }>("SELECT user_id,data FROM ai_video_jobs WHERE id=?", req.requestId)[0];
+    runtime.store.sql.exec("UPDATE ai_video_jobs SET data=? WHERE id=? AND user_id=?", JSON.stringify({ ...JSON.parse(row.data), status: "uncertain", pollAt: 0 }), req.requestId, row.user_id);
+    transport.mockClear(); transport.mockResolvedValueOnce(task("failed"));
+    await expect(runtime.service.video.refresh("a", req.requestId)).resolves.toMatchObject({ status: "failed", reserved: false });
+    expect(transport).toHaveBeenCalledTimes(1); expect(transport.mock.calls[0][1]).toMatchObject({ method: "GET" });
+  });
   it("allows one video generation per plan while preserving duplicate-request replay", async () => {
     const req = input();
     const first = await runtime.service.video.submit("a", req);

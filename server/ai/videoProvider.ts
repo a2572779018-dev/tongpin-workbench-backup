@@ -15,7 +15,10 @@ export interface H3VideoTask {
   id: string;
   status: "queued" | "processing" | "completed" | "failed";
   progress: number;
+  /** Allowlisted provider failure code only; never provider text or URLs. */
+  errorCode?: string;
 }
+const SAFE_TASK_ERROR_CODES = new Set(["reference_image_download_failed", "content_policy_violation", "moderation_blocked", "invalid_request", "insufficient_user_quota", "timeout", "upstream_error", "internal_error", "generation_failed"]);
 export interface VideoConnection { baseUrl: string; apiKey: string }
 
 export function parseH3VideoInput(value: unknown): H3VideoInput {
@@ -59,7 +62,9 @@ export function parseH3VideoTask(value: unknown, expectedId?: string): H3VideoTa
   const status = taskStatus(root.status);
   if (typeof root.progress !== "number" || !Number.isFinite(root.progress) || root.progress < 0 || root.progress > 100) throw new AiError(502, "AI_VIDEO_RESPONSE_INVALID", "视频任务进度无效，请稍后查询");
   // Do not return provider error text, URLs, prompts, headers or unknown fields.
-  return { id, status, progress: root.progress };
+  const code = object(root.error).code;
+  const errorCode = status === "failed" && typeof code === "string" && SAFE_TASK_ERROR_CODES.has(code) ? code : undefined;
+  return { id, status, progress: root.progress, ...(errorCode ? { errorCode } : {}) };
 }
 
 /** A submission performs exactly one POST. Callers must persist a reservation/request ID BEFORE calling. */

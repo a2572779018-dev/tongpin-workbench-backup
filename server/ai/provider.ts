@@ -113,6 +113,7 @@ export function providerHttpError(status: number, operation: AiProviderDiagnosti
   if (category === "redirect") return failure("AI_PROVIDER_REDIRECT", `API 地址发生重定向${http}，已为保护密钥停止连接，请填写最终 API 地址`);
   if (category === "timeout" || category === "conflict" || category === "upstream_unavailable" || diagnostic.billing === "unknown") {
     if (operation === "models") return failure("AI_PROVIDER_UNAVAILABLE", `读取模型列表时服务异常${http}，请稍后重新测试连接；本次测试未发起生成`);
+    if (diagnostic.code === "model_not_found" || diagnostic.code === "model_not_supported") return failure("AI_PROVIDER_UNAVAILABLE", `${prefix}报告当前模型没有可用通道${http}，请管理员核对模型名称与密钥分组（可在服务与模型中重新测试并更换模型）；结果与用量待核对，请勿直接重复生成`);
     if (diagnostic.code === "no_available_compatible_accounts") return failure("AI_PROVIDER_UNAVAILABLE", `${prefix}暂无可用兼容通道${http}，需要服务商恢复对应模型通道；结果与用量待核对，请勿直接重复生成`);
     return failure("AI_PROVIDER_UNAVAILABLE", `${prefix}${category === "timeout" ? "处理超时" : category === "conflict" ? "报告请求冲突" : "暂时故障"}${http}，结果与用量待核对；请管理员先核对服务商记录，不要直接重复生成`);
   }

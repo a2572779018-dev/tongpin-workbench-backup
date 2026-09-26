@@ -535,6 +535,7 @@ export class AiServiceMediaTaskOrchestrator {
   }
 
   private async reconcileAfterExecutionError(userId: string, runId: string, toolCallId: string, error: unknown): Promise<MediaTaskRun> {
+    console.warn("[media-task]", JSON.stringify({ run: runId, tool: toolCallId, code: safeErrorCode(error), name: error instanceof Error ? error.name : typeof error }));
     const snapshot = this.runtime.snapshot(userId, runId);
     if (!snapshot) return this.runtime.failTool(userId, runId, toolCallId, "AI_MEDIA_TASK_SNAPSHOT_MISSING", "unknown");
     if (snapshot.intent === "image") {
@@ -572,6 +573,11 @@ export class AiServiceMediaTaskOrchestrator {
       catch { return this.runtime.schedulePoll(userId, runId); /* Poll failures do not resubmit. */ }
     }
     if (run.status === "unknown" && ["queued", "processing", "submitting"].includes(job.status)) return run;
+    if (job.status === "uncertain") {
+      // Query-only: resolves a provider-confirmed result, never resubmits.
+      try { return this.applyVideoJob(userId, runId, toolCallId, await this.service.video.refresh(userId, toolCallId)); }
+      catch { return run; }
+    }
     return this.applyVideoJob(userId, runId, toolCallId, job);
   }
 }

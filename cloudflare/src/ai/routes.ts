@@ -162,7 +162,10 @@ export async function handleAiRequest(request: Request, service: AiService, user
     }
     const mediaByRequestMatch = path.match(/^\/api\/ai\/media-tasks\/by-request\/([^/]+)$/);
     if (mediaByRequestMatch && method === "GET") {
-      const task = createAiServiceMediaTaskOrchestrator(service).getByRequest(user.id, decodeURIComponent(mediaByRequestMatch[1]));
+      const orchestrator = createAiServiceMediaTaskOrchestrator(service);
+      let task = orchestrator.getByRequest(user.id, decodeURIComponent(mediaByRequestMatch[1]));
+      // "重新查询原任务": an unknown video run re-queries its provider task once (read-only).
+      if (task.status === "unknown" && task.tool?.capability === "video") task = await orchestrator.advance(user.id, task.runId);
       return json({ task: mediaTaskScope(task, tenantId, user.id) });
     }
     const mediaTaskEventMatch = path.match(/^\/api\/ai\/media-tasks\/([^/]+)\/events$/);

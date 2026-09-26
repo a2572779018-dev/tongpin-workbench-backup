@@ -150,10 +150,12 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
       scheduleAfterResponse(response, task);
       response.status(202).json({ task });
     });
-    router.get("/media-tasks/by-request/:requestId", (request, response) => {
+    router.get("/media-tasks/by-request/:requestId", async (request, response) => {
       const tenantId = aiTenantIdFromPrincipal(request.currentUser);
       const userId = request.currentUser!.id;
-      const task = createAiServiceMediaTaskOrchestrator(scoped(request)).getByRequest(userId, request.params.requestId);
+      const orchestrator = createAiServiceMediaTaskOrchestrator(scoped(request));
+      let task = orchestrator.getByRequest(userId, request.params.requestId);
+      if (task.status === "unknown" && task.tool?.capability === "video") task = await orchestrator.advance(userId, task.runId);
       response.json({ task: mediaTaskScope(task, tenantId, userId) });
     });
     router.get("/media-tasks/:id/events", (request, response) => {
