@@ -17,6 +17,7 @@ import {
 import type { MediaTaskRun } from "../ai/mediaTaskRuntime";
 import { runGuidanceRoute } from "../ai/runGuidance";
 import { registerAiVoiceRoutes } from "../ai/voiceRoutes";
+import { computerExpressRoutes } from "../ai/computerExpress";
 
 const videoTier = (value: unknown): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
 
@@ -80,6 +81,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
   router.use((_request, response, next) => { response.set("Cache-Control", "no-store"); next(); });
   if (admin) {
     router.use(requireRole("admin"));
+    router.use("/computer", computerExpressRoutes(scoped, "/api/admin/ai"));
     router.get("/video", (request, response) => response.json({ settings: video(request).settings(), pending: video(request).adminPending() }));
     router.put("/video", async (request, response) => response.json({ settings: await video(request).configure(request.body) }));
     router.post("/video/test", async (request, response) => response.json(await video(request).test()));
@@ -107,6 +109,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.get("/usage", (request, response) => response.json({ entries: scoped(request).store.usage(typeof request.query.userId === "string" ? request.query.userId : undefined) }));
   } else {
     router.use(requireRole("member", "boss"));
+    router.use("/computer", computerExpressRoutes(scoped, "/api/ai"));
     router.get("/videos", (request, response) => response.json(video(request).list(request.currentUser!.id, videoTier(request.query.tier))));
     router.post("/video-references", async (request, response) => response.json(await video(request).uploadReference(request.currentUser!.id, request.body)));
     router.post("/video-references/generated-asset", async (request, response) => response.json(await video(request).generatedReferenceSource(request.currentUser!.id, request.body)));

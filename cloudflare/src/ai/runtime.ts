@@ -4,7 +4,7 @@ import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "../../../serv
 import { object, readBoundedJson, type AiTransport } from "../../../server/ai/provider";
 import type { AiBackgroundPrincipalCheck } from "../../../server/ai/service";
 
-const DEFAULT_AI_HOSTS = ["api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com", "api.moonshot.cn", "api.siliconflow.cn", "open.bigmodel.cn"] as const;
+const DEFAULT_AI_HOSTS = ["api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com", "api.moonshot.cn", "api.siliconflow.cn", "open.bigmodel.cn", "api.typesafe.ai"] as const;
 /** Exact deployment-owned domains close the DNS-rebinding gap: Worker fetch cannot pin IPs.
  * This allowlist is never read from an administrator's provider form or a member request.
  * Public DNS checks remain defense in depth and redirects never carry credentials elsewhere. */

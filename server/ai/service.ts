@@ -30,6 +30,8 @@ import { withPendingGuidance } from "./runGuidance";
 import { AiVoiceService } from "./voice";
 import { AiMemberMemoryService } from "./memberMemoryService";
 import { cancelMultiAgentRun as cancelActiveMultiAgentRun, multiAgentPreflight, runMultiAgentChat, type MultiAgentHost } from "./multiAgentRun";
+import { parseComputerTaskOutput } from "./computerTask";
+import { AiComputerService } from "./computerExecutor";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -197,7 +199,7 @@ function parseImageRequest(value: unknown): AiImageRequest {
 function totalReserved(request: StoredRequest): number { return request.inputReserve + request.outputReserve + (request.convertedReserve ?? 0); }
 function conservativeUsage(request: StoredRequest): AiUsage {
   return { inputTokens: request.inputReserve, outputTokens: request.outputReserve, totalTokens: totalReserved(request), estimated: true,
-    ...(request.convertedReserve ? { convertedTokens: request.convertedReserve, billingKind: request.kind === "image" ? "image_conversion" as const : "tokens_with_search" as const } : {}),
+    ...(request.convertedReserve ? { convertedTokens: request.convertedReserve, billingKind: request.kind === "image" ? "image_conversion" as const : request.kind === "computer" ? "decision_conversion" as const : "tokens_with_search" as const } : {}),
   };
 }
 
@@ -219,6 +221,8 @@ export class AiService {
   readonly harness: AiHarness;
   readonly voice: AiVoiceService;
   readonly memberMemory: AiMemberMemoryService;
+  /** Unified computer executor (task spec, Jev decisions, results). */
+  readonly computer: AiComputerService;
   private readonly availabilityProbe: AvailabilityProbe;
   constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "", private readonly isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
     this.harness = new AiHarness(store, box, transport);
@@ -226,6 +230,7 @@ export class AiService {
     this.voice = new AiVoiceService(store, box, transport);
     this.availabilityProbe = new AvailabilityProbe(transport, box);
     this.memberMemory = new AiMemberMemoryService({ store, harness: this.harness, box, transport, isPrincipalActive: isBackgroundPrincipalActive });
+    this.computer = new AiComputerService(store, box, transport, this);
   }
   forTenant(tenantId: string): AiService {
     const scoped = this.store.forTenant(tenantId);
@@ -561,7 +566,7 @@ export class AiService {
     });
   }
   memberUsage(userId: string) {
-    return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "memory" ? "记忆整理" : entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.kind === "voice" ? entry.billingKind === "text_to_speech_conversion" ? "语音朗读" : "语音输入" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
+    return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "memory" ? "记忆整理" : entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.kind === "voice" ? entry.billingKind === "text_to_speech_conversion" ? "语音朗读" : "语音输入" : entry.kind === "computer" ? "电脑操作 · Jev 决策" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
   }
   private chatSelection(request: AiChatRequest): { provider: StoredProvider; route: ResolvedHarnessRoute } {
     const saved = this.store.provider();
@@ -685,7 +690,7 @@ export class AiService {
       }
     });
   }
-  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "completion" | "attempt" | "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "citations" | "trace">, images?: AiImageResponse["images"]): boolean {
+  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "completion" | "attempt" | "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "computerTask" | "sources" | "citations" | "trace">, images?: AiImageResponse["images"]): boolean {
     if (this.store.request(request.userId, request.requestId)?.status !== "pending") return false;
     if (!extras?.trace && this.store.harnessRun(request.userId, request.requestId)?.status === "running") {
       const trace = this.harness.finishRun(request.userId, request.requestId, status === "completed" ? "succeeded" : status);
@@ -783,7 +788,8 @@ export class AiService {
       this.store.saveQuota(userId, q); this.store.saveRequest(pending);
       pending.harnessRunId = this.harness.startRun(userId, request, route);
       pending.attempt = { runId: parentAttempt?.attempt?.runId ?? parentAttempt?.harnessRunId ?? pending.harnessRunId ?? request.requestId, attemptId: request.requestId, ...(request.retryOf ? { parentAttemptId: request.retryOf } : {}) };
-      this.store.saveRequestSnapshot(userId, request.requestId, request);
+      // A computer instruction may contain private details; it is not kept for regeneration.
+      if (request.outputFormat !== "computer_task") this.store.saveRequestSnapshot(userId, request.requestId, request);
       this.store.saveRequest(pending);
       return pending;
     });
@@ -938,6 +944,7 @@ export class AiService {
       let toolClarification: string | undefined;
       let dispatch: AiChatResponse["dispatch"];
       let computerPlan: AiChatResponse["computerPlan"];
+      let computerTask: AiChatResponse["computerTask"];
       if (request.outputFormat === "dispatch") {
         try {
           dispatch = parseAiDispatchDecision(publicExplanation.content, request.mode, { allowPlainText: true });
@@ -979,17 +986,26 @@ export class AiService {
           this.store.sql.transaction(() => settleChat(reserved, usage, validUsage ? "failed" : "uncertain", "本机操作方案未通过应用校验，已记录模型生成用量", undefined, safe));
           throw safe;
         }
+      } else if (request.outputFormat === "computer_task") {
+        try {
+          const plan = parseComputerTaskOutput(publicExplanation.content);
+          if (plan.kind === "clarification") toolClarification = plan.question; else computerTask = plan.task;
+        } catch (error) {
+          const safe = error instanceof AiError ? error : new AiError(502, "AI_COMPUTER_TASK_INVALID", "同频 AI 整理的电脑任务不正确");
+          this.store.sql.transaction(() => settleChat(reserved, usage, validUsage ? "failed" : "uncertain", "电脑任务未通过应用校验，已记录模型生成用量", undefined, safe));
+          throw safe;
+        }
       }
       const content = dispatch
         ? dispatch.kind === "text" ? dispatch.content : dispatch.clarification ?? ""
-        : toolClarification ?? (presentation ? `已生成《${presentation.title}》，共 ${presentation.slides.length} 页。` : toolPlan ? `已整理${toolPlan.kind === "video" ? "视频" : toolPlan.kind === "image" ? "图片" : "PPT"}任务，请确认后生成。` : computerPlan ? "已整理一个本机操作，请在系统确认框中核对。" : stripToolRequestMarkup(publicExplanation.content));
+        : toolClarification ?? (presentation ? `已生成《${presentation.title}》，共 ${presentation.slides.length} 页。` : toolPlan ? `已整理${toolPlan.kind === "video" ? "视频" : toolPlan.kind === "image" ? "图片" : "PPT"}任务，请确认后生成。` : computerTask ? "已整理电脑操作任务，等待你在系统确认框中授权。" : computerPlan ? "已整理一个本机操作，请在系统确认框中核对。" : stripToolRequestMarkup(publicExplanation.content));
       const toolCapability = toolPlan ? toolPlan.kind === "image" ? "image" : toolPlan.kind === "video" ? "video" : "presentation" : computerPlan ? "computer" : undefined;
       const toolSummary = toolPlan?.summary ?? computerPlan?.summary;
       const dispatchSummary = dispatch?.kind === "text" ? dispatch.analysisSummary : undefined;
       // Markers only for answer prose taken from the provider text, verified against this exact `content`.
-      const answerProse = !presentation && !toolPlan && !computerPlan && toolClarification === undefined && (!dispatch || dispatch.kind === "text");
+      const answerProse = !presentation && !toolPlan && !computerPlan && !computerTask && toolClarification === undefined && (!dispatch || dispatch.kind === "text");
       const citations = answerProse ? citationsForContent(result.content, content, result.citationSpans, result.sources) : undefined;
-      const extras: Pick<AiChatResponse, "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "citations" | "trace"> = { ...(toolClarification ? { toolClarification } : {}), ...(dispatch ? { dispatch } : {}), ...(dispatchSummary || publicExplanation.analysisSummary ? { analysisSummary: dispatchSummary ?? publicExplanation.analysisSummary } : {}), ...(presentation ? { presentation } : {}), ...(toolPlan ? { toolPlan } : {}), ...(computerPlan ? { computerPlan } : {}), ...(result.sources.length ? { sources: result.sources } : {}), ...(citations ? { citations } : {}) };
+      const extras: Pick<AiChatResponse, "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "computerTask" | "sources" | "citations" | "trace"> = { ...(toolClarification ? { toolClarification } : {}), ...(dispatch ? { dispatch } : {}), ...(dispatchSummary || publicExplanation.analysisSummary ? { analysisSummary: dispatchSummary ?? publicExplanation.analysisSummary } : {}), ...(presentation ? { presentation } : {}), ...(toolPlan ? { toolPlan } : {}), ...(computerPlan ? { computerPlan } : {}), ...(computerTask ? { computerTask } : {}), ...(result.sources.length ? { sources: result.sources } : {}), ...(citations ? { citations } : {}) };
       const settled = this.store.sql.transaction(() => {
         const trace = this.harness.finishRun(userId, request.requestId, validUsage ? "succeeded" : "uncertain", toolCapability ? { capability: toolCapability, summary: toolSummary } : undefined);
         if (trace) extras.trace = trace;

@@ -91,7 +91,8 @@ export interface StoredRequest {
   inputReserve: number;
   outputReserve: number;
   convertedReserve?: number;
-  kind?: "chat" | "image";
+  /** "computer" = one Jev decision of the computer executor (points in convertedReserve). */
+  kind?: "chat" | "image" | "computer";
   model: string;
   mode: AiMode;
   conversationId?: string;

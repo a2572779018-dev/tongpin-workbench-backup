@@ -13,6 +13,7 @@ import {
 import type { MediaTaskRun } from "../../../server/ai/mediaTaskRuntime";
 import { runGuidanceRoute } from "../../../server/ai/runGuidance";
 import { handleAiVoiceRequest } from "./voiceRoutes";
+import { handleComputerApi } from "../../../server/ai/computerRoutes";
 
 const videoTier = (value: string | null): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
 
@@ -228,6 +229,8 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (runMatch && method === "DELETE") return json({ trace: service.cancelHarnessRun(user.id, decodeURIComponent(runMatch[1])) });
     const resumeRunMatch = path.match(/^\/api\/ai\/runs\/([^/]+)\/resume$/);
     if (resumeRunMatch && method === "POST") return json({ trace: await service.resumeHarnessRun(user.id, decodeURIComponent(resumeRunMatch[1])) });
+    const computer = await handleComputerApi(service, { method, path, userId: user.id, readBody: () => parseAiJson(request) });
+    if (computer) return json(computer.body, computer.status);
     throw new AiError(404, "NOT_FOUND", "请求的接口不存在");
   } catch (error) {
     if (error instanceof ApiError) throw error;

@@ -140,7 +140,7 @@ export function requestCapability(request: AiChatRequest): AiHarnessCapability {
   if (request.outputFormat === "image_plan") return "image";
   if (request.outputFormat === "video_plan") return "video";
   if (request.outputFormat === "presentation" || request.outputFormat === "presentation_plan") return "presentation";
-  if (request.outputFormat === "computer_plan") return "computer";
+  if (request.outputFormat === "computer_plan" || request.outputFormat === "computer_task") return "computer";
   if (request.webSearch) return "web_search";
   if (request.attachments?.some(item => item.dataUrl)) return "vision";
   return "chat";

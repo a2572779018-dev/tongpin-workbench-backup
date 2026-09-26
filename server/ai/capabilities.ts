@@ -8,6 +8,7 @@ import { aiWorkflowInstruction, aiWorkflowTemplate } from "../../shared/aiWorkfl
 import { publicExplanationInstruction } from "./publicExplanation";
 import { supplementFramedMessages } from "./runGuidance";
 import { memberMemoryInstruction } from "./memberMemoryPrompt";
+import { COMPUTER_TASK_INSTRUCTION, computerDispatchHint } from "./computerTask";
 
 /** Only reviewed, code-owned instructions can acquire system-message priority. */
 export const AI_SKILL_INSTRUCTIONS: Readonly<Record<string, string>> = Object.freeze({
@@ -61,7 +62,7 @@ function dispatchInstruction(request: AiChatRequest): string {
   const labels = kinds.map(kind => DISPATCH_KIND_LABELS[kind]).join("、");
   const closed = AI_DISPATCH_TOOL_KINDS.filter(kind => !kinds.includes(kind)).map(kind => DISPATCH_KIND_LABELS[kind]);
   const closedNote = closed.length ? `本档位未开放${closed.join("、")}，不得请求这些工具；联网查询、打开网页等需求不属于电脑操作，直接用已有知识或已提供的搜索结果回答。` : "";
-  return `${base}只有用户明确要求${labels}时，才单独输出 <tool_request>{"kind":"${kinds.join("|")}","prompt":"保留用户原意的完整任务"}</tool_request>。${closedNote}如缺少不可推断的核心信息，在工具对象中额外加入 "clarification":"只问一个必要问题"。工具对象仅包含以上字段，不夹带正文、工具参数或隐藏推理；这是待授权的请求，不是已执行结果，不得声称已生成或已控制电脑。`;
+  return `${base}只有用户明确要求${labels}时，才单独输出 <tool_request>{"kind":"${kinds.join("|")}","prompt":"保留用户原意的完整任务"}</tool_request>。${closedNote}${computerDispatchHint(request, kinds)}如缺少不可推断的核心信息，在工具对象中额外加入 "clarification":"只问一个必要问题"。工具对象仅包含以上字段，不夹带正文、工具参数或隐藏推理；这是待授权的请求，不是已执行结果，不得声称已生成或已控制电脑。`;
 }
 export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRequest, "skillIds" | "workflowId" | "projectContext" | "attachments" | "outputFormat" | "toolPlanRequestId" | "videoParameters" | "webSearch" | "webSearchMode" | "supplement"> {
   if (p.webSearchMode !== undefined && p.webSearchMode !== "auto") throw new AiError(400, "AI_INPUT_INVALID", "搜索模式不正确");
@@ -75,7 +76,7 @@ export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRe
     if (requested.length !== expected.length || requested.some((id, index) => id !== expected[index])) throw new AiError(400, "AI_WORKFLOW_SKILLS_MISMATCH", "Hub 工作流的 Skill 组合已被修改，请重新选择");
   }
   if (p.projectContext !== undefined && (typeof p.projectContext !== "string" || p.projectContext.length > 12000)) throw new AiError(400, "AI_CONTEXT_TOO_LONG", "项目说明不能超过 12000 字");
-  if (p.outputFormat !== undefined && !["text", "dispatch", "presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan"].includes(String(p.outputFormat))) throw new AiError(400, "AI_INPUT_INVALID", "不支持的输出格式");
+  if (p.outputFormat !== undefined && !["text", "dispatch", "presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan", "computer_task"].includes(String(p.outputFormat))) throw new AiError(400, "AI_INPUT_INVALID", "不支持的输出格式");
   if (p.toolPlanRequestId !== undefined && (p.outputFormat !== "presentation" || typeof p.toolPlanRequestId !== "string" || !/^[a-zA-Z0-9_-]{16,100}$/.test(p.toolPlanRequestId))) throw new AiError(400, "AI_TOOL_PLAN_INVALID", "PPT 方案标识无效，请重新整理任务");
   if (p.outputFormat === "presentation" && p.toolPlanRequestId === undefined) throw new AiError(409, "AI_TOOL_PLAN_REQUIRED", "请先让同频 AI 整理 PPT 任务，再确认生成");
   if (p.webSearch !== undefined && typeof p.webSearch !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "联网搜索设置不正确");
@@ -120,7 +121,7 @@ export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRe
     ...(workflow ? { workflowId: workflow.id, skillIds: [...workflow.skillIds] } : Array.isArray(p.skillIds) && p.skillIds.length ? { skillIds: [...new Set(p.skillIds as string[])] } : {}),
     ...(typeof p.projectContext === "string" && p.projectContext.trim() ? { projectContext: p.projectContext.trim() } : {}),
     ...(attachments.length ? { attachments } : {}),
-    ...(["dispatch", "presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan"].includes(String(p.outputFormat)) ? { outputFormat: p.outputFormat as "dispatch" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan" } : {}),
+    ...(["dispatch", "presentation", "presentation_plan", "image_plan", "video_plan", "computer_plan", "computer_task"].includes(String(p.outputFormat)) ? { outputFormat: p.outputFormat as "dispatch" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan" | "computer_task" } : {}),
     ...(typeof p.toolPlanRequestId === "string" ? { toolPlanRequestId: p.toolPlanRequestId } : {}),
     ...(videoParameters ? { videoParameters } : {}),
     ...(p.webSearch === true ? { webSearch: true } : {}),
@@ -141,7 +142,7 @@ export function chatInstructions(request: AiChatRequest, persona?: AiPersonaProf
     const base = chatInstructions({ ...request, webSearch: false, webSearchMode: undefined }, persona, model, options);
     return base.replace("未开启联网搜索，不声称获得了实时检索结果。", "按问题需要自行调用联网工具：需要最新事实、核验来源时搜索，普通聊天、改写和已提供资料的总结不搜索。把相关的几个问题合并到同一次搜索里（例如“深圳 今日 天气 空气质量”），尽量 1–2 次完成，不要逐项分别搜索。仅引用实际搜索结果，失败时如实说明，不编造来源。");
   }
-  const toolPlan = request.outputFormat === "dispatch" ? dispatchInstruction(request) : request.outputFormat === "image_plan" ? TOOL_PLAN.image + TOOL_CLARIFICATION : request.outputFormat === "video_plan" ? TOOL_PLAN.video + TOOL_CLARIFICATION : request.outputFormat === "presentation_plan" ? TOOL_PLAN.presentation + TOOL_CLARIFICATION : request.outputFormat === "computer_plan" ? COMPUTER_PLAN : "";
+  const toolPlan = request.outputFormat === "dispatch" ? dispatchInstruction(request) : request.outputFormat === "image_plan" ? TOOL_PLAN.image + TOOL_CLARIFICATION : request.outputFormat === "video_plan" ? TOOL_PLAN.video + TOOL_CLARIFICATION : request.outputFormat === "presentation_plan" ? TOOL_PLAN.presentation + TOOL_CLARIFICATION : request.outputFormat === "computer_plan" ? COMPUTER_PLAN : request.outputFormat === "computer_task" ? COMPUTER_TASK_INSTRUCTION : "";
   const workflow = request.workflowId ? aiWorkflowInstruction(request.workflowId) : "";
   // Ordinary answers (plain text and the main-chat dispatch path) share one
   // formatting contract; tool plans and PPT JSON must not see it.

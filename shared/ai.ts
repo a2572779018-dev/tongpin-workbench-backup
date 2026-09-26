@@ -227,7 +227,7 @@ export interface AiUsage {
   estimated: boolean;
   /** Quota units explicitly configured by an administrator, not provider token counts. */
   convertedTokens?: number;
-  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search" | "speech_to_text_conversion" | "text_to_speech_conversion" | "memory_conversion";
+  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search" | "speech_to_text_conversion" | "text_to_speech_conversion" | "memory_conversion" | "decision_conversion";
   /** Observed provider search invocations, never inferred from generated text or citations. */
   searchCalls?: number;
   /** Separates actual text-token reporting from administrator-defined tool conversion estimates. */
@@ -251,7 +251,7 @@ export interface AiUsageEntry extends AiUsage {
   id: string;
   userId: string;
   requestId: string | null;
-  kind: "chat" | "image" | "video" | "voice" | "quota" | "memory";
+  kind: "chat" | "image" | "video" | "voice" | "quota" | "memory" | "computer";
   status: "completed" | "failed" | "uncertain" | "adjusted";
   model: string | null;
   mode: AiMode | null;
@@ -374,7 +374,7 @@ export interface AiChatRequest {
   workflowId?: AiWorkflowId;
   projectContext?: string;
   attachments?: AiAttachment[];
-  outputFormat?: "text" | "dispatch" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan";
+  outputFormat?: "text" | "dispatch" | "presentation" | "presentation_plan" | "image_plan" | "video_plan" | "computer_plan" | "computer_task";
   /** Required when executing a presentation plan; the server binds it to the
    * exact model-authored prompt before asking the model for slide data. */
   toolPlanRequestId?: string;
@@ -437,6 +437,8 @@ export interface AiChatResponse {
    * not called the corresponding tool. */
   dispatch?: AiDispatchDecision;
   computerPlan?: AiComputerPlan;
+  /** Validated one-time task spec for the unified computer executor. */
+  computerTask?: import("./computerAgent").ComputerTaskSpec;
   sources?: AiSource[];
   /** Optional: omitted whenever provider positions cannot be verified against `content`. */
   citations?: AiCitation[];
