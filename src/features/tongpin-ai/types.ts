@@ -1,5 +1,6 @@
 import type { AiChatResponse, AiHarnessTrace, AiQuota, AiUsage, AiSource } from "../../../shared/ai";
 import type { AiWorkspaceDocument, AiWorkspaceJson } from "../../../shared/aiWorkspace";
+import type { TongpinAILiveThinking } from "./liveThinking";
 
 export type AiQuotaFilter = "all" | "available" | "low" | "empty";
 
@@ -56,6 +57,9 @@ export interface TongpinAIMessage {
   attachments?: AiWorkspaceDocument[];
   sources?: AiSource[];
   trace?: AiHarnessTrace;
+  /** Display-only live reasoning/tool progress for an in-flight reply. Never
+   * persisted in the workspace and never included in model context. */
+  liveThinking?: TongpinAILiveThinking;
 }
 
 export interface TongpinAIConversation {

@@ -22,6 +22,7 @@ import { registerAiLeaveGuard } from "./workspaceLeaveGuard";
 import { waitForReply } from "./waitForReply";
 import { workspaceV2Client } from "./workspaceV2Client";
 import type { TongpinAIMode, TongpinAIUsage } from "./types";
+import { applyLiveThinkingEvent, EMPTY_LIVE_THINKING, type TongpinAILiveThinking } from "./liveThinking";
 import "./workspace-v2.css";
 
 type Bootstrap = Extract<AiWorkspaceV2Bootstrap, { schemaVersion: 2 }>;
@@ -79,7 +80,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const busyRef = useRef(new Set<string>());
-  const [streamContent, setStreamContent] = useState<Record<string, { content: string; analysisSummary: string; startedAt: number }>>({});
+  const [streamContent, setStreamContent] = useState<Record<string, { content: string; analysisSummary: string; startedAt: number; liveThinking?: TongpinAILiveThinking }>>({});
   const [loading, setLoading] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [notice, setNotice] = useState("");
@@ -434,7 +435,12 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       let result: AiChatResponse;
       try {
         result = await readAiChatStream(api, request, { accountId: user.id, signal: controller.signal, onEvent: event => {
-          if (!mountedRef.current || (event.type !== "answer_delta" && event.type !== "public_summary_delta")) return;
+          if (!mountedRef.current) return;
+          if (event.type === "reasoning_delta" || event.type === "tool_progress") {
+            setStreamContent(old => old[id] ? ({ ...old, [id]: { ...old[id], liveThinking: applyLiveThinkingEvent(old[id].liveThinking ?? EMPTY_LIVE_THINKING, event) } }) : old);
+            return;
+          }
+          if (event.type !== "answer_delta" && event.type !== "public_summary_delta") return;
           const delta = event.data.delta;
           setStreamContent(old => ({ ...old, [id]: { ...old[id], content: (old[id]?.content ?? "") + (event.type === "answer_delta" ? delta : ""),
             analysisSummary: (old[id]?.analysisSummary ?? "") + (event.type === "public_summary_delta" ? delta : ""), startedAt } }));
@@ -467,11 +473,12 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
     }
   }, [activeId, aiStatus.configured, aiStatus.quota.remainingTokens, aiStatus.quickAgent, aiStatus.visionEnabled, api, artifacts, client, commitRecordedReply, flushDraft, mode, putCache, refreshStatus, saveAttachments, session, user.id]);
 
-  const displayMessages: AiWorkspaceMessage[] = active ? [...active.messages] : [];
+  const displayMessages: Array<AiWorkspaceMessage & { liveThinking?: TongpinAILiveThinking }> = active ? [...active.messages] : [];
   if (activeId && busy[activeId] && streamContent[activeId]) displayMessages.push({
     id: `stream-${activeId}`, role: "assistant", content: streamContent[activeId].content,
     analysisSummary: streamContent[activeId].analysisSummary || undefined,
     time: timeLabel(), status: streamContent[activeId].content ? "typing" : "thinking", startedAt: streamContent[activeId].startedAt,
+    ...(streamContent[activeId].liveThinking ? { liveThinking: streamContent[activeId].liveThinking } : {}),
   });
   const activeArtifacts = new Map(Object.entries(artifacts).filter(([, item]) => item.conversationId === activeId));
   const preview = previewId ? activeArtifacts.get(previewId) : undefined;

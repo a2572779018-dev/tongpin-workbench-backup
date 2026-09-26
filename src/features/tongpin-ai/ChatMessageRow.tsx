@@ -6,6 +6,8 @@ import { AnalysisSummary } from "./AnalysisSummary";
 import { AiSourceList } from "./AiSourceLink";
 import { MarkdownReply } from "./MarkdownReply";
 import { ReplyWaiting } from "./ReplyWaiting";
+import { LiveThinkingPanel } from "./LiveThinkingPanel";
+import { hasLiveThinking } from "./liveThinking";
 import { memberVisibleHarnessSteps } from "./tracePresentation";
 import { AiVideoReply } from "./AiVideoReply";
 import { MediaTaskReply } from "./MediaTaskReply";
@@ -87,6 +89,8 @@ export const ChatMessageRow = memo(function ChatMessageRow({
   onSelectGeneratedImage, onCancelGeneratedImageSelection,
 }: ChatMessageRowProps) {
   const imageSelection = readGeneratedImageSelection(artifact);
+  // Display-only live state from real run events; absent once the reply settles.
+  const live = hasLiveThinking(message.liveThinking) ? message.liveThinking : undefined;
   return <article
     data-ai-message-id={message.id}
     className={`tp-ai-message is-${message.role}${message.status === "error" ? " is-error" : ""}`}
@@ -103,9 +107,9 @@ export const ChatMessageRow = memo(function ChatMessageRow({
           </figure>)}</div>{file.media.kind === "video" ? <small>仅分析采样画面，不含音频</small> : null}</> : null}
         </li>)}
       </ul> : null}
-      {message.status === "thinking" ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}{message.content ? <MarkdownReply content={message.content} /> : null}<ReplyWaiting key={message.id} startedAt={message.startedAt} /></> :
+      {message.status === "thinking" ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}{live ? <LiveThinkingPanel thinking={live} /> : null}{message.content ? <MarkdownReply content={message.content} /> : null}{!live && !message.analysisSummary && !message.content ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> : null}</> :
         message.role === "assistant" && message.status !== "error"
-          ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}<MarkdownReply content={message.content} typing={message.status === "typing"} /></>
+          ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}{live && message.status === "typing" ? <LiveThinkingPanel thinking={live} /> : null}<MarkdownReply content={message.content} typing={message.status === "typing"} /></>
           : <p>{message.content}</p>}
       {message.artifactId && !artifact ? <button type="button" className="tp-ai-artifact-card" onClick={() => onOpenArtifact(message.artifactId!)}>
         成果暂未加载，点击重试

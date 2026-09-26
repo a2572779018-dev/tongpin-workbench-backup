@@ -83,7 +83,7 @@ describe("waiting for the original AI request", () => {
   });
   it("renders elapsed waiting text without a retry error or per-second announcements", () => {
     const html = renderToStaticMarkup(createElement(ReplyWaiting));
-    expect(html).toContain("正在等待 · 已用时 0 秒");
+    expect(html).toContain("等待模型响应 · 已用时 0 秒");
     expect(html).toContain('aria-live="off"');
     expect(html).not.toContain("重新获取");
   });

@@ -1,5 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import request from "supertest";
@@ -22,6 +24,25 @@ function adapter(database: DatabaseSync): AiSql {
     all<T>(query: string, ...bindings: Array<string | number | null>): T[] { return database.prepare(query).all(...bindings) as T[]; },
     transaction<T>(action: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = action(); database.exec("COMMIT"); return result; } catch (error) { database.exec("ROLLBACK"); throw error; } },
   };
+}
+/**
+ * supertest(app) binds the wildcard address on an ephemeral port and then dials
+ * 127.0.0.1:<port>. On macOS (SO_REUSEADDR, BSD more-specific-bind-wins) that port
+ * can already be held on 127.0.0.1 by a server in a parallel test worker, so the
+ * request silently reaches the other runtime (different JWT secret/users) and
+ * returns 401/403 from the wrong app. Bind loopback explicitly so the kernel only
+ * hands out a port that is free on 127.0.0.1 and requests always reach this app.
+ */
+async function listenLoopback(app: import("express").Express): Promise<Server> {
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
+  expect((server.address() as AddressInfo).address).toBe("127.0.0.1");
+  return server;
+}
+async function closeServer(server: Server | undefined): Promise<void> {
+  if (!server?.listening) return;
+  server.closeAllConnections();
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 }
 function profile(name = "小频"): AiPersonaProfile {
   return { name, tone: "warm", customStyle: "语气自然、耐心，像一位长期合作的伙伴", preferences: "优先用中文回答；解释时先给结论", onboardingComplete: true };
@@ -215,32 +236,35 @@ describe("member-owned AI persona", () => {
       resend: { apiKey: "", from: "" }, smtp: { host: "", port: 587, secure: false, user: "", pass: "", from: "" },
     };
     let runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });
+    let http: Server | undefined;
     try {
+      http = await listenLoopback(runtime.app);
       await runtime.store.mutate(db => { const admin = db.users.find(user => user.role === "admin")!; db.users.push({ ...admin, id: "persona-member", role: "member", email: "persona-member@tongpin.test", name: "真实成员姓名" }); });
-      await request(runtime.app).get("/api/ai/persona").expect(401);
-      const admin = await request(runtime.app).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
-      await request(runtime.app).get("/api/ai/persona").set("Authorization", `Bearer ${admin.body.accessToken}`).expect(403);
-      const session = await request(runtime.app).post("/api/auth/login").send({ email: "persona-member@tongpin.test", password }).expect(200);
+      await request(http!).get("/api/ai/persona").expect(401);
+      const admin = await request(http!).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
+      await request(http!).get("/api/ai/persona").set("Authorization", `Bearer ${admin.body.accessToken}`).expect(403);
+      const session = await request(http!).post("/api/auth/login").send({ email: "persona-member@tongpin.test", password }).expect(200);
       const headers = { Authorization: `Bearer ${session.body.accessToken}`, "X-Tongpin-Account": "persona-member" };
-      await request(runtime.app).put("/api/ai/persona").set({ ...headers, "X-Tongpin-Account": "wrong-account" }).send({ expectedRevision: 0, profile: profile() }).expect(409);
-      expect((await request(runtime.app).get("/api/ai/status").set(headers).expect(200)).body.accessGranted).toBe(false);
-      const denied = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile() }).expect(403);
+      await request(http!).put("/api/ai/persona").set({ ...headers, "X-Tongpin-Account": "wrong-account" }).send({ expectedRevision: 0, profile: profile() }).expect(409);
+      expect((await request(http!).get("/api/ai/status").set(headers).expect(200)).body.accessGranted).toBe(false);
+      const denied = await request(http!).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile() }).expect(403);
       expect(denied.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
-      await request(runtime.app).put("/api/admin/ai/members/persona-member/quota").set("Authorization", `Bearer ${admin.body.accessToken}`).send({ limitTokens: 5000 }).expect(200);
-      expect((await request(runtime.app).get("/api/ai/status").set(headers).expect(200)).body.accessGranted).toBe(true);
-      const saved = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: { ...profile(), expression: "smitten" } }).expect(200);
+      await request(http!).put("/api/admin/ai/members/persona-member/quota").set("Authorization", `Bearer ${admin.body.accessToken}`).send({ limitTokens: 5000 }).expect(200);
+      expect((await request(http!).get("/api/ai/status").set(headers).expect(200)).body.accessGranted).toBe(true);
+      const saved = await request(http!).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: { ...profile(), expression: "smitten" } }).expect(200);
       expect(saved.body.profile.name).toBe("小频");
       expect(saved.body.profile.expression).toBe("smitten");
-      const invalid = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 1, profile: { ...profile(), expression: "love" } }).expect(400);
+      const invalid = await request(http!).put("/api/ai/persona").set(headers).send({ expectedRevision: 1, profile: { ...profile(), expression: "love" } }).expect(400);
       expect(invalid.body.error.code).toBe("AI_PERSONA_INVALID");
-      await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile("不能覆盖") }).expect(409);
-      await request(runtime.app).put("/api/ai/persona").set(headers).send({ oversized: "x".repeat(AI_PERSONA_LIMITS.requestBytes) }).expect(413);
-      await runtime.close(); runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });
-      const restored = await request(runtime.app).get("/api/ai/persona").set(headers).expect(200); expect(restored.body).toEqual(saved.body);
-      const reset = await request(runtime.app).put("/api/ai/persona").set(headers).send({ expectedRevision: 1, reset: true }).expect(200);
+      await request(http!).put("/api/ai/persona").set(headers).send({ expectedRevision: 0, profile: profile("不能覆盖") }).expect(409);
+      await request(http!).put("/api/ai/persona").set(headers).send({ oversized: "x".repeat(AI_PERSONA_LIMITS.requestBytes) }).expect(413);
+      await closeServer(http); await runtime.close(); runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });
+      http = await listenLoopback(runtime.app);
+      const restored = await request(http!).get("/api/ai/persona").set(headers).expect(200); expect(restored.body).toEqual(saved.body);
+      const reset = await request(http!).put("/api/ai/persona").set(headers).send({ expectedRevision: 1, reset: true }).expect(200);
       expect(reset.body).toEqual({ revision: 2, profile: defaultAiPersonaProfile() });
       const memberName = await runtime.store.read(db => db.users.find(user => user.id === "persona-member")?.name);
       expect(memberName).toBe("真实成员姓名");
-    } finally { await runtime.close(); }
+    } finally { await closeServer(http); await runtime.close(); }
   });
 });

@@ -264,4 +264,32 @@ describe("AI run stream decoder", () => {
       vi.useRealTimers();
     }
   });
+  it("opts in to live progress and accepts reasoning_delta and tool_progress events", async () => {
+    let body = "";
+    const api = async <T,>(_path: string, init?: RequestInit) => {
+      body = String(init?.body ?? "");
+      return eventResponse([
+        event(1, "run_started", { startedAt: 1 }),
+        event(2, "tool_progress", { tool: "web_search", callId: "search-1", status: "completed", query: "上海天气", sourceCount: 2 }),
+        event(3, "reasoning_delta", { delta: "先确认城市", source: "provider_reasoning_content" }),
+        event(4, "run_finished", { response }),
+      ]) as T;
+    };
+    const seen: AiRunEvent[] = [];
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value) })).resolves.toEqual(response);
+    expect(JSON.parse(body)).toMatchObject({ requestId: request.requestId, liveProgress: true });
+    expect(seen.map(value => value.type)).toEqual(["run_started", "tool_progress", "reasoning_delta", "run_finished"]);
+  });
+
+  it.each([
+    ["tool_progress", { tool: "shell", callId: "search-1", status: "completed" }],
+    ["tool_progress", { tool: "web_search", callId: "ws_provider", status: "completed" }],
+    ["tool_progress", { tool: "web_search", callId: "search-1", status: "thinking" }],
+    ["reasoning_delta", { delta: "x", source: "hidden" }],
+  ] as const)("rejects a malformed %s event", async (type, data) => {
+    const api = async <T,>() => eventResponse([event(1, "run_started", { startedAt: 1 }), event(2, type, data as AiRunEvent["data"])]) as T;
+    const seen = vi.fn();
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: seen })).rejects.toMatchObject({ code: "AI_STREAM_INTERRUPTED" });
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
 });

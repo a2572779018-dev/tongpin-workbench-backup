@@ -46,6 +46,7 @@ import { mediaCacheScope, videoBlobCache } from "../features/tongpin-ai/mediaCac
 import { sameHarnessTrace } from "../features/tongpin-ai/runTracePolling";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
 import { ArtifactPreview } from "../features/tongpin-ai/ArtifactPreview";
+import { applyLiveThinkingEvent, EMPTY_LIVE_THINKING, type TongpinAILiveThinking } from "../features/tongpin-ai/liveThinking";
 import { ChatWorkspace } from "../features/tongpin-ai/ChatWorkspace";
 import { TongpinAIWorkspaceV2 } from "../features/tongpin-ai/TongpinAIWorkspaceV2";
 import { TONGPIN_AI_SKILLS } from "../features/tongpin-ai/mockData";
@@ -129,7 +130,10 @@ function WorkspaceLoader({ user }: { user: User }) {
 }
 
 type GenerationRequest = AiChatRequest | AiImageRequest;
-type TaskContinuation = { conversationId: string; messageId: string; originalPrompt: string; snapshot: SubmissionSnapshot };
+type TaskContinuation = { conversationId: string; messageId: string; originalPrompt: string; snapshot: SubmissionSnapshot;
+  /** A text turn's first save, still in flight. sendMessage overlaps its read-only
+   * preflight with it and awaits it before persisting the reply or calling a model. */
+  recorded?: Promise<boolean> };
 type ComputerUseRequest = {
   id: string;
   conversationId: string;
@@ -163,7 +167,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [seenResults, setSeenResults] = useState(() => readSeenResults(user.id));
   // Live deltas are transient and excluded from workspace serialization. Only
   // the final/partial result enters durable conversation state.
-  const [streamReplies, setStreamReplies] = useState<Record<string, { content: string; analysisSummary: string }>>({});
+  const [streamReplies, setStreamReplies] = useState<Record<string, { content: string; analysisSummary: string; liveThinking: TongpinAILiveThinking }>>({});
   const [checkingQuota, setCheckingQuota] = useState(false);
   const [computerProbe, setComputerProbe] = useState<ComputerUseProbeResult | null>(null);
   const [computerRequest, setComputerRequest] = useState<ComputerUseRequest | null>(null);
@@ -1118,8 +1122,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       return;
     }
     const controller = new AbortController();
-    let liveContent = "", liveSummary = "", deltaTimer: ReturnType<typeof setTimeout> | undefined;
-    const flushDeltas = () => { deltaTimer = undefined; if (mountedRef.current && !controller.signal.aborted) setStreamReplies(current => ({ ...current, [messageId]: { content: liveContent, analysisSummary: liveSummary } })); };
+    let liveContent = "", liveSummary = "", liveThinking = EMPTY_LIVE_THINKING, deltaTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushDeltas = () => { deltaTimer = undefined; if (mountedRef.current && !controller.signal.aborted) setStreamReplies(current => ({ ...current, [messageId]: { content: liveContent, analysisSummary: liveSummary, liveThinking } })); };
     requestRef.current.set(conversationId, { controller, messageId });
     // Only requests that were never sent may be POSTed by the retry button.
     retryRequestsRef.current.delete(messageId);
@@ -1156,6 +1160,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           }, 130_000) : await readAiChatStream(api, request, { accountId: user.id, signal: controller.signal, onEvent: event => {
             if (event.type === "answer_delta") liveContent += event.data.delta;
             else if (event.type === "public_summary_delta") liveSummary += event.data.delta;
+            else if (event.type === "reasoning_delta" || event.type === "tool_progress") liveThinking = applyLiveThinkingEvent(liveThinking, event);
             else return;
             if (!deltaTimer) deltaTimer = setTimeout(flushDeltas, 60);
           } });
@@ -1834,10 +1839,17 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     setActiveConversationId(conversationId); setView("chat"); draftConversationIdsRef.current.delete(snapshot.draftKey);
     const continuation: TaskContinuation = { conversationId, messageId, originalPrompt: prompt, snapshot };
     try {
-      if (!await persistenceRef.current.saveNow(next)) throw new Error("任务记录尚未保存，未调用模型。请恢复同步后重试。");
+      const recorded = persistenceRef.current.saveNow(next);
+      if (kind === "text") {
+        // Plain text needs no planning IO. Overlap the read-only quota preflight
+        // with this first save instead of paying the two round trips serially.
+        updateReply(conversationId, messageId, { taskPhase: "planning" });
+        await sendMessage(undefined, { ...continuation, recorded });
+        return true;
+      }
+      if (!await recorded) throw new Error("任务记录尚未保存，未调用模型。请恢复同步后重试。");
       if (!mountedRef.current || pendingCancelledRef.current.has(conversationId)) return true;
       updateReply(conversationId, messageId, { taskPhase: "planning" });
-      if (kind === "text") { await sendMessage(undefined, continuation); return true; }
       const plan = await planTool(kind, prompt, videoRequest, continuation);
       if (plan && mountedRef.current && !pendingCancelledRef.current.has(conversationId)) await sendMessage({ ...plan, originalPrompt: prompt }, continuation);
     } catch (error) {
@@ -1950,6 +1962,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         if (gate.finish(ticket) && !continuation && mountedRef.current) setCheckingQuota(false);
       }
     }
+    // The submitted turn must be durable before the reply is persisted or a model is called.
+    if (continuation?.recorded && !await continuation.recorded) throw new Error("任务记录尚未保存，未调用模型。请恢复同步后重试。");
+    if (continuation && (!mountedRef.current || pendingCancelledRef.current.has(conversationId))) return;
     if (originId && !liveConversation(workspaceRef.current, deletingConversationRef.current, originId)) {
       showAnnouncement("此对话正在删除或已被删除，本次未发送"); return;
     }

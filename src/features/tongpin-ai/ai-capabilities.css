@@ -2,6 +2,16 @@
 .tp-ai-analysis-summary { width: fit-content; max-width: 720px; margin: 0 0 8px; color: #676a62; font-size: 12px; }
 .tp-ai-analysis-summary > summary { width: fit-content; cursor: pointer; color: #777a72; line-height: 1.5; font-weight: 600; }
 .tp-ai-analysis-summary > p { max-width: 680px; margin: 6px 0 10px; padding-left: 15px; border-left: 2px solid #ded9ca; color: #686b63; line-height: 1.7; white-space: pre-wrap; }
+.tp-ai-live-thinking { display: grid; gap: 6px; max-width: 720px; margin: 0 0 8px; color: #676a62; font-size: 12px; }
+.tp-ai-live-thinking__tools { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.tp-ai-live-thinking__tools li { display: flex; align-items: center; gap: 6px; min-width: 0; line-height: 1.5; }
+.tp-ai-live-thinking__tools li > svg { flex: 0 0 auto; }
+.tp-ai-live-thinking__tools li span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-ai-live-thinking__tools li small { flex: 0 0 auto; color: #8a8c83; }
+.tp-ai-live-thinking__tools li.is-failed { color: #954c3d; }
+.tp-ai-live-thinking .is-spinning { animation: tp-ai-trace-spin .9s linear infinite; }
+.tp-ai-live-thinking__reasoning > p { max-height: 240px; overflow: auto; }
+@media (prefers-reduced-motion: reduce) { .tp-ai-live-thinking .is-spinning { animation: none; } }
 .tp-ai-run-trace { margin-top: 12px; max-width: 720px; border: 1px solid #ded9ca; border-radius: 12px; background: #fbf9f2; color: #55574f; font-size: 12px; }
 .tp-ai-run-trace > summary { cursor: pointer; padding: 10px 12px; line-height: 1.5; font-weight: 600; }
 .tp-ai-run-trace ol { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0 12px 12px; }

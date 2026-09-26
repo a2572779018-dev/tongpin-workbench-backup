@@ -1,5 +1,5 @@
 import type { AiChatRequest, AiChatResponse } from "../../shared/ai";
-import type { AiRunEvent } from "../../shared/aiRunEvents";
+import { AI_TOOL_PROGRESS_STATUSES, type AiRunEvent } from "../../shared/aiRunEvents";
 import { validAiRichContent } from "../../shared/aiRichContent";
 import { ApiRequestError } from "./api";
 
@@ -37,6 +37,15 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
         event.conversationId !== (request.conversationId ?? request.requestId))) throw new UnsafeEvent("回复事件版本或标识不正确");
     if (event.type === "answer_delta" || event.type === "public_summary_delta") {
       if (typeof event.data?.delta !== "string") throw new UnsafeEvent("回复增量格式无效");
+    } else if (event.type === "reasoning_delta") {
+      if (typeof event.data?.delta !== "string" || event.data.source !== "provider_reasoning_content") throw new UnsafeEvent("思考摘要格式无效");
+    } else if (event.type === "tool_progress") {
+      const progress = event.data;
+      if (!progress || progress.tool !== "web_search" || typeof progress.callId !== "string" || !/^search-\d{1,3}$/.test(progress.callId) ||
+          !AI_TOOL_PROGRESS_STATUSES.includes(progress.status) ||
+          (progress.query !== undefined && (typeof progress.query !== "string" || progress.query.length > 400)) ||
+          (progress.sourceCount !== undefined && (!Number.isSafeInteger(progress.sourceCount) || progress.sourceCount < 0)))
+        throw new UnsafeEvent("工具进度格式无效");
     } else if (event.type === "usage_updated") {
       const usage = event.data?.usage;
       const tokenCount = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0;
@@ -127,7 +136,9 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
   try {
     checkAbort();
     response = await api<Response>("/api/ai/chat/stream", {
-      method: "POST", body: JSON.stringify(request), headers: accountHeaders, signal: options.signal,
+      method: "POST",
+      // liveProgress opts this client in to reasoning_delta/tool_progress events.
+      body: JSON.stringify({ ...request, liveProgress: true }), headers: accountHeaders, signal: options.signal,
     }, 130_000, "stream");
   } catch (error) {
     checkAbort();

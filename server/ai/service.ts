@@ -18,7 +18,7 @@ import { verifiedBaiAgentModels } from "./modelVerification";
 import { AiHarness, parseHarnessContinuationDecision, requestCapability, validConversationId, type ResolvedHarnessRoute } from "./harness";
 import { parsePublicExplanation, parseProviderPublicSummary, providerPublicSummaryFromResponse, stripToolRequestMarkup, supportsPublicExplanation } from "./publicExplanation";
 import { parseAiDispatchDecision } from "./dispatch";
-import type { AiRunEvent, AiRunEventPayload } from "../../shared/aiRunEvents";
+import type { AiRunEvent, AiRunEventPayload, AiToolProgress } from "../../shared/aiRunEvents";
 import { createVisibleStream } from "./visibleStream";
 import { generationDiagnostic } from "./generationDiagnostic";
 import { createAiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
@@ -30,6 +30,8 @@ const MAX_TOKEN_LIMIT = 1_000_000_000;
 // Keep the existing conservative allowance until a provider supplies a verifiable cap.
 const SEARCH_INPUT_RESERVE = 32768;
 const MIN_OUTPUT_TOKENS = 16;
+/** Upper bound on provider-published reasoning text streamed for live display. */
+export const AI_LIVE_REASONING_LIMIT = 8000;
 const CONTINUATION_TOOLS = new Set<AiHarnessCapability>(["web_search", "image", "video", "presentation", "computer"]);
 
 export interface AiBackgroundAgentCycle {
@@ -680,6 +682,10 @@ export class AiService {
   async chat(userId: string, value: unknown, options: { stream?: boolean; onEvent?: (event: AiRunEvent) => void } = {}): Promise<AiChatResponse> {
     this.store.assertAccess(userId);
     let request = parseChat(value);
+    // Transport-only opt-in: older clients reject unknown event types, so live
+    // reasoning/tool progress is journaled only for clients that ask for it.
+    // Not part of the request hash, snapshot or provider body.
+    const liveProgress = object(value).liveProgress === true;
     this.bindVideoTierParameters(request);
     const { requestId: _requestId, ...hashable } = request;
     const hash = await requestHash(hashable);
@@ -774,18 +780,30 @@ export class AiService {
       usageEventSent = true;
       emit({ type: "usage_updated", data: { usage, status, providerReported: true } });
     };
-    let deltaBuffer = "", lastFlush = 0;
-    const flush = () => { if (deltaBuffer) {
+    // One ordered buffer for every text channel. The journal is capped at
+    // 4096 events per request, so provider micro-deltas are always coalesced.
+    let buffered: { type: "answer_delta" | "public_summary_delta" | "reasoning_delta"; text: string } | undefined, lastFlush = 0;
+    const flush = () => {
+      const pendingText = buffered;
+      buffered = undefined;
+      if (!pendingText?.text) return;
+      if (pendingText.type === "reasoning_delta") emit({ type: "reasoning_delta", data: { delta: pendingText.text, source: "provider_reasoning_content" } });
+      else emit({ type: pendingText.type, data: { delta: pendingText.text } });
       // This is when a filtered public answer fragment is actually emitted.
-      emit({ type: "answer_delta", data: { delta: deltaBuffer } });
-      reserved.firstVisibleMs ??= Math.max(0, Date.now() - Date.parse(reserved.createdAt));
-      deltaBuffer = ""; lastFlush = Date.now();
-    } };
+      if (pendingText.type === "answer_delta") reserved.firstVisibleMs ??= Math.max(0, Date.now() - Date.parse(reserved.createdAt));
+      lastFlush = Date.now();
+    };
+    const push = (type: "answer_delta" | "public_summary_delta" | "reasoning_delta", delta: string) => {
+      if (!delta) return;
+      if (buffered && buffered.type !== type) flush();
+      buffered ??= { type, text: "" };
+      buffered.text += delta;
+      if (buffered.text.length >= 256 || Date.now() - lastFlush >= 80) flush();
+    };
     const visible = createVisibleStream(request.mode, delta => {
       // Never count connection setup, hidden reasoning or a tool envelope.
-      deltaBuffer += delta;
-      if (deltaBuffer.length >= 256 || Date.now() - lastFlush >= 80) flush();
-    }, delta => emit({ type: "public_summary_delta", data: { delta } }));
+      push("answer_delta", delta);
+    }, delta => push("public_summary_delta", delta));
     const canStream = (!request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch") && !request.skillIds?.includes("agent-continuation-v1");
     let providerSummary = "", summaryRejected = false;
     const publicSummary = (delta: string) => {
@@ -793,8 +811,20 @@ export class AiService {
       if (!providerSummary) { delta = delta.trimStart(); if (!delta) return; }
       providerSummary += delta;
       if (!parseProviderPublicSummary(providerSummary)) { summaryRejected = true; providerSummary = ""; return; }
-      emit({ type: "public_summary_delta", data: { delta } });
+      push("public_summary_delta", delta);
     };
+    // Provider-published chat `reasoning_content` is display-only live state:
+    // bounded, never parsed as answer text, never saved as analysisSummary and
+    // never returned in the final response or later model context.
+    let providerReasoningChars = 0;
+    const providerReasoning = (delta: string) => {
+      if (!liveProgress || providerReasoningChars >= AI_LIVE_REASONING_LIMIT) return;
+      const clean = delta.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+      const part = [...clean].slice(0, AI_LIVE_REASONING_LIMIT - providerReasoningChars).join("");
+      providerReasoningChars += [...part].length;
+      push("reasoning_delta", part);
+    };
+    const toolProgress = (progress: AiToolProgress) => { if (liveProgress) { flush(); emit({ type: "tool_progress", data: progress }); } };
     try {
       emit({ type: "run_started", data: { startedAt: Date.parse(reserved.createdAt) } });
       const response = await this.transport(`${provider.baseUrl}/${provider.protocol === "responses" ? "responses" : "chat/completions"}`, {
@@ -805,14 +835,14 @@ export class AiService {
       });
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "chat"); }
       const maxSearchCalls = request.webSearch ? searchCallLimit(provider) : 0;
-      const rawResult = await readProviderResponse(response, { maxSearchCalls, ...(options.stream && canStream ? { onTextDelta: (delta: string) => visible.feed(delta), onPublicSummaryDelta: publicSummary } : {}) });
+      const rawResult = await readProviderResponse(response, { maxSearchCalls, ...(options.stream && canStream ? { onTextDelta: (delta: string) => visible.feed(delta), onPublicSummaryDelta: publicSummary, onProviderReasoningDelta: providerReasoning, onToolProgress: toolProgress } : {}) });
       const result = parseProviderResult(rawResult, provider.protocol);
       // Some compliant providers return the explicitly public summary only in
       // the terminal Responses item. This fallback is restricted to routes on
       // which we actually requested the documented summary capability.
       const terminalPublicSummary = !summaryRejected && !providerSummary && supportsOfficialPublicSummary(provider, request, model)
         ? providerPublicSummaryFromResponse(rawResult) : undefined;
-      if (terminalPublicSummary) emit({ type: "public_summary_delta", data: { delta: terminalPublicSummary } });
+      if (terminalPublicSummary) { flush(); emit({ type: "public_summary_delta", data: { delta: terminalPublicSummary } }); }
       reserved.generation = generationDiagnostic(rawResult, response.headers, provider.protocol, reserved.outputReserve, Date.parse(reserved.createdAt), result.usage);
       flush();
       const publicExplanation = supportsPublicExplanation(request)

@@ -23,9 +23,28 @@ function requireAstra(verifiedModels: readonly string[]): void {
  * A deliberately narrow freshness detector. False negatives stay on the cheap
  * local route; false positives would spend administrator-owned search quota, so
  * generic words such as "介绍" or "分析" are intentionally absent.
+ *
+ * Standalone freshness signals. Generic words that are common in ordinary
+ * chats ("当前"/"现在"/"版本"/"更新"/"发布"/"查询"/"查找"/"价格"/"current",
+ * "version", "release"...) used to match alone, which silently turned plain
+ * quick-tier turns into a search turn (and, for the B.AI quick agent, an Astra
+ * escalation), adding a full search/tool round trip before the first token.
  */
+const FRESHNESS_SIGNAL = /(?:最新|今天|今日|昨天|刚刚|近期|最近几天|本周|本月|实时|新闻|热搜|行情|股价|汇率|天气|赛程|比分|是否还|还在营业|上网查|联网|网上搜|搜一下|搜索一下|查一下|核实一下|latest|today|breaking|news|weather|stock\s+price|exchange\s+rate|search\s+(?:for|the\s+web)|look\s+up)/iu;
+// A generic "current/now" word only counts when it qualifies a time-sensitive
+// fact that cannot be answered from the conversation itself.
+const QUALIFIED_FRESHNESS = /(?:现在|当前|目前|\bcurrent(?:ly)?\b|\bnow\b)[^。！？.!?\n]{0,12}?(?:价格|售价|报价|多少钱|政策|法规|排名|比分|股价|汇率|price|ranking|policy|score)/iu;
+
+// A lookup verb counts when the member asks for external sources, not for
+// e.g. "写一个 SQL 查询" or "搜索算法".
+const SOURCE_LOOKUP = /(?:查找|查询|搜索|检索)[^。！？.!?\n]{0,8}?(?:官方|官网|资料|来源|出处|文献|报道)/u;
+
+// Asking what something costs right now ("黄金价格多少", "iPhone 多少钱") is a
+// live fact even without a time word.
+const PRICE_QUESTION = /(?:价格|售价|报价|金价|油价|房价)[^。！？.!?\n]{0,6}?(?:多少|几|怎么样|如何)|多少钱/u;
+
 export function needsOnlineEvidence(text: string): boolean {
-  return /(?:最新|现在|当前|今天|昨天|刚刚|近期|本周|本月|实时|新闻|热搜|行情|股价|汇率|价格|天气|赛程|比分|日程|政策|法规|版本|更新|发布|是否还|上网查|联网|搜索|查找|查询|查一下|核实一下|latest|today|current|recent|breaking|news|weather|price|schedule|score|release|version|search\s+(?:for|the\s+web)|look\s+up)/iu.test(text);
+  return FRESHNESS_SIGNAL.test(text) || QUALIFIED_FRESHNESS.test(text) || SOURCE_LOOKUP.test(text) || PRICE_QUESTION.test(text);
 }
 
 /**
