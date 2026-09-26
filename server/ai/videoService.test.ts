@@ -113,6 +113,25 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(init.headers.Authorization).toBe("Bearer harness-video-key");
     expect(JSON.parse(init.body!)).toMatchObject({ model: "minimax_h3", seconds: "15", resolution: "768p" });
   });
+  it("stops offering a tier model the gateway reports as model_not_found, and refunds", async () => {
+    const route = {
+      providerId: "video-provider", modelId: "minimax_h3", protocol: "chat_completions" as const,
+      maxOutputTokens: 1024, reasoningEffort: "" as const, capabilities: ["chat", "video"] as const,
+      enabled: true, videoProviderId: "video-provider", videoModelId: "sd-2-c6",
+    };
+    await runtime.service.saveHarness({
+      providers: [{ id: "video-provider", name: "75API", baseUrl: "https://www.75api.com/v1", protocol: "chat_completions", apiKey: "harness-video-key", enabled: true }],
+      tiers: { quick: route, standard: route, deep: route, pro: route },
+      policy: { strategy: "plan_execute", maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
+    });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
+    await runtime.service.discoverHarnessProvider("video-provider");
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "model_not_found" } }, { status: 503 }));
+    const request = input("a", "一段品牌视频", { model: "minimax_h3", seconds: 15, resolution: "768p" });
+    await expect(runtime.service.video.submit("a", request)).resolves.toMatchObject({ status: "failed", reserved: false });
+    expect(runtime.service.quota("a")).toMatchObject({ reservedTokens: 0, usedTokens: 0 });
+    expect(runtime.service.video.list("a").settings).toMatchObject({ availableModels: ["sd-2-c6"], defaultModel: "sd-2-c6" });
+  });
   it("requires a positive administrator conversion and valid credentials", async () => {
     await expect(runtime.service.video.configure({ enabled: true, quotaPoints: 0 })).rejects.toMatchObject({ code: "AI_VIDEO_SETTINGS_INVALID" });
     await expect(runtime.service.video.configure({ ...config, apiKey: "bad\nkey" })).rejects.toMatchObject({ code: "AI_KEY_INVALID" });
@@ -366,17 +385,12 @@ describe("durable H3 jobs and isolated quotas", () => {
     await expect(checking).rejects.toMatchObject({ code: "AI_CONFIG_CHANGED" });
     expect(runtime.service.video.settings()).toMatchObject({ defaultModel: "sd-2-c6", availableModels: [], modelsVerified: false });
   });
-  it("makes stale jobs visible to admin without resubmitting or releasing money", async () => {
+  it("automatically returns the reservation of a stale job without resubmitting", async () => {
     const req = input(); await runtime.service.video.submit("a", req);
     vi.useFakeTimers(); vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
-    const pending = runtime.service.video.adminPending();
-    expect(pending).toEqual([expect.objectContaining({ id: req.requestId, status: "uncertain", reserved: true, userId: "a" })]);
-    expect(pending[0]).not.toHaveProperty("prompt");
-    expect(pending[0]).not.toHaveProperty("conversationId");
-    expect(pending[0]).not.toHaveProperty("referenceIds");
-    expect(pending[0]).not.toHaveProperty("images");
-    expect(pending[0]).not.toHaveProperty("encryptedKey");
-    expect(runtime.service.quota("a").reservedTokens).toBe(1000);
+    expect(runtime.service.video.list("a").jobs[0]).toMatchObject({ id: req.requestId, status: "failed", reserved: false, error: expect.stringContaining("自动退回") });
+    expect(runtime.service.video.adminPending()).toEqual([]);
+    expect(runtime.service.quota("a")).toMatchObject({ reservedTokens: 0, usedTokens: 0 });
     expect(transport).toHaveBeenCalledTimes(1);
   });
   it("settles completion only once and retains original credential after rotation", async () => {
@@ -389,7 +403,7 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(runtime.service.quota("a")).toMatchObject({ reservedTokens: 0, usedTokens: 1000, remainingTokens: 9000 });
     expect(runtime.store.usage("a").filter(e => e.kind === "video")).toHaveLength(1);
   });
-  it("refunds explicit rejected 403 but preserves uncertain submission and never retries", async () => {
+  it("returns the reservation for every failed submission and never retries", async () => {
     transport.mockResolvedValue(new Response("denied", { status: 403 }));
     const req = input(); expect(await runtime.service.video.submit("a", req)).toMatchObject({ status: "failed", reserved: false });
     expect(runtime.service.quota("a").remainingTokens).toBe(10000);
@@ -397,20 +411,23 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.store.usage("a").filter(entry => entry.requestId === req.requestId)).toHaveLength(1);
     transport.mockRejectedValue(new Error("private details and unknown submission"));
-    const uncertain = input(); expect(await runtime.service.video.submit("a", uncertain)).toMatchObject({ status: "uncertain", reserved: true });
-    await runtime.service.video.submit("a", uncertain); expect(transport).toHaveBeenCalledTimes(2);
+    const unknown = input(); expect(await runtime.service.video.submit("a", unknown)).toMatchObject({ status: "failed", reserved: false, error: expect.stringContaining("自动退回") });
+    await runtime.service.video.submit("a", unknown); expect(transport).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(runtime.service.video.list("a"))).not.toContain("private details");
-    expect(runtime.service.video.reconcile("a", uncertain.requestId, "admin", { action: "release" }).reserved).toBe(false);
-    await expect(runtime.service.video.submit("a", uncertain)).resolves.toMatchObject({ status: "failed" });
     expect(runtime.service.quota("a").remainingTokens).toBe(10000);
-    expect(() => runtime.service.video.reconcile("a", uncertain.requestId, "admin", { action: "charge" })).toThrow();
+    expect(() => runtime.service.video.reconcile("a", unknown.requestId, "admin", { action: "release" })).toThrow();
 
-    const chargedUnknown = input();
-    expect(await runtime.service.video.submit("a", chargedUnknown)).toMatchObject({ status: "uncertain", reserved: true });
-    expect(runtime.service.video.reconcile("a", chargedUnknown.requestId, "admin", { action: "charge" })).toMatchObject({ status: "failed", reserved: false });
+    transport.mockResolvedValue(new Response("upstream", { status: 503 }));
+    const unavailable = input(); expect(await runtime.service.video.submit("a", unavailable)).toMatchObject({ status: "failed", reserved: false, diagnostic: expect.objectContaining({ httpStatus: 503, billing: "unknown" }) });
+    expect(runtime.service.quota("a")).toMatchObject({ usedTokens: 0, reservedTokens: 0, remainingTokens: 10000 });
+  });
+  it("still lets an administrator settle a legacy uncertain job that has a provider task", async () => {
+    const req = input(); await runtime.service.video.submit("a", req);
+    const row = runtime.store.sql.all<{ user_id: string; data: string }>("SELECT user_id,data FROM ai_video_jobs WHERE id=?", req.requestId)[0];
+    runtime.store.sql.exec("UPDATE ai_video_jobs SET data=? WHERE id=? AND user_id=?", JSON.stringify({ ...JSON.parse(row.data), status: "uncertain" }), req.requestId, row.user_id);
+    expect(runtime.service.video.reconcile("a", req.requestId, "admin", { action: "charge" })).toMatchObject({ status: "failed", reserved: false });
     expect(runtime.service.quota("a")).toMatchObject({ usedTokens: 1000, reservedTokens: 0, remainingTokens: 9000 });
-    expect(runtime.store.usage("a").find(entry => entry.requestId === chargedUnknown.requestId)).toMatchObject({ status: "failed", totalTokens: 1000, reason: expect.stringContaining("任务结果仍未验证") });
-    expect(runtime.store.sql.all<{ success: number; error_code: string }>("SELECT success,error_code FROM ai_observability_events WHERE tenant_id=? ORDER BY rowid DESC LIMIT 1", runtime.store.tenantId)[0]).toEqual({ success: 0, error_code: "AI_VIDEO_RECONCILED_CHARGE_UNVERIFIED" });
+    expect(runtime.store.usage("a").find(entry => entry.requestId === req.requestId)).toMatchObject({ status: "failed", totalTokens: 1000, reason: expect.stringContaining("任务结果仍未验证") });
   });
   it("keeps pending jobs on restart without chat recovery stealing their reservation", async () => {
     const req = input(); await runtime.service.video.submit("a", req); runtime.close();

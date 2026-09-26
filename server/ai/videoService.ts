@@ -296,9 +296,11 @@ export class AiVideoService {
       for (const row of this.store.sql.all<{ data: string }>(query + (userId ? " AND user_id=?" : ""), this.store.tenantId, ...(userId ? [this.userKey(userId)] : []))) {
         const job: Job = JSON.parse(row.data);
         const age = Date.now() - Date.parse(job.createdAt);
-        if ((job.status === "submitting" && age > 90_000) || (["queued", "processing"].includes(job.status) && age > 24 * 60 * 60 * 1000)) {
-          this.write({ ...job, status: "uncertain", updatedAt: now(), error: "任务结果待核对，请管理员查看服务商任务记录，勿重复生成" });
-          if (job.planRequestId) this.harness?.finishApprovedTool(job.userId, job.planRequestId, "video", "uncertain");
+        if ((job.status === "submitting" && age > 90_000) || (["queued", "processing"].includes(job.status) && age > 24 * 60 * 60 * 1000)
+          || (job.status === "uncertain" && (!job.providerId || age > 24 * 60 * 60 * 1000))) {
+          const stale: Job = { ...job, status: "failed", updatedAt: now(), error: "视频任务长时间没有结果，预留同频点已自动退回；服务商记录待管理员核对" };
+          this.settle(stale, 0);
+          this.write(stale);
         }
       }
     });
@@ -329,7 +331,7 @@ export class AiVideoService {
     if (q.reservedTokens < job.quotaPoints) throw new AiError(409, "AI_VIDEO_QUOTA_CONFLICT", "视频预留额度异常，请管理员核查");
     this.store.saveQuota(job.userId, { ...q, reservedTokens: q.reservedTokens - job.quotaPoints, usedTokens: q.usedTokens + points });
     job.reserved = false;
-    this.store.addUsage({ id: crypto.randomUUID(), userId: job.userId, requestId: job.id, kind: "video", status: succeeded ? "completed" : "failed", model: job.model ?? "minimax_h3", mode: null, createdAt: now(), reason: actorId ? points ? "管理员按服务商记录确认扣额，任务结果仍未验证" : "管理员已释放未知任务的预留额度" : succeeded ? "视频生成完成" : "服务商拒绝视频请求，已释放预留", limitTokens: null, actorId, inputTokens: 0, outputTokens: 0, totalTokens: points, convertedTokens: points, billingKind: "video_conversion", estimated: false, ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) });
+    this.store.addUsage({ id: crypto.randomUUID(), userId: job.userId, requestId: job.id, kind: "video", status: succeeded ? "completed" : "failed", model: job.model ?? "minimax_h3", mode: null, createdAt: now(), reason: actorId ? points ? "管理员按服务商记录确认扣额，任务结果仍未验证" : "管理员已释放未知任务的预留额度" : succeeded ? "视频生成完成" : "视频未生成，已自动退回预留", limitTokens: null, actorId, inputTokens: 0, outputTokens: 0, totalTokens: points, convertedTokens: points, billingKind: "video_conversion", estimated: false, ...(job.diagnostic ? { diagnostic: job.diagnostic } : {}) });
     const run = job.planRequestId ? this.store.harnessRun(job.userId, job.planRequestId) : null;
     this.store.addObservability({ userId: job.userId, tier: run?.tier ?? "standard", providerId: job.routingProviderId ?? "video-75api", capability: "video", operation: "execution", success: succeeded, latencyMs: Date.now() - Date.parse(job.createdAt), ...(!succeeded ? { errorCode: job.diagnostic ? `AI_PROVIDER_${job.diagnostic.category.toUpperCase()}` : actorId ? points ? "AI_VIDEO_RECONCILED_CHARGE_UNVERIFIED" : "AI_VIDEO_RECONCILED_RELEASE" : "AI_VIDEO_FAILED" } : {}) });
     if (job.planRequestId) this.harness?.finishApprovedTool(job.userId, job.planRequestId, "video", succeeded ? "succeeded" : actorId && points ? "uncertain" : "failed");
@@ -410,15 +412,30 @@ export class AiVideoService {
       console.warn("[video-submit]", JSON.stringify({ job: id, model: input.model ?? "minimax_h3", code: error instanceof AiError ? error.code : "UNEXPECTED", name: error instanceof Error ? error.name : typeof error, diagnostic: error instanceof AiError ? error.diagnostic ?? null : null }));
       this.store.sql.transaction(() => {
         job = this.raw(userId, id);
-        job.status = error instanceof AiError && (error.definitelyNotSent || error.diagnostic?.billing === "rejected") ? "failed" : "uncertain";
-        job.error = error instanceof AiError ? error.message : "视频提交结果待核对，请管理员查看服务商记录；不会自动重试";
+        // Member points are never held hostage by a failed submission: the
+        // reservation is always returned. When the provider outcome is not
+        // provable (5xx/timeout) the diagnostic stays on the usage record so
+        // an administrator can still check the provider's own billing.
+        const rejected = error instanceof AiError && (error.definitelyNotSent || error.diagnostic?.billing === "rejected");
+        // A gateway that lists a model but has no channel for it answers
+        // model_not_found. Stop offering that model until an administrator
+        // reads the provider's model list again.
+        if (error instanceof AiError && error.diagnostic?.code === "model_not_found" && job.routingProviderId) this.quarantineModel(job.routingProviderId, input.model ?? "minimax_h3");
+        job.status = "failed";
+        job.error = `${error instanceof AiError ? error.message : "视频提交失败"}；预留同频点已自动退回${rejected ? "" : "，服务商记录待管理员核对"}`;
         job.diagnostic = error instanceof AiError ? error.diagnostic : undefined; job.updatedAt = now();
-        if (job.status === "failed") this.settle(job, 0);
-        else if (job.planRequestId) this.harness?.finishApprovedTool(userId, job.planRequestId, "video", "uncertain");
+        this.settle(job, 0);
         this.write(job);
       });
     }
     return this.public(job);
+  }
+  private quarantineModel(providerId: string, modelId: string) {
+    const harness = this.store.harness();
+    const provider = harness?.providers.find(item => item.id === providerId);
+    if (!harness || !provider?.availableModels.includes(modelId)) return;
+    this.store.saveHarness({ ...harness, providers: harness.providers.map(item => item.id === providerId ? { ...item, availableModels: item.availableModels.filter(id => id !== modelId) } : item) });
+    console.warn("[video-model-quarantine]", JSON.stringify({ provider: providerId, model: modelId }));
   }
   private applyTask(userId: string, id: string, task: H3VideoTask): Job {
     return this.store.sql.transaction(() => {

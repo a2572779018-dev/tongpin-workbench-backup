@@ -109,7 +109,7 @@ describe("AI tenant isolation foundation", () => {
     beta.saveQuota(userId, { ...emptyQuota(), limitTokens: 5000, reservedTokens: 2000 });
     const job = (quotaPoints: number, tenant: string) => ({
       id: jobId, userId, conversationId: "same-conversation", prompt: `${tenant} private`, seconds: 15, resolution: "768p", aspectRatio: "16:9",
-      status: "uncertain", progress: 0, createdAt: now, updatedAt: now, quotaPoints, reserved: true, encryptedKey: "not-read", pollAt: 0,
+      status: "uncertain", progress: 0, createdAt: now, updatedAt: now, quotaPoints, reserved: true, encryptedKey: "not-read", pollAt: 0, providerId: "task_fixture_12345678",
     });
     sql.exec("INSERT INTO ai_video_jobs(user_id,id,tenant_id,data) VALUES(?,?,?,?)", tenantStorageKey(alpha.tenantId, userId), jobId, alpha.tenantId, JSON.stringify(job(1000, "alpha")));
     sql.exec("INSERT INTO ai_video_jobs(user_id,id,tenant_id,data) VALUES(?,?,?,?)", tenantStorageKey(beta.tenantId, userId), jobId, beta.tenantId, JSON.stringify(job(2000, "beta")));
@@ -142,7 +142,7 @@ describe("AI tenant isolation foundation", () => {
     const alpha = new AiStore(sql, "tenant-alpha"), beta = new AiStore(sql, "tenant-beta");
     alpha.initialize();
     const box = await createSecretBox("tenant-video-idempotency-test-secret-32-bytes");
-    const transport = vi.fn(async () => Response.json({ id: "same-provider-task", status: "queued", progress: 0 }));
+    const transport = vi.fn(async () => Response.json({ id: "task_same_provider_1", status: "queued", progress: 0 }));
     const alphaVideo = new AiVideoService(alpha, async () => box, transport);
     const betaVideo = new AiVideoService(beta, async () => box, transport);
     for (const [store, video, points, key] of [[alpha, alphaVideo, 1000, "alpha-key"], [beta, betaVideo, 2000, "beta-key"]] as const) {
