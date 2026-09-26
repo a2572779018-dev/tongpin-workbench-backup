@@ -3,6 +3,7 @@ import { AiService } from "../../../server/ai/service";
 import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "../../../server/ai/security";
 import { object, readBoundedJson, type AiTransport } from "../../../server/ai/provider";
 import type { AiBackgroundPrincipalCheck } from "../../../server/ai/service";
+import { wireRunGuidance } from "../../../server/ai/runGuidanceWiring";
 
 const DEFAULT_AI_HOSTS = ["api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com", "api.moonshot.cn", "api.siliconflow.cn", "open.bigmodel.cn", "api.typesafe.ai"] as const;
 /** Exact deployment-owned domains close the DNS-rebinding gap: Worker fetch cannot pin IPs.
@@ -46,5 +47,7 @@ export function createWorkerAi(storage: DurableObjectStorage, secret: () => stri
   };
   const store = new AiStore(sql);
   const service = new AiService(store, () => createSecretBox(secret()), createWorkerAiTransport(allowedHosts), videoKey, isBackgroundPrincipalActive);
+  // Mid-run guidance (steer) for multi-agent and computer runs; same wiring as Express.
+  wireRunGuidance(store);
   return { store, service };
 }

@@ -9,6 +9,7 @@ import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AiService, type AiBackgroundPrincipalCheck } from "./service";
 import { AiPersonaRepository } from "./persona";
+import { wireRunGuidance } from "./runGuidanceWiring";
 import type { AiTransport } from "./provider";
 
 /** Resolve and pin a public address within the TLS connection itself; never follow redirects. */
@@ -94,6 +95,8 @@ export async function createNodeAi(dataFile: string, transport: AiTransport = no
     return await secret;
   };
   const service = new AiService(store, box, transport, () => process.env.TONGPIN_H3_API_KEY ?? "", isBackgroundPrincipalActive);
+  // Mid-run guidance (steer) for multi-agent and computer runs; same wiring as the Worker.
+  wireRunGuidance(store);
   let closed = false;
   return { service, store, close: () => { if (!closed) { closed = true; database.close(); } } };
 }

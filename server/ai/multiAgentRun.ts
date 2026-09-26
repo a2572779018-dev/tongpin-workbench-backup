@@ -79,6 +79,8 @@ export function setMultiAgentPendingGuidance(hook: MultiAgentPendingGuidance | u
 const GUIDANCE_ITEMS = 3;
 const GUIDANCE_CODE_POINTS = 600;
 const GUIDANCE_BYTES = utf8Bytes(guidanceBlock(["-", "-", "-"])) + GUIDANCE_CODE_POINTS * 4;
+/** What one checkpoint carries, so a hook can take only items that fit whole. */
+export const MULTI_AGENT_GUIDANCE_LIMITS = Object.freeze({ items: GUIDANCE_ITEMS, codePoints: GUIDANCE_CODE_POINTS });
 
 function boundGuidance(items: readonly string[] | undefined): string[] {
   const result: string[] = [];

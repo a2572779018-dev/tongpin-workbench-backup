@@ -109,6 +109,22 @@ const REASONS: readonly ComputerRunReason[] = ["goal_verified", "goal_refuted", 
 const RISKS: readonly ComputerCandidateRisk[] = ["none", "send", "submit", "delete", "payment", "irreversible"];
 const STEP_RESULTS: readonly ComputerStepResult[] = ["delivered", "unverified", "no_effect", "failed", "blocked", "reobserved", "unknown"];
 
+/**
+ * Mid-run guidance target (runGuidance.ts `registerRunGuidanceTarget`): a
+ * member's guidance keyed by a computer run id (`cr_…`) is accepted while that
+ * run is planned or running and inside its time budget. Undefined for every
+ * other id, so chat requests and harness runs keep their built-in rules.
+ */
+export function computerRunGuidanceTarget(store: AiStore, userId: string, runId: string, now: number): "active" | "terminal" | undefined {
+  if (!RUN_ID.test(runId)) return undefined;
+  store.sql.exec(RUNS_SCHEMA);
+  const row = store.sql.all<{ data: string }>("SELECT data FROM ai_computer_runs WHERE tenant_id=? AND user_id=? AND run_id=?", store.tenantId, tenantStorageKey(store.tenantId, userId), runId)[0];
+  if (!row) return undefined;
+  const run = JSON.parse(row.data) as StoredComputerRun;
+  if (run.status !== "planned" && run.status !== "running") return "terminal";
+  return now <= (run.startedAt ?? run.createdAt) + run.limits.maxMinutes * 60_000 + DEADLINE_GRACE_MS ? "active" : "terminal";
+}
+
 function invalid(message: string): never { throw new AiError(400, "AI_COMPUTER_INPUT_INVALID", message); }
 function object(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) invalid(`${name}格式不正确`);

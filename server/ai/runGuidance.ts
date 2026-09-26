@@ -223,16 +223,24 @@ export function cancelRunGuidance(store: AiStore, userId: string, requestIdValue
  * per-run limit) and marks it delivered, so each item reaches exactly one model
  * call. Call it right before building the next model call; include every
  * returned text in that call. `deliveredTo` records which model request carried
- * it (diagnostics only). Opens no transaction of its own, so it may also be
- * called inside a step loop's claim transaction.
+ * it (diagnostics only). `fits`, for a loop that can carry only so much per
+ * step, takes the longest oldest-first run of items it accepts whole; the rest
+ * stays pending for a later step (or the steer client's follow-up turn), so
+ * nothing is marked delivered without reaching a model. Opens no transaction
+ * of its own, so it may also be called inside a step loop's claim transaction.
  */
-export function takePendingGuidance(store: AiStore, userId: string, requestId: string, options: { deliveredTo?: string; now?: number } = {}): Array<{ id: string; text: string }> {
+export function takePendingGuidance(store: AiStore, userId: string, requestId: string, options: { deliveredTo?: string; now?: number; fits?: (texts: readonly string[]) => boolean } = {}): Array<{ id: string; text: string }> {
   if (!ID.test(requestId)) return [];
   ready(store);
-  const pending = store.sql.all<Row>(
+  let pending = store.sql.all<Row>(
     "SELECT guidance_id,seq,text,text_hash,status,created_at,delivered_at FROM ai_run_guidance WHERE tenant_id=? AND user_id=? AND request_id=? AND status='pending' ORDER BY seq LIMIT ?",
     store.tenantId, userId, requestId, AI_RUN_GUIDANCE_LIMITS.itemsPerRun,
   );
+  if (options.fits) {
+    let count = 0;
+    while (count < pending.length && options.fits(pending.slice(0, count + 1).map(row => row.text))) count += 1;
+    pending = pending.slice(0, count);
+  }
   if (!pending.length) return [];
   // One guarded statement flips pending→delivered at most once per row; RETURNING
   // reports exactly which rows this call took. The text then lives only in the
