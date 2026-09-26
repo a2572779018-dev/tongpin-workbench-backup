@@ -16,6 +16,7 @@ import {
   Monitor,
   Presentation,
   Terminal,
+  Route,
   TriangleAlert,
   Users,
   Video,
@@ -130,6 +131,7 @@ function partIcon(part: ReplyProcessPart): ReactNode {
   if (part.state === "failed") return <TriangleAlert size={14} aria-hidden="true" />;
   if (part.state === "waiting") return <Hourglass size={14} aria-hidden="true" />;
   switch (part.kind) {
+    case "route": return <Route size={14} aria-hidden="true" />;
     case "plan": return <ListChecks size={14} aria-hidden="true" />;
     case "thinking": return <Lightbulb size={14} aria-hidden="true" />;
     case "search": case "search-total": return <Globe size={14} aria-hidden="true" />;
@@ -184,6 +186,10 @@ function PartRow({ part, office }: { part: ReplyProcessPart; office?: AgentOffic
   let title: ReactNode;
   let detail: ReactNode = null;
   switch (part.kind) {
+    case "route":
+      title = <><strong>路由</strong><span>{part.label}</span></>;
+      detail = <p className="tp-ai-process-part__text">{part.detail}</p>;
+      break;
     case "plan":
       title = <><strong>{part.label}</strong><small>{part.completed}/{part.steps.length} 步</small></>;
       detail = <ol className="tp-ai-process-plan">{part.steps.map(step => <li key={step.id} className={`is-${step.status}`}>

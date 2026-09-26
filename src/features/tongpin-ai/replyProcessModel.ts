@@ -28,6 +28,8 @@ export type ReplyProcessExecStatus = AiCodeExecStatus | "incomplete" | "unsuppor
 export type ReplyProcessToolKind = "image" | "video" | "presentation" | "computer" | "file";
 
 export type ReplyProcessPart =
+  /** How the quick tier was routed (OpenSquilla or the built-in fallback), from the trace's route step. */
+  | { kind: "route"; key: "route"; label: string; detail: string; state: "done" }
   | { kind: "plan"; key: "plan"; label: "任务进度" | "工具进度"; steps: AiHarnessPublicStep[]; completed: number; state: ReplyProcessPartState }
   | { kind: "thinking"; key: "thinking"; text: string; state: ReplyProcessPartState }
   | { kind: "search"; key: string; query?: string; status: ReplyProcessSearchStatus; sourceCount?: number; durationMs?: number; state: ReplyProcessPartState }
@@ -153,6 +155,22 @@ function execState(status: ReplyProcessExecStatus): ReplyProcessPartState {
   if (status === "completed") return "done";
   if (status === "failed" || status === "incomplete" || status === "unsupported") return "failed";
   return "running";
+}
+
+const ROUTE_TITLE_PREFIX = "路由：";
+
+/** Only a quick-tier turn routed by OpenSquilla carries a "路由：" route step;
+ * built-in fallbacks and older traces keep the plain "快速档位" step and show nothing. */
+export function replyProcessRoutePart(trace: AiHarnessTrace | undefined): Extract<ReplyProcessPart, { kind: "route" }> | undefined {
+  const step = trace?.steps.find(item => item.kind === "route" && item.title.startsWith(ROUTE_TITLE_PREFIX));
+  if (!step) return undefined;
+  return { kind: "route", key: "route", label: step.title.slice(ROUTE_TITLE_PREFIX.length).trim(), detail: step.summary, state: "done" };
+}
+
+/** "OpenSquilla v4.2 → C1 均衡" → "OpenSquilla C1 均衡" for the one-line summary. */
+function routeSummaryLabel(label: string): string {
+  const arrow = label.indexOf("→");
+  return arrow < 0 ? label : `${label.slice(0, arrow).trim().split(" ")[0]} ${label.slice(arrow + 1).trim()}`;
 }
 
 function planPart(trace: AiHarnessTrace | undefined): Extract<ReplyProcessPart, { kind: "plan" }> | undefined {
@@ -307,6 +325,7 @@ export function replyProcessView(input: { message: TongpinAIMessage; artifact?: 
   const recorded = readReplyProcess(message.process);
   const live = streaming && message.liveProcess?.steps.length ? message.liveProcess : undefined;
   const plan = planPart(input.trace ?? message.trace);
+  const route = replyProcessRoutePart(input.trace ?? message.trace);
   const tool = replyProcessToolPart(artifact);
 
   let steps: ReplyProcessPart[];
@@ -322,7 +341,7 @@ export function replyProcessView(input: { message: TongpinAIMessage; artifact?: 
   // has arrived; afterwards it is a finished part like any other.
   const last = steps.at(-1);
   if (streaming && last?.kind === "thinking" && !message.content.trim()) last.state = "running";
-  const parts: ReplyProcessPart[] = [...(plan ? [plan] : []), ...steps, ...(tool ? [tool] : [])];
+  const parts: ReplyProcessPart[] = [...(route ? [route] : []), ...(plan ? [plan] : []), ...steps, ...(tool ? [tool] : [])];
   if (!parts.length) return null;
 
   const searches = parts.filter((part): part is Extract<ReplyProcessPart, { kind: "search" }> => part.kind === "search");
@@ -370,6 +389,8 @@ export function replyProcessSummary(view: ReplyProcessView): string {
   for (const part of view.parts) if (part.kind === "tool") segments.push(part.label);
   const described = segments.length - (view.phase === "settled" && view.outcome !== "completed" ? 1 : 0);
   if (!described && view.parts.some(part => part.kind === "thinking")) segments.push("已思考");
+  const route = view.parts.find(part => part.kind === "route");
+  if (route?.kind === "route") segments.unshift(routeSummaryLabel(route.label));
   if (view.phase === "settled" && view.durationMs !== undefined) segments.push(`用时 ${formatProcessTotal(view.durationMs)}`);
   return segments.join(" · ");
 }

@@ -9,6 +9,7 @@ import type { AiMode } from "../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../ai/tenant";
 import { createChatStreamResponse } from "../ai/chatStream";
 import { readGeneratedAssetReference } from "../ai/generatedAssetReference";
+import { readOpenSquillaRouting, saveOpenSquillaRouting } from "../ai/openSquillaRouting";
 import {
   createAiServiceMediaTaskOrchestrator,
   type MediaTaskConfirmation,
@@ -92,6 +93,8 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.get("/harness", (request, response) => response.json({ harness: scoped(request).harnessSettings() }));
     router.put("/harness", async (request, response) => response.json({ harness: await scoped(request).saveHarness(request.body) }));
     router.post("/harness/providers/:id/discover", async (request, response) => response.json(await scoped(request).discoverHarnessProvider(request.params.id)));
+    router.get("/opensquilla", (request, response) => response.json({ settings: readOpenSquillaRouting(scoped(request).store) }));
+    router.put("/opensquilla", (request, response) => response.json({ settings: saveOpenSquillaRouting(scoped(request).store, request.body) }));
     router.get("/observability", (request, response) => response.json(scoped(request).observability(Number(request.query.windowMinutes ?? 60))));
     router.patch("/observability/alerts/:id/acknowledge", (request, response) => response.json({ alert: scoped(request).acknowledgeObservabilityAlert(request.params.id, request.currentUser!.id) }));
     router.get("/members", async (request, response) => {

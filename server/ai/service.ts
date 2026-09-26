@@ -33,6 +33,8 @@ import { AiMemberMemoryService } from "./memberMemoryService";
 import { cancelMultiAgentRun as cancelActiveMultiAgentRun, multiAgentPreflight, runMultiAgentChat, type MultiAgentHost } from "./multiAgentRun";
 import { parseComputerTaskOutput } from "./computerTask";
 import { AiComputerService } from "./computerExecutor";
+import { planOpenSquillaRoute, readOpenSquillaRouting } from "./openSquillaRouting";
+import { parseOpenSquillaRouteDecision } from "../../shared/aiOpenSquilla";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -184,7 +186,9 @@ function parseChat(value: unknown): AiChatRequest {
     ...(capabilities.attachments?.length ? { attachments: capabilities.attachments.map(({ dataUrl: _image, ...text }) => text) } : {}),
   };
   try {
-    return { requestId: p.requestId, mode: p.mode as AiChatRequest["mode"], conversationId: validConversationId(p.conversationId, p.requestId), messages: fitAiChatMessages(messages, textContext), ...capabilities, ...(p.retryOf ? { retryOf: p.retryOf as string, retryMode: p.retryMode as "regenerate" | "continue" } : {}) };
+    return { requestId: p.requestId, mode: p.mode as AiChatRequest["mode"], conversationId: validConversationId(p.conversationId, p.requestId), messages: fitAiChatMessages(messages, textContext), ...capabilities, ...(p.retryOf ? { retryOf: p.retryOf as string, retryMode: p.retryMode as "regenerate" | "continue" } : {}),
+      // Only a strictly valid decision is kept; null records that an invalid one was sent.
+      ...(p.mode === "quick" && p.openSquillaRoute !== undefined ? { openSquillaRoute: parseOpenSquillaRouteDecision(p.openSquillaRoute) } : {}) };
   } catch (error) {
     if (error instanceof AiCurrentContextTooLongError) throw new AiError(400, "AI_CONTEXT_TOO_LONG", error.message);
     throw error;
@@ -583,9 +587,11 @@ export class AiService {
     const saved = this.store.provider();
     let route = this.harness.resolve(request.mode, saved, requestCapability(request));
     let provider = this.harness.asProvider(route, saved);
+    const quickAgentModels = route.legacy && saved && isTongpinQuickAgent(saved.quickModel) ? verifiedBaiAgentModels(saved) : null;
+    const openSquilla = planOpenSquillaRoute(request, { route, provider, harness: this.harness.settings(), settings: readOpenSquillaRouting(this.store), quickAgentSearch: filterBaiAgentModels(quickAgentModels ?? []).includes(BAI_ASTRA_MODEL) });
     if (route.legacy) {
       if (!saved?.enabled) throw new AiError(503, "AI_NOT_CONFIGURED", "管理员尚未启用 AI 服务");
-      provider = routeChatProvider(saved, request, isTongpinQuickAgent(saved.quickModel) ? verifiedBaiAgentModels(saved) : null);
+      provider = routeChatProvider(saved, request, quickAgentModels, openSquilla?.quickModels);
       const deep = request.mode === "deep" || request.mode === "pro";
       route = { ...route, modelId: deep ? provider.deepModel : provider.quickModel, protocol: provider.protocol, maxOutputTokens: provider.maxOutputTokens, reasoningEffort: deep ? provider.reasoningEffort : "" };
     }
@@ -593,7 +599,7 @@ export class AiService {
     if (!route.legacy) request.dispatchKinds = AI_DISPATCH_TOOL_KINDS.filter(kind => route.capabilities.includes(kind));
     if (request.webSearchMode === "auto") {
       const latestUserText = request.messages.filter(message => message.role === "user").at(-1)?.content ?? "";
-      request.webSearch = Boolean(route.policy.autoWebSearch && needsOnlineEvidence(latestUserText) && provider.protocol === "responses" && provider.webSearchEnabled && provider.webSearchQuotaTokens);
+      request.webSearch = Boolean((openSquilla?.applied === "search" || route.policy.autoWebSearch && needsOnlineEvidence(latestUserText)) && provider.protocol === "responses" && provider.webSearchEnabled && provider.webSearchQuotaTokens);
     }
     if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
     // Code execution is never a member toggle: always auto-decided from tier

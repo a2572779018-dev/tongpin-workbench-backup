@@ -63,11 +63,12 @@ export function needsComputation(text: string, attachments?: readonly Pick<AiAtt
 }
 
 /**
- * Bounded local agent dispatch inspired by OpenSquilla's local-router design.
- * This is intentionally not a second desktop/gateway runtime: it reuses
- * Tongpin's account, quota, approval and tool-result loop.
+ * Built-in quick-Agent dispatch (keyword rules), used when no desktop
+ * OpenSquilla decision is available. With a decision, `openSquillaModels`
+ * (planned in openSquillaRouting.ts from OpenSquilla's tier) replaces the
+ * keyword preference; visual and search constraints still apply.
  */
-export function routeChatProvider<T extends AiProviderConfig>(provider: T, request: AiChatRequest, verifiedModels: readonly string[] | null = null): T {
+export function routeChatProvider<T extends AiProviderConfig>(provider: T, request: AiChatRequest, verifiedModels: readonly string[] | null = null, openSquillaModels?: readonly string[]): T {
   if (!isTongpinQuickAgent(provider.quickModel)) return provider;
   if (new URL(provider.baseUrl).hostname !== "api.b.ai") throw new AiError(400, "AI_AGENT_PROVIDER_INVALID", "快速 Agent 当前仅支持 B.AI");
   if (verifiedModels === null) throw new AiError(503, "AI_AGENT_MODELS_UNVERIFIED", "快速 Agent 尚未完成当前密钥的模型检查，请管理员保存配置后重新检查模型列表", true);
@@ -87,7 +88,8 @@ export function routeChatProvider<T extends AiProviderConfig>(provider: T, reque
   const longContext = request.messages.reduce((size, message) => size + message.content.length, 0) + (request.attachments ?? []).reduce((size, item) => size + (item.text?.length ?? 0), 0) > 16000;
   const structuredTask = request.outputFormat && request.outputFormat !== "text";
   const researchTask = request.skillIds?.some(id => id === "deep-research" || id === "data-reader");
-  const preferences: readonly BaiQuickModel[] = visual || longContext || structuredTask || researchTask
+  const planned = openSquillaModels?.filter((model): model is BaiQuickModel => (BAI_QUICK_MODELS as readonly string[]).includes(model));
+  const preferences: readonly BaiQuickModel[] = planned?.length ? planned : visual || longContext || structuredTask || researchTask
     ? ["qwen3.8-flash", "mimo-v2.5", "hy3"]
     : /代码|编程|脚本|调试|程序|数据|表格|\b(code|coding|debug|python|javascript|typescript|sql|csv)\b/i.test(text)
       ? ["mimo-v2.5", "qwen3.8-flash", "hy3"]

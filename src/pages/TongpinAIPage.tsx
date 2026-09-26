@@ -87,6 +87,7 @@ import "../features/tongpin-ai/ai-capabilities.css";
 import "../features/tongpin-ai/ai-refinements.css";
 import "../features/tongpin-ai/workspace-storage.css";
 import { WorkspaceStorageRelief } from "../features/tongpin-ai/WorkspaceStoragePanel";
+import { attachOpenSquillaRoute, warmOpenSquillaRouter } from "../features/tongpin-ai/opensquilla/desktopBridge";
 import { conversationExportFilename, conversationExportJson, isWorkspaceSpaceRejection, largestWorkspaceConversations } from "../features/tongpin-ai/workspaceStorage";
 
 type WorkspaceDialogState =
@@ -164,6 +165,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [view, setView] = useState<TongpinAIWorkspaceView>(initialSession.view);
   const [personaSettingsOpen, setPersonaSettingsOpen] = useState(false);
   const [mode, setMode] = useState<TongpinAIMode>(initialSession.mode);
+  // Desktop only: load OpenSquilla's quick-tier router before the first quick send.
+  useEffect(() => { if (mode === "quick") warmOpenSquillaRouter(); }, [mode]);
   const [conversations, setConversations] = useState<TongpinAIConversation[]>(
     () => recoverInterruptedMessages(initialSession.conversations),
   );
@@ -2021,6 +2024,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           if (!current()) return;
           request.attachments = toolAttachmentContext(origin.attachments, origin.project?.contextDocuments ?? [], continuation ? messages : origin.conversation?.messages ?? [], visual);
         }
+        // Quick-tier text turns carry the local OpenSquilla decision to preflight and send alike.
+        await attachOpenSquillaRoute(request, conversationId, messages);
+        if (!current()) return;
         const result = await api<AiChatPreflight>("/api/ai/preflight", {
           method: "POST", body: JSON.stringify(request), signal: controller.signal,
           headers: { "X-Tongpin-Account": user.id },

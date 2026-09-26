@@ -7,6 +7,7 @@ import { AdminAiVideoSettings } from "./AdminAiVideoSettings";
 import { AdminAiVoiceSettings } from "./AdminAiVoiceSettings";
 import { AdminAiHarnessSettings } from "./AdminAiHarnessSettings";
 import { AdminAiJevSettings } from "./AdminAiJevSettings";
+import { AdminAiOpenSquillaSettings } from "./AdminAiOpenSquillaSettings";
 import { AdminAiObservability } from "./AdminAiObservability";
 import { AdminAiMemorySettings } from "./AdminAiMemorySettings";
 import { useAdminAiAlertCenter } from "./AdminAiAlertCenter";
@@ -238,7 +239,7 @@ export function AdminAiQuotaPanel() {
         return <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => setSection(key)}>{label}{alertDot ? <span className="tp-ai-admin-tab-dot" role="status" aria-label={`${alertCenter.unviewedCount} 条未查看告警`} /> : null}</button>;
       })}</nav>
       <AdminAiTabIntro section={section} />
-      <div hidden={section !== "models"}><AdminAiHarnessSettings onConfigured={setHarnessConfig} /></div>
+      <div className="tp-ai-admin-section-stack" hidden={section !== "models"}><AdminAiHarnessSettings onConfigured={setHarnessConfig} /><AdminAiOpenSquillaSettings /></div>
       <div className="tp-ai-admin-section-stack" hidden={section !== "capabilities"}>
         <AdminAiProviderSettings harnessConfig={harnessConfig} />
         <AdminAiVideoSettings key={session?.user.id} harnessConfig={harnessConfig} members={members} />

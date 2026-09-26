@@ -21,6 +21,7 @@ import type { AiStore, StoredHarnessConfig, StoredHarnessProvider, StoredProvide
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
 import { legacyHarnessDraft } from "./harnessMigration";
 import { parseImageEditCapability, parseImageGenerationCapability } from "./imageCapabilities";
+import { openSquillaRouteStep } from "./openSquillaRouting";
 import type { AiImageEditCapability, AiImageGenerationCapability } from "../../shared/aiImageCapabilities";
 import { readAiMultiAgentSettings, type AiMultiAgentSettings } from "../../shared/aiMultiAgent";
 
@@ -425,7 +426,9 @@ export class AiHarness {
         : `先形成有界执行计划，再逐步执行，最多 ${maxToolSteps} 个工具步骤。`;
     const workflow = request.workflowId ? aiWorkflowTemplate(request.workflowId) : undefined;
     const strategyStep: AiHarnessStep = { id: crypto.randomUUID(), kind: "strategy", capability, title: "执行策略", summary: strategySummary, status: "succeeded", createdAt: now, updatedAt: now, strategy, maxToolSteps, ...(workflow ? { workflowId: workflow.id, workflowVersion: AI_WORKFLOW_VERSION } : {}) };
-    const routeStep: AiHarnessStep = { id: crypto.randomUUID(), kind: "route", capability, title: `${AI_BUSINESS_TIER_LABELS[request.mode]}档位`, summary: "已按管理员配置选择业务档位；具体服务商与模型仅管理员可见。", status: "succeeded", createdAt: now, updatedAt: now };
+    // Quick-tier turns record how OpenSquilla (or the built-in fallback) routed them.
+    const routeNote = openSquillaRouteStep(request);
+    const routeStep: AiHarnessStep = { id: crypto.randomUUID(), kind: "route", capability, title: routeNote?.title ?? `${AI_BUSINESS_TIER_LABELS[request.mode]}档位`, summary: routeNote?.summary ?? "已按管理员配置选择业务档位；具体服务商与模型仅管理员可见。", status: "succeeded", createdAt: now, updatedAt: now };
     const workflowSteps: AiHarnessStep[] = workflow?.steps.map((step, index) => ({
       id: crypto.randomUUID(), kind: "workflow", capability, title: `${index + 1}. ${step.title}`,
       summary: "已按受限 Hub 模板加入本轮执行。", status: index === 0 ? "running" : "planned",

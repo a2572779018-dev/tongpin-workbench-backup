@@ -92,6 +92,8 @@ interface DesktopSessionBridge {
     value: string;
   }): Promise<boolean>;
   openAiSource(url: string): Promise<"opened" | "cancelled" | "blocked" | "failed" | "busy">;
+  /** Local OpenSquilla quick-tier router (desktop 0.1.49+; absent in the web build). */
+  openSquilla?: import("./features/tongpin-ai/opensquilla/desktopBridge").OpenSquillaDesktopBridge;
   saveAiFile(input: { filename: string; bytes: ArrayBuffer }): Promise<
     { state: "saved"; filePath: string } | { state: "cancelled" } | { state: "busy" }
   >;

@@ -5,6 +5,7 @@ import type { AiMode } from "../../../shared/ai";
 import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
 import { createChatStreamResponse } from "../../../server/ai/chatStream";
 import { readGeneratedAssetReference } from "../../../server/ai/generatedAssetReference";
+import { readOpenSquillaRouting, saveOpenSquillaRouting } from "../../../server/ai/openSquillaRouting";
 import {
   createAiServiceMediaTaskOrchestrator,
   type MediaTaskConfirmation,
@@ -124,6 +125,8 @@ export async function handleAiRequest(request: Request, service: AiService, user
       }
       return json({ harness: await service.saveHarness(body) });
     }
+    if (path === "/api/admin/ai/opensquilla" && method === "GET") return json({ settings: readOpenSquillaRouting(service.store) });
+    if (path === "/api/admin/ai/opensquilla" && method === "PUT") return json({ settings: saveOpenSquillaRouting(service.store, await parseAiJson(request)) });
     const harnessDiscover = path.match(/^\/api\/admin\/ai\/harness\/providers\/([^/]+)\/discover$/);
     if (harnessDiscover && method === "POST") return json(await service.discoverHarnessProvider(decodeURIComponent(harnessDiscover[1])));
     if (path === "/api/admin/ai/observability" && method === "GET") return json(service.observability(Number(url.searchParams.get("windowMinutes") ?? 60)));

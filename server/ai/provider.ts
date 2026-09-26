@@ -2,6 +2,7 @@ import type { AiChatRequest, AiProviderDiagnostic, AiSource, AiUsage } from "../
 import type { StoredProvider } from "./storage";
 import { AiError } from "./security";
 import { chatInstructions, chatMessages, safeSource } from "./capabilities";
+import { openSquillaReasoningEffort } from "./openSquillaRouting";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { consumeProviderResponse, type ProviderReadOptions } from "./providerStream";
 import { AI_WORKSPACE_LIMITS } from "../../shared/aiWorkspace";
@@ -245,6 +246,8 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
       max_output_tokens: maxOutputTokens, stream: true, store: false,
       ...(tools.length ? { tools, ...(maxToolCalls > 0 ? { max_tool_calls: maxToolCalls } : {}), tool_choice: request.webSearch && request.webSearchMode !== "auto" ? "required" : "auto", include } : {}),
       ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort, ...(providerPublicSummary ? { summary: "auto" } : {}) } } : {}),
+      // Quick tier: only an admin-mapped OpenSquilla "reasoning" turn on a Responses route.
+      ...(openSquillaReasoningEffort(request) ? { reasoning: { effort: openSquillaReasoningEffort(request) } } : {}),
     };
   }
   const isBaiChat = new URL(provider.baseUrl).hostname === "api.b.ai";

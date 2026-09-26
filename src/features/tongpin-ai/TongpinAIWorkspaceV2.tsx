@@ -30,6 +30,7 @@ import { useSteerController, type SteerSendResult } from "./steerController";
 import type { TongpinAIMode, TongpinAIUsage } from "./types";
 import { applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE, type AiReplyProcessLive } from "../../../shared/aiReplyProcess";
 import "./workspace-v2.css";
+import { attachOpenSquillaRoute, warmOpenSquillaRouter } from "./opensquilla/desktopBridge";
 
 type Bootstrap = Extract<AiWorkspaceV2Bootstrap, { schemaVersion: 2 }>;
 type ConversationCache = {
@@ -94,6 +95,8 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
   const [nameDialog, setNameDialog] = useState<{ kind: "new" | "rename"; conversationId?: string; projectId?: string } | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [mode, setMode] = useState<TongpinAIMode>(initial.manifest.base.mode);
+  // Desktop only: load OpenSquilla's quick-tier router before the first quick send.
+  useEffect(() => { if (mode === "quick") warmOpenSquillaRouter(); }, [mode]);
   const [aiStatus, setAiStatus] = useState(status);
   const [focusRequest, setFocusRequest] = useState(0);
   const mountedRef = useRef(true);
@@ -452,6 +455,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
         ...(current.project?.instructions ? { projectContext: current.project.instructions } : {}),
         ...(mode === "quick" && aiStatus.quickAgent ? { webSearchMode: "auto" as const } : {}),
         ...(supplement ? { supplement: true as const } : {}) };
+      await attachOpenSquillaRoute(request, id, [...current.messages, message]);
       const startedAt = Date.now();
       setStreamContent(old => ({ ...old, [id]: { content: "", analysisSummary: "", startedAt } }));
       let result: AiChatResponse;

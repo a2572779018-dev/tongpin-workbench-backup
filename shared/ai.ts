@@ -2,6 +2,7 @@ import type { AiWorkspaceStorageUsage } from "./aiWorkspace";
 import type { AiWorkflowId } from "./aiWorkflows";
 import type { AiImageEditCapability, AiImageGenerationCapability } from "./aiImageCapabilities";
 import type { AiMultiAgentSettings } from "./aiMultiAgent";
+import type { AiOpenSquillaPlan, AiOpenSquillaRouteDecision } from "./aiOpenSquilla";
 
 /** Browser-safe contract. API credentials and prompts never appear in admin usage records. */
 export type AiProtocol = "chat_completions" | "responses";
@@ -404,6 +405,11 @@ export interface AiChatRequest {
   /** Server-owned: tool kinds the resolved tier actually permits. Never read
    * from the client body; set after route resolution. Undefined = legacy (all). */
   dispatchKinds?: AiDispatchToolKind[];
+  /** Desktop OpenSquilla router decision for a quick-tier turn, strictly validated
+   * by the server; null means the client sent one that failed validation. */
+  openSquillaRoute?: AiOpenSquillaRouteDecision | null;
+  /** Server-owned: how the quick tier applied (or fell back from) OpenSquilla. Never read from the client body. */
+  openSquillaPlan?: AiOpenSquillaPlan;
 }
 export type AiChatPreflightReason = null | "quota_exhausted" | "search_quota_insufficient" | "quota_insufficient" | "request_in_progress";
 /** Conservative quota reservations, not actual provider usage or currency prices. */
