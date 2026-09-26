@@ -1,4 +1,4 @@
-import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceDocument, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceDocument, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState, type AiWorkspaceStorageUsage } from "../../shared/aiWorkspace";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
@@ -473,6 +473,11 @@ function chunks(serialized: string): string[] {
   return result;
 }
 
+/** Same measure as the aggregate save check: UTF-8 bytes of the stored JSON. Storage format is unchanged. */
+export function workspaceStorageUsage(serialized: string): AiWorkspaceStorageUsage {
+  return { usedBytes: serialized ? new TextEncoder().encode(serialized).byteLength : 0, limitBytes: LIMITS.stateBytes };
+}
+
 export class AiWorkspaceRepository {
   constructor(readonly sql: AiSql) {}
 
@@ -486,13 +491,36 @@ export class AiWorkspaceRepository {
     this.sql.exec("CREATE INDEX IF NOT EXISTS ai_workspaces_tenant_user ON ai_workspaces(tenant_id,user_id); CREATE INDEX IF NOT EXISTS ai_workspace_mutations_tenant_user ON ai_workspace_mutations(tenant_id,user_id,revision DESC);");
   }
 
+  /**
+   * Admin overview: UTF-8 bytes of each member's stored V1 snapshot, measured in
+   * SQL without loading or parsing it. Accounts without a V1 row, or already on
+   * another schema version, get no entry. Read-only; storage format unchanged.
+   */
+  storedSnapshotUsage(userIds: readonly string[], tenantId: string = DEFAULT_AI_TENANT_ID): Map<string, AiWorkspaceStorageUsage> {
+    const tenant = normalizeAiTenantId(tenantId);
+    const result = new Map<string, AiWorkspaceStorageUsage>();
+    for (const userId of userIds) {
+      const storedUserId = tenantStorageKey(tenant, userId);
+      const row = this.sql.all<{ schema_version: number; inline_bytes: number | null }>(
+        "SELECT schema_version, CASE WHEN data=? THEN NULL ELSE LENGTH(CAST(data AS BLOB)) END AS inline_bytes FROM ai_workspaces WHERE tenant_id=? AND user_id=?",
+        CHUNK_MARKER, tenant, storedUserId,
+      )[0];
+      if (!row || row.schema_version !== 1) continue;
+      const usedBytes = row.inline_bytes ?? Number(this.sql.all<{ bytes: number | null }>(
+        "SELECT COALESCE(SUM(LENGTH(CAST(data AS BLOB))),0) AS bytes FROM ai_workspace_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUserId,
+      )[0]?.bytes ?? 0);
+      result.set(userId, { usedBytes, limitBytes: LIMITS.stateBytes });
+    }
+    return result;
+  }
+
   read(userId: string, tenantId: string = DEFAULT_AI_TENANT_ID): AiWorkspaceSnapshot {
     id(userId, "账号");
     const tenant = normalizeAiTenantId(tenantId);
     const storedUserId = tenantStorageKey(tenant, userId);
     new AiStore(this.sql, tenant).assertAccess(userId);
     const row = this.sql.all<{ revision: number; schema_version: number; updated_at: string; data: string }>("SELECT revision,schema_version,updated_at,data FROM ai_workspaces WHERE tenant_id=? AND user_id=?", tenant, storedUserId)[0];
-    if (!row) return { revision: 0, schemaVersion: 1, updatedAt: null, state: null };
+    if (!row) return { revision: 0, schemaVersion: 1, updatedAt: null, state: null, storage: workspaceStorageUsage("") };
     if (row.schema_version !== 1) throw new AiError(409, "AI_WORKSPACE_VERSION_UNSUPPORTED", "工作台记录版本已更新，请升级客户端");
     let serialized = row.data;
     if (serialized === CHUNK_MARKER) {
@@ -500,7 +528,7 @@ export class AiWorkspaceRepository {
       if (!rows.length || rows.some((chunk, index) => chunk.chunk_index !== index)) throw new AiError(500, "AI_WORKSPACE_CORRUPT", "工作台记录不完整，请保留当前窗口并联系管理员");
       serialized = rows.map(chunk => chunk.data).join("");
     }
-    return { revision: row.revision, schemaVersion: 1, updatedAt: row.updated_at, state: JSON.parse(serialized) as AiWorkspaceState };
+    return { revision: row.revision, schemaVersion: 1, updatedAt: row.updated_at, state: JSON.parse(serialized) as AiWorkspaceState, storage: workspaceStorageUsage(serialized) };
   }
 
   async save(userId: string, value: unknown, tenantId: string = DEFAULT_AI_TENANT_ID): Promise<AiWorkspaceSnapshot> {
@@ -550,13 +578,14 @@ export class AiWorkspaceRepository {
       const updatedAt = new Date().toISOString();
       this.sql.exec("INSERT INTO ai_workspaces(user_id,tenant_id,revision,schema_version,updated_at,data) VALUES(?,?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET tenant_id=excluded.tenant_id,revision=excluded.revision,schema_version=excluded.schema_version,updated_at=excluded.updated_at,data=excluded.data", storedUserId, tenant, revision, updatedAt, CHUNK_MARKER);
       this.sql.exec("DELETE FROM ai_workspace_chunks WHERE tenant_id=? AND user_id=?", tenant, storedUserId);
-      for (const [index, data] of chunks(JSON.stringify(stateToSave)).entries()) {
+      const serialized = JSON.stringify(stateToSave);
+      for (const [index, data] of chunks(serialized).entries()) {
         this.sql.exec("INSERT INTO ai_workspace_chunks(user_id,tenant_id,chunk_index,data) VALUES(?,?,?,?)", storedUserId, tenant, index, data);
       }
       this.sql.exec("INSERT INTO ai_workspace_mutations(user_id,tenant_id,mutation_id,request_hash,revision) VALUES(?,?,?,?,?)", storedUserId, tenant, request.mutationId, hash, revision);
       // Compact receipts, not user records. Older requests still fail CAS and cannot replay writes.
       this.sql.exec("DELETE FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND revision<=?", tenant, storedUserId, Math.max(0, revision - 2048));
-      return acknowledge({ revision, schemaVersion: 1, updatedAt, state: stateToSave });
+      return acknowledge({ revision, schemaVersion: 1, updatedAt, state: stateToSave, storage: workspaceStorageUsage(serialized) });
     });
   }
 }

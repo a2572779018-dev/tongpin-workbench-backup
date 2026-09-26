@@ -97,3 +97,7 @@
 .tp-ai-admin-legacy-group > summary { color: var(--tpq-muted); }
 .tp-ai-admin-tier-video-note ul { margin: .4rem 0 0; padding-left: 1.2rem; font-size: .8rem; line-height: 1.7; }
 .tp-ai-admin-tier-video-note small { color: var(--tpq-muted); margin-left: .25rem; }
+
+.tp-ai-admin-storage { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tp-ai-admin-storage.is-warning { color: #9a6a12; font-weight: 600; }
+.tp-ai-admin-storage.is-critical { color: #b23a26; font-weight: 700; }

@@ -28,6 +28,9 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { User } from "../../types";
 import { TongpinAIAccountUsage } from "./TongpinAIAccountUsage";
+import { aiMotionRef } from "./motion";
+import { WorkspaceStorageMeter } from "./WorkspaceStorage";
+import type { AiWorkspaceStorageUsage } from "../../../shared/aiWorkspace";
 import type { ConversationTaskStatus } from "./conversationTaskStatus";
 import type {
   TongpinAIConversation,
@@ -45,6 +48,8 @@ interface TongpinAISidebarProps {
   projects: TongpinAIProject[];
   skillCount: number;
   usage: TongpinAIUsage;
+  /** V1 whole-account snapshot size; null hides the meter. */
+  workspaceStorage?: AiWorkspaceStorageUsage | null;
   quotaSynced?: boolean;
   onRefreshUsage?: () => Promise<void>;
   user: User;
@@ -80,6 +85,7 @@ export function TongpinAISidebar({
   projects,
   skillCount,
   usage,
+  workspaceStorage = null,
   quotaSynced = false,
   onRefreshUsage,
   user,
@@ -423,7 +429,7 @@ export function TongpinAISidebar({
             ) : visibleProjects.length === 0 ? (
               <p className="tp-ai-sidebar__empty">没有匹配的项目</p>
             ) : (
-              <div className="tp-ai-projects__list">
+              <div className="tp-ai-projects__list" ref={aiMotionRef}>
                 {visibleProjects.map((project) => {
                   const projectConversations = conversations.filter(
                     (item) => item.projectId === project.id,
@@ -536,6 +542,7 @@ export function TongpinAISidebar({
                       </div>
                       <div
                         className="tp-ai-project-chats"
+                        ref={aiMotionRef}
                         id={"tp-ai-project-chats-" + project.id}
                         role="group"
                         aria-label={project.title + "中的对话"}
@@ -586,6 +593,7 @@ export function TongpinAISidebar({
             </header>
             <div
               className="tp-ai-history__list"
+              ref={aiMotionRef}
               id="tp-ai-history-list"
               hidden={!ordinaryConversationsOpen && !query}
             >
@@ -598,6 +606,7 @@ export function TongpinAISidebar({
             </div>
           </section>
         </div>
+        <WorkspaceStorageMeter storage={workspaceStorage} />
         <TongpinAIAccountUsage usage={usage} user={user} quotaSynced={quotaSynced} onRefresh={onRefreshUsage} />
       </aside>
 

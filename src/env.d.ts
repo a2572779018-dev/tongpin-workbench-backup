@@ -66,6 +66,8 @@ interface DesktopSessionBridge {
     } | {
       type: "open-lora-dashboard";
       reportDate: string;
+    } | {
+      type: "open-admin-ai-monitoring";
     };
   }): Promise<boolean>;
   dismissNotification(notificationId?: string): Promise<boolean>;
@@ -93,6 +95,9 @@ interface DesktopSessionBridge {
       | {
           type: "open-lora-dashboard";
           reportDate: string;
+        }
+      | {
+          type: "open-admin-ai-monitoring";
         },
     ) => void,
   ): () => void;

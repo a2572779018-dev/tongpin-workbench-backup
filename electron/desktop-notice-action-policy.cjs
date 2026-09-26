@@ -25,6 +25,9 @@ function normalizeDesktopNoticeAction(action) {
       reportDate: action.reportDate,
     };
   }
+  if (action.type === "open-admin-ai-monitoring") {
+    return { type: "open-admin-ai-monitoring" };
+  }
   return null;
 }
 

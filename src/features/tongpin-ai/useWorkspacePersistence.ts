@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
+import type { AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceState, AiWorkspaceStorageUsage } from "../../../shared/aiWorkspace";
 import { WorkspaceSaveQueue, type WorkspaceSyncStatus } from "./workspaceSync";
 import { notifyAiWorkspaceSaved, registerAiLeaveGuard } from "./workspaceLeaveGuard";
+import { estimateWorkspaceStorage, workspaceStorageFrom } from "./workspaceStorage";
 
 export function useWorkspacePersistence(
   initial: AiWorkspaceSnapshot,
@@ -12,9 +13,18 @@ export function useWorkspacePersistence(
   const active = useRef(true);
   const [status, setStatus] = useState<WorkspaceSyncStatus>("saved");
   const [error, setError] = useState("");
-  const [queue] = useState(() => new WorkspaceSaveQueue(initial, write, (next, message = "") => {
+  const [errorCode, setErrorCode] = useState<string | undefined>(undefined);
+  // Server-reported snapshot size; a one-time local estimate if an older server omits it.
+  const [storage, setStorage] = useState<AiWorkspaceStorageUsage | null>(() =>
+    workspaceStorageFrom(initial.storage) ?? (initial.state ? estimateWorkspaceStorage(initial.state) : null));
+  const [queue] = useState(() => new WorkspaceSaveQueue(initial, async body => {
+    const snapshot = await write(body);
+    const reported = workspaceStorageFrom(snapshot.storage);
+    if (reported && active.current) setStorage(reported);
+    return snapshot;
+  }, (next, message = "", code) => {
     if (next === "saved") notifyAiWorkspaceSaved(accountId);
-    if (active.current) { setStatus(next); setError(message); }
+    if (active.current) { setStatus(next); setError(message); setErrorCode(next === "error" || next === "conflict" ? code : undefined); }
   }));
   useEffect(() => registerAiLeaveGuard(accountId, () => queue.flushSaved()), [accountId, queue]);
   useEffect(() => {
@@ -39,7 +49,7 @@ export function useWorkspacePersistence(
     const timer = window.setTimeout(() => void queue.flush(), 300);
     return () => window.clearTimeout(timer);
   }, [queue, state]);
-  return { status, error, retry: () => void queue.flush(), flush: () => queue.flush(),
+  return { status, error, errorCode, storage, retry: () => void queue.flush(), flush: () => queue.flush(),
     flushSaved: () => queue.flushSaved(),
     saveNow: (next: AiWorkspaceState) => queue.saveNow(next),
   };

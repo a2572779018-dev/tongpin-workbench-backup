@@ -769,6 +769,8 @@ export function AppShell({
         }
         return;
       }
+      // Admin AI alert notices are handled by the app-level admin alert watch.
+      if (action.type === "open-admin-ai-monitoring") return;
       const taskId = action.taskId;
       const date = action.date;
       if (!taskId || !date) return;

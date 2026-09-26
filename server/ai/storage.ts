@@ -426,10 +426,14 @@ export class AiStore {
     }
   }
   private observabilityAlertHistory(): AiObservabilityAlert[] {
-    return this.sql.all<{ id: string; code: AiObservabilityAlert["code"]; severity: AiObservabilityAlert["severity"]; tier: string; provider_id: string; capability: string; message: string; first_seen_at: number; last_seen_at: number; occurrence_count: number; acknowledged_at: number | null; resolved_at: number | null }>(
-      "SELECT id,code,severity,tier,provider_id,capability,message,first_seen_at,last_seen_at,occurrence_count,acknowledged_at,resolved_at FROM ai_observability_alerts WHERE tenant_id=? ORDER BY last_seen_at DESC LIMIT 100", this.tenantId,
-    ).map(row => ({ id: row.id, code: row.code, severity: row.severity, tier: row.tier as AiMode, provider: row.provider_id, capability: row.capability as AiHarnessCapability, message: row.message, firstSeenAt: new Date(Number(row.first_seen_at)).toISOString(), lastSeenAt: new Date(Number(row.last_seen_at)).toISOString(), occurrences: Number(row.occurrence_count), acknowledgedAt: row.acknowledged_at === null ? null : new Date(Number(row.acknowledged_at)).toISOString(), resolvedAt: row.resolved_at === null ? null : new Date(Number(row.resolved_at)).toISOString() }));
+    return this.observabilityAlertRows().map(({ fingerprint: _fingerprint, ...alert }) => alert);
   }
+  private observabilityAlertRows(): Array<AiObservabilityAlert & { fingerprint: string }> {
+    return this.sql.all<{ fingerprint: string; id: string; code: AiObservabilityAlert["code"]; severity: AiObservabilityAlert["severity"]; tier: string; provider_id: string; capability: string; message: string; first_seen_at: number; last_seen_at: number; occurrence_count: number; acknowledged_at: number | null; resolved_at: number | null }>(
+      "SELECT fingerprint,id,code,severity,tier,provider_id,capability,message,first_seen_at,last_seen_at,occurrence_count,acknowledged_at,resolved_at FROM ai_observability_alerts WHERE tenant_id=? ORDER BY last_seen_at DESC LIMIT 100", this.tenantId,
+    ).map(row => ({ fingerprint: String(row.fingerprint), id: row.id, code: row.code, severity: row.severity, tier: row.tier as AiMode, provider: row.provider_id, capability: row.capability as AiHarnessCapability, message: row.message, firstSeenAt: new Date(Number(row.first_seen_at)).toISOString(), lastSeenAt: new Date(Number(row.last_seen_at)).toISOString(), occurrences: Number(row.occurrence_count), acknowledgedAt: row.acknowledged_at === null ? null : new Date(Number(row.acknowledged_at)).toISOString(), resolvedAt: row.resolved_at === null ? null : new Date(Number(row.resolved_at)).toISOString() }));
+  }
+
   acknowledgeObservabilityAlert(alertId: string, actorId: string): AiObservabilityAlert {
     const now = Date.now();
     this.sql.exec("UPDATE ai_observability_alerts SET acknowledged_at=COALESCE(acknowledged_at,?),acknowledged_by=COALESCE(acknowledged_by,?) WHERE tenant_id=? AND id=?", now, this.userKey(actorId), this.tenantId, alertId);
@@ -443,7 +447,8 @@ export class AiStore {
     const slices = this.observabilitySlices(safeWindow);
     // Alert lifecycle uses one canonical 60-minute window so a custom dashboard
     // query cannot accidentally resolve or reopen durable alert history.
-    this.syncObservabilityAlerts(safeWindow === 60 ? slices : this.observabilitySlices(60));
+    const alertSlices = safeWindow === 60 ? slices : this.observabilitySlices(60);
+    this.syncObservabilityAlerts(alertSlices);
     const requests = slices.reduce((sum, item) => sum + item.requests, 0);
     const successes = slices.reduce((sum, item) => sum + item.successes, 0);
     const failures = slices.reduce((sum, item) => sum + item.failures, 0);
@@ -461,7 +466,15 @@ export class AiStore {
       }, []).sort((left, right) => right.count - left.count || left.code.localeCompare(right.code)),
     };
     if (totals.firstVisibleSamples) totals.averageFirstVisibleMs = Math.round(slices.reduce((sum, item) => sum + (item.averageFirstVisibleMs ?? 0) * item.firstVisibleSamples, 0) / totals.firstVisibleSamples);
-    const alertHistory = this.observabilityAlertHistory();
-    return { generatedAt: new Date().toISOString(), windowMinutes: safeWindow, totals, slices, alerts: alertHistory.filter(alert => alert.resolvedAt === null), alertHistory };
+    const rows = this.observabilityAlertRows();
+    const alertHistory = rows.map(({ fingerprint: _fingerprint, ...alert }) => alert);
+    // Read-only enrichment: attach the live 60-minute metrics of the slice behind each
+    // active alert so the admin UI can phrase rate / error codes without new writes.
+    const sliceByKey = new Map(alertSlices.map(item => [`${item.tier}:${item.provider}:${item.capability}:${item.operation}`, item]));
+    const alerts = rows.filter(alert => alert.resolvedAt === null).map(({ fingerprint, ...alert }): AiObservabilityAlert => {
+      const slice = sliceByKey.get(fingerprint.slice(fingerprint.indexOf(":") + 1));
+      return slice ? { ...alert, detail: { operation: slice.operation, requests: slice.requests, failures: slice.failures, errorRate: slice.errorRate, maxLatencyMs: slice.maxLatencyMs, errors: slice.errors.slice(0, 3) } } : alert;
+    });
+    return { generatedAt: new Date().toISOString(), windowMinutes: safeWindow, totals, slices, alerts, alertHistory };
   }
 }

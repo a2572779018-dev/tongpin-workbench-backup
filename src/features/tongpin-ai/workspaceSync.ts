@@ -32,7 +32,7 @@ export class WorkspaceSaveQueue {
   constructor(
     initial: AiWorkspaceSnapshot,
     private readonly write: (body: AiWorkspaceSaveRequest) => Promise<AiWorkspaceSnapshot>,
-    private readonly changed: (status: WorkspaceSyncStatus, message?: string) => void,
+    private readonly changed: (status: WorkspaceSyncStatus, message?: string, code?: string) => void,
   ) {
     this.revision = initial.revision;
     this.desiredJson = JSON.stringify(initial.state);
@@ -94,7 +94,7 @@ export class WorkspaceSaveQueue {
         ? code === "AI_ACCOUNT_CHANGED" || code === "AI_WORKSPACE_ACCOUNT_CHANGED"
           ? "账号已切换，本机记录未保存到其他账号；请先导出本机内容，再重新打开工作台。"
           : "另一台设备已更新记录；为避免覆盖，请先导出本机内容，再重新加载。"
-        : error instanceof Error ? error.message : "记录暂未保存，请检查网络后重试。");
+        : error instanceof Error ? error.message : "记录暂未保存，请检查网络后重试。", code);
     }
   }
 }

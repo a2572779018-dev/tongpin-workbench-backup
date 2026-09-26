@@ -79,6 +79,9 @@ import "../features/tongpin-ai/chat-layout.css";
 import "../features/tongpin-ai/ai-metal-theme.css";
 import "../features/tongpin-ai/ai-capabilities.css";
 import "../features/tongpin-ai/ai-refinements.css";
+import "../features/tongpin-ai/workspace-storage.css";
+import { WorkspaceStorageRelief } from "../features/tongpin-ai/WorkspaceStorage";
+import { conversationExportFilename, conversationExportJson, isWorkspaceSpaceRejection, largestWorkspaceConversations } from "../features/tongpin-ai/workspaceStorage";
 
 type WorkspaceDialogState =
   | { type: "new-project" }
@@ -541,6 +544,26 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       throw error;
     }
     finally { fileImportRef.current.delete(target); }
+  }
+
+  const spaceRejected = capacityNotice !== null
+    || (persistence.status === "error" && isWorkspaceSpaceRejection(persistence.errorCode));
+  // Computed only while a space notice is visible; never during ordinary chat rendering.
+  const largestConversations = useMemo(
+    () => spaceRejected ? largestWorkspaceConversations(persistentState, 5) : [],
+    [spaceRejected, persistentState],
+  );
+
+  async function exportConversationThenDelete(conversationId: string) {
+    const json = conversationExportJson(persistentStateRef.current, conversationId);
+    const conversation = persistentStateRef.current.conversations.find(item => item.id === conversationId);
+    if (!json || !conversation) return;
+    const result = await saveBlobWithFeedback(
+      new Blob([json], { type: "application/json;charset=utf-8" }),
+      conversationExportFilename(conversation.title),
+    );
+    // Deletion still goes through the existing confirmation dialog; never automatic.
+    if (mountedRef.current && (result.state === "saved" || result.state === "started")) openDeleteConversationDialog(conversationId);
   }
 
   function exportWorkspace() {
@@ -1514,7 +1537,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     const next = continuation ? { ...currentState, conversations: latest.conversations.map(item => item.id === conversationId ? conversation : item) }
       : withPreparedChatSend(currentState, conversation, origin.draftKey);
     try { ensureAttachmentWorkspaceCapacity(next, kind === "video" ? "video" : "reply"); }
-    catch (error) { showAnnouncement(error instanceof Error ? error.message : "记录空间不足，未提交生成"); return false; }
+    catch (error) {
+      if (error instanceof WorkspaceCapacityError) setCapacityNotice(error.message);
+      else showAnnouncement(error instanceof Error ? error.message : "记录空间不足，未提交生成");
+      return false;
+    }
     pendingGenerationRef.current.add(conversationId);
     pendingCancelledRef.current.delete(conversationId);
     setReplyActivity(conversationId, messageId, "waiting");
@@ -1719,7 +1746,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       next.videoDraftSettings = latest.videoDraftSettings;
     }
     try { ensureAttachmentWorkspaceCapacity(next, "video"); }
-    catch (e) { showAnnouncement(e instanceof Error ? e.message : "记录空间不足"); return false; }
+    catch (e) {
+      if (e instanceof WorkspaceCapacityError) setCapacityNotice(e.message);
+      else showAnnouncement(e instanceof Error ? e.message : "记录空间不足");
+      return false;
+    }
     pendingGenerationRef.current.add(conversationId);
     pendingCancelledRef.current.delete(conversationId);
     setReplyActivity(conversationId, messageId, "waiting");
@@ -2138,6 +2169,13 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         <span>{capacityNotice}</span>
         <button type="button" onClick={exportWorkspace}>导出当前内容</button>
         <button type="button" onClick={() => setCapacityNotice(null)} aria-label="关闭存储空间提示">关闭</button>
+        <WorkspaceStorageRelief items={largestConversations} onDelete={openDeleteConversationDialog}
+          onExportThenDelete={id => void exportConversationThenDelete(id)} />
+      </div>}
+      {!capacityNotice && persistence.status === "error" && isWorkspaceSpaceRejection(persistence.errorCode) && largestConversations.length > 0 && <div className="tp-ai-capacity-notice" role="status">
+        <span>云端资料空间不足，本次改动尚未保存。可删除下面占用较多的对话后点“重试保存”。</span>
+        <WorkspaceStorageRelief items={largestConversations} onDelete={openDeleteConversationDialog}
+          onExportThenDelete={id => void exportConversationThenDelete(id)} />
       </div>}
       </div>}
       <TongpinAISidebar
@@ -2148,6 +2186,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         projects={projects}
         skillCount={TONGPIN_AI_SKILLS.length}
         usage={usage}
+        workspaceStorage={persistence.storage}
         quotaSynced={aiStatus !== null}
         onRefreshUsage={refreshStatus}
         user={user}

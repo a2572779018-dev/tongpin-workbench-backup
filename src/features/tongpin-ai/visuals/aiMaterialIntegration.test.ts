@@ -40,7 +40,9 @@ describe("AI material integration guardrails", () => {
 
   it("starts empty conversations at the top instead of scrolling their welcome character away", () => {
     const chat = read("../ChatWorkspace.tsx");
-    expect(chat.match(/list\.scrollTop = isEmpty \? 0 : list\.scrollHeight;/g)).toHaveLength(2);
+    expect(chat.match(/list\.scrollTop = isEmpty \? 0 : list\.scrollHeight;/g)).toHaveLength(1);
+    // Streaming follow is rAF-coalesced, but an empty conversation still pins to the top synchronously.
+    expect(chat).toMatch(/if \(isEmpty\) \{\s*const list = messageListRef\.current;\s*if \(list && followResponseRef\.current\) list\.scrollTop = 0;/);
     expect(read("../ai-refinements.css")).toMatch(/@media \(max-height: 850px\)[\s\S]*\.tp-ai-page \.tp-ai-chat\.is-empty \.tp-ai-composer-wrap\s*\{ flex: 0 0 auto;/);
   });
 

@@ -747,6 +747,10 @@ describe("AI Harness", () => {
     expect(dashboard.slices[0]).toMatchObject({ operation: "execution", errors: [{ code: "UPSTREAM_REJECTED", count: 4 }] });
     expect(dashboard.alerts.map(alert => alert.code)).toEqual(expect.arrayContaining(["HIGH_ERROR_RATE", "HIGH_LATENCY", "PROVIDER_UNAVAILABLE"]));
     expect(JSON.stringify(dashboard)).not.toMatch(/tenant-member|harness-secret|内部敏感提示/);
+    expect(dashboard.alerts.find(alert => alert.code === "HIGH_ERROR_RATE")?.detail).toEqual({
+      operation: "execution", requests: 4, failures: 4, errorRate: 1, maxLatencyMs: 65_000, errors: [{ code: "UPSTREAM_REJECTED", count: 4 }],
+    });
+    expect(dashboard.alertHistory.every(alert => !("detail" in alert) && !("fingerprint" in alert))).toBe(true);
 
     const activeOccurrences = Object.fromEntries(dashboard.alerts.map(alert => [alert.code, alert.occurrences]));
     runtime.store.addObservability({ userId: "tenant-member-success", tier: "deep", providerId: "primary", capability: "chat", success: true, latencyMs: 10 });

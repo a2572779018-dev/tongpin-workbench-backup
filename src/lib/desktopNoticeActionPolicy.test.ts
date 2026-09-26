@@ -16,6 +16,12 @@ describe("desktop notice action policy", () => {
     ).toEqual({ type: "open-lora-dashboard", reportDate: "2026-08-14" });
   });
 
+  it("allows the admin AI monitoring action without extra fields", () => {
+    expect(
+      normalizeDesktopNoticeAction({ type: "open-admin-ai-monitoring", url: "https://example.com" }),
+    ).toEqual({ type: "open-admin-ai-monitoring" });
+  });
+
   it("rejects arbitrary actions and malformed dates", () => {
     expect(
       normalizeDesktopNoticeAction({

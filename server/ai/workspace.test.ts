@@ -17,6 +17,8 @@ import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 import { completedReply } from "../../src/features/tongpin-ai/chatRequests";
 import { WorkspaceSaveQueue } from "../../src/features/tongpin-ai/workspaceSync";
 import type { AiHarnessStep, AiHarnessTrace } from "../../shared/ai";
+import { AiService } from "./service";
+import { createSecretBox } from "./security";
 
 // Keep Worker global types out of the browser/Node tsconfig. The Worker source is
 // separately typechecked by cloudflare/tsconfig.json and executed here unchanged.
@@ -92,7 +94,7 @@ describe("AI durable member workspace", () => {
   });
 
   it("starts empty and preserves every project, conversation, draft and artifact across process restart", async () => {
-    expect(repository.read("member-a")).toEqual({ revision: 0, schemaVersion: 1, updatedAt: null, state: null });
+    expect(repository.read("member-a")).toEqual({ revision: 0, schemaVersion: 1, updatedAt: null, state: null, storage: { usedBytes: 0, limitBytes: AI_WORKSPACE_LIMITS.stateBytes } });
     const request = saveRequest();
     const first = await repository.save("member-a", request);
     database.close(); database = new DatabaseSync(path.join(directory, "workspace.sqlite"));
@@ -403,6 +405,50 @@ describe("AI durable member workspace", () => {
     state.artifacts[0].data.padding += "中";
     await expect(repository.save("member-a", saveRequest(state, 1))).rejects.toMatchObject({ status: 413, code: "AI_WORKSPACE_TOO_LARGE" });
     expect(repository.read("member-a").revision).toBe(1);
+  });
+  it("reports stored snapshot size and limit on save and read without changing the stored format", async () => {
+    const state = fixture();
+    const saved = await repository.save("member-a", saveRequest(state));
+    const bytes = new TextEncoder().encode(JSON.stringify(saved.state)).byteLength;
+    expect(saved.storage).toEqual({ usedBytes: bytes, limitBytes: AI_WORKSPACE_LIMITS.stateBytes });
+    expect(repository.read("member-a").storage).toEqual(saved.storage);
+    const stored = (database.prepare("SELECT data FROM ai_workspace_chunks ORDER BY chunk_index").all() as { data: string }[]).map(row => row.data).join("");
+    expect(JSON.parse(stored)).toEqual(saved.state);
+    expect(stored).not.toContain("usedBytes");
+    const larger = fixture(); larger.conversations[0].messages[0].content = "中".repeat(1000);
+    const next = await repository.save("member-a", saveRequest(larger, 1));
+    expect(next.storage!.usedBytes).toBeGreaterThan(bytes + 2900);
+  });
+  it("reports storage through both the Node and Cloudflare workspace routes", async () => {
+    const app = express(); app.use((request, _response, next) => { request.currentUser = { id: "member-a", role: "member", status: "active" } as never; next(); });
+    app.use("/api/ai/workspace", createAiWorkspaceRouter(repository, ((_request: unknown, _response: unknown, next: () => void) => next()) as never));
+    const put = await request(app).put("/api/ai/workspace").send(saveRequest());
+    expect(put.status).toBe(200);
+    expect(put.body.storage).toMatchObject({ limitBytes: AI_WORKSPACE_LIMITS.stateBytes });
+    expect(put.body.storage.usedBytes).toBeGreaterThan(0);
+    const get = await request(app).get("/api/ai/workspace");
+    expect(get.body.storage).toEqual(put.body.storage);
+    const worker = await handleAiWorkspaceRequest(new Request("https://tongpin.example/api/ai/workspace"), repository, { id: "member-a", role: "member", status: "active" });
+    expect(((await worker.json()) as AiWorkspaceSnapshot).storage).toEqual(put.body.storage);
+  });
+  it("lets admins see each member's stored snapshot size without parsing or changing it", async () => {
+    const saved = await repository.save("member-a", saveRequest());
+    const usage = repository.storedSnapshotUsage(["member-a", "member-b", "unknown"]);
+    expect(usage.get("member-a")).toEqual(saved.storage);
+    expect(usage.has("member-b")).toBe(false);
+    expect(usage.has("unknown")).toBe(false);
+    // Legacy inline rows (pre-chunking) are measured in UTF-8 bytes too.
+    const inline = JSON.stringify(fixture());
+    database.prepare("UPDATE ai_workspaces SET data=? WHERE user_id=?").run(inline, "member-a");
+    expect(repository.storedSnapshotUsage(["member-a"]).get("member-a")!.usedBytes).toBe(new TextEncoder().encode(inline).byteLength);
+    // Non-V1 rows are skipped rather than mis-reported.
+    database.prepare("UPDATE ai_workspaces SET schema_version=2 WHERE user_id=?").run("member-a");
+    expect(repository.storedSnapshotUsage(["member-a"]).size).toBe(0);
+    const service = new AiService(new AiStore(repository.sql), () => createSecretBox("workspace-storage-admin-secret-32-bytes"), (async () => { throw Error("no network"); }) as never);
+    database.prepare("UPDATE ai_workspaces SET schema_version=1 WHERE user_id=?").run("member-a");
+    const members = service.members([{ id: "member-a", name: "A", email: "a@example.com", role: "member", status: "active" }, { id: "member-b", name: "B", email: "b@example.com", role: "member", status: "active" }]);
+    expect(members[0].workspaceStorage).toEqual({ usedBytes: new TextEncoder().encode(inline).byteLength, limitBytes: AI_WORKSPACE_LIMITS.stateBytes });
+    expect(members[1]).not.toHaveProperty("workspaceStorage");
   });
   it("does not split Unicode surrogate pairs between SQLite chunks", async () => {
     const state = fixture(); state.artifacts[0].data = { padding: "😀".repeat(70000) };

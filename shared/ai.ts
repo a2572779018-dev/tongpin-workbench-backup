@@ -1,3 +1,4 @@
+import type { AiWorkspaceStorageUsage } from "./aiWorkspace";
 import type { AiWorkflowId } from "./aiWorkflows";
 import type { AiImageEditCapability, AiImageGenerationCapability } from "./aiImageCapabilities";
 
@@ -14,6 +15,10 @@ export const AI_BUSINESS_TIER_LABELS: Record<AiMode, string> = {
   pro: "Pro",
 };
 export type AiHarnessCapability = "chat" | "vision" | "web_search" | "image" | "video" | "presentation" | "computer";
+/** Plain-Chinese capability names shared by admin monitoring and alert messages. */
+export const AI_HARNESS_CAPABILITY_LABELS: Record<AiHarnessCapability, string> = {
+  chat: "文字对话", vision: "图片理解", web_search: "联网搜索", image: "图片生成", video: "视频生成", presentation: "演示文稿", computer: "电脑操作",
+};
 export type AiHarnessStrategy = "direct" | "react" | "plan_execute";
 export interface AiHarnessProviderInput {
   id: string;
@@ -139,6 +144,16 @@ export interface AiObservabilityAlert {
   occurrences: number;
   acknowledgedAt: string | null;
   resolvedAt: string | null;
+  /** Live metrics of the slice that raised an active alert (absent once the slice leaves the window). */
+  detail?: AiObservabilityAlertDetail;
+}
+export interface AiObservabilityAlertDetail {
+  operation: AiObservabilitySlice["operation"];
+  requests: number;
+  failures: number;
+  errorRate: number;
+  maxLatencyMs: number;
+  errors: Array<{ code: string; count: number }>;
 }
 export interface AiObservabilityDashboard {
   generatedAt: string;
@@ -198,6 +213,8 @@ export interface AiMember {
   role: string;
   status: string;
   quota: AiQuota;
+  /** Admin-only, informational: size of the member's V1 AI workspace snapshot. Absent when unknown. */
+  workspaceStorage?: AiWorkspaceStorageUsage;
 }
 export interface AiUsage {
   inputTokens: number;

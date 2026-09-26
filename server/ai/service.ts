@@ -1,6 +1,8 @@
 import { AI_BUSINESS_TIER_LABELS, AI_BUSINESS_TIERS, AI_DISPATCH_TOOL_KINDS, type AiChatBudget, type AiChatPreflight, type AiChatPreflightReason, type AiChatRequest, type AiChatResponse, type AiHarnessCapability, type AiHarnessConfig, type AiHarnessTrace, type AiImageAsset, type AiImageMimeType, type AiImageRequest, type AiImageResponse, type AiMember, type AiObservabilityDashboard, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult, type AiQuota, type AiRequestResult, type AiStatus, type AiUsage } from "../../shared/ai";
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import { AiStore, type StoredProvider, type StoredRequest } from "./storage";
+import { AiWorkspaceRepository } from "./workspace";
+import type { AiWorkspaceStorageUsage } from "../../shared/aiWorkspace";
 import { AI_TIMEOUT_MS, isProviderRejection, object, parseProviderResult, providerBody, readProviderHttpError, readBoundedJson, readProviderResponse, supportsOfficialPublicSummary, type AiTransport } from "./provider";
 import { chatInputReserve, parseChatCapabilities, parseComputerPlan, parsePresentation, parseToolPlan, parseToolClarification, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
@@ -535,7 +537,15 @@ export class AiService {
       visionEnabled: Boolean(configured && (this.store.harness() ? AI_BUSINESS_TIERS.some(tier => harness!.tiers[tier].enabled && harness!.tiers[tier].capabilities.includes("vision")) : p?.visionEnabled)),
       webSearchEnabled: Boolean(configured && p?.webSearchEnabled && p.webSearchQuotaTokens && (this.store.harness() ? AI_BUSINESS_TIERS.some(tier => harness!.tiers[tier].enabled && harness!.tiers[tier].protocol === "responses" && harness!.tiers[tier].capabilities.includes("web_search")) : p.protocol === "responses")), webSearchQuotaTokens: p?.webSearchQuotaTokens ?? 0 };
   }
-  members(users: MemberIdentity[]): AiMember[] { return users.map(user => ({ ...user, quota: this.quota(user.id) })); }
+  members(users: MemberIdentity[]): AiMember[] {
+    let storage = new Map<string, AiWorkspaceStorageUsage>();
+    // Informational only: a missing workspace table must never break the quota list.
+    try { storage = new AiWorkspaceRepository(this.store.sql).storedSnapshotUsage(users.map(user => user.id), this.store.tenantId); } catch { /* leave sizes unknown */ }
+    return users.map(user => {
+      const workspaceStorage = storage.get(user.id);
+      return { ...user, quota: this.quota(user.id), ...(workspaceStorage ? { workspaceStorage } : {}) };
+    });
+  }
   memberUsage(userId: string) {
     return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
   }

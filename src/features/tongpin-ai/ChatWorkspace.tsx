@@ -29,7 +29,6 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import autoAnimate from "@formkit/auto-animate";
 import type {
   TongpinAIArtifact,
   TongpinAIDemoAction,
@@ -251,12 +250,21 @@ export function ChatWorkspace({
   const [videoAttachmentReferences, setVideoAttachmentReferences] = useState<LocalVideoReferenceImage[]>([]);
   const [videoBusy, setVideoBusy] = useState(false);
 
-  useEffect(() => {
-    const list = messageListRef.current;
-    if (!list) return;
-    const controller = autoAnimate(list, { duration: 160, easing: "ease-out" });
-    return () => controller.disable();
+  // The message log is deliberately NOT auto-animated: every streamed delta
+  // resizes the last row, and auto-animate would keep an observer + position
+  // poll on every history row. Motion lives on small, bounded lists instead.
+  const followFrameRef = useRef(0);
+  /** Coalesces follow-to-bottom writes to one per frame so streaming deltas
+   * never force a synchronous layout per token. */
+  const scheduleFollowScroll = useCallback(() => {
+    if (followFrameRef.current) return;
+    followFrameRef.current = requestAnimationFrame(() => {
+      followFrameRef.current = 0;
+      const list = messageListRef.current;
+      if (list && followResponseRef.current) list.scrollTop = list.scrollHeight;
+    });
   }, []);
+  useEffect(() => () => cancelAnimationFrame(followFrameRef.current), []);
   const [imagePlanning, setImagePlanning] = useState(false);
   const [queuedToolPlan, setQueuedToolPlan] = useState<{
     kind: "image" | "presentation";
@@ -317,13 +325,19 @@ export function ChatWorkspace({
   }, [conversationId, projectId]);
   const [historyWindow, setHistoryWindow] = useState({ conversationId, count: CHAT_MESSAGE_PAGE_SIZE });
   const historyAnchorRef = useRef<{ height: number; top: number } | null>(null);
-  const callbacksRef = useRef({ onOpenArtifact, onRetry, onRefreshConnection });
-  callbacksRef.current = { onOpenArtifact, onRetry, onRefreshConnection };
+  const callbacksRef = useRef({ onOpenArtifact, onRetry, onRefreshConnection, onTraceChange, onMediaTask, onSelectGeneratedImage, onCancelGeneratedImageSelection });
+  callbacksRef.current = { onOpenArtifact, onRetry, onRefreshConnection, onTraceChange, onMediaTask, onSelectGeneratedImage, onCancelGeneratedImageSelection };
   const videoComposerContextRef = useRef({ attachments, onComposerToolChange, onDraftChange, onWebSearchChange });
   videoComposerContextRef.current = { attachments, onComposerToolChange, onDraftChange, onWebSearchChange };
   const videoSettled = useCallback(() => callbacksRef.current.onRefreshConnection?.(), []);
   const openArtifact = useCallback((id: string) => callbacksRef.current.onOpenArtifact(id), []);
   const retryMessage = useCallback((id: string, mode?: "continue" | "regenerate") => callbacksRef.current.onRetry?.(id, mode), []);
+  // Parents pass fresh inline handlers on every streamed delta; route them
+  // through refs so settled rows keep identical props and skip re-rendering.
+  const traceChange = useCallback((id: string, trace: AiHarnessTrace) => callbacksRef.current.onTraceChange?.(id, trace), []);
+  const mediaTask = useCallback((conversation: string, requestId: string, task: MediaTaskRun) => callbacksRef.current.onMediaTask?.(conversation, requestId, task), []);
+  const selectGeneratedImage = useCallback((artifactId: string, assetId: string) => callbacksRef.current.onSelectGeneratedImage?.(artifactId, assetId) ?? Promise.resolve(false), []);
+  const cancelGeneratedImageSelection = useCallback((artifactId: string) => callbacksRef.current.onCancelGeneratedImageSelection?.(artifactId) ?? Promise.resolve(), []);
   const visibleCount = historyWindow.conversationId === conversationId ? historyWindow.count : CHAT_MESSAGE_PAGE_SIZE;
   const hiddenCount = Math.max(0, messages.length - visibleCount);
   useEffect(() => {
@@ -464,9 +478,13 @@ export function ChatWorkspace({
     historyAnchorRef.current = null;
   }, [visibleCount, messages.length]);
   useEffect(() => {
-    const list = messageListRef.current;
-    if (list && followResponseRef.current) list.scrollTop = isEmpty ? 0 : list.scrollHeight;
-  }, [messages, isEmpty]);
+    if (isEmpty) {
+      const list = messageListRef.current;
+      if (list && followResponseRef.current) list.scrollTop = 0;
+      return;
+    }
+    if (followResponseRef.current) scheduleFollowScroll();
+  }, [messages, isEmpty, scheduleFollowScroll]);
   useEffect(() => {
     // Local typewriter updates do not rerender this workspace. Observe only the
     // active reply's height to retain follow-to-bottom without a polling loop.
@@ -475,11 +493,11 @@ export function ChatWorkspace({
     const reply = list?.lastElementChild;
     if (!list || !reply) return;
     const observer = new ResizeObserver(() => {
-      if (followResponseRef.current) list.scrollTop = list.scrollHeight;
+      if (followResponseRef.current) scheduleFollowScroll();
     });
     observer.observe(reply);
     return () => observer.disconnect();
-  }, [responding, responsePhase, conversationId, messages.length, lastMessage?.artifactId, artifactById]);
+  }, [responding, responsePhase, conversationId, messages.length, lastMessage?.artifactId, artifactById, scheduleFollowScroll]);
   useEffect(() => {
     if (composerFocusRequest > 0) composerRef.current?.focus();
   }, [composerFocusRequest]);
@@ -757,11 +775,11 @@ export function ChatWorkspace({
                 retryable={Boolean(retryableMessageIds?.has(message.id))}
                 retryDisabled={responding}
                 onCopy={copyMessage} onOpenArtifact={openArtifact} onRetry={retryMessage}
-                onTraceChange={onTraceChange}
+                onTraceChange={onTraceChange ? traceChange : undefined}
                 onVideoSettled={isVideoArtifact ? videoSettled : undefined}
-                onMediaTask={artifact?.data?.mediaTaskRequestId && onMediaTask ? task => onMediaTask(artifact.conversationId, String(artifact.data!.mediaTaskRequestId), task) : undefined}
-                onSelectGeneratedImage={onSelectGeneratedImage}
-                onCancelGeneratedImageSelection={onCancelGeneratedImageSelection}
+                onMediaTask={artifact?.data?.mediaTaskRequestId && onMediaTask ? mediaTask : undefined}
+                onSelectGeneratedImage={onSelectGeneratedImage ? selectGeneratedImage : undefined}
+                onCancelGeneratedImageSelection={onCancelGeneratedImageSelection ? cancelGeneratedImageSelection : undefined}
                 videoEditDisabled={isVideoArtifact ? responding || videoBusy || videoOpen || Boolean(draft.trim()) || Boolean(attachments.length) : undefined}
                 onEditVideo={isVideoArtifact && onSubmitVideo ? editVideo : undefined}
               />;

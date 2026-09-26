@@ -1,5 +1,6 @@
 import { useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { AiSource } from "../../../shared/ai";
+import { aiMotionRef } from "./motion";
 import { displaySources, sourceLabel } from "./sourceDisplay";
 
 export function AiSourceLink({ source }: { source: AiSource }) {
@@ -13,7 +14,7 @@ export function AiSourceList({ sources }: { sources: readonly AiSource[] | undef
   if (!visible.length) return null;
   const shown = expanded ? [...visible, ...folded] : visible;
   return <div className="tp-ai-message-sources-block">
-    <ul className="tp-ai-message-sources" aria-label="参考来源">
+    <ul className="tp-ai-message-sources" aria-label="参考来源" ref={aiMotionRef}>
       {shown.map((source, index) => <AiSourceLink key={`${source.url}-${index}`} source={source} />)}
     </ul>
     {folded.length ? <button type="button" className="tp-ai-message-sources__toggle" aria-expanded={expanded}

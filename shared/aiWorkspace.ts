@@ -100,11 +100,19 @@ export interface AiWorkspaceState {
   sidebarCollapsed?: boolean;
 }
 
+/** Informational size of the stored V1 whole-account snapshot (UTF-8 bytes of its JSON). */
+export interface AiWorkspaceStorageUsage {
+  usedBytes: number;
+  limitBytes: number;
+}
+
 export interface AiWorkspaceSnapshot {
   revision: number;
   schemaVersion: 1;
   updatedAt: string | null;
   state: AiWorkspaceState | null;
+  /** Optional: older servers omit it. Clients must not require it and never compare it for acknowledgement. */
+  storage?: AiWorkspaceStorageUsage;
 }
 
 export interface AiWorkspaceSaveRequest {

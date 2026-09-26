@@ -6,10 +6,13 @@ import { AdminAiProviderSettings } from "./AdminAiProviderSettings";
 import { AdminAiVideoSettings } from "./AdminAiVideoSettings";
 import { AdminAiHarnessSettings } from "./AdminAiHarnessSettings";
 import { AdminAiObservability } from "./AdminAiObservability";
+import { useAdminAiAlertCenter } from "./AdminAiAlertCenter";
 import { adminAiErrorMessage, calculateAiQuotaLimit } from "./adminAiForms";
 import { aiDiagnosticDescription, aiUsageDescription, aiUsageTotal } from "./usageFormatting";
 import { AI_QUOTA_BILLING_NOTE, formatAiPoints } from "./quotaFormatting";
 import { AdminAiTabIntro, type AdminAiSection } from "./adminAiLayout";
+import { formatWorkspaceMegabytes, workspaceStorageFrom, workspaceStorageLevel, workspaceStoragePercent } from "./workspaceStorage";
+import type { AiWorkspaceStorageUsage } from "../../../shared/aiWorkspace";
 import "./AdminAiQuotaPanel.css";
 
 const MEMBER_STATUS: Record<string, string> = {
@@ -26,6 +29,16 @@ export function AdminAiMemberIdentity({ member }: { member: Pick<AiMember, "name
     </span>
     <small>{member.email}</small>
   </>;
+}
+
+/** Informational V1 snapshot size; "—" when the member has no V1 record or the server did not report it. */
+export function AdminAiMemberWorkspaceStorage({ storage }: { storage?: AiWorkspaceStorageUsage }) {
+  const usage = workspaceStorageFrom(storage);
+  if (!usage) return <span className="tp-ai-admin-storage">—</span>;
+  const level = workspaceStorageLevel(usage);
+  return <span className={`tp-ai-admin-storage is-${level}`} title={`${workspaceStoragePercent(usage)}%`}>
+    {formatWorkspaceMegabytes(usage.usedBytes)} / {formatWorkspaceMegabytes(usage.limitBytes)} MB
+  </span>;
 }
 
 function AdminAiDialog({ title, children, busy = false, onClose }: {
@@ -183,6 +196,20 @@ export function AdminAiQuotaPanel() {
   const [usageMember, setUsageMember] = useState<AiMember | null>(null);
   const [section, setSection] = useState<AdminAiSection>("models");
   const [harnessConfig, setHarnessConfig] = useState<AiHarnessConfig | null>(null);
+  const alertCenter = useAdminAiAlertCenter();
+  const { monitoringRequested, consumeMonitoringRequest, setMonitoringVisible } = alertCenter;
+
+  useEffect(() => {
+    if (!monitoringRequested) return;
+    setSection("monitoring");
+    consumeMonitoringRequest();
+  }, [monitoringRequested, consumeMonitoringRequest]);
+
+  // Opening 运行监控 acknowledges (views) the open alerts and clears the tab red dot.
+  useEffect(() => {
+    setMonitoringVisible(isAdmin && section === "monitoring");
+    return () => setMonitoringVisible(false);
+  }, [isAdmin, section, setMonitoringVisible]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -203,14 +230,17 @@ export function AdminAiQuotaPanel() {
     <section className="tp-admin-ai-quota" aria-label="AI 接入与额度管理">
       <nav className="tp-ai-admin-tabs" aria-label="AI 管理分类">{([
         ["models", "服务与模型"], ["capabilities", "生成与搜索"], ["members", "成员额度"], ["monitoring", "运行监控"],
-      ] as const).map(([key, label]) => <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => setSection(key)}>{label}</button>)}</nav>
+      ] as const).map(([key, label]) => {
+        const alertDot = key === "monitoring" && section !== "monitoring" && alertCenter.unviewedCount > 0;
+        return <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => setSection(key)}>{label}{alertDot ? <span className="tp-ai-admin-tab-dot" role="status" aria-label={`${alertCenter.unviewedCount} 条未查看告警`} /> : null}</button>;
+      })}</nav>
       <AdminAiTabIntro section={section} />
       <div hidden={section !== "models"}><AdminAiHarnessSettings onConfigured={setHarnessConfig} /></div>
       <div className="tp-ai-admin-section-stack" hidden={section !== "capabilities"}>
         <AdminAiProviderSettings harnessConfig={harnessConfig} />
         <AdminAiVideoSettings key={session?.user.id} harnessConfig={harnessConfig} members={members} />
       </div>
-      <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} harnessConfig={harnessConfig} /></div>
+      <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} harnessConfig={harnessConfig} onDashboard={alertCenter.markViewed} /></div>
       <section hidden={section !== "members"} className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>
         <header className="tp-ai-admin-heading">
           <div><h2 id="tp-ai-admin-members-title"><UsersRound size={21} aria-hidden="true" />成员额度</h2>
@@ -229,13 +259,14 @@ export function AdminAiQuotaPanel() {
         ) : (
           <div className="tp-ai-admin-table-scroll" tabIndex={0} aria-label="成员额度表格，可横向滚动">
             <table className="tp-ai-admin-table">
-              <thead><tr><th>成员</th><th>账号状态</th><th>总限额</th><th>已使用</th><th>处理中预留</th><th>剩余额度</th><th>操作</th></tr></thead>
+              <thead><tr><th>成员</th><th>账号状态</th><th>总限额</th><th>已使用</th><th>处理中预留</th><th>剩余额度</th><th title="成员 AI 工作台在云端保存的对话资料大小（上限 8 MB）">云端资料</th><th>操作</th></tr></thead>
               <tbody>{visibleMembers.map((member) => (
                 <tr key={member.id}>
                   <td><AdminAiMemberIdentity member={member} /></td>
                   <td><span className={`tp-ai-admin-status ${member.status === "active" ? "is-active" : ""}`}>{MEMBER_STATUS[member.status] ?? "不可用"}</span></td>
                   <td>{formatAiPoints(member.quota.limitTokens)}</td><td>{formatAiPoints(member.quota.usedTokens)}</td>
                   <td>{formatAiPoints(member.quota.reservedTokens)}</td><td><strong>{formatAiPoints(member.quota.remainingTokens)}</strong></td>
+                  <td><AdminAiMemberWorkspaceStorage storage={member.workspaceStorage} /></td>
                   <td><div className="tp-ai-admin-row-actions">
                     <button className="tp-ai-admin-button is-primary" type="button" aria-label={`设置 ${member.name} 的额度`} onClick={() => setQuotaMember(member)}><Coins size={16} aria-hidden="true" />设额度</button>
                     <button className="tp-ai-admin-button" type="button" aria-label={`查看 ${member.name} 的同频点与 Token 明细`} onClick={() => setUsageMember(member)}><History size={16} aria-hidden="true" />明细</button>
@@ -247,7 +278,7 @@ export function AdminAiQuotaPanel() {
         )}
       </section>
       {quotaMember ? <MemberQuotaDialog member={quotaMember} onClose={() => setQuotaMember(null)} onSaved={(member) => {
-        setMembers((current) => current.map((item) => item.id === member.id ? member : item));
+        setMembers((current) => current.map((item) => item.id === member.id ? { ...member, workspaceStorage: member.workspaceStorage ?? item.workspaceStorage } : item));
         setQuotaMember(null); setNotice(`${member.name} 的总限额已保存为 ${formatAiPoints(member.quota.limitTokens)}。`);
       }} /> : null}
       {usageMember ? <MemberUsageDialog member={usageMember} onClose={() => setUsageMember(null)} /> : null}

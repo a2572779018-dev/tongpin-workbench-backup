@@ -3,6 +3,7 @@ import { LogOut, RefreshCw, WifiOff } from "lucide-react";
 import { useAuth } from "./auth/AuthContext";
 import { flushAiBeforeLeave } from "./features/tongpin-ai/workspaceLeaveGuard";
 import { AiHarnessContinuationRunner } from "./features/tongpin-ai/AiHarnessContinuationRunner";
+import { AdminAiAlertCenter } from "./features/tongpin-ai/AdminAiAlertCenter";
 import { AppShell, type AppView } from "./components/AppShell";
 import { CustomCursor } from "./components/CustomCursor";
 import { DesktopTitlebar } from "./components/DesktopTitlebar";
@@ -78,6 +79,8 @@ export function App() {
         relationshipExitInFlight.current = false;
       });
   }, [view, session]);
+
+  const openAdminAiMonitoring = useCallback(() => changeView("admin-ai"), [changeView]);
 
   useEffect(() => {
     if (!session) return;
@@ -225,14 +228,20 @@ export function App() {
         }
       />
       {session && !loading && !startupError ? (
-        <AppShell
-          view={view}
-          onViewChange={changeView}
-          homeLayout={homeLayout}
-          onHomeLayoutChange={changeHomeLayout}
+        <AdminAiAlertCenter
+          enabled={session.user.role === "admin"}
+          userId={session.user.id}
+          onOpenMonitoring={openAdminAiMonitoring}
         >
-          {content}
-        </AppShell>
+          <AppShell
+            view={view}
+            onViewChange={changeView}
+            homeLayout={homeLayout}
+            onHomeLayoutChange={changeHomeLayout}
+          >
+            {content}
+          </AppShell>
+        </AdminAiAlertCenter>
       ) : (
         content
       )}

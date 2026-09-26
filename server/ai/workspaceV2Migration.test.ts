@@ -79,7 +79,10 @@ describe("local-test-only V1 to V2 activation and rollback", () => {
     expect(restored.schemaVersion).toBe(1);
     expect(restored.revision).toBe(oldSnapshot.revision + 1);
     expect(restored.state?.conversations[0].messages.map(message => message.content)).toEqual(["旧消息", "V2 新消息"]);
-    expect(workspace.read(USER, TENANT)).toEqual(restored);
+    // V1 reads additionally carry informational storage usage; the rollback snapshot itself is unchanged.
+    const { storage, ...readBack } = workspace.read(USER, TENANT);
+    expect(readBack).toEqual(restored);
+    expect(storage?.usedBytes).toBeGreaterThan(0);
     expect(v2.workspaceVersion(USER, TENANT)).toBe(1);
     await expect(workspace.save(USER, { expectedRevision: oldSnapshot.revision, mutationId: crypto.randomUUID(), state: initialState() }, TENANT))
       .rejects.toMatchObject({ code: "AI_WORKSPACE_CONFLICT" });
