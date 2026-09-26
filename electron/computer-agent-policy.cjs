@@ -667,9 +667,11 @@ function nextTracker(tracker, candidate, status, { task }) {
       break;
     case "type": {
       next.typed.push({ field: candidate.elementIdentity || `focus:${candidate.field}`, text: candidate.text });
-      if (candidate.field === "search") Object.assign(next, { focus: "search", searchText: candidate.text });
-      else if (candidate.field === "message") Object.assign(next, { focus: tracker.focus === "field" ? "field" : "conversation", composerText: candidate.text });
-      else Object.assign(next, { focus: "field", composerText: candidate.text });
+      // A second landed literal may have been appended to the first: the
+      // application no longer knows the exact field content.
+      if (candidate.field === "search") Object.assign(next, { focus: "search", searchText: tracker.searchText ? null : candidate.text });
+      else if (candidate.field === "message") Object.assign(next, { focus: tracker.focus === "field" ? "field" : "conversation", composerText: tracker.composerText ? null : candidate.text });
+      else Object.assign(next, { focus: "field", composerText: tracker.composerText ? null : candidate.text });
       break;
     }
     case "key":
@@ -681,7 +683,8 @@ function nextTracker(tracker, candidate, status, { task }) {
       } else if (candidate.key === "escape") {
         Object.assign(next, { focus: tracker.focus === "search" ? "none" : tracker.focus, searchText: null });
       } else if (candidate.key === "backspace") {
-        next.typed = next.typed.filter((entry) => !entry.field.startsWith("focus:"));
+        // The exact remaining text is unknown after a deletion.
+        Object.assign(next, { searchText: null, composerText: null, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
       }
       break;
     case "click":

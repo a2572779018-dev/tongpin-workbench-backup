@@ -677,6 +677,16 @@ describe("computer agent policy units", () => {
     expect(decision).toMatchObject({ allowed: false, extraConsent: { risk: "submit" } });
   });
 
+  it("forgets the exact draft after a second literal or a deletion", () => {
+    const task = policy.validateTaskSpec(TASK).task;
+    const type = { id: "type_p2_focus", kind: "type", field: "message", text: "中秋快乐", parameterId: "p2", risk: "none", delivery: "background" };
+    const conversation = { ...policy.emptyTracker(), focus: "conversation", conversationTarget: "姐姐", conversationVia: "click" };
+    const once = policy.nextTracker(conversation, type, "delivered", { task });
+    expect(once.composerText).toBe("中秋快乐");
+    expect(policy.nextTracker(once, { ...type, id: "type_p2_e6", elementIdentity: "x" }, "delivered", { task }).composerText).toBeNull();
+    expect(policy.nextTracker(once, { id: "key_backspace", kind: "key", key: "backspace", risk: "none", delivery: "background" }, "delivered", { task }).composerText).toBeNull();
+  });
+
   it("keeps the send attempted after an unknown or no-effect result", () => {
     const task = policy.validateTaskSpec(TASK).task;
     const send = { id: "key_return", kind: "key", key: "return", risk: "send", delivery: "background" };
