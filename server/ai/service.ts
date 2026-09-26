@@ -768,7 +768,11 @@ export class AiService {
     // Pro 多 Agent 协作: runs only when the tier opts in and its worst case fits; otherwise the ordinary path below.
     const multiAgent = await runMultiAgentChat(this.multiAgentHost(userId), { userId, request, provider, route, key, persona, hash, parentAttempt,
       stream: options.stream, onEvent: options.onEvent, subagentEvents: object(value).subagentEvents === true });
-    if (multiAgent) return multiAgent;
+    if (multiAgent) {
+      // Hermes-style learning loop: a multi-agent reply is reviewed like the ordinary one below.
+      this.memberMemory.afterReply(userId, request, multiAgent);
+      return multiAgent;
+    }
     const reserved = this.store.sql.transaction(() => {
       // Recheck after asynchronous hashing / key decryption.
       if (this.store.request(userId, request.requestId)) throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "AI 正在处理这条消息，请稍候");

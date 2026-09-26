@@ -86,9 +86,11 @@ export function memoryReviewIds(value: unknown): string[] {
   return value.split(",").filter(Boolean);
 }
 
-/** Only these requests read member memory; tool continuations and local computer plans never do. */
+/** Only these requests read member memory; tool continuations and local computer
+ * plans never do — neither the legacy per-action plan nor the unified executor's
+ * task spec, which must come from the member's instruction alone. */
 function readsMemory(request: AiChatRequest): boolean {
-  return !request.skillIds?.includes("agent-continuation-v1") && request.outputFormat !== "computer_plan";
+  return !request.skillIds?.includes("agent-continuation-v1") && request.outputFormat !== "computer_plan" && request.outputFormat !== "computer_task";
 }
 
 type ReviewTarget = { provider: StoredProvider; model: string; encryptedKey: string; maxOutputTokens: number };
