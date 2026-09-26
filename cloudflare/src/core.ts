@@ -672,7 +672,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           .exec<{ name: string }>(
             `SELECT name FROM sqlite_master
              WHERE type = 'table'
-               AND name IN ('users', 'tasks', 'lora_chain_checkpoint')`,
+               AND name IN ('users', 'tasks', 'lora_chain_checkpoint', 'boss_work_report_statuses')`,
           )
           .toArray()
           .map((row) => row.name),
@@ -682,6 +682,22 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         existingTables.has("tasks") &&
         existingTables.has("lora_chain_checkpoint")
       ) {
+        // Installations created before migration 6 took this early exit and
+        // never received the work-report table. Add only that table here.
+        if (!existingTables.has("boss_work_report_statuses")) {
+          this.ctx.storage.transactionSync(() => {
+            this.sql.exec(DATABASE_MIGRATION_6);
+            this.sql.exec(`
+              CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
+                id INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+              );
+            `);
+            this.sql.exec(
+              "INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (6)",
+            );
+          });
+        }
         return;
       }
     } catch (error) {
