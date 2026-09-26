@@ -12,6 +12,7 @@ import { readAiChatStream } from "../../lib/aiRunStream";
 import { ChatWorkspace } from "./ChatWorkspace";
 import { TongpinAINameDialog } from "./TongpinAIWorkspaceDialog";
 import { TongpinAIAccountUsage } from "./TongpinAIAccountUsage";
+import { MemberMemoryNavEntry } from "./MemberMemoryNavEntry";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { documentAttachments, extractAttachment, validateAttachments, workspaceAttachment } from "./attachments";
 import { buildChatRequest } from "./chatRequests";
@@ -556,6 +557,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
         <div className="tp-ai-v2-project-title">普通对话</div>
         {bootstrap.conversations.filter(item => !item.projectId).map(item => <div key={item.entityId} className="tp-ai-v2-conversation"><button type="button" className={item.entityId === activeId ? "is-active" : ""} onClick={() => void selectConversation(item.entityId)}><MessageSquare size={14} /><span>{item.title}</span>{busy[item.entityId] && <i aria-label="回复中">•</i>}</button><button type="button" aria-label={`重命名${item.title}`} onClick={() => setNameDialog({ kind: "rename", conversationId: item.entityId })}><Pencil size={14} /></button></div>)}
       </nav>}
+      <nav className="tp-ai-sidebar__nav" aria-label="AI 功能"><MemberMemoryNavEntry user={user} showLabel={!collapsed} /></nav>
       {!collapsed && <TongpinAIAccountUsage user={user} usage={usage} quotaSynced onRefresh={refreshStatus} />}
     </aside>
     {activeId ? <ChatWorkspace key={activeId} viewerId={user.id} textOnly assistantName={persona.profile.name || "同频 AI"} characterExpression={persona.profile.expression}

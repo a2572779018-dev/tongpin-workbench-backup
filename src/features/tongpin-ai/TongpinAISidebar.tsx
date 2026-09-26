@@ -28,6 +28,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { User } from "../../types";
 import { TongpinAIAccountUsage } from "./TongpinAIAccountUsage";
+import { MemberMemoryNavEntry } from "./MemberMemoryNavEntry";
 import { aiMotionRef } from "./motion";
 import { WorkspaceStorageMeter } from "./WorkspaceStoragePanel";
 import type { AiWorkspaceStorageUsage } from "../../../shared/aiWorkspace";
@@ -391,6 +392,7 @@ export function TongpinAISidebar({
             <span>AI 能力中心</span>
             <b>{skillCount}</b>
           </button>
+          <MemberMemoryNavEntry user={user} />
         </nav>
 
         <div className="tp-ai-sidebar__search">

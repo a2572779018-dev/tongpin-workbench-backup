@@ -18,6 +18,7 @@ import { aiLiveMotionRef } from "./motion";
 import { ReplyCitationScope } from "./ReplyCitation";
 import { replyCitations } from "./replyCitations";
 import { ReadAloudButton } from "./voice/ReadAloudButton";
+import { MemoryUpdateIndicator } from "./MemoryUpdateIndicator";
 
 interface ChatMessageRowProps {
   message: TongpinAIMessage;
@@ -104,6 +105,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
         <div className="tp-ai-message__controls"><button type="button" aria-label={copied ? "已复制回复" : "复制回复"} onClick={() => onCopy(message)}>
           {copied ? <Check size={15} /> : <Copy size={15} />}
         </button><ReadAloudButton messageId={message.id} content={message.content} /></div>}
+      {settled && message.requestId ? <MemoryUpdateIndicator requestId={message.requestId} /> : null}
     </div>
     </ReplyCitationScope>
   </article>;
