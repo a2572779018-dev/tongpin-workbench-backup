@@ -24,6 +24,11 @@ contextBridge.exposeInMainWorld("tongpin", {
         pane === "screenRecording" ? "screenRecording" : "accessibility",
       ),
   }),
+  microphone: Object.freeze({
+    status: () => ipcRenderer.invoke("microphone:status"),
+    request: () => ipcRenderer.invoke("microphone:request"),
+    openSettings: () => ipcRenderer.invoke("microphone:open-settings"),
+  }),
   session: {
     load: () => ipcRenderer.invoke("session:load"),
     save: (payload) => ipcRenderer.invoke("session:save", payload),

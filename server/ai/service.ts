@@ -27,6 +27,7 @@ import { createAiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 import { describeAiRichContent } from "../../shared/aiRichContent";
 import { citationsForContent } from "./citations";
 import { withPendingGuidance } from "./runGuidance";
+import { AiVoiceService } from "./voice";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -214,10 +215,12 @@ export async function providerIdempotencyKey(tenantId: string, userId: string, r
 export class AiService {
   readonly video: AiVideoService;
   readonly harness: AiHarness;
+  readonly voice: AiVoiceService;
   private readonly availabilityProbe: AvailabilityProbe;
   constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "", private readonly isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
     this.harness = new AiHarness(store, box, transport);
     this.video = new AiVideoService(store, box, transport, videoKey, this.harness);
+    this.voice = new AiVoiceService(store, box, transport);
     this.availabilityProbe = new AvailabilityProbe(transport, box);
   }
   forTenant(tenantId: string): AiService {
@@ -552,7 +555,7 @@ export class AiService {
     });
   }
   memberUsage(userId: string) {
-    return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
+    return this.store.usage(userId).map(({ generation: _adminOnly, ...entry }) => ({ ...entry, model: entry.kind === "image" ? "图片生成" : entry.kind === "video" ? "视频生成" : entry.kind === "voice" ? entry.billingKind === "text_to_speech_conversion" ? "语音朗读" : "语音输入" : entry.mode ? AI_BUSINESS_TIER_LABELS[entry.mode] : null }));
   }
   private chatSelection(request: AiChatRequest): { provider: StoredProvider; route: ResolvedHarnessRoute } {
     const saved = this.store.provider();

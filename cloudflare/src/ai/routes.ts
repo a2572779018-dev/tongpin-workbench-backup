@@ -12,6 +12,7 @@ import {
 } from "../../../server/ai/mediaTaskOrchestrator";
 import type { MediaTaskRun } from "../../../server/ai/mediaTaskRuntime";
 import { runGuidanceRoute } from "../../../server/ai/runGuidance";
+import { handleAiVoiceRequest } from "./voiceRoutes";
 
 const videoTier = (value: string | null): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
 
@@ -75,6 +76,8 @@ export async function handleAiRequest(request: Request, service: AiService, user
     service = service.forTenant(tenantId);
     if (path.startsWith("/api/admin/ai/") && user.role !== "admin") throw new AiError(403, "FORBIDDEN", "你没有访问此功能的权限");
     if (path.startsWith("/api/ai/") && user.role !== "member" && user.role !== "boss") throw new AiError(403, "AI_MEMBER_REQUIRED", "请使用成员或老板账号访问 AI 工作台");
+    const voiceResponse = await handleAiVoiceRequest(request, path, method, service, user.id, () => parseAiJson(request));
+    if (voiceResponse) return voiceResponse;
     if (path === "/api/admin/ai/video" && method === "GET") return json({ settings: service.video.settings(), pending: service.video.adminPending() });
     if (path === "/api/admin/ai/video" && method === "PUT") return json({ settings: await service.video.configure(await parseAiJson(request)) });
     if (path === "/api/admin/ai/video/test" && method === "POST") return json(await service.video.test());

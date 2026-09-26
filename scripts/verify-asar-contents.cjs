@@ -38,6 +38,7 @@ const required = [
   "/electron/relationship-member-verifier.cjs",
   "/electron/relationship-graph-vault.cjs",
   "/electron/ai-source-policy.cjs",
+  "/electron/media-permission-policy.cjs",
   "/THIRD_PARTY_NOTICES.md",
   "/AI_DOCUMENT_LIBRARY_NOTICES.md",
   "/package.json",

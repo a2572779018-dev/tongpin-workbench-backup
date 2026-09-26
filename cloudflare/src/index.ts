@@ -6,6 +6,7 @@ import {
   RELATIONSHIP_GRAPH_ME_PATH,
   RELATIONSHIP_GRAPH_MIRROR_REQUEST_BYTES,
 } from "../../shared/relationshipGraphMirror";
+import { AI_VOICE_LIMITS, AI_VOICE_TRANSCRIPTION_PATH } from "../../shared/aiVoice";
 
 export { TongpinCore };
 
@@ -59,7 +60,7 @@ async function bufferedApiRequest(request: Request): Promise<Request> {
     return request;
   }
   const path = new URL(request.url).pathname;
-  const limit = path === "/api/dify/tools/invoke" ? 16_384 : path === RELATIONSHIP_GRAPH_ME_PATH ? RELATIONSHIP_GRAPH_MIRROR_REQUEST_BYTES : path === "/api/ai/workspace" ? AI_WORKSPACE_LIMITS.requestBytes : path.startsWith("/api/ai/workspace-v2/") ? AI_WORKSPACE_V2_REQUEST_BYTES : ["/api/ai/chat", "/api/ai/chat/stream", "/api/ai/preflight"].includes(path) ? 1600 * 1024 : 768 * 1024;
+  const limit = path === AI_VOICE_TRANSCRIPTION_PATH ? AI_VOICE_LIMITS.uploadBytes : path === "/api/dify/tools/invoke" ? 16_384 : path === RELATIONSHIP_GRAPH_ME_PATH ? RELATIONSHIP_GRAPH_MIRROR_REQUEST_BYTES : path === "/api/ai/workspace" ? AI_WORKSPACE_LIMITS.requestBytes : path.startsWith("/api/ai/workspace-v2/") ? AI_WORKSPACE_V2_REQUEST_BYTES : ["/api/ai/chat", "/api/ai/chat/stream", "/api/ai/preflight"].includes(path) ? 1600 * 1024 : 768 * 1024;
   if (Number(request.headers.get("Content-Length")) > limit) throw new RangeError("API request body is too large");
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];

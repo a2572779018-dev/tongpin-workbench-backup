@@ -14,6 +14,7 @@ const {
   powerMonitor,
   safeStorage,
   screen,
+  session: electronSession,
   shell,
   systemPreferences,
   Tray,
@@ -81,6 +82,10 @@ const {
   createComputerUseController,
   computerUseSystemVersion,
 } = require("./computer-use.cjs");
+const {
+  configureMediaPermissions,
+  registerMicrophoneIpc,
+} = require("./media-permission-policy.cjs");
 
 autoUpdater.logger = null;
 const safeStorageAdapter = createSafeStorageAdapter(safeStorage);
@@ -2223,6 +2228,11 @@ if (process.platform === "win32") {
 app.whenReady().then(async () => {
   configureApplicationMenu();
   registerDesktopIpc();
+  registerMicrophoneIpc({ ipcMain, systemPreferences, shell, platform: process.platform, assertSender: assertMainRendererEvent });
+  configureMediaPermissions(electronSession.defaultSession, {
+    isMainRendererContents: (contents) => Boolean(mainWindow && !mainWindow.isDestroyed() && contents === mainWindow.webContents),
+    isAllowedRendererUrl: isAllowedMainRendererUrl,
+  });
   if (isQuickTaskPreview) {
     quickTasksAvailable = true;
     if (quickTaskPreviewTarget === "corner") {

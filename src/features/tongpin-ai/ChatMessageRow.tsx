@@ -17,6 +17,7 @@ import type { VideoChatRequest } from "./videoChat";
 import { aiLiveMotionRef } from "./motion";
 import { ReplyCitationScope } from "./ReplyCitation";
 import { replyCitations } from "./replyCitations";
+import { ReadAloudButton } from "./voice/ReadAloudButton";
 
 interface ChatMessageRowProps {
   message: TongpinAIMessage;
@@ -102,7 +103,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
       {message.role === "assistant" && message.content && !["thinking", "typing", "error"].includes(message.status ?? "ready") &&
         <div className="tp-ai-message__controls"><button type="button" aria-label={copied ? "已复制回复" : "复制回复"} onClick={() => onCopy(message)}>
           {copied ? <Check size={15} /> : <Copy size={15} />}
-        </button></div>}
+        </button><ReadAloudButton messageId={message.id} content={message.content} /></div>}
     </div>
     </ReplyCitationScope>
   </article>;

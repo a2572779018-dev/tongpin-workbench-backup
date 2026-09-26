@@ -4,6 +4,7 @@ import type { AiHarnessConfig, AiMember, AiUsageEntry } from "../../../shared/ai
 import { useAuth } from "../../auth/AuthContext";
 import { AdminAiProviderSettings } from "./AdminAiProviderSettings";
 import { AdminAiVideoSettings } from "./AdminAiVideoSettings";
+import { AdminAiVoiceSettings } from "./AdminAiVoiceSettings";
 import { AdminAiHarnessSettings } from "./AdminAiHarnessSettings";
 import { AdminAiObservability } from "./AdminAiObservability";
 import { useAdminAiAlertCenter } from "./AdminAiAlertCenter";
@@ -239,6 +240,7 @@ export function AdminAiQuotaPanel() {
       <div className="tp-ai-admin-section-stack" hidden={section !== "capabilities"}>
         <AdminAiProviderSettings harnessConfig={harnessConfig} />
         <AdminAiVideoSettings key={session?.user.id} harnessConfig={harnessConfig} members={members} />
+        <AdminAiVoiceSettings key={`voice-${session?.user.id}`} harnessConfig={harnessConfig} />
       </div>
       <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} harnessConfig={harnessConfig} onDashboard={alertCenter.markViewed} /></div>
       <section hidden={section !== "members"} className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>

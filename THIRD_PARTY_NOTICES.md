@@ -211,6 +211,46 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+## AI voice input and read-aloud
+
+The 同频 AI voice features adapt LibreChat v0.8.7 commit
+`9e74cc0e57b395926122bd4062c1fcedc48ed465`
+(https://github.com/danny-avila/LibreChat), under the LibreChat MIT License
+reproduced in "AI reply Markdown rendering" above:
+
+- `api/server/services/Files/Audio/STTService.js` (`MIME_TO_EXTENSION_MAP`,
+  `getValidatedLanguageCode`, `openAIProvider`, `sttRequest`) and
+  `api/server/routes/files/speech/stt.js`, adapted in `server/ai/voice.ts`,
+  `server/ai/voiceAudio.ts`, `server/ai/voiceRoutes.ts` and
+  `cloudflare/src/ai/voiceRoutes.ts`: one OpenAI-compatible
+  `/audio/transcriptions` multipart request per recording.
+- `api/server/services/Files/Audio/TTSService.js` (`openAIProvider`,
+  `ttsRequest`) and `streamAudio.js` (`splitTextIntoChunks` and its sentence
+  separators), adapted in `server/ai/voice.ts` and
+  `src/features/tongpin-ai/voice/speechText.ts`.
+- `client/src/components/Chat/Input/AudioRecorder.tsx`,
+  `client/src/hooks/Input/useSpeechToText.ts` and `useSpeechToTextExternal.ts`
+  (MediaRecorder chunks, best supported MIME type, silence monitoring,
+  appending the transcript to the composer, automatic sending), adapted in
+  `src/features/tongpin-ai/voice/recorderState.ts`, `useVoiceRecorder.ts`,
+  `VoiceInputControl.tsx` and `voiceHooks.ts`.
+- `client/src/hooks/Input/useTextToSpeech.ts`, `useTextToSpeechBrowser.ts`,
+  `useTextToSpeechExternal.ts`, `client/src/hooks/Audio/useTTSBrowser.ts`,
+  `useTTSExternal.ts`, `client/src/components/Chat/Messages/HoverButtons.tsx`
+  and `client/src/components/Nav/SettingsTabs/Speech/ConversationModeSwitch.tsx`
+  (speak/stop toggle on a message, speechSynthesis utterances, external audio
+  played at the member's rate, conversation mode), adapted in
+  `src/features/tongpin-ai/voice/speechPlayer.ts`, `ReadAloudButton.tsx` and
+  `voicePreferences.ts`.
+
+Tongpin's own parts are the tenant and account scope, one-time request ids,
+同频点 reservation and settlement, audio container and duration checks
+(WebM, Ogg, WAV, MP4), Markdown/code/citation cleaning before speech, the
+Chinese system-voice preference, per-member preferences in localStorage and
+the Electron microphone permission handling. LibreChat's Recoil stores,
+toasts, Azure/ElevenLabs/LocalAI providers, streamed message audio and TTS
+cache are not used.
+
 ## AI document processing and export
 
 The AI workbench uses pdfjs-dist, Mammoth, PptxGenJS and JSZip through their npm

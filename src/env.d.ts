@@ -18,6 +18,7 @@ interface DesktopSessionBridge {
     electron: string;
   };
   computerUse?: import("../shared/computerUse").ComputerUseBridge;
+  microphone?: import("../shared/aiVoice").MicrophoneBridge;
   session: {
     load(): Promise<string | null>;
     save(payload: string): Promise<void>;

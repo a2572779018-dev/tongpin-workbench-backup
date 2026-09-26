@@ -223,7 +223,7 @@ export interface AiUsage {
   estimated: boolean;
   /** Quota units explicitly configured by an administrator, not provider token counts. */
   convertedTokens?: number;
-  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search";
+  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search" | "speech_to_text_conversion" | "text_to_speech_conversion";
   /** Observed provider search invocations, never inferred from generated text or citations. */
   searchCalls?: number;
   /** Separates actual text-token reporting from administrator-defined tool conversion estimates. */
@@ -231,7 +231,7 @@ export interface AiUsage {
 }
 /** Sanitized metadata only: never the provider's message, request body, URL or credentials. */
 export interface AiProviderDiagnostic {
-  operation: "chat" | "image" | "video" | "models";
+  operation: "chat" | "image" | "video" | "models" | "audio";
   httpStatus: number;
   category: "authentication" | "permission" | "access_denied" | "gateway_block" | "rate_limit" | "redirect" | "invalid_request" | "timeout" | "conflict" | "upstream_unavailable" | "rejected";
   /** Local settlement assessment, not a claim about the provider's final invoice. */
@@ -247,7 +247,7 @@ export interface AiUsageEntry extends AiUsage {
   id: string;
   userId: string;
   requestId: string | null;
-  kind: "chat" | "image" | "video" | "quota";
+  kind: "chat" | "image" | "video" | "voice" | "quota";
   status: "completed" | "failed" | "uncertain" | "adjusted";
   model: string | null;
   mode: AiMode | null;

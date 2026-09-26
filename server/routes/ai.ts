@@ -16,6 +16,7 @@ import {
 } from "../ai/mediaTaskOrchestrator";
 import type { MediaTaskRun } from "../ai/mediaTaskRuntime";
 import { runGuidanceRoute } from "../ai/runGuidance";
+import { registerAiVoiceRoutes } from "../ai/voiceRoutes";
 
 const videoTier = (value: unknown): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
 
@@ -221,6 +222,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.post("/runs/:id/resume", async (request, response) => response.json({ trace: await scoped(request).resumeHarnessRun(request.currentUser!.id, request.params.id) }));
     router.delete("/runs/:id", (request, response) => response.json({ trace: scoped(request).cancelHarnessRun(request.currentUser!.id, request.params.id) }));
   }
+  registerAiVoiceRoutes(router, request => scoped(request).voice, admin);
   // Provider error bodies and caught network errors are deliberately never logged or forwarded.
   router.use((error: unknown, _request: import("express").Request, response: import("express").Response, next: import("express").NextFunction) => {
     if (error instanceof ApiError) { next(error); return; }

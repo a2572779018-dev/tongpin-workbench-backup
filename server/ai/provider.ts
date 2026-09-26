@@ -104,7 +104,7 @@ export function providerHttpError(status: number, operation: AiProviderDiagnosti
     ...(gatewaySignal ? { gatewaySignal } : {}),
     ...(cfRay ? { cfRay } : {}),
   };
-  const prefix = operation === "image" ? "图片服务" : operation === "video" ? "视频服务" : "AI 服务";
+  const prefix = operation === "image" ? "图片服务" : operation === "video" ? "视频服务" : operation === "audio" ? "语音服务" : "AI 服务";
   const http = `（HTTP ${status}）`;
   const failure = (code: string, message: string) => new AiError(502, code, message, false, undefined, diagnostic);
   if (category === "authentication") return failure("AI_PROVIDER_AUTH", `${prefix}身份验证失败${http}，请管理员检查对应 API 密钥是否有效`);

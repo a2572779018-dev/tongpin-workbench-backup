@@ -63,6 +63,7 @@ import { TONGPIN_AI_SKILLS } from "./mockData";
 import { activeSkillMention, insertSkillMention, mentionedToolIds, resolveToolIntent, TOOL_MENTIONS, WORKFLOW_MENTIONS } from "./skillMentions";
 import { ToolPlanRequestGate, toolPlanClientContextKey } from "./toolPlanState";
 import { videoReferencesFromAttachments, type LocalVideoReferenceImage } from "./videoReferenceAttachments";
+import { VoiceInputControl, useVoiceAutoRead, useVoiceTranscriptInsert } from "./voice/VoiceInputControl";
 import "./skill-mentions.css";
 
 const EMPTY_PROJECT_DOCUMENTS: AiWorkspaceDocument[] = [];
@@ -463,6 +464,9 @@ export function ChatWorkspace({
     if (quickAuto && mode === "quick" && webSearch) onWebSearchChange?.(false);
   }, [quickAuto, mode, webSearch, onWebSearchChange]);
   const lastMessage = messages.at(-1);
+  useVoiceAutoRead(conversationId, lastMessage);
+  // Auto-send only plain text turns; a media/tool draft always waits for the member.
+  const insertVoiceTranscript = useVoiceTranscriptInsert(draft, onDraftChange, () => composerTool === "text" && !videoOpen ? submitMessage() : composerRef.current?.focus(), () => composerRef.current?.focus());
   const responseFailed = lastMessage?.role === "assistant" && lastMessage.status === "error";
   const currentReplyPending = lastMessage?.role === "assistant" && (lastMessage.status === "thinking" || lastMessage.status === "typing");
   const characterActivity: CharacterActivity = currentReplyPending
@@ -1132,6 +1136,7 @@ export function ChatWorkspace({
                 </select>
                 <ChevronDown size={12} />
               </label>}
+              <VoiceInputControl key={conversationId ?? "new"} disabled={videoBusy} onTranscript={insertVoiceTranscript} />
               {sendMode === "stop" ? (
                 <button
                   type="button"
