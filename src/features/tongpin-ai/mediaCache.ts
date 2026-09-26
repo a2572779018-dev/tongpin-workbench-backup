@@ -11,20 +11,26 @@ export function mediaCacheScope(session: Session | null): string {
   return scope;
 }
 
+/** Mirrors server/ai/tenant.ts: a principal without tenant metadata is served
+ * from the default tenant. Production auth responses (cloudflare/src/platform.ts
+ * toPublicUser) omit tenant fields entirely, so treating "missing" as "no
+ * match" rotated the scope — and emptied every cache — on each token refresh. */
+const DEFAULT_TENANT_ID = "default";
+
 function principalIdentity(session: Session | null): string | null {
   if (!session?.user.id) return null;
   const user = session.user as unknown as Record<string, unknown>;
   const tenantValues = [user.tenantId, user.tenant_id, user.orgId, user.org_id]
     .filter(value => value !== undefined && value !== null && value !== "");
-  // A user ID alone cannot prove that a token refresh stayed in the same
-  // tenant. Older/public sessions omit tenant metadata, so fail closed.
-  if (!tenantValues.length || tenantValues.some(value => typeof value !== "string" || value !== tenantValues[0])) return null;
-  return JSON.stringify([session.user.id, tenantValues[0]]);
+  // Conflicting or non-string tenant fields are ambiguous: fail closed.
+  if (tenantValues.some(value => typeof value !== "string" || value !== tenantValues[0])) return null;
+  return JSON.stringify([session.user.id, tenantValues[0] ?? DEFAULT_TENANT_ID]);
 }
 
 /** Only call for an authenticated continuation of the *same* login (token
  * rotation or profile update). A fresh login must use a new scope even when
- * the public user ID happens to match. */
+ * the public user ID happens to match; a changed user or an explicitly
+ * different tenant never inherits the previous scope. */
 export function transferMediaCacheScope(previous: Session | null, next: Session | null): boolean {
   const previousIdentity = principalIdentity(previous);
   if (!previous || !next || !previousIdentity || previousIdentity !== principalIdentity(next)) return false;
@@ -33,6 +39,10 @@ export function transferMediaCacheScope(previous: Session | null, next: Session 
   sessionScopes.set(next, scope);
   return true;
 }
+
+/** In-memory budget for private generated media (never persisted to disk). */
+export const MEDIA_CACHE_BYTE_LIMIT = 256 * 1024 * 1024;
+export const MEDIA_CACHE_ENTRY_LIMIT = 400;
 
 interface InFlight<T> { controller: AbortController; promise: Promise<T> }
 interface MediaCacheEntry {
@@ -75,7 +85,7 @@ function waitForCaller<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T>
 export class MediaBlobCache {
   private entries = new Map<string, MediaCacheEntry>();
   private bytes = 0;
-  constructor(private readonly limit = 96 * 1024 * 1024, private readonly maxEntries = 200) {}
+  constructor(private readonly limit = MEDIA_CACHE_BYTE_LIMIT, private readonly maxEntries = MEDIA_CACHE_ENTRY_LIMIT) {}
 
   private find(account: string, id: string, create = false): [string, MediaCacheEntry] | undefined {
     if (!account || !id) return undefined;

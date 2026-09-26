@@ -40,7 +40,9 @@ try {
   await switchPage();
   await page.getByRole("button", { name: "打开成果：两张人物图片", exact: true }).first().click();
   await page.waitForFunction(() => (document.querySelector('output[aria-label="验收证据"]')?.textContent?.match(/image-check:/g) ?? []).length === 4);
-  assert.equal(await images.count(), 0, "revoked images must remain hidden despite warm memory bytes");
+  // Stale-while-revalidate: warm images paint first, then the denied background check removes them.
+  await page.waitForFunction(() => document.querySelectorAll(".tp-ai-generated-image img").length === 0);
+  assert.equal(await images.count(), 0, "revoked images must be removed after the background check");
   await setDenied(false);
 
   await select("C 后台视频");
@@ -54,7 +56,8 @@ try {
   await setDenied(true);
   await switchPage(); await select("C 后台视频");
   await page.waitForFunction(() => (document.querySelector('output[aria-label="验收证据"]')?.textContent?.match(/video-content-check:fixture-video-c/g) ?? []).length === 2);
-  assert.equal(await video.count(), 0, "revoked video must remain hidden despite warm memory bytes");
+  await page.waitForFunction(() => document.querySelectorAll(".tp-ai-video-reply video").length === 0);
+  assert.equal(await video.count(), 0, "revoked video must be removed after the background check");
   await setDenied(false);
   assert.deepEqual(errors, []);
   process.stdout.write(JSON.stringify({ imageFullDownloads: 2, imageWarmChecks: 4, videoFullDownloads: 1, videoWarmChecks: 2, revokedMediaHidden: true }) + "\n");

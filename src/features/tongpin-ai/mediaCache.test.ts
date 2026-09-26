@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { MediaBlobCache, mediaCacheScope, transferMediaCacheScope } from "./mediaCache";
+import { MEDIA_CACHE_BYTE_LIMIT, MEDIA_CACHE_ENTRY_LIMIT, MediaBlobCache, mediaCacheScope, transferMediaCacheScope } from "./mediaCache";
 import type { AiVideoJob } from "../../../shared/aiVideo";
 import type { Session } from "../../types";
 
@@ -33,13 +33,37 @@ describe("private session media cache", () => {
       expect(mediaCacheScope(next)).not.toBe(originalScope);
     }
   });
-  it("fails closed on a refresh without trusted tenant metadata", () => {
-    const before = login("legacy-member", undefined, "old");
-    const refresh = login("legacy-member", undefined, "rotated");
-    const scope = mediaCacheScope(before);
-    expect(transferMediaCacheScope(before, refresh)).toBe(false);
-    expect(mediaCacheScope(refresh)).not.toBe(scope);
+  it("keeps one scope across repeated refreshes of the production session shape (no tenant fields)", () => {
+    // cloudflare/src/platform.ts toPublicUser() returns no tenant metadata;
+    // the server resolves such principals to the default tenant.
+    const cache = new MediaBlobCache(), blob = new Blob(["private-image"]);
+    let current = login("legacy-member", undefined, "old");
+    const scope = mediaCacheScope(current);
+    cache.put(scope, "image:asset", blob);
+    for (const token of ["rotated-1", "rotated-2", "rotated-3"]) {
+      const next = login("legacy-member", undefined, token);
+      expect(transferMediaCacheScope(current, next)).toBe(true);
+      expect(mediaCacheScope(next)).toBe(scope);
+      current = next;
+    }
+    // A profile update keeps the same login chain as well.
+    const profile = { ...current, user: { ...current.user, name: "新名字" } } as Session;
+    expect(transferMediaCacheScope(current, profile)).toBe(true);
+    expect(cache.get(mediaCacheScope(profile), "image:asset")).toBe(blob);
+    // A new login is never transferred and therefore never shares the scope.
     expect(mediaCacheScope(login("legacy-member", undefined, "new-login"))).not.toBe(scope);
+  });
+  it("treats a missing tenant as the server's default tenant, never as another tenant", () => {
+    const legacy = login("member", undefined, "old");
+    expect(transferMediaCacheScope(legacy, login("member", "default", "new"))).toBe(true);
+    expect(transferMediaCacheScope(login("member", "default", "old"), login("member", undefined, "new"))).toBe(true);
+    expect(transferMediaCacheScope(login("member", undefined, "old"), login("member", "tenant-b", "new"))).toBe(false);
+    expect(transferMediaCacheScope(login("member", "tenant-b", "old"), login("member", undefined, "new"))).toBe(false);
+    const conflicting = { accessToken: "t", refreshToken: "r", user: { id: "member", tenantId: "tenant-a", org_id: "tenant-b" } } as unknown as Session;
+    expect(transferMediaCacheScope(conflicting, login("member", "tenant-a"))).toBe(false);
+    expect(transferMediaCacheScope(login("member", "tenant-a"), conflicting)).toBe(false);
+    const numeric = { accessToken: "t", refreshToken: "r", user: { id: "member", tenantId: 7 } } as unknown as Session;
+    expect(transferMediaCacheScope(numeric, login("member"))).toBe(false);
   });
   it("separates authenticated sessions even when tenant user and job IDs match", () => {
     const first = { user: { id: "member" } } as Session;
@@ -51,6 +75,20 @@ describe("private session media cache", () => {
     cache.put(scopeA, "shared-job", blob);
     expect(cache.get(scopeB, "shared-job")).toBeUndefined();
     expect(cache.get(scopeA, "shared-job")).toBe(blob);
+  });
+  it("budgets 256 MB / 400 entries in memory and never evicts media that is on screen", () => {
+    expect(MEDIA_CACHE_BYTE_LIMIT).toBe(256 * 1024 * 1024);
+    expect(MEDIA_CACHE_ENTRY_LIMIT).toBe(400);
+    const cache = new MediaBlobCache(6, 2), blob = new Blob(["abc"]);
+    cache.put("a", "shown", blob);
+    const release = cache.retain("a", "shown");
+    cache.put("a", "2", blob); cache.put("a", "3", blob);
+    // snapshot() does not touch LRU order, so "shown" stays the oldest entry.
+    expect(cache.snapshot("a", "shown")?.blob).toBe(blob);
+    expect(cache.snapshot("a", "2")).toBeUndefined();
+    release();
+    cache.put("a", "4", blob);
+    expect(cache.snapshot("a", "shown")).toBeUndefined();
   });
   it("isolates accounts, evicts least-recently-used blobs and clears on logout", () => {
     const cache = new MediaBlobCache(6), blob = new Blob(["abc"]);

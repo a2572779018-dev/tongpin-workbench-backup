@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -22,14 +23,23 @@ const expected = { ...props, accountId: "member-1" };
 describe("media task reply remount", () => {
   afterEach(() => { mediaTaskSnapshotCache.clear(); auth.session = null; });
 
-  it("does not reveal even a same-login terminal task before this mount's authorized GET", () => {
+  it("paints a same-login terminal task at once on remount instead of a query placeholder", () => {
     const current = session(); auth.session = current;
     for (const status of ["completed", "failed"] as const) {
       mediaTaskSnapshotCache.put(mediaCacheScope(current), expected, task(status));
       const html = renderToStaticMarkup(createElement(MediaTaskReply, props));
-      expect(html).toContain("正在查询原任务");
-      expect(html).not.toContain(status === "completed" ? "图片已生成" : "图片未生成");
+      expect(html).not.toContain("正在查询原任务");
+      expect(html).toContain(status === "completed" ? "图片已生成" : "图片未生成");
     }
+  });
+
+  it("drops only the vanished request on 404 and keeps a settled result through temporary errors", () => {
+    const source = readFileSync(new URL("./MediaTaskReply.tsx", import.meta.url), "utf8");
+    expect(source).toContain("mediaTaskSnapshotCache.remove(scope, expected);");
+    expect(source).toContain("forgetTaskMedia(scope, latest.current.task);");
+    expect(source).toContain("mediaTaskSnapshotCache.put(scope, expected, task);");
+    // The background read stays GET-only: no second billable POST on remount.
+    expect(source).toContain("mediaTaskReadPath(requestId), { headers, signal: controller.signal }");
   });
 
   it("does not warm a fresh login or an unfinished task", () => {

@@ -54,7 +54,9 @@ describe("video conversations", () => {
     expect(source).toContain('api<Blob>(`/api/ai/videos/${encodeURIComponent(jobId)}/content`');
     expect(source).toContain('api<{ job: AiVideoJob }>(`/api/ai/videos/${encodeURIComponent(jobId)}`');
     expect(source).toContain("videoBlobCache.retain");
-    expect(source).toContain("useState<PlaybackState>(() => unverifiedPlayback");
+    // Stale-while-revalidate: the first render paints the same-login warm state.
+    expect(source).toContain("useState<PlaybackState>(() => cachedPlayback");
+    expect(source).toContain("revalidateWarmVideo(");
     expect(source).toContain("useState(false)");
     expect(cache).toContain('URL.revokeObjectURL');
     expect(source).toContain('IntersectionObserver');

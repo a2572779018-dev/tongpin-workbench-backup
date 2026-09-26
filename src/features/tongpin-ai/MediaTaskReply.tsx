@@ -5,6 +5,7 @@ import { ApiRequestError } from "../../lib/api";
 import { AiVideoReply } from "./AiVideoReply";
 import { ImageArtifact } from "./ImageArtifact";
 import { mediaCacheScope, videoBlobCache } from "./mediaCache";
+import { privateImageCacheId } from "./mediaRevalidation";
 import { mediaTaskReadInvalidatesSnapshot, mediaTaskSnapshotCache } from "./mediaTaskSnapshotCache";
 import {
   mediaTaskAnswerPath,
@@ -64,6 +65,22 @@ function FreeQuestionForm({ question, busy, onAnswer }: {
   </form>;
 }
 
+/** Terminal snapshot of the same login and request, shown on the first render
+ * of a remount (stale-while-revalidate); the original request is still read
+ * again in the background and a 401/403/404/409 or identity mismatch hides it. */
+function warmTaskView(identity: string, scope: string, expected: Parameters<typeof mediaTaskSnapshotCache.snapshot>[1], submissionError?: string): TaskView {
+  if (submissionError) return { identity, task: null, error: submissionError, loading: false };
+  const task = mediaTaskSnapshotCache.snapshot(scope, expected);
+  return { identity, task, error: "", loading: !task };
+}
+
+/** Drop the cached media bytes that belonged to a task the server no longer returns. */
+function forgetTaskMedia(scope: string, task: MediaTaskRun | null) {
+  if (!task) return;
+  for (const assetId of mediaTaskImageIds(task)) videoBlobCache.remove(scope, privateImageCacheId(assetId));
+  if (task.tool?.serviceRequestId) videoBlobCache.remove(scope, task.tool.serviceRequestId);
+}
+
 /** Rehydrate by the original idempotent request ID. Polls are GET-only and
  * never create a second billable media request after a refresh or timeout. */
 export function MediaTaskReply({ requestId, conversationId, runId, intent, submissionError, videoChoice, onTask, onSettled, onError }: MediaTaskReplyProps) {
@@ -72,14 +89,12 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
   const scope = mediaCacheScope(session);
   const identity = JSON.stringify([scope, conversationId, requestId, intent, runId ?? "", submissionError ?? ""]);
   const expected = { requestId, runId, conversationId, accountId, intent };
-  // A prior task is not authorization for this mount. Its media remains hidden
-  // until the current session's GET confirms access to the original request.
-  const [view, setView] = useState<TaskView>({ identity, task: null, error: "", loading: true });
+  const [view, setView] = useState<TaskView>(() => warmTaskView(identity, scope, expected, submissionError));
   const [busy, setBusy] = useState(false);
   const [authorizationUncertain, setAuthorizationUncertain] = useState(false);
   const [retry, setRetry] = useState(0);
-  const shown = view.identity === identity ? view : { identity, task: null, error: "", loading: true };
-  const latest = useRef<{ identity: string; task: MediaTaskRun | null }>({ identity, task: null });
+  const shown = view.identity === identity ? view : warmTaskView(identity, scope, expected, submissionError);
+  const latest = useRef<{ identity: string; task: MediaTaskRun | null }>({ identity, task: shown.task });
   const lastNotified = useRef("");
   const settledNotified = useRef("");
   const callbacks = useRef({ onTask, onSettled, onError });
@@ -99,6 +114,8 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
     if (latest.current.identity !== identity) latest.current = { identity, task: null };
     if (latest.current.task && task.version < latest.current.task.version) return;
     latest.current.task = task;
+    // Only verified terminal tasks are kept (bounded, 60 min, memory only).
+    mediaTaskSnapshotCache.put(scope, expected, task);
     setView({ identity, task, error: "", loading: false });
     if (task.status !== "awaiting_authorization") setAuthorizationUncertain(false);
     const signature = `${identity}:${task.runId}:${task.version}:${task.status}`;
@@ -113,13 +130,14 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
   }
 
   useEffect(() => {
+    const warm = warmTaskView(identity, scope, expected, submissionError);
     if (latest.current.identity !== identity) {
-      latest.current = { identity, task: null };
+      latest.current = { identity, task: warm.task };
       setAuthorizationUncertain(false);
     }
     setView(current => current.identity === identity && current.task
       ? { ...current, error: "" }
-      : { identity, task: null, error: submissionError ?? "", loading: !submissionError });
+      : warm);
     if (latest.current.task === null) setBusy(false);
     if (submissionError) return;
     const controller = new AbortController();
@@ -142,9 +160,18 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
         }
         const invalid = mediaTaskReadInvalidatesSnapshot(caught);
         if (invalid) {
-          mediaTaskSnapshotCache.clear();
-          videoBlobCache.clear();
+          if (caught instanceof ApiRequestError && caught.status === 404) {
+            // Only this request vanished: forget it and its media, not the whole login.
+            mediaTaskSnapshotCache.remove(scope, expected);
+            forgetTaskMedia(scope, latest.current.task);
+          } else {
+            mediaTaskSnapshotCache.clear();
+            videoBlobCache.clear();
+          }
           latest.current = { identity, task: null };
+        } else if (latest.current.task && mediaTaskIsSettled(latest.current.task.status) && latest.current.task.status !== "unknown") {
+          // A temporary read failure keeps the verified final result on screen.
+          return;
         }
         const message = caught instanceof ApiRequestError && caught.status === 404
           ? "暂未查到原任务。请核对提交状态，不会自动重复生成。"

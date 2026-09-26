@@ -4,6 +4,7 @@ import { useAuth } from "../../auth/AuthContext";
 import type { AiVideoJob, AiVideoList } from "../../../shared/aiVideo";
 import { AI_IMAGE_ACCEPT } from "../../../shared/aiMedia";
 import { ApiRequestError } from "../../lib/api";
+import { mediaCacheScope, videoBlobCache } from "./mediaCache";
 import "./ai-video.css";
 
 const labels: Record<AiVideoJob["status"], string> = { submitting: "提交中", queued: "排队中", processing: "生成中", completed: "已完成", failed: "未完成", uncertain: "费用待核对" };
@@ -13,6 +14,7 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : "
 export function AiVideoPanel({ onClose, initialPrompt = "", onQuotaChange }: { onClose: () => void; initialPrompt?: string; onQuotaChange?: () => void }) {
   const { api, session } = useAuth();
   const account = session?.user.id;
+  const cacheScope = mediaCacheScope(session);
   const openedAccount = useRef(account);
   const dialog = useRef<HTMLDialogElement>(null), live = useRef(true), busyRef = useRef(false);
   const [data, setData] = useState<AiVideoList | null>(null), [error, setError] = useState("");
@@ -32,7 +34,8 @@ export function AiVideoPanel({ onClose, initialPrompt = "", onQuotaChange }: { o
     void refresh().catch(e => { if (live.current) setError(errorText(e)); });
     return () => { live.current = false; imageAbort.current?.abort(); dialog.current?.close(); before?.focus(); };
   }, [refresh]);
-  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview.url); }, [preview]);
+  // The login-scoped media cache owns the Blob URL; keep it from LRU eviction while shown.
+  useEffect(() => preview ? videoBlobCache.retain(cacheScope, preview.id) : undefined, [cacheScope, preview]);
   useEffect(() => { if (openedAccount.current !== account) onClose(); }, [account, onClose]);
   useEffect(() => {
     if (!data?.jobs.some(j => ["queued", "processing", "submitting"].includes(j.status))) return;
@@ -98,9 +101,16 @@ export function AiVideoPanel({ onClose, initialPrompt = "", onQuotaChange }: { o
   async function view(job: AiVideoJob) {
     if (busyRef.current) return; busyRef.current = true; setBusy(true); setError("");
     try {
-      const blob = await api<Blob>(`/api/ai/videos/${encodeURIComponent(job.id)}/content`, { headers: header() }, 130000, "blob");
-      if (live.current) setPreview({ id: job.id, url: URL.createObjectURL(blob) });
-    } catch (e) { if (live.current) setError(errorText(e)); }
+      // The job was just listed for this account; a video already played in
+      // chat (same login) opens from memory instead of a second MP4 download.
+      await videoBlobCache.loadBlob(cacheScope, job.id, signal => api<Blob>(`/api/ai/videos/${encodeURIComponent(job.id)}/content`, { headers: header(), signal }, 130000, "blob"));
+      const url = videoBlobCache.objectUrl(cacheScope, job.id);
+      if (!url) throw new Error("视频缓存暂时不可用，请重试");
+      if (live.current) setPreview({ id: job.id, url });
+    } catch (e) {
+      if (e instanceof ApiRequestError && [401, 403, 404, 409].includes(e.status)) videoBlobCache.remove(cacheScope, job.id);
+      if (live.current) setError(errorText(e));
+    }
     finally { busyRef.current = false; if (live.current) setBusy(false); }
   }
   const active = data?.jobs.some(j => j.reserved);

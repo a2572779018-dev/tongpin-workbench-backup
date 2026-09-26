@@ -9,12 +9,14 @@ export function mediaTaskReadInvalidatesSnapshot(error: unknown): boolean {
     || error instanceof Error && error.message.includes("任务响应与当前对话或账号不匹配");
 }
 
-/** A bounded, same-login presentation snapshot. It does not authorize actions
- * or replace the read of the original server task on every mount. */
+/** A bounded, same-login presentation snapshot of verified terminal tasks. A
+ * remount paints it at once and still re-reads the original task in the
+ * background; it never authorizes actions such as paid confirmation or
+ * cancellation. */
 export class MediaTaskSnapshotCache {
   private entries = new Map<string, Entry>();
 
-  constructor(private readonly ttlMs = 10 * 60_000, private readonly maxEntries = 200) {}
+  constructor(private readonly ttlMs = 60 * 60_000, private readonly maxEntries = 400) {}
 
   private key(scope: string, expected: ExpectedTask): string {
     return JSON.stringify([scope, expected.intent, expected.requestId]);

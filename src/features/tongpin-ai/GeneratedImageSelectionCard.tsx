@@ -1,29 +1,12 @@
-import { useEffect, useState } from "react";
-import type { AiImageAsset } from "../../../shared/ai";
-import { useAuth } from "../../auth/AuthContext";
-import { decodePrivateImage } from "./ImageArtifact";
+import { useState } from "react";
+import { usePrivateImage } from "./privateImage";
 import "./generated-image-selection.css";
 
 function Choice({ assetId, index, busy, onSelect }: { assetId: string; index: number; busy: boolean; onSelect: (assetId: string) => void }) {
-  const { api, session } = useAuth();
-  const accountId = session?.user.id ?? "";
-  const [preview, setPreview] = useState("");
-  const [error, setError] = useState("");
-  useEffect(() => {
-    const controller = new AbortController();
-    let url = "";
-    setPreview(""); setError("");
-    if (!accountId || !/^[A-Za-z0-9_-]{8,160}$/.test(assetId)) { setError("图片不可用"); return; }
-    void api<AiImageAsset>(`/api/ai/assets/${encodeURIComponent(assetId)}`, { signal: controller.signal, headers: { "X-Tongpin-Account": accountId } }, 30_000)
-      .then(asset => {
-        if (controller.signal.aborted) return;
-        if (asset.assetId !== assetId) throw new Error("图片与选择项不匹配");
-        url = URL.createObjectURL(decodePrivateImage(asset));
-        setPreview(url);
-      })
-      .catch(caught => { if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "图片暂时无法读取"); });
-    return () => { controller.abort(); if (url) URL.revokeObjectURL(url); };
-  }, [accountId, api, assetId]);
+  // Shares the login-scoped image cache with the chat result: a thumbnail that
+  // was already shown paints at once and is revalidated in the background.
+  const { image, error } = usePrivateImage(assetId);
+  const preview = image?.url ?? "";
   return <button type="button" className="tp-ai-image-choice" disabled={busy || !preview || Boolean(error)} onClick={() => onSelect(assetId)} aria-label={`选择第 ${index + 1} 张图片用于视频`}>
     {preview ? <img src={preview} alt={`第 ${index + 1} 张生成图片`} /> : <span role="status">{error || "正在读取图片…"}</span>}
     <strong>第 {index + 1} 张</strong>
