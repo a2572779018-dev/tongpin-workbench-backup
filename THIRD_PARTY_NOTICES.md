@@ -633,6 +633,71 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## NousResearch Hermes Agent (member memory learning loop)
+
+- Source: https://github.com/NousResearch/hermes-agent
+- Commit: `d0288be5b3330d2442e3907185b8e9d0958297bb`
+- License: MIT
+- Copyright: Copyright (c) 2025 Nous Research
+- Use in Tongpin: 同频 AI's member memory ("AI 对你的了解") ports Hermes'
+  learning-loop *mechanism*, not its Python runtime. Hermes forks its Python
+  agent and gives the fork a `memory` tool; Tongpin runs inside a Cloudflare
+  Durable Object with an Express mirror, so the review is one journaled
+  strict-JSON model call (plus at most one consolidation retry) whose
+  operations are validated and applied by TypeScript code. No Hermes code,
+  gateway, skills, session database or external memory provider is bundled.
+- Adapted files (upstream → Tongpin):
+  - `tools/memory_tool_store.py` (`MemoryStore`: character budgets counting the
+    `\n§\n` delimiter, unique-substring `old_text` matching with whole-entry
+    exact-match priority, whole-entry `replace`, duplicate adds as no-ops,
+    all-or-nothing batches against the final budget, overflow errors instead of
+    silent dropping, refusal to empty a store through a batch, pinned entries,
+    `_render_block` usage header, frozen load-time snapshot and load-time
+    sanitization) → `server/ai/memberMemoryStore.ts`, `server/ai/memberMemoryPrompt.ts`.
+  - `tools/memory_tool.py` (`MEMORY_SCHEMA` guidance, `new_text` alias,
+    unattended background-review delete gate) → `server/ai/memberMemoryReview.ts`.
+  - `tools/threat_patterns.py` (strict-scope injection/exfiltration patterns,
+    invisible Unicode set, NFKC folding) → `server/ai/memberMemorySafety.ts`,
+    extended with Chinese patterns and a credential filter.
+  - `agent/background_review.py` (`_MEMORY_ROUTING_BLOCK`,
+    `_MEMORY_REVIEW_PROMPT`, post-turn review that never blocks the reply) and
+    `agent/prompt_builder.py` (`build_memory_guidance`: declarative facts, not
+    instructions) → Chinese reviewer instructions in
+    `server/ai/memberMemoryPrompt.ts`, orchestration in `server/ai/memberMemoryService.ts`.
+  - `website/docs/user-guide/features/memory.md` (two stores, capacity
+    management, frozen snapshot pattern, "memory updated" notification) →
+    overall design, `src/features/tongpin-ai/MemberMemoryPanel.tsx` and
+    `MemoryUpdateIndicator.tsx`.
+  - `tests/tools/test_memory_tool.py` → test semantics and scanner cases in
+    `server/ai/memberMemoryStore.test.ts` and `server/ai/memberMemorySafety.test.ts`.
+- Tongpin changes: Chinese character budgets (memory 1,000 / user 600, see
+  `shared/aiMemory.ts`), per-member SQLite storage with revisions instead of
+  files, per-conversation frozen snapshots with a 6-hour lifetime, member-only
+  access, an administrator switch/tier/price, and billing through the existing
+  quota ledger only when memory actually changes.
+
+MIT License
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## FormKit AutoAnimate
 
 - Source: https://github.com/formkit/auto-animate
