@@ -76,9 +76,9 @@ describe("memory threat scanner (Hermes strict scope + Chinese)", () => {
 
 describe("credential filter", () => {
   it.each([
-    ["我的 OpenAI key 是 sk-proj-AbCdEf1234567890XyZ", "api_key"],
+    ["我的 OpenAI key 是 sk-proj-FAKEtestOnly0000000000", "api_key"],
     ["AWS 用 AKIAIOSFODNN7EXAMPLE", "api_key"],
-    ["GitHub 用 ghp_abcdefghijklmnopqrstuvwxyz0123", "api_key"],
+    ["GitHub 用 ghp_FAKEtestOnlyNotARealToken0000", "api_key"],
     ["公司邮箱密码是 Tongpin#2026", "credential"],
     ["my password is hunter22", "credential"],
     ["口令：abc12345", "credential"],
@@ -86,11 +86,11 @@ describe("credential filter", () => {
     ["身份证号 110101199003071234", "account_number"],
     ["工资卡 6222 0202 0000 1234 567", "account_number"],
     ["银行卡号是 6222020200001234567", "account_number"],
-    ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "token"],
+    ["eyJhbGciOiJub25lIn0.eyJ0ZXN0Ijp0cnVlfQ.ZmFrZS1zaWduYXR1cmU", "token"],
     ["-----BEGIN RSA PRIVATE KEY-----", "private_key"],
-    ["钱包私钥是 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318", "wallet_secret"],
+    ["钱包私钥是 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "wallet_secret"],
     ["助记词: abandon ability able about above absent absorb abstract absurd abuse access accident", "wallet_secret"],
-    ["https://admin:s3cret@internal.example.com", "url_credentials"],
+    ["https://fake-user:fake-pass@internal.example.com", "url_credentials"],
     ['api_key = "abcd1234efgh5678ijkl9012mnop"', "credential"],
   ])("detects %s", (content, reason) => {
     expect(detectMemorySecret(content)).toBe(reason);
