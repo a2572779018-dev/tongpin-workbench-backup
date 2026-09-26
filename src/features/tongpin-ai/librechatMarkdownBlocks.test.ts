@@ -4,7 +4,7 @@ import { splitMarkdownIntoBlocks } from "./librechatMarkdownBlocks";
 const raws = (content: string) => splitMarkdownIntoBlocks(content).map(block => block.raw);
 
 // Adapted from LibreChat v0.8.7 splitMarkdown.test.ts; the Tongpin renderer
-// enables GFM but deliberately does not enable upstream math/artifact directives.
+// enables GFM plus $$ display-math grouping, but not upstream artifact directives.
 describe("LibreChat-derived streamed Markdown blocks", () => {
   it("keeps completed paragraphs stable while the trailing paragraph grows", () => {
     expect(raws("第一段。\n\n第二")).toEqual(["第一段。", "第二"]);

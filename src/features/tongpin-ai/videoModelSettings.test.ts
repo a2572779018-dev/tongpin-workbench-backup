@@ -21,11 +21,15 @@ describe("video model settings feedback", () => {
     expect(shouldApplyVideoDefault(false, "sd-2-c6", ["minimax_h3"])).toBe(false);
     expect(shouldApplyVideoDefault(false, "sd-2-c6", ["sd-2-c6"])).toBe(true);
     const composer = readFileSync(new URL("./AiVideoComposer.tsx", import.meta.url), "utf8");
-    expect(composer).toContain("result.settings.availableModels.includes(model)");
+    // The tier default wins until the member explicitly picks a model (#31);
+    // options and constraints come from server profiles, not the bundled list.
+    expect(composer).toContain("(modelTouched.current ? pickable.find(item => item.id === model) : undefined)");
+    expect(composer).toContain("pickable.find(item => item.id === result.settings.defaultModel)");
     expect(composer).toContain("profile?.seconds[resolution]");
     expect(composer).toContain("<label>模型<select");
-    expect(composer).toContain("VIDEO_MODELS.filter(item => authorizedModels.includes(item.id))");
-    expect(composer).toContain("model, resolution, aspectRatio");
+    expect(composer).toContain("selectableVideoProfiles(data.settings)");
+    expect(composer).not.toContain("VIDEO_MODELS");
+    expect(composer).toContain("model: profile.id, resolution, aspectRatio");
   });
 
   it("keeps the non-generating probe disclaimer and confirms a listed default", () => {

@@ -132,6 +132,39 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(runtime.service.quota("a")).toMatchObject({ reservedTokens: 0, usedTokens: 0 });
     expect(runtime.service.video.list("a").settings).toMatchObject({ availableModels: ["sd-2-c6"], defaultModel: "sd-2-c6" });
   });
+  it("returns a server profile for every available model and names a replaced tier default", async () => {
+    const route = {
+      providerId: "video-provider", modelId: "minimax_h3", protocol: "chat_completions" as const,
+      maxOutputTokens: 1024, reasoningEffort: "" as const, capabilities: ["chat", "video"] as const,
+      enabled: true, videoProviderId: "video-provider", videoModelId: "minimax_h3_内置提示词优化",
+    };
+    await runtime.service.saveHarness({
+      providers: [{ id: "video-provider", name: "75API", baseUrl: "https://www.75api.com/v1", protocol: "chat_completions", apiKey: "harness-video-key", enabled: true }],
+      tiers: { quick: route, standard: route, deep: route, pro: route },
+      policy: { strategy: "plan_execute", maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
+    });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3_内置提示词优化" }, { id: "sd-2.0-fast" }] }));
+    await runtime.service.discoverHarnessProvider("video-provider");
+    const settings = runtime.service.video.list("a").settings;
+    expect(settings.defaultModel).toBe("minimax_h3_内置提示词优化");
+    expect(settings.defaultNotice).toBeUndefined();
+    expect(settings.profiles).toEqual({
+      "minimax_h3_内置提示词优化": { label: expect.stringContaining("MiniMax H3"), resolutions: ["480p", "768p"], seconds: { "480p": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "768p": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] }, maxImages: 8, requiresImage: true },
+      "sd-2.0-fast": { label: "SD 2.0 Fast", resolutions: ["480p", "720p"], seconds: { "480p": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "720p": [5, 6, 7, 8, 9, 10, 11, 12] }, maxImages: 9, requiresImage: false },
+    });
+    // A tier model this server can no longer generate with is replaced visibly, never silently.
+    await runtime.service.saveHarness({
+      providers: [{ id: "video-provider", name: "75API", baseUrl: "https://www.75api.com/v1", protocol: "chat_completions", enabled: true }],
+      tiers: Object.fromEntries(["quick", "standard", "deep", "pro"].map(tier => [tier, { ...route, videoModelId: "minimax_h3_retired" }])) as never,
+      policy: { strategy: "plan_execute", maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
+    });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3_retired" }, { id: "sd-2.0-fast" }] }));
+    await runtime.service.discoverHarnessProvider("video-provider");
+    const replaced = runtime.service.video.list("a").settings;
+    expect(replaced).toMatchObject({ availableModels: ["sd-2.0-fast"], defaultModel: "sd-2.0-fast" });
+    expect(replaced.defaultNotice).toContain("SD 2.0 Fast");
+    expect(replaced.defaultNotice).toContain("当前不可用");
+  });
   it("requires a positive administrator conversion and valid credentials", async () => {
     await expect(runtime.service.video.configure({ enabled: true, quotaPoints: 0 })).rejects.toMatchObject({ code: "AI_VIDEO_SETTINGS_INVALID" });
     await expect(runtime.service.video.configure({ ...config, apiKey: "bad\nkey" })).rejects.toMatchObject({ code: "AI_KEY_INVALID" });

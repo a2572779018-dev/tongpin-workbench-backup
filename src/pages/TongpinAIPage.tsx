@@ -36,7 +36,7 @@ import { generatedVideoReference, generatedVideoReferenceCandidates, videoRefere
 import { generatedMediaForFollowup, generatedMediaForMixedFollowup, readGeneratedMedia } from "../features/tongpin-ai/generatedMediaContext";
 import { readGeneratedImageSelection, type GeneratedImageSelection } from "../features/tongpin-ai/generatedImageSelection";
 import { persistedVideoChatRequest, type VideoChatRequest } from "../features/tongpin-ai/videoChat";
-import { naturalVideoRequest } from "../features/tongpin-ai/naturalVideoRequest";
+import { explicitVideoChoice, naturalVideoRequest } from "../features/tongpin-ai/naturalVideoRequest";
 import { parseMediaTaskResponse, type MediaTaskRun } from "../features/tongpin-ai/mediaTaskClient";
 import { preserveVideoClarificationDraft } from "../features/tongpin-ai/videoDraftRecovery";
 import { hasConversationActivity } from "../features/tongpin-ai/conversationActivity";
@@ -1582,8 +1582,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           if (generated) references = [generated];
           else if (/同一个人物|同一位人物|这张|上张|刚才.{0,8}(?:图|人物)|把[她他它]动起来/.test(prompt)) throw new Error("没有找到可验证的上一张图片，请先选择参考图；本次未生成视频。");
         }
-        const prepared = videoRequest ? { ...videoRequest, ...(references.length ? { referenceImages: references } : {}) }
+        // Server profiles decide what the tier can run; an explicit member
+        // choice is honored exactly, otherwise the tier default is used or the
+        // replacement and its reason are recorded for the task card.
+        const explicitRequest = videoRequest ? { ...videoRequest, ...(references.length ? { referenceImages: references } : {}) } : undefined;
+        const natural = explicitRequest ? undefined
           : naturalVideoRequest(requestId, prompt, list.settings, selectedImage?.previousSettings ?? latest.videoDraftSettings[origin.draftKey], references);
+        const prepared = explicitRequest ?? natural!.request;
+        const videoChoice = explicitRequest ? explicitVideoChoice(list.settings, explicitRequest) : natural!.choice;
         if (!prepared.model || !list.settings.availableModels.includes(prepared.model)) throw new Error("当前档位没有可用的视频模型，请重新选择");
         if (!continuation && (!Number.isSafeInteger(maxPointsPerTool) || Number(maxPointsPerTool) <= 0)) maxPointsPerTool = list.settings.quotaPoints;
         sourceAssetIds = [...(prepared.referenceIds ?? [])];
@@ -1596,7 +1602,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         parameters = { model: prepared.model, seconds: prepared.seconds, resolution: prepared.resolution, aspectRatio: prepared.aspectRatio, referenceIds: sourceAssetIds };
         const { referenceImages: _localImages, ...durableRequest } = prepared;
         const current = workspaceRef.current;
-        const nextArtifacts = current.artifacts.map(item => item.id === artifactId ? { ...item, data: { ...item.data, videoRequest: persistedVideoChatRequest({ ...durableRequest, referenceIds: sourceAssetIds }) as unknown as import("../../shared/aiWorkspace").AiWorkspaceJson } } : item);
+        const nextArtifacts = current.artifacts.map(item => item.id === artifactId ? { ...item, data: { ...item.data, videoRequest: persistedVideoChatRequest({ ...durableRequest, referenceIds: sourceAssetIds }) as unknown as import("../../shared/aiWorkspace").AiWorkspaceJson,
+          videoChoice: videoChoice as unknown as import("../../shared/aiWorkspace").AiWorkspaceJson } } : item);
         const preparedState = { ...persistentStateRef.current, artifacts: nextArtifacts };
         ensureAttachmentWorkspaceCapacity(preparedState, "video");
         workspaceRef.current = { ...current, artifacts: nextArtifacts }; persistentStateRef.current = preparedState; setArtifacts(nextArtifacts);

@@ -450,6 +450,52 @@ download assets. Only the internal application component is bundled here.
 - Copyright: Copyright (c) 2026 moyan
 - Use in Tongpin: product-safe persona catalogue patterns. Tongpin does not ship
   third-party identity claims or tool permissions as trusted system prompts.
+- Catalogue (issue #26): `src/features/tongpin-ai/personaPresets.ts` holds 156
+  low-authority writing/role presets in 15 categories — the 39 pre-existing
+  presets plus 117 new ones rewritten in Tongpin's own words from the upstream
+  `persona-skills.md` sections, `Novelists/`, `zimeiti/`, `DirectorAgents-1/`,
+  `tianya-gods-framework/`, `EQ/` and the README's 永乐大典 entry. Each new
+  preset records the upstream section it came from (`source`). No upstream
+  prompt text is copied beyond short names; no upstream "identity" (你就是X /
+  first-person claims), tool permission, script, or factual assertion is used.
+- Real people: presets describe a technique, not a person. A named reference
+  ("参考……笔法/手法") is used only for a short allowlist of deceased, widely
+  studied authors, directors and thinkers, always with an explicit "does not
+  claim to be that person or invent their words" guard. Upstream entries built
+  on living people (novelists, bloggers, directors, entrepreneurs, forum
+  authors) became unnamed methodology/style presets.
+- Not imported: distillations of private individuals (colleague, boss, ex,
+  parents, crush, friend, deceased relatives, the user's own digital clone;
+  replaced where useful by generic coaching presets that never simulate a real
+  person); real streamers and VTubers; divination/fortune charts, wealth-signal
+  mining, wiki scraping and other entries that need tools, calculations or
+  external facts (a culture-only 术数 explainer is offered instead); document
+  "anti-distill" poisoning; political-leader persona skills (only a generic
+  "main-constraint analysis" method is kept); the multi-agent orchestrator
+  scripts (DirectorAgents and 天涯 teams are represented as single roundtable
+  role presets, not agents).
+
+MIT License
+
+Copyright (c) 2026 moyan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ## FormKit AutoAnimate
 

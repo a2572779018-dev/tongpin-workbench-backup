@@ -36,3 +36,15 @@ export function replyUrlTransform(value: string) {
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : "";
   } catch { return ""; }
 }
+
+/** remark-math treats any `$...$` pair as inline math, so "$5 到 $10" would
+ * render "5 到 " as a formula. A `$` directly followed by a plain amount that
+ * ends at whitespace, sentence punctuation, a range dash, CJK text or the end (and is not itself
+ * closed by `$`, like `$10$`) is escaped to a literal dollar sign. Inline code
+ * spans and fenced code/math blocks are left untouched. */
+const CURRENCY_OR_CODE = /(`+)[\s\S]*?\1|(?<![\\$])\$(?![\d.,]*\$)(?=\d[\d,]*(?:\.\d+)?(?:[kKmMbB]|万|亿)?(?:[\s\p{Script=Han},.;:!?)，。、；：！？）~～–—]|$))/gu;
+
+export function escapeCurrencyDollars(source: string): string {
+  if (!source.includes("$") || /^ {0,3}(?:`{3,}|~{3,}|\${2,})/.test(source)) return source;
+  return source.replace(CURRENCY_OR_CODE, match => match === "$" ? "\\$" : match);
+}

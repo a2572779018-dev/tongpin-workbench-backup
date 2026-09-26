@@ -1,3 +1,5 @@
+import { isUnclosedMathFence } from "../../../shared/librechatMarkdownBlocks";
+
 /** Parsers for the optional rich-content fenced blocks a model may emit at the
  * end of a reply: a ```chart data block and a ```followups suggestion block.
  *
@@ -19,6 +21,9 @@ export interface ReplyChart {
 const MAX_SERIES_POINTS = 24;
 const MAX_TEXT_LENGTH = 120;
 const MAX_FOLLOWUPS = 3;
+/** Keeps the SVG scale finite: larger magnitudes (or +/-1e308 pairs whose
+ * span overflows to Infinity) would otherwise draw NaN coordinates. */
+const MAX_CHART_MAGNITUDE = 1e15;
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -49,7 +54,7 @@ export function parseReplyChart(raw: string): ReplyChart | null {
     const { label, value } = entry as Record<string, unknown>;
     const safeLabel = boundedText(label, 40);
     const safeValue = finiteNumber(value);
-    if (!safeLabel || safeValue === null) return null;
+    if (!safeLabel || safeValue === null || Math.abs(safeValue) > MAX_CHART_MAGNITUDE) return null;
     series.push({ label: safeLabel, value: safeValue });
   }
   return { title, unit, source, type, series };
@@ -70,4 +75,46 @@ export function parseReplyFollowups(raw: string): string[] {
     if (chips.length >= MAX_FOLLOWUPS) break;
   }
   return chips;
+}
+
+/** What an unfinished final block would turn into once the stream completes.
+ * Only these constructs change shape when their closing syntax arrives, so
+ * only they get a placeholder instead of their raw, half-written source:
+ * - "chart" / "followups": an open ```chart or ```followups fence (raw JSON);
+ * - "fence": an opened code fence with no body yet (an empty box whose
+ *   language label is still being typed);
+ * - "math": an open $$ display formula (would render as a KaTeX error);
+ * - "table": pipe rows still waiting for a valid GFM delimiter row.
+ * Everything else streams as normal Markdown. */
+export type PendingReplyTail = "chart" | "followups" | "fence" | "math" | "table" | null;
+
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`]*)/;
+
+function tableCells(line: string): number {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
+  return trimmed.split(/(?<!\\)\|/).length;
+}
+
+function isDelimiterRow(line: string, cells: number): boolean {
+  if (!/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line)) return false;
+  return tableCells(line) === cells;
+}
+
+export function pendingReplyTail(raw: string): PendingReplyTail {
+  const lines = raw.replace(/\r\n?/g, "\n").split("\n");
+  const fence = FENCE_OPEN.exec(lines[0]);
+  if (fence) {
+    const [, marker, info] = fence;
+    const close = new RegExp(`^ {0,3}${marker[0] === "`" ? "`" : "~"}{${marker.length},}[ \\t]*$`);
+    if (lines.slice(1).some(line => close.test(line))) return null;
+    const language = info.toLowerCase();
+    if (language === "chart" || language === "followups") return language;
+    return lines.length < 2 ? "fence" : null;
+  }
+  if (isUnclosedMathFence(lines.join("\n"))) return "math";
+  if (lines.every(line => line.trimStart().startsWith("|"))) {
+    if (lines.length >= 2 && isDelimiterRow(lines[1], tableCells(lines[0]))) return null;
+    return "table";
+  }
+  return null;
 }

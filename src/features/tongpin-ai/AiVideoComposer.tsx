@@ -5,7 +5,8 @@ import type { AiVideoList } from "../../../shared/aiVideo";
 import type { AiToolPlan } from "../../../shared/ai";
 import type { AiMode } from "../../../shared/ai";
 import { AI_IMAGE_ACCEPT } from "../../../shared/aiMedia";
-import { VIDEO_MODELS, videoModel, videoSeconds, type VideoModelId, type VideoResolution } from "../../../shared/aiVideoModels";
+import type { VideoModelId, VideoResolution } from "../../../shared/aiVideoModels";
+import { selectableVideoProfiles, videoProfileBlocker, videoProfileFor } from "./videoProfiles";
 import type { VideoChatRequest } from "./videoChat";
 import "./ai-video.css";
 
@@ -23,7 +24,9 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   const { api, session } = useAuth();
   const [data, setData] = useState<AiVideoList | null>(null);
   const [error, setError] = useState("");
-  const [model, setModel] = useState<VideoModelId>(initialRequest?.model ?? "minimax_h3");
+  const [model, setModel] = useState<VideoModelId | undefined>(initialRequest?.model);
+  // Only a member's own pick (or a restored request) overrides the tier default.
+  const modelTouched = useRef(Boolean(initialRequest?.model));
   const [seconds, setSeconds] = useState(initialRequest?.seconds ?? 15);
   const [resolution, setResolution] = useState<VideoResolution>(initialRequest?.resolution ?? "768p");
   const [submitted, setSubmitted] = useState(false);
@@ -32,15 +35,12 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   const [plan, setPlan] = useState<AiToolPlan | null>(null);
   const [plannedFrom, setPlannedFrom] = useState(initialRequest?.originalPrompt ?? initialRequest?.prompt ?? "");
   const [dragging, setDragging] = useState(false);
-  const authorizedModels = data?.settings.availableModels ?? [];
-  const selectedModel = authorizedModels.includes(model) ? videoModel(model) : undefined;
-  const profile = selectedModel ? {
-    resolutions: [...selectedModel.resolutions] as VideoResolution[],
-    seconds: Object.fromEntries(selectedModel.resolutions.map(item => [item, videoSeconds(selectedModel.id, item)])) as Partial<Record<VideoResolution, number[]>>,
-    maxImages: selectedModel.maxImages,
-    requiresImage: selectedModel.requiresImage,
-  } : undefined;
-  const modelAvailable = Boolean(selectedModel);
+  // Server profiles first: a model renamed at the gateway is selectable even
+  // when this client's bundled catalogue predates it.
+  const options = data ? selectableVideoProfiles(data.settings) : [];
+  const profile = data ? videoProfileFor(data.settings, model) : undefined;
+  const modelAvailable = Boolean(profile);
+  const tierDefault = data?.settings.defaultModel;
   const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16">(initialRequest?.aspectRatio ?? "16:9");
   const [images, setImages] = useState<NonNullable<VideoChatRequest["referenceImages"]>>(
     initialRequest?.referenceImages ?? initialReferenceImages ?? [],
@@ -55,14 +55,13 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
   async function refresh() {
     try { const result = await api<AiVideoList>(`/api/ai/videos?tier=${encodeURIComponent(tier)}`, { headers }); if (live.current) {
       setData(result); setError("");
-      const nextModel = result.settings.availableModels.includes(model) ? model
-        : result.settings.defaultModel && result.settings.availableModels.includes(result.settings.defaultModel) ? result.settings.defaultModel
-          : result.settings.availableModels[0];
-      const nextSpec = nextModel ? videoModel(nextModel) : undefined;
-      if (nextModel && nextSpec) {
-        const nextResolution = (nextSpec.resolutions as readonly VideoResolution[]).includes(resolution) ? resolution : nextSpec.resolutions.at(-1)!;
-        const durations = videoSeconds(nextModel, nextResolution);
-        setPlan(null); setModel(nextModel); setResolution(nextResolution); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current);
+      const pickable = selectableVideoProfiles(result.settings);
+      const next = (modelTouched.current ? pickable.find(item => item.id === model) : undefined)
+        ?? pickable.find(item => item.id === result.settings.defaultModel) ?? pickable[0];
+      if (next) {
+        const nextResolution = next.resolutions.includes(resolution) ? resolution : next.resolutions.at(-1)!;
+        const durations = next.seconds[nextResolution] ?? [];
+        setPlan(null); setModel(next.id); setResolution(nextResolution); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current);
       }
     } }
     catch (e) { if (live.current) setError(e instanceof Error ? e.message : "视频服务暂时不可用"); }
@@ -76,8 +75,10 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     if (!modelAvailable) { setError("当前业务档位尚未配置可用的视频生成功能，请联系管理员"); return; }
     if (data.jobs.some(job => job.reserved)) { setError("已有视频正在处理或等待核对，请先查看原任务"); return; }
     if (data.quota.remainingTokens < data.settings.quotaPoints) { setError("剩余额度不足以生成这段视频，请联系管理员增加额度。尚未提交生成任务。"); return; }
-    if (!profile || images.length > profile.maxImages || (profile.requiresImage && !images.length)) { setError(profile?.requiresImage && !images.length ? "当前档位需要添加参考图片" : `最多添加 ${profile?.maxImages ?? 0} 张参考图片`); return; }
-    const base: VideoChatRequest = { requestId: crypto.randomUUID(), prompt: prompt.trim(), seconds, model, resolution, aspectRatio, ...(images.length ? { referenceImages: images } : {}) };
+    if (!profile) { setError("请选择视频模型"); return; }
+    const blocker = videoProfileBlocker(profile, images.length);
+    if (blocker) { setError(`「${profile.label}」${blocker}，请调整参考图片或选择其他模型`); return; }
+    const base: VideoChatRequest = { requestId: crypto.randomUUID(), prompt: prompt.trim(), seconds, model: profile.id, resolution, aspectRatio, ...(images.length ? { referenceImages: images } : {}) };
     setWorking(true, "正在整理并提交视频任务…"); setError("");
     try {
       if (onSubmitTask) {
@@ -129,18 +130,20 @@ export const AiVideoComposer = forwardRef<VideoComposerHandle, {
     <div className="tp-ai-video-inline-heading"><strong><Video size={16} />生成视频</strong><button type="button" aria-label="取消生成视频" onClick={onClose}><X size={16} /></button></div>
     {busy ? <p role="status">{busyLabel || "正在处理视频任务…"}</p> : <>
     <div className="tp-ai-video-options">
-      <label>模型<select value={model} disabled={!authorizedModels.length} onChange={e => {
-        const nextModel = e.target.value as VideoModelId;
-        const nextSpec = videoModel(nextModel);
-        if (!nextSpec || !authorizedModels.includes(nextModel)) return;
-        const nextResolution = (nextSpec.resolutions as readonly VideoResolution[]).includes(resolution) ? resolution : nextSpec.resolutions.at(-1)!;
-        const durations = videoSeconds(nextModel, nextResolution);
-        setPlan(null); setModel(nextModel); setResolution(nextResolution); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current);
-      }}>{VIDEO_MODELS.filter(item => authorizedModels.includes(item.id)).map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label>模型<select value={model ?? ""} disabled={!options.length} onChange={e => {
+        const next = options.find(item => item.id === e.target.value);
+        if (!next) return;
+        modelTouched.current = true;
+        const nextResolution = next.resolutions.includes(resolution) ? resolution : next.resolutions.at(-1)!;
+        const durations = next.seconds[nextResolution] ?? [];
+        setPlan(null); setModel(next.id); setResolution(nextResolution); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current);
+      }}>{options.map(item => <option key={item.id} value={item.id}>{item.label}{item.id === tierDefault ? "（档位默认）" : ""}{item.requiresImage && !item.label.includes("参考图") ? "（需参考图）" : ""}</option>)}</select></label>
       <label>时长<select value={seconds} disabled={!modelAvailable} onChange={e => { setPlan(null); setSeconds(Number(e.target.value)); }}>{(profile?.seconds[resolution] ?? []).map(n => <option key={n} value={n}>{n} 秒</option>)}</select></label>
       <label>清晰度<select value={resolution} disabled={!modelAvailable} onChange={e => { setPlan(null); const next = e.target.value as VideoResolution; const durations = profile?.seconds[next] ?? []; setResolution(next); setSeconds(current => durations.includes(current) ? current : durations.at(-1) ?? current); }}>{profile?.resolutions.map(r => <option key={r}>{r}</option>)}</select></label>
       <label>画幅<select value={aspectRatio} onChange={e => { setPlan(null); setAspectRatio(e.target.value as typeof aspectRatio); }}><option value="16:9">横屏 16:9</option><option value="9:16">竖屏 9:16</option></select></label>
     </div>
+    {profile?.requiresImage && !images.length ? <p className="tp-ai-video-hint" role="status">「{profile.label}」需要至少一张参考图片，请添加参考图片或选择其他模型。</p> : null}
+    {data?.settings.defaultNotice && model === tierDefault ? <p className="tp-ai-video-hint" role="note">{data.settings.defaultNotice}</p> : null}
     <input ref={input} type="file" hidden multiple accept={AI_IMAGE_ACCEPT} onChange={e => { const files = Array.from(e.target.files ?? []); e.target.value = ""; void addImages(files); }} />
     <button type="button" disabled={!modelAvailable || images.length >= (profile?.maxImages ?? 0)} onClick={() => input.current?.click()}>拖入或添加参考图片（{images.length}/{profile?.maxImages ?? 0}）</button>
     <div className="tp-ai-video-reference-grid">{images.map((image, index) => <figure key={`${index}-${image.name}`}><img src={image.dataUrl} alt={`参考图 ${index + 1}`} /><figcaption>{image.name}<button type="button" aria-label={`移除参考图 ${index + 1}`} onClick={() => { setPlan(null); setImages(current => current.filter((_, i) => i !== index)); }}><X size={12} /></button></figcaption></figure>)}</div>

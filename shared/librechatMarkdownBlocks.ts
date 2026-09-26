@@ -24,6 +24,33 @@ interface MdastNode {
   position?: { start?: { offset?: number }; end?: { offset?: number } };
 }
 
+/** A `$$` line opens display math for remark-math; the block is closed only
+ * by a later line of at least two dollars. GFM alone does not know this
+ * construct, so a formula containing a blank line would otherwise be split
+ * into halves that each render as a broken formula. */
+const MATH_FENCE_OPEN = /^ {0,3}\${2,}[^$\n]*$/;
+const MATH_FENCE_CLOSE = /^ {0,3}\${2,}[ \t]*$/;
+
+export function isUnclosedMathFence(raw: string): boolean {
+  const lines = raw.split("\n");
+  return MATH_FENCE_OPEN.test(lines[0]) && !lines.slice(1).some(line => MATH_FENCE_CLOSE.test(line));
+}
+
+function mergeMathFences(content: string, blocks: MarkdownBlock[]): MarkdownBlock[] {
+  const merged: MarkdownBlock[] = [];
+  for (let index = 0; index < blocks.length; index += 1) {
+    let block = blocks[index];
+    // An unclosed math fence extends to the next closing line or, like an
+    // unclosed code fence, to the end of the document.
+    while (isUnclosedMathFence(block.raw) && index + 1 < blocks.length) {
+      const next = blocks[++index];
+      block = { raw: content.slice(block.start, next.end), start: block.start, end: next.end };
+    }
+    merged.push(block);
+  }
+  return merged;
+}
+
 function containsDefinition(node: MdastNode): boolean {
   if (node.type === "definition" || node.type === "footnoteDefinition") return true;
   return (node.children ?? []).some(containsDefinition);
@@ -51,5 +78,5 @@ export function splitMarkdownIntoBlocks(content: string): MarkdownBlock[] {
     if (start === undefined || end === undefined || start < 0 || end <= start || end > content.length) return whole;
     blocks.push({ raw: content.slice(start, end), start, end });
   }
-  return blocks;
+  return mergeMathFences(content, blocks);
 }

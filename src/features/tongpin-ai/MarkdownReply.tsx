@@ -7,9 +7,9 @@ import { AiSourceAnchor } from "./AiSourceLink";
 import { ChatChart } from "./ChatChart";
 import { splitMarkdownIntoBlocks, StableMarkdownBlocks } from "./librechatMarkdownBlocks";
 import { codeBlockFromHast } from "./replyCodeData";
-import { remarkReplyEmphasis, replyUrlTransform } from "./replyMarkdown";
+import { escapeCurrencyDollars, remarkReplyEmphasis, replyUrlTransform } from "./replyMarkdown";
 import { ReplyFollowups } from "./ReplyFollowups";
-import { parseReplyChart, parseReplyFollowups } from "./replyRichBlocks";
+import { parseReplyChart, parseReplyFollowups, pendingReplyTail, type PendingReplyTail } from "./replyRichBlocks";
 import { tableRowsFromHast, tableToCsv, tableToMarkdown, tableToTsv } from "./replyTableData";
 import { TypewriterText } from "./TypewriterText";
 import "./reply-markdown.css";
@@ -58,11 +58,13 @@ function ReplyCode({ node, children }: { node: unknown; children: ReactNode }) {
   const [feedback, setFeedback] = useState("");
   // Optional rich blocks ride the fenced-code channel: a valid ```chart block
   // becomes a labelled chart, a valid ```followups block becomes chips. A
-  // malformed payload keeps rendering as plain code below. The parser result
-  // (not the element, which is always truthy) decides the branch, and the hook
-  // above stays unconditional so the render order never changes mid-stream.
-  if (language === "chart" && parseReplyChart(text)) return <ChatChart body={text} />;
-  if (language === "followups" && parseReplyFollowups(text).length) return <ReplyFollowups body={text} />;
+  // malformed chart keeps rendering as plain code (with a notice) so its data
+  // stays readable; malformed followups are only suggestions and are dropped.
+  // The parser result (not the element, which is always truthy) decides the
+  // branch, and the hooks above stay unconditional so render order is stable.
+  const chartInvalid = language === "chart" && !parseReplyChart(text);
+  if (language === "chart" && !chartInvalid) return <ChatChart body={text} />;
+  if (language === "followups") return parseReplyFollowups(text).length ? <ReplyFollowups body={text} /> : null;
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -72,6 +74,7 @@ function ReplyCode({ node, children }: { node: unknown; children: ReactNode }) {
   return <div className="tp-ai-markdown-code">
     <div className="tp-ai-markdown-code__actions">
       <span>{language || "代码"}</span>
+      {chartInvalid ? <small className="tp-ai-markdown-code__notice">图表数据格式无效，已显示原文</small> : null}
       <button type="button" onClick={() => void copy()}>复制代码</button>
       <span role="status" aria-live="polite">{feedback}</span>
     </div>
@@ -88,8 +91,24 @@ const components: Components = {
 };
 
 function renderReplyBlock(content: string): ReactNode {
-  return Markdown({ children: content, remarkPlugins: plugins, rehypePlugins: rehype,
+  return Markdown({ children: escapeCurrencyDollars(content), remarkPlugins: plugins, rehypePlugins: rehype,
     components, skipHtml: true, urlTransform: replyUrlTransform });
+}
+
+const PENDING_LABELS: Record<Exclude<PendingReplyTail, null | "fence" | "followups">, string> = {
+  chart: "正在生成图表…",
+  math: "正在生成公式…",
+  table: "正在生成表格…",
+};
+
+/** Final block of a still-streaming reply: an unfinished chart, formula or
+ * table header shows a short placeholder instead of raw syntax that would
+ * flicker into a widget; followup chips and empty code boxes wait silently. */
+function renderStreamingTail(content: string): ReactNode {
+  const pending = pendingReplyTail(content);
+  if (pending === "fence" || pending === "followups") return null;
+  if (pending) return <p className="tp-ai-markdown-pending">{PENDING_LABELS[pending]}</p>;
+  return renderReplyBlock(content);
 }
 
 export function replyTreeText(node: ReactNode): string {
@@ -120,7 +139,7 @@ export function revealReplyTree(node: ReactNode, visible: number): ReactNode {
   return reveal(node);
 }
 
-export const MarkdownReply = memo(function MarkdownReply({ content, typing = false }: { content: string; typing?: boolean }) {
+export const MarkdownReply = memo(function MarkdownReply({ content, typing = false, streaming = false }: { content: string; typing?: boolean; streaming?: boolean }) {
   // During the post-response typewriter effect, reveal a single parsed tree.
   // The active SSE path below uses LibreChat's stable completed-block rendering.
   const tree = useMemo(() => typing
@@ -129,7 +148,7 @@ export const MarkdownReply = memo(function MarkdownReply({ content, typing = fal
   const text = useMemo(() => replyTreeText(tree), [tree]);
   return <div className="tp-ai-markdown">
     {typing ? <TypewriterText content={text} render={offset => revealReplyTree(tree, offset)} />
-      : <StableMarkdownBlocks content={content} renderBlock={renderReplyBlock} />}
+      : <StableMarkdownBlocks content={content} renderBlock={renderReplyBlock} renderTail={streaming ? renderStreamingTail : undefined} />}
     {typing && <span className="tp-ai-message__typing-caret" aria-hidden="true" />}
   </div>;
 });

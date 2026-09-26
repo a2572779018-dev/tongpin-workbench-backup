@@ -11,6 +11,7 @@ import { hasLiveThinking } from "./liveThinking";
 import { memberVisibleHarnessSteps } from "./tracePresentation";
 import { AiVideoReply } from "./AiVideoReply";
 import { MediaTaskReply } from "./MediaTaskReply";
+import { savedVideoChoice } from "./naturalVideoRequest";
 import { GeneratedImageSelectionCard } from "./GeneratedImageSelectionCard";
 import { readGeneratedImageSelection } from "./generatedImageSelection";
 import type { MediaTaskRun } from "./mediaTaskClient";
@@ -117,7 +118,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
           </figure>)}</div>{file.media.kind === "video" ? <small>仅分析采样画面，不含音频</small> : null}</> : null}
         </li>)}
       </ul> : null}
-      {message.status === "thinking" ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}{live ? <LiveThinkingPanel thinking={live} /> : null}{message.content ? <MarkdownReply content={message.content} /> : null}{!live && !message.analysisSummary && !message.content ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> : null}</> :
+      {message.status === "thinking" ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}{live ? <LiveThinkingPanel thinking={live} /> : null}{message.content ? <MarkdownReply content={message.content} streaming /> : null}{!live && !message.analysisSummary && !message.content ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> : null}</> :
         message.role === "assistant" && message.status !== "error"
           ? <>{message.analysisSummary ? <AnalysisSummary>{message.analysisSummary}</AnalysisSummary> : null}{live && message.status === "typing" ? <LiveThinkingPanel thinking={live} /> : null}<MarkdownReply content={message.content} typing={message.status === "typing"} /></>
           : <p>{message.content}</p>}
@@ -128,7 +129,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
       {imageSelection?.status === "awaiting_selection" && artifact && onSelectGeneratedImage && onCancelGeneratedImageSelection
         ? <GeneratedImageSelectionCard key={artifact.id} assetIds={imageSelection.assetIds} onSelect={assetId => onSelectGeneratedImage(artifact.id, assetId)} onCancel={() => onCancelGeneratedImageSelection(artifact.id)} />
         : artifact?.kind === "参考图片选择" ? null
-        : artifact && typeof artifact.data?.mediaTaskRequestId === "string" ? <MediaTaskReply key={artifact.data.mediaTaskRequestId} requestId={artifact.data.mediaTaskRequestId} conversationId={artifact.conversationId} runId={typeof artifact.data.mediaTaskRunId === "string" ? artifact.data.mediaTaskRunId : undefined} intent={artifact.kind === "视频" ? "video" : "image"} submissionError={typeof artifact.data.mediaTaskSubmitError === "string" ? artifact.data.mediaTaskSubmitError : undefined} onTask={onMediaTask ? task => onMediaTask(artifact.conversationId, String(artifact.data!.mediaTaskRequestId), task) : undefined} onSettled={onVideoSettled} /> : artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string" ? <AiVideoReply key={artifact.data.videoJobId} jobId={artifact.data.videoJobId} onSettled={onVideoSettled} savedRequest={artifact.data.videoRequest} submissionError={typeof artifact.data.videoSubmitError === "string" ? artifact.data.videoSubmitError : undefined} onEdit={onEditVideo} editDisabled={videoEditDisabled} /> : artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
+        : artifact && typeof artifact.data?.mediaTaskRequestId === "string" ? <MediaTaskReply key={artifact.data.mediaTaskRequestId} requestId={artifact.data.mediaTaskRequestId} conversationId={artifact.conversationId} runId={typeof artifact.data.mediaTaskRunId === "string" ? artifact.data.mediaTaskRunId : undefined} intent={artifact.kind === "视频" ? "video" : "image"} videoChoice={artifact.kind === "视频" ? savedVideoChoice(artifact.data.videoChoice) : undefined} submissionError={typeof artifact.data.mediaTaskSubmitError === "string" ? artifact.data.mediaTaskSubmitError : undefined} onTask={onMediaTask ? task => onMediaTask(artifact.conversationId, String(artifact.data!.mediaTaskRequestId), task) : undefined} onSettled={onVideoSettled} /> : artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string" ? <AiVideoReply key={artifact.data.videoJobId} jobId={artifact.data.videoJobId} onSettled={onVideoSettled} savedRequest={artifact.data.videoRequest} submissionError={typeof artifact.data.videoSubmitError === "string" ? artifact.data.videoSubmitError : undefined} onEdit={onEditVideo} editDisabled={videoEditDisabled} /> : artifact && <button type="button" className="tp-ai-artifact-card" aria-label={`打开成果：${artifact.title}`} onClick={() => onOpenArtifact(artifact.id)}>
         <span className="tp-ai-artifact-card__icon"><FileText size={20} /></span>
         <span><small>{artifact.kind}</small><strong>{artifact.title}</strong></span>
         <span className="tp-ai-artifact-card__action">打开</span>

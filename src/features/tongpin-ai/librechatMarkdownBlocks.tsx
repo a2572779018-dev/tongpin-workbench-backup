@@ -9,9 +9,10 @@ export type { MarkdownBlock } from "../../../shared/librechatMarkdownBlocks";
  * client/src/components/Chat/Messages/Content/splitMarkdown.ts and
  * MarkdownBlocks.tsx (MIT, Copyright (c) 2026 LibreChat).
  *
- * Tongpin currently renders GFM only. The source splitter lives in shared/
- * so the settled server response and this real chat renderer agree on blocks.
- * Upstream math/directive and code/artifact providers remain omitted.
+ * Tongpin renders GFM plus `$`/`$$` math. The source splitter lives in
+ * shared/ so the settled server response and this real chat renderer agree
+ * on blocks (display math stays one block). Upstream directive and
+ * code/artifact providers remain omitted.
  */
 type RenderBlock = (source: string) => ReactNode;
 
@@ -23,11 +24,16 @@ const CompletedMarkdownBlock = memo(function CompletedMarkdownBlock({ source, re
   return renderBlock(source);
 }, (previous, next) => previous.source === next.source && previous.renderBlock === next.renderBlock);
 
-/** Main chat renderer: only the changing final block re-parses during SSE. */
-export const StableMarkdownBlocks = memo(function StableMarkdownBlocks({ content, renderBlock }: {
+/** Main chat renderer: only the changing final block re-parses during SSE.
+ * While streaming, the still-growing final block may use `renderTail` so an
+ * unfinished construct (an open chart fence, a table header without its
+ * delimiter row) is not shown as raw syntax that then jumps into a widget. */
+export const StableMarkdownBlocks = memo(function StableMarkdownBlocks({ content, renderBlock, renderTail }: {
   content: string;
   renderBlock: RenderBlock;
+  renderTail?: RenderBlock;
 }) {
   const blocks = useMemo(() => splitMarkdownIntoBlocks(content), [content]);
-  return <>{blocks.map((block, index) => <CompletedMarkdownBlock key={index} source={block.raw} renderBlock={renderBlock} />)}</>;
+  return <>{blocks.map((block, index) => <CompletedMarkdownBlock key={index} source={block.raw}
+    renderBlock={renderTail && index === blocks.length - 1 ? renderTail : renderBlock} />)}</>;
 });

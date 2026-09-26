@@ -10,12 +10,23 @@ export interface AiVideoSettings {
   /** False means no provider model-list verification is current for this view. */
   modelsVerified: boolean;
   /** Member-safe constraints for the selected business tier; contains no provider or model ID. */
-  profile?: {
-    resolutions: VideoResolution[];
-    seconds: Partial<Record<VideoResolution, number[]>>;
-    maxImages: number;
-    requiresImage: boolean;
-  };
+  profile?: AiVideoModelProfile;
+  /** Server-side profile for every entry of availableModels. Clients prefer
+   * this over their bundled catalogue, so a gateway rename reaches an older
+   * packaged client without a client release. Absent on older servers. */
+  profiles?: Record<string, AiVideoModelProfile>;
+  /** Set when the tier's configured model is currently unavailable (for
+   * example quarantined after model_not_found) and defaultModel is a
+   * replacement; the member-facing reason for that replacement. */
+  defaultNotice?: string;
+}
+export interface AiVideoModelProfile {
+  /** Member-facing label; optional for older servers. */
+  label?: string;
+  resolutions: VideoResolution[];
+  seconds: Partial<Record<VideoResolution, number[]>>;
+  maxImages: number;
+  requiresImage: boolean;
 }
 export interface AiVideoModelCheck {
   ok: true;

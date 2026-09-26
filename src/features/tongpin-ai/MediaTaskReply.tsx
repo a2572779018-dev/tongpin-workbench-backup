@@ -20,6 +20,8 @@ import {
   type MediaTaskIntent,
   type MediaTaskRun,
 } from "./mediaTaskClient";
+import { videoChoiceSummary } from "./videoProfiles";
+import type { VideoModelChoice } from "./naturalVideoRequest";
 import "./media-task-reply.css";
 
 export interface MediaTaskReplyProps {
@@ -29,6 +31,8 @@ export interface MediaTaskReplyProps {
   intent: MediaTaskIntent;
   /** Only definite non-submission, never a timeout or unknown POST outcome. */
   submissionError?: string;
+  /** Exact model/duration/resolution this video task was prepared with. */
+  videoChoice?: VideoModelChoice;
   onTask?: (task: MediaTaskRun) => void;
   onSettled?: () => void;
   onError?: (message: string) => void;
@@ -62,7 +66,7 @@ function FreeQuestionForm({ question, busy, onAnswer }: {
 
 /** Rehydrate by the original idempotent request ID. Polls are GET-only and
  * never create a second billable media request after a refresh or timeout. */
-export function MediaTaskReply({ requestId, conversationId, runId, intent, submissionError, onTask, onSettled, onError }: MediaTaskReplyProps) {
+export function MediaTaskReply({ requestId, conversationId, runId, intent, submissionError, videoChoice, onTask, onSettled, onError }: MediaTaskReplyProps) {
   const { api, session } = useAuth();
   const accountId = session?.user.id ?? "";
   const scope = mediaCacheScope(session);
@@ -198,6 +202,8 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
   </section>;
   return <section className="tp-ai-media-task-reply" aria-label="媒体生成任务" data-native-cursor>
     <strong role="status">{!accountId ? "请登录后查询原任务" : task ? mediaTaskStatusText(task.status, intent) : shown.loading ? "正在查询原任务…" : "原任务暂时无法核对"}</strong>
+    {intent === "video" && videoChoice ? <p className="tp-ai-media-task-video-choice">模型：{videoChoiceSummary(videoChoice)}</p> : null}
+    {intent === "video" && videoChoice?.notice ? <p className="tp-ai-media-task-video-notice" role="note">{videoChoice.notice}</p> : null}
     {task?.status === "planning" ? <p>正在核对方案和参考素材，尚未开始生成。</p> : null}
     {freeQuestion && freeQuestion.answer === undefined && task
       ? <FreeQuestionForm key={freeQuestion.questionId} question={freeQuestion} busy={busy} onAnswer={answer => updateTask(mediaTaskAnswerPath(task.runId), { questionId: freeQuestion.questionId, answer })} />

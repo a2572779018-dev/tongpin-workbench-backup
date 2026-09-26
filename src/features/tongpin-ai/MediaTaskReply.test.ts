@@ -41,4 +41,14 @@ describe("media task reply remount", () => {
     mediaTaskSnapshotCache.put(mediaCacheScope(auth.session as Session), expected, task("running"));
     expect(renderToStaticMarkup(createElement(MediaTaskReply, props))).toContain("正在查询原任务");
   });
+
+  it("shows the exact video model, duration, resolution and any replacement reason on the task card", () => {
+    auth.session = session();
+    const html = renderToStaticMarkup(createElement(MediaTaskReply, { ...props, intent: "video" as const, videoChoice: {
+      model: "sd-2.0-fast", label: "SD 2.0 Fast", seconds: 5, resolution: "480p", aspectRatio: "16:9",
+      notice: "档位默认模型「MiniMax H3 · 提示词优化（需参考图）」需要至少一张参考图片，本次改用「SD 2.0 Fast」",
+    } }));
+    expect(html).toContain("模型：SD 2.0 Fast · 5 秒 · 480p · 16:9");
+    expect(html).toContain("本次改用「SD 2.0 Fast」");
+  });
 });

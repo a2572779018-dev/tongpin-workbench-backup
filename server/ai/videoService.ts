@@ -1,4 +1,4 @@
-import type { AiAdminVideoReconciliationJob, AiVideoJob, AiVideoList, AiVideoSettings, AiVideoModelCheck } from "../../shared/aiVideo";
+import type { AiAdminVideoReconciliationJob, AiVideoJob, AiVideoList, AiVideoSettings, AiVideoModelCheck, AiVideoModelProfile } from "../../shared/aiVideo";
 import type { AiMode } from "../../shared/ai";
 import { VIDEO_MODELS, videoModel, videoSeconds, type VideoModelId } from "../../shared/aiVideoModels";
 import { AiStore } from "./storage";
@@ -49,6 +49,19 @@ const verifiedModels = (settings: Settings): VideoModelId[] | null => {
 // model-list check; this prevents a member from discovering a bad mapping via a
 // paid generation attempt.
 const availableModels = (settings: Settings): VideoModelId[] => verifiedModels(settings) ?? [];
+/** Member-safe generation constraints for one catalogue model. The server
+ * catalogue is authoritative; clients use this instead of their bundled copy. */
+export function memberVideoProfile(id: string): AiVideoModelProfile | undefined {
+  const spec = videoModel(id);
+  if (!spec?.generationEnabled) return undefined;
+  return {
+    label: spec.label,
+    resolutions: [...spec.resolutions],
+    seconds: Object.fromEntries(spec.resolutions.map(resolution => [resolution, videoSeconds(spec.id, resolution)])),
+    maxImages: spec.maxImages,
+    requiresImage: spec.requiresImage,
+  };
+}
 
 /** Durable video jobs are separate from short-lived chat reservations. No automatic paid retries. */
 export class AiVideoService {
@@ -137,6 +150,14 @@ export class AiVideoService {
     const selected = (access?.route.modelId && models.includes(access.route.modelId as VideoModelId) ? access.route.modelId as VideoModelId : undefined)
       ?? (admin.defaultModel && models.includes(admin.defaultModel) ? admin.defaultModel : models[0]);
     const spec = selected ? videoModel(selected) : undefined;
+    const profiles = Object.fromEntries(models.flatMap(id => { const profile = memberVideoProfile(id); return profile ? [[id, profile]] : []; }));
+    const configured = access?.route.modelId;
+    const configuredSpec = configured ? videoModel(configured) : undefined;
+    // The tier default is never replaced silently: when the configured model is
+    // not currently usable the member is told which model is used instead.
+    const defaultNotice = configured && selected && configured !== selected
+      ? `档位默认模型「${configuredSpec?.label ?? configured}」当前不可用（服务商未开通或已暂停），本次将使用「${spec?.label ?? selected}」`
+      : undefined;
     return {
       enabled: admin.enabled,
       quotaPoints: admin.quotaPoints,
@@ -144,12 +165,9 @@ export class AiVideoService {
       availableModels: models,
       modelsVerified: Boolean(spec),
       ...(selected ? { defaultModel: selected } : {}),
-      ...(spec ? { profile: {
-        resolutions: [...spec.resolutions],
-        seconds: Object.fromEntries(spec.resolutions.map(resolution => [resolution, videoSeconds(spec.id, resolution)])),
-        maxImages: spec.maxImages,
-        requiresImage: spec.requiresImage,
-      } } : {}),
+      ...(spec ? { profile: memberVideoProfile(spec.id)! } : {}),
+      profiles,
+      ...(defaultNotice ? { defaultNotice } : {}),
     };
   }
   /** Read-only source for client JPEG normalization; never calls a video provider. */
