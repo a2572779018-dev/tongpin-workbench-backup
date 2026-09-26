@@ -1,0 +1,977 @@
+"use strict";
+
+/**
+ * Unified computer-operation executor host (Electron main process).
+ *
+ * The owner-specified loop is: instruction → task spec → ONE consent →
+ * {Cua Driver reads the target window → closed candidate set → Jev chooses →
+ * authorization/scope check → Cua Driver executes → re-observe/verify} until
+ * done or stopped. The renderer orchestrates and the server asks Jev, but this
+ * process is the authority for everything that touches the computer:
+ *
+ *   consent  re-validates the task spec, shows ONE native dialog (scope and
+ *            any missing macOS permissions), requests the missing permissions
+ *            together through the Cua Driver Electron helpers, opens the exact
+ *            System Settings panes and waits, then starts a Cua Driver session.
+ *   observe  captures the target app window (accessibility tree first, a
+ *            screenshot only when the tree is sparse) and freezes a closed
+ *            candidate table bound to this observation.
+ *   execute  resolves the echoed candidate id only through that table, checks
+ *            the consent grant, executes once and reports an honest outcome.
+ *            Uncertain input is never replayed.
+ *   stop     Stop button, Esc, window close, logout or quit.
+ */
+
+const { createHash, randomBytes } = require("node:crypto");
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+const policy = require("./computer-agent-policy.cjs");
+const {
+  CUA_DRIVER_VERSION,
+  loadPackagedOrInstalledSdk,
+  probePlatform,
+  validateSdk,
+  withTimeout,
+} = require("./computer-use.cjs");
+
+const RUN_ID = /^cr_[0-9a-f]{32}$/;
+const OBSERVATION_ID = /^ob_[0-9a-f]{24}$/;
+const CANDIDATE_ID = /^[a-z][a-z0-9_]{0,47}$/;
+const UNSAFE_TEXT = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]+/gu;
+const MAX_WINDOW_ID = (1n << 64n) - 1n;
+
+const TIMING = Object.freeze({
+  observationTtlMs: 90_000,
+  nativeTimeoutMs: 8_000,
+  launchTimeoutMs: 15_000,
+  settleMs: 500,
+  launchSettleMs: 2_000,
+  deadlineGraceMs: 30_000,
+  openPaneAfterMs: 4_000,
+  screenRecordingGraceMs: 20_000,
+});
+const CAPTURE = Object.freeze({ maxElements: 400, maxDepth: 40, maxDimension: 1280, maxTreeChars: 64 * 1024, sparseBelow: 6 });
+
+const SAFE_MESSAGES = Object.freeze({
+  busy: "上一个电脑操作步骤还在进行，请稍候",
+  run_active: "已有一个电脑任务在运行，请先停止它",
+  invalid_input: "电脑任务参数无效，未执行任何操作",
+  invalid_task: "电脑任务结构未通过本机校验，未执行任何操作",
+  blocked_app: "出于安全考虑，同频 AI 不操作终端、钥匙串、系统设置、脚本工具或同频自身",
+  unsupported: "当前系统不支持同频电脑操作",
+  sdk_unavailable: "Cua Driver 本机能力不可用",
+  sdk_api_mismatch: "Cua Driver 接口与当前安全适配层不匹配",
+  sdk_version_mismatch: "Cua Driver 本机版本不匹配",
+  consent_denied: "你没有允许本次电脑操作，未执行任何动作",
+  permission_missing: "同频还没有获得「辅助功能」权限，无法读取和操作其他应用。请在系统设置中打开后重新发起",
+  session_start_failed: "电脑操作会话启动失败，未执行任何动作",
+  session_not_active: "电脑操作会话已结束",
+  stopped: "电脑操作已停止",
+  observation_stale: "界面观察已过期，请重新读取后再决定",
+  candidate_unknown: "选择的动作不在本次候选中，未执行",
+  step_limit: "已达到本次电脑任务的步数上限，已停止",
+  time_limit: "已超过本次电脑任务的时长上限，已停止",
+  observe_failed: "无法读取目标应用的界面",
+});
+
+function failure(code, message = SAFE_MESSAGES[code] || "电脑操作不可用") {
+  return { ok: false, error: { code, message } };
+}
+function success(value) {
+  return { ok: true, value };
+}
+function record(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function hasOnlyKeys(value, keys) {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+function safeText(value, max = 512) {
+  if (typeof value !== "string") return "";
+  return [...value.replace(UNSAFE_TEXT, " ").replace(/\s+/gu, " ").trim()].slice(0, max).join("");
+}
+function safeToken(value, max = 1_024) {
+  return typeof value === "string" && value.length > 0 && value.length <= max && !/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\s]/u.test(value) ? value : null;
+}
+function bigString(value) {
+  if (value === undefined || value === null) return null;
+  try { return BigInt(value).toString(); } catch { return null; }
+}
+function finite(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+function safeCode(value) {
+  return typeof value === "string" && /^[a-z0-9_.-]{1,64}$/i.test(value) ? value.toLowerCase() : null;
+}
+function normKey(value) {
+  return String(value || "").normalize("NFKC").toLocaleLowerCase("en-US").replace(/[\s._\-·]+/gu, "");
+}
+
+/* ------------------------------------------------------------------ */
+/* Applications.                                                       */
+/* ------------------------------------------------------------------ */
+
+/** Well-known Chinese/English names so a task spec that says 微信 finds WeChat. */
+const APP_ALIASES = Object.freeze([
+  { names: ["微信", "wechat", "weixin"], bundleIds: ["com.tencent.xinwechat"] },
+  { names: ["企业微信", "wecom", "wework"], bundleIds: ["com.tencent.weworkmac"] },
+  { names: ["qq"], bundleIds: ["com.tencent.qq"] },
+  { names: ["钉钉", "dingtalk"], bundleIds: ["com.alibaba.dingtalkmac"] },
+  { names: ["飞书", "feishu", "lark"], bundleIds: [] },
+  { names: ["备忘录", "notes"], bundleIds: ["com.apple.notes"] },
+  { names: ["信息", "messages", "imessage"], bundleIds: ["com.apple.mobilesms"] },
+  { names: ["邮件", "mail"], bundleIds: ["com.apple.mail"] },
+  { names: ["访达", "finder"], bundleIds: ["com.apple.finder"] },
+  { names: ["safari", "safari浏览器"], bundleIds: ["com.apple.safari"] },
+  { names: ["提醒事项", "reminders"], bundleIds: ["com.apple.reminders"] },
+  { names: ["日历", "calendar"], bundleIds: ["com.apple.ical"] },
+]);
+
+/** Shells, credential stores, OS settings, automation tools and 同频 itself are never targets. */
+const BLOCKED_APPS = Object.freeze([
+  { names: ["终端", "terminal", "命令行"], bundleIds: ["com.apple.terminal"] },
+  { names: ["iterm", "iterm2"], bundleIds: ["com.googlecode.iterm2"] },
+  { names: ["warp"], bundleIds: ["dev.warp.warp-stable"] },
+  { names: ["powershell", "windowsterminal", "命令提示符", "cmd"], bundleIds: [] },
+  { names: ["钥匙串访问", "钥匙串", "keychainaccess", "密码"], bundleIds: ["com.apple.keychainaccess", "com.apple.passwords"] },
+  { names: ["系统设置", "系统偏好设置", "systemsettings", "systempreferences", "设置"], bundleIds: ["com.apple.systempreferences"] },
+  { names: ["脚本编辑器", "scripteditor"], bundleIds: ["com.apple.scripteditor2"] },
+  { names: ["自动操作", "automator"], bundleIds: ["com.apple.automator"] },
+  { names: ["同频", "tongpin"], bundleIds: [] },
+]);
+
+function groupFor(groups, name, bundleId) {
+  const key = normKey(name);
+  const bundle = String(bundleId || "").toLowerCase();
+  return groups.find((group) => group.names.includes(key) || (bundle && group.bundleIds.includes(bundle))) || null;
+}
+function isBlockedApp(name, bundleId) {
+  return Boolean(groupFor(BLOCKED_APPS, name, bundleId));
+}
+function appMatches(grant, info) {
+  const infoName = normKey(info.name);
+  const infoBundle = String(info.bundleId || "").toLowerCase();
+  if (grant.bundleId && infoBundle && grant.bundleId.toLowerCase() === infoBundle) return true;
+  const group = groupFor(APP_ALIASES, grant.name, grant.bundleId);
+  if (group && ((infoBundle && group.bundleIds.includes(infoBundle)) || group.names.includes(infoName))) return true;
+  return Boolean(infoName) && normKey(grant.name) === infoName;
+}
+
+/* ------------------------------------------------------------------ */
+/* Cua Driver data normalization (every value is untrusted).           */
+/* ------------------------------------------------------------------ */
+
+function normalizeBounds(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const width = raw.width ?? raw.w;
+  const height = raw.height ?? raw.h;
+  if (![raw.x, raw.y, width, height].every(finite) || width <= 0 || height <= 0) return null;
+  return { x: raw.x, y: raw.y, width, height };
+}
+
+function normalizeWindowInfo(raw, hostPid) {
+  if (!raw || typeof raw !== "object" || !Number.isInteger(raw.pid) || raw.pid <= 0 || raw.pid === hostPid) return null;
+  let windowId;
+  try { windowId = BigInt(raw.windowId); } catch { return null; }
+  if (windowId <= 0n || windowId > MAX_WINDOW_ID) return null;
+  const bounds = normalizeBounds(raw.bounds);
+  if (!bounds) return null;
+  let zIndex = null;
+  try { if (raw.zIndex !== undefined && raw.zIndex !== null) zIndex = Number(BigInt(raw.zIndex)); } catch { zIndex = null; }
+  return {
+    pid: raw.pid,
+    windowId: windowId.toString(),
+    appName: safeText(raw.appName, 160),
+    title: safeText(raw.title, 160),
+    bounds,
+    visible: raw.isOnScreen === true && raw.minimized !== true,
+    minimized: raw.minimized === true,
+    layer: Number.isInteger(raw.layer) ? raw.layer : 0,
+    zIndex: Number.isFinite(zIndex) ? zIndex : null,
+  };
+}
+
+/** Front-most normal window of the app (higher z_index is closer to the front). */
+function chooseWindow(windows) {
+  const normal = windows.filter((window) => window.layer === 0 && window.bounds.width >= 120 && window.bounds.height >= 80);
+  const area = (window) => window.bounds.width * window.bounds.height;
+  const pick = (items) => {
+    if (!items.length) return null;
+    const ranked = items.some((window) => window.zIndex !== null)
+      ? [...items].sort((a, b) => (b.zIndex ?? -Infinity) - (a.zIndex ?? -Infinity) || area(b) - area(a))
+      : [...items].sort((a, b) => area(b) - area(a));
+    return ranked[0];
+  };
+  const visible = pick(normal.filter((window) => window.visible));
+  if (visible) return { window: visible, hidden: false };
+  const hidden = pick(normal.filter((window) => !window.visible));
+  return hidden ? { window: hidden, hidden: true } : null;
+}
+
+function normalizeElement(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const role = safeText(raw.role, 60);
+  if (!role) return null;
+  const token = safeToken(raw.elementToken);
+  const frame = normalizeBounds(raw.frame);
+  return {
+    role,
+    depth: Number.isInteger(raw.depth) && raw.depth >= 0 ? raw.depth : 0,
+    elementIndex: bigString(raw.elementIndex),
+    parentIndex: bigString(raw.parentIndex),
+    ...(token ? { elementToken: token } : {}),
+    label: safeText(raw.label),
+    value: safeText(raw.value),
+    valueDescription: safeText(raw.valueDescription),
+    enabled: raw.enabled !== false,
+    selected: raw.selected === true,
+    actions: Array.isArray(raw.actions) ? raw.actions.slice(0, 20).map((action) => safeText(action, 60)).filter(Boolean) : [],
+    ...(frame ? { frame } : {}),
+  };
+}
+
+function normalizeState(raw, target) {
+  if (!raw || typeof raw !== "object" || raw.pid !== target.pid) return null;
+  if (bigString(raw.windowId) !== target.windowId) return null;
+  const elements = Array.isArray(raw.elements)
+    ? raw.elements.slice(0, CAPTURE.maxElements).map(normalizeElement).filter(Boolean)
+    : [];
+  const width = raw.screenshotWidth, height = raw.screenshotHeight;
+  return {
+    windowTitle: safeText(raw.windowTitle, 160) || target.title,
+    treeMarkdown: typeof raw.treeMarkdown === "string" ? raw.treeMarkdown.slice(0, CAPTURE.maxTreeChars) : "",
+    elements,
+    windowBounds: normalizeBounds(raw.windowBounds) || target.bounds,
+    screenshot: finite(width) && finite(height) && width > 0 && height > 0
+      ? { width, height, frameValid: raw.screenshotFrameValid === true }
+      : null,
+  };
+}
+
+function isSparse(elements) {
+  return elements.filter((element) => element.elementToken && element.enabled && (element.label || element.value)).length < CAPTURE.sparseBelow;
+}
+
+function semanticFingerprint(state) {
+  return createHash("sha256").update(JSON.stringify([
+    state.windowTitle,
+    state.elements.map((element) => [element.role, element.label, element.value, element.selected, element.enabled]),
+  ])).digest("hex");
+}
+
+/* ------------------------------------------------------------------ */
+/* Cua Driver tool arguments (fixed keys; uint64 window id stays exact). */
+/* ------------------------------------------------------------------ */
+
+function targetJson(target) {
+  // pid and windowId are validated integers; window_id is written as a JSON
+  // integer from its decimal string so the uint64 is never rounded.
+  return `{"kind":"window","pid":${target.pid},"window_id":${target.windowId}}`;
+}
+function toolJson(fields, target, session, delivery) {
+  const parts = Object.entries(fields).map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`);
+  parts.push(`"target":${targetJson(target)}`, `"session":${JSON.stringify(session)}`, `"delivery_mode":${JSON.stringify(delivery === "foreground" ? "foreground" : "background")}`);
+  return `{${parts.join(",")}}`;
+}
+
+function toolSchemas(raw) {
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const tools = Array.isArray(parsed) ? parsed : parsed && parsed.tools;
+    return new Map((Array.isArray(tools) ? tools : []).filter((tool) => tool && typeof tool.name === "string").map((tool) => [tool.name, tool.inputSchema]));
+  } catch {
+    return new Map();
+  }
+}
+function supportsWindowInput(schema, field, elementTargeted) {
+  const properties = schema && schema.properties;
+  const modes = properties && properties.delivery_mode && properties.delivery_mode.enum;
+  return Boolean(schema && schema.type === "object" && schema.additionalProperties === false &&
+    Array.isArray(schema.required) && schema.required.includes(field) && properties[field] &&
+    properties.target && properties.session && Array.isArray(modes) &&
+    modes.includes("background") && modes.includes("foreground") &&
+    (!elementTargeted || (properties.element_token && properties.element_token.type === "string")));
+}
+function supportsRequiredTools(raw) {
+  const schemas = toolSchemas(raw);
+  const launch = schemas.get("launch_app");
+  const front = schemas.get("bring_to_front");
+  return supportsWindowInput(schemas.get("type_text"), "text", true) &&
+    supportsWindowInput(schemas.get("press_key"), "key", false) &&
+    supportsWindowInput(schemas.get("hotkey"), "keys", false) &&
+    supportsWindowInput(schemas.get("scroll"), "direction", true) &&
+    Boolean(launch && launch.additionalProperties === false && launch.properties && launch.properties.bundle_id && launch.properties.name) &&
+    Boolean(front && front.additionalProperties === false && front.properties && front.properties.pid);
+}
+
+function validateAgentSdk(sdk) {
+  return Boolean(validateSdk(sdk) &&
+    sdk.ListAppsInput && typeof sdk.ListAppsInput.new === "function" &&
+    sdk.ClickPosition && sdk.ClickPosition.Coordinates && typeof sdk.ClickPosition.Coordinates.new === "function" &&
+    sdk.InputDeliveryMode && sdk.InputDeliveryMode.Foreground !== undefined);
+}
+
+function loadPackagedOrInstalledPermissionHelpers() {
+  const packagedRoot = typeof process.resourcesPath === "string" ? path.join(process.resourcesPath, "app.asar.unpacked") : "";
+  if (process.versions.electron && __dirname.includes("app.asar") && packagedRoot) {
+    return import(pathToFileURL(path.join(packagedRoot, "node_modules", "@trycua", "cua-driver", "dist", "electron.js")).href);
+  }
+  return import("@trycua/cua-driver/electron");
+}
+
+/** Maps a thrown driver error to an honest execution status. */
+function classifyError(error) {
+  if (error && error.code === "native_timeout") return { status: "unknown", code: "timeout" };
+  const tag = error && error.tag;
+  const inner = error && error.inner;
+  if (tag === "Tool") {
+    const code = safeCode(inner && inner.errorCode) || "tool_error";
+    return { status: "failed", code };
+  }
+  if (tag === "InvalidArguments" || tag === "Configuration") return { status: "failed", code: "invalid_arguments" };
+  return { status: "unknown", code: "driver_error" };
+}
+
+const STATUS_MESSAGES = Object.freeze({
+  delivered: "已执行",
+  unverified: "已发送输入，等待界面验证",
+  no_effect: "界面没有变化，可能未生效",
+  failed: "未能执行",
+  blocked: "未执行",
+  unknown: "结果无法确认，不会重复执行",
+});
+
+/* ------------------------------------------------------------------ */
+/* Controller.                                                         */
+/* ------------------------------------------------------------------ */
+
+function createComputerAgentController({
+  platform = process.platform,
+  arch = process.arch,
+  osVersion = "",
+  hostPid = process.pid,
+  loadSdk = loadPackagedOrInstalledSdk,
+  loadPermissionHelpers = loadPackagedOrInstalledPermissionHelpers,
+  showConsent = async () => false,
+  showExtraConsent = async () => false,
+  openPrivacyPane = async () => undefined,
+  emit = () => undefined,
+  registerStopShortcut = null,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); }),
+  createId = () => randomBytes(16).toString("hex"),
+  permissionWaitMs = 120_000,
+  permissionPollMs = 1_500,
+  timing = TIMING,
+} = {}) {
+  let sdkPromise = null;
+  let run = null;
+  let pending = null;
+  let shortcutDispose = null;
+  let screenRecordingAsked = false;
+
+  async function getSdk() {
+    if (!sdkPromise) sdkPromise = Promise.resolve().then(loadSdk);
+    let sdk;
+    try { sdk = await sdkPromise; } catch (error) { sdkPromise = null; throw error; }
+    if (!validateAgentSdk(sdk)) {
+      const error = new Error("sdk_api_mismatch");
+      error.code = "sdk_api_mismatch";
+      throw error;
+    }
+    return sdk;
+  }
+
+  function native(runState, call, timeoutMs = timing.nativeTimeoutMs) {
+    return withTimeout((signal) => call(runState.driver, runState.sdk, signal), timeoutMs);
+  }
+
+  function armStopShortcut() {
+    if (shortcutDispose || typeof registerStopShortcut !== "function") return;
+    try {
+      const dispose = registerStopShortcut(() => { void stop("esc"); });
+      shortcutDispose = typeof dispose === "function" ? dispose : null;
+    } catch {
+      shortcutDispose = null;
+    }
+  }
+  function disarmStopShortcut() {
+    const dispose = shortcutDispose;
+    shortcutDispose = null;
+    try { dispose?.(); } catch { /* already released */ }
+  }
+
+  function readPermissions(sdk) {
+    if (platform !== "darwin") return { accessibility: true, screenRecording: true };
+    try {
+      const status = sdk.currentMacOsPermissionStatus();
+      return { accessibility: status && status.accessibility === true, screenRecording: status && status.screenRecording === true };
+    } catch {
+      return { accessibility: false, screenRecording: false };
+    }
+  }
+
+  /**
+   * After the single consent: request every missing permission together
+   * (system prompts), then open the exact System Settings pane for whatever
+   * is still missing and wait. Accessibility is required; without Screen
+   * Recording the run continues tree-only (no coordinate fallback).
+   */
+  async function ensurePermissions(sdk, state) {
+    let status = readPermissions(sdk);
+    if (status.accessibility && status.screenRecording) return { status };
+    if (status.accessibility && screenRecordingAsked) {
+      // Screen Recording is optional (tree-only fallback). It was requested
+      // once in this app session already; do not reopen the pane every run.
+      emit({ type: "permission_ready", axOnly: true });
+      return { status };
+    }
+    screenRecordingAsked = true;
+    const missing = () => [...(status.accessibility ? [] : ["accessibility"]), ...(status.screenRecording ? [] : ["screenRecording"])];
+    emit({ type: "permission_wait", missing: missing() });
+    try {
+      const helpers = await loadPermissionHelpers();
+      helpers?.requestMacOSPermissions?.();
+    } catch {
+      // The panes below still let the member grant access manually.
+    }
+    const started = now();
+    const opened = new Set();
+    let accessibilityReadyAt = null;
+    for (;;) {
+      if (state.cancelled) return { cancelled: true };
+      status = readPermissions(sdk);
+      if (status.accessibility && status.screenRecording) break;
+      if (status.accessibility && accessibilityReadyAt === null) accessibilityReadyAt = now();
+      if (now() - started >= timing.openPaneAfterMs) {
+        const pane = !status.accessibility ? "accessibility" : "screenRecording";
+        if (!opened.has(pane)) {
+          opened.add(pane);
+          try { await openPrivacyPane(pane); } catch { /* member can open it manually */ }
+        }
+      }
+      if (now() - started >= permissionWaitMs) break;
+      if (accessibilityReadyAt !== null && now() - accessibilityReadyAt >= timing.screenRecordingGraceMs) break;
+      await sleep(permissionPollMs);
+    }
+    if (state.cancelled) return { cancelled: true };
+    if (!status.accessibility) return { error: failure("permission_missing") };
+    emit({ type: "permission_ready", axOnly: !status.screenRecording });
+    return { status };
+  }
+
+  async function disposeDriver(state) {
+    if (!state || !state.driver) return;
+    const { driver, sdk, sessionId } = state;
+    state.driver = null;
+    if (sessionId) {
+      try { await withTimeout((signal) => driver.endSession(sdk.EndSessionInput.new({ session: sessionId }), { signal })); } catch { /* best effort */ }
+    }
+    try { await withTimeout((signal) => driver.shutdown({ signal })); } catch { /* best effort */ }
+    try { driver.uniffiDestroy?.(); } catch { /* best effort */ }
+  }
+
+  async function startDriver(sdk) {
+    const driver = sdk.CuaDriver.create(undefined);
+    const methods = ["metadata", "startSession", "endSession", "listApps", "listWindows", "getWindowState", "click", "listToolsJson", "callTool", "shutdown"];
+    if (!driver || methods.some((name) => typeof driver[name] !== "function")) {
+      const error = new Error("sdk_api_mismatch");
+      error.code = "sdk_api_mismatch";
+      throw error;
+    }
+    const state = { driver, sdk, sessionId: null };
+    try {
+      const metadata = await withTimeout((signal) => driver.metadata({ signal }), 5_000);
+      if (!metadata || metadata.driverVersion !== CUA_DRIVER_VERSION || metadata.embedded !== true) {
+        const error = new Error("sdk_version_mismatch");
+        error.code = "sdk_version_mismatch";
+        throw error;
+      }
+      const tools = await withTimeout((signal) => driver.listToolsJson({ signal }), 5_000);
+      if (!supportsRequiredTools(tools)) {
+        const error = new Error("sdk_api_mismatch");
+        error.code = "sdk_api_mismatch";
+        throw error;
+      }
+      const sessionId = `tongpin-agent-${createId().slice(0, 16)}`;
+      const started = await withTimeout((signal) => driver.startSession(sdk.StartSessionInput.new({ session: sessionId }), { signal }));
+      if (!started || started.active !== true) throw new Error("session_start_failed");
+      state.sessionId = sessionId;
+      return state;
+    } catch (error) {
+      await disposeDriver(state);
+      throw error;
+    }
+  }
+
+  function parseConsentInput(input) {
+    const root = record(input);
+    if (!root || !hasOnlyKeys(root, ["runId", "task", "limits"]) || typeof root.runId !== "string" || !RUN_ID.test(root.runId)) return { error: failure("invalid_input") };
+    const validation = policy.validateTaskSpec(root.task);
+    if (!validation.ok) return { error: failure("invalid_task", validation.message) };
+    const limits = policy.validateLimits(root.limits);
+    if (!limits) return { error: failure("invalid_input") };
+    if (validation.task.apps.some((app) => isBlockedApp(app.name, app.bundleId))) return { error: failure("blocked_app") };
+    return { runId: root.runId, task: validation.task, limits };
+  }
+
+  async function consent(input) {
+    if (run) return failure("run_active");
+    if (pending) return failure("busy");
+    const parsed = parseConsentInput(input);
+    if (parsed.error) return parsed.error;
+    const unsupported = probePlatform(platform, arch, osVersion);
+    if (unsupported) return failure("unsupported", unsupported.message);
+    const state = { cancelled: false };
+    pending = state;
+    let driverState = null;
+    try {
+      let sdk;
+      try {
+        sdk = await withTimeout(() => getSdk(), 5_000);
+      } catch (error) {
+        return failure(error && error.code === "sdk_api_mismatch" ? "sdk_api_mismatch" : "sdk_unavailable");
+      }
+      const before = readPermissions(sdk);
+      const skipScreenRecording = before.accessibility && !before.screenRecording && screenRecordingAsked;
+      const missing = [...(before.accessibility ? [] : ["accessibility"]), ...(before.screenRecording || skipScreenRecording ? [] : ["screenRecording"])];
+      const dialog = policy.consentDialog(parsed.task, parsed.limits, { platform, missingPermissions: missing, screenRecordingSkipped: skipScreenRecording });
+      let approved = false;
+      try { approved = (await showConsent(dialog)) === true; } catch { approved = false; }
+      if (!approved || state.cancelled) return failure("consent_denied");
+
+      const permission = await ensurePermissions(sdk, state);
+      if (permission.cancelled) return failure("stopped");
+      if (permission.error) return permission.error;
+      const permissions = permission.status;
+
+      try {
+        driverState = await startDriver(sdk);
+      } catch (error) {
+        const code = error && ["sdk_api_mismatch", "sdk_version_mismatch"].includes(error.code) ? error.code : "session_start_failed";
+        return failure(code);
+      }
+      if (state.cancelled) {
+        await disposeDriver(driverState);
+        return failure("stopped");
+      }
+      run = {
+        ...driverState,
+        runId: parsed.runId,
+        task: parsed.task,
+        limits: parsed.limits,
+        grantApps: parsed.task.apps,
+        permissions,
+        axOnly: !permissions.screenRecording,
+        startedAt: now(),
+        deadline: now() + parsed.limits.maxMinutes * 60_000 + timing.deadlineGraceMs,
+        executed: 0,
+        targetIndex: 0,
+        tracker: policy.emptyTracker(),
+        sendBaseline: null,
+        observation: null,
+        apps: [],
+        busy: false,
+        stopped: false,
+      };
+      driverState = null;
+      armStopShortcut();
+      let apps = [];
+      try { apps = await resolveApps(run); } catch { apps = []; }
+      run.apps = apps;
+      return success({
+        runId: run.runId,
+        platform: platform === "darwin" ? "macos" : "windows",
+        permissions: { accessibility: permissions.accessibility, screenRecording: permissions.screenRecording },
+        axOnly: run.axOnly,
+        apps: run.grantApps.map((grant, index) => ({ name: grant.name, running: Boolean(apps[index] && apps[index].running) })),
+      });
+    } finally {
+      if (driverState) await disposeDriver(driverState);
+      if (pending === state) pending = null;
+    }
+  }
+
+  /** Granted apps resolved against the live app list (never the host). */
+  async function resolveApps(state) {
+    const output = await native(state, (driver, sdk, signal) => driver.listApps(sdk.ListAppsInput.new({}), { signal }));
+    const infos = (output && Array.isArray(output.apps) ? output.apps : [])
+      .filter((info) => info && typeof info.name === "string")
+      .map((info) => ({
+        pid: Number.isInteger(info.pid) && info.pid > 0 ? info.pid : 0,
+        name: safeText(info.name, 120),
+        bundleId: typeof info.bundleId === "string" ? safeText(info.bundleId, 150) : "",
+        running: info.running === true && Number.isInteger(info.pid) && info.pid > 0,
+      }))
+      .filter((info) => info.pid !== hostPid && !isBlockedApp(info.name, info.bundleId));
+    return state.grantApps.map((grant, index) => {
+      const matches = infos.filter((info) => appMatches(grant, info));
+      const info = matches.find((item) => item.running) || matches[0] || null;
+      return {
+        index,
+        name: grant.name,
+        pid: info && info.running ? info.pid : 0,
+        running: Boolean(info && info.running),
+        installed: Boolean(info),
+        bundleId: (info && info.bundleId) || grant.bundleId || "",
+        launchName: (info && info.name) || grant.name,
+      };
+    });
+  }
+
+  async function listAppWindows(state, app) {
+    if (!app.running || !app.pid) return [];
+    const output = await native(state, (driver, sdk, signal) => driver.listWindows(sdk.ListWindowsInput.new({ pid: app.pid }), { signal }));
+    return (output && Array.isArray(output.windows) ? output.windows : [])
+      .map((window) => normalizeWindowInfo(window, hostPid))
+      .filter((window) => window && window.pid === app.pid)
+      .slice(0, 50);
+  }
+
+  async function capture(state, target, withScreenshot) {
+    const output = await native(state, (driver, sdk, signal) => driver.getWindowState(sdk.GetWindowStateInput.new({
+      pid: target.pid,
+      windowId: BigInt(target.windowId),
+      session: state.sessionId,
+      includeAccessibilityTree: true,
+      includeScreenshot: withScreenshot,
+      maxElements: CAPTURE.maxElements,
+      maxDepth: CAPTURE.maxDepth,
+      ...(withScreenshot ? { maxDimension: CAPTURE.maxDimension } : {}),
+    }), { signal }));
+    return normalizeState(output, target);
+  }
+
+  function activeRun() {
+    return run && !run.stopped ? run : null;
+  }
+
+  async function enforceLimits(state) {
+    if (now() > state.deadline) { await stop("limit"); return failure("time_limit"); }
+    return null;
+  }
+
+  async function observe() {
+    const state = activeRun();
+    if (!state) return failure("session_not_active");
+    if (state.busy) return failure("busy");
+    const limited = await enforceLimits(state);
+    if (limited) return limited;
+    state.busy = true;
+    try {
+      const apps = await resolveApps(state);
+      if (state.stopped) return failure("stopped");
+      state.apps = apps;
+      const targetApp = apps[state.targetIndex] || apps[0];
+      let target = null;
+      let hiddenWindow = null;
+      if (targetApp && targetApp.running) {
+        const chosen = chooseWindow(await listAppWindows(state, targetApp));
+        if (chosen && !chosen.hidden) {
+          target = { app: targetApp.name, pid: chosen.window.pid, windowId: chosen.window.windowId, title: chosen.window.title, bounds: chosen.window.bounds, running: true, minimized: false };
+        } else if (chosen) {
+          hiddenWindow = chosen.window;
+        }
+      }
+      if (targetApp) targetApp.hiddenWindowId = hiddenWindow ? hiddenWindow.windowId : null;
+      let snapshot = null;
+      let screenshotUsed = false;
+      if (target) {
+        snapshot = await capture(state, target, false);
+        if (snapshot && isSparse(snapshot.elements) && state.permissions.screenRecording) {
+          const withShot = await capture(state, target, true);
+          if (withShot) { snapshot = withShot; screenshotUsed = true; }
+        }
+        if (!snapshot) return failure("observe_failed");
+      }
+      if (state.stopped) return failure("stopped");
+      const axSparse = snapshot ? isSparse(snapshot.elements) : false;
+      const windowBounds = snapshot ? snapshot.windowBounds : null;
+      const elements = snapshot ? policy.modelElements(snapshot.elements, windowBounds) : [];
+      const treeTexts = snapshot ? policy.extractTreeTexts(snapshot.treeMarkdown) : [];
+      const windowTitle = snapshot ? snapshot.windowTitle : null;
+      const appName = targetApp ? targetApp.name : state.grantApps[0].name;
+      const appStates = apps.map((app) => ({
+        name: app.name,
+        running: app.running,
+        hasWindow: Boolean(app.running && (app.index === state.targetIndex ? target : true)),
+      }));
+      const candidates = policy.buildCandidates({
+        platform,
+        task: state.task,
+        target: target ? { app: appName, pid: target.pid, windowId: target.windowId, title: windowTitle, running: true, minimized: false } : null,
+        appStates,
+        elements,
+        axSparse,
+        screenshot: screenshotUsed && snapshot.screenshot ? snapshot.screenshot : null,
+        windowBounds,
+        tracker: state.tracker,
+        canLaunch: true,
+      });
+      const observationId = `ob_${createId().slice(0, 24)}`;
+      state.observation = {
+        id: observationId,
+        capturedAt: now(),
+        target,
+        appAllowed: Boolean(target),
+        elements,
+        treeTexts,
+        windowTitle,
+        fingerprint: snapshot ? semanticFingerprint(snapshot) : null,
+        candidates: new Map(candidates.map((candidate) => [candidate.id, candidate])),
+      };
+      const observation = policy.projectObservation({ app: appName, windowTitle, elements, treeTexts, axSparse, task: state.task });
+      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running) });
+      return success({
+        observationId,
+        observation,
+        candidates: candidates.map(policy.publicCandidate),
+        facts,
+        display: { app: appName, title: windowTitle, elementCount: elements.length, axSparse, screenshotUsed },
+      });
+    } catch {
+      return failure("observe_failed");
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  function effectStatus(sdk, effect) {
+    if (effect === undefined || effect === null) return "unverified";
+    if (effect === sdk.ActionEffect.Confirmed) return "delivered";
+    if (effect === sdk.ActionEffect.Partial || effect === sdk.ActionEffect.Unverifiable) return "unverified";
+    if (effect === sdk.ActionEffect.SuspectedNoop) return "no_effect";
+    if (effect === sdk.ActionEffect.Refused) return "failed";
+    return "unknown";
+  }
+  function toolStatus(sdk, result, { actionExpected = true } = {}) {
+    if (!result || typeof result !== "object") return { status: "unknown", code: "no_result" };
+    if (result.isError === true) return { status: "failed", code: safeCode(result.errorCode) || "tool_error" };
+    if (result.isError !== false) return { status: "unknown", code: "no_result" };
+    if (!result.action) return { status: actionExpected ? "unverified" : "delivered" };
+    return { status: effectStatus(sdk, result.action.effect) };
+  }
+
+  async function activateApp(state, candidate) {
+    const app = state.apps[candidate.appIndex];
+    const grant = state.grantApps[candidate.appIndex];
+    if (!app || !grant) return { status: "blocked", code: "app_not_granted" };
+    if (candidate.launch === "switch") {
+      state.targetIndex = candidate.appIndex;
+      return { status: "delivered" };
+    }
+    if (isBlockedApp(app.launchName, app.bundleId)) return { status: "blocked", code: "blocked_app" };
+    const args = app.bundleId && /^[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)+$/.test(app.bundleId)
+      ? `{"bundle_id":${JSON.stringify(app.bundleId)}}`
+      : `{"name":${JSON.stringify(app.launchName)}}`;
+    const launched = toolStatus(state.sdk, await native(state, (driver, _sdk, signal) => driver.callTool("launch_app", args, { signal }), timing.launchTimeoutMs), { actionExpected: false });
+    if (launched.status === "failed" || launched.status === "unknown") return launched;
+    if (candidate.launch === "front" && app.pid && app.hiddenWindowId) {
+      try {
+        await native(state, (driver, _sdk, signal) => driver.callTool("bring_to_front", `{"pid":${app.pid},"window_id":${app.hiddenWindowId}}`, { signal }));
+      } catch { /* the reopened app usually shows its main window anyway */ }
+    }
+    state.targetIndex = candidate.appIndex;
+    await sleep(timing.launchSettleMs);
+    return { status: "unverified" };
+  }
+
+  async function dispatch(state, candidate, target, elementToken) {
+    const sdk = state.sdk;
+    const delivery = candidate.delivery === "foreground" ? "foreground" : "background";
+    switch (candidate.kind) {
+      case "activate_app":
+        return activateApp(state, candidate);
+      case "click": {
+        const result = await native(state, (driver, _sdk, signal) => driver.click(sdk.ClickInput.new({
+          target: sdk.ActionTarget.Window.new({ pid: target.pid, windowId: BigInt(target.windowId) }),
+          position: sdk.ClickPosition.Element.new({ elementToken }),
+          deliveryMode: sdk.InputDeliveryMode.Background,
+          session: state.sessionId,
+          button: sdk.ClickButton.Left,
+          count: 1,
+        }), { signal }));
+        return { status: effectStatus(sdk, result && result.effect) };
+      }
+      case "point": {
+        const result = await native(state, (driver, _sdk, signal) => driver.click(sdk.ClickInput.new({
+          target: sdk.ActionTarget.Window.new({ pid: target.pid, windowId: BigInt(target.windowId) }),
+          position: sdk.ClickPosition.Coordinates.new({ x: candidate.point.x, y: candidate.point.y }),
+          deliveryMode: delivery === "foreground" ? sdk.InputDeliveryMode.Foreground : sdk.InputDeliveryMode.Background,
+          session: state.sessionId,
+          button: sdk.ClickButton.Left,
+          count: 1,
+        }), { signal }));
+        return { status: effectStatus(sdk, result && result.effect) };
+      }
+      case "type": {
+        const fields = elementToken ? { text: candidate.text, element_token: elementToken } : { text: candidate.text };
+        const result = await native(state, (driver, _sdk, signal) => driver.callTool("type_text", toolJson(fields, target, state.sessionId, elementToken ? "background" : delivery), { signal }));
+        return toolStatus(sdk, result);
+      }
+      case "key": {
+        const result = await native(state, (driver, _sdk, signal) => driver.callTool("press_key", toolJson({ key: candidate.key }, target, state.sessionId, delivery), { signal }));
+        return toolStatus(sdk, result);
+      }
+      case "hotkey": {
+        const result = await native(state, (driver, _sdk, signal) => driver.callTool("hotkey", toolJson({ keys: [...candidate.keys] }, target, state.sessionId, delivery), { signal }));
+        return toolStatus(sdk, result);
+      }
+      case "scroll": {
+        const result = await native(state, (driver, _sdk, signal) => driver.callTool("scroll", toolJson({ direction: candidate.direction, by: "line", amount: 3, element_token: elementToken }, target, state.sessionId, "background"), { signal }));
+        return toolStatus(sdk, result);
+      }
+      default:
+        return { status: "blocked", code: "unsupported_candidate" };
+    }
+  }
+
+  function outcome(status, extra = {}) {
+    return { status, message: extra.message || STATUS_MESSAGES[status] || "未执行", authorization: extra.authorization || "allowed", ...(extra.code ? { code: extra.code } : {}), ...(extra.delivery ? { delivery: extra.delivery } : {}) };
+  }
+
+  async function execute(input) {
+    const state = activeRun();
+    if (!state) return failure("session_not_active");
+    const root = record(input);
+    if (!root || !hasOnlyKeys(root, ["observationId", "candidateId"]) ||
+      typeof root.observationId !== "string" || !OBSERVATION_ID.test(root.observationId) ||
+      typeof root.candidateId !== "string" || !CANDIDATE_ID.test(root.candidateId)) return failure("invalid_input");
+    if (state.busy) return failure("busy");
+    const observation = state.observation;
+    if (!observation || observation.id !== root.observationId || now() - observation.capturedAt > timing.observationTtlMs) return failure("observation_stale");
+    const candidate = observation.candidates.get(root.candidateId);
+    if (!candidate) return failure("candidate_unknown");
+    if (candidate.kind === "reserved") return failure("invalid_input", "保留选项不执行动作");
+    const limited = await enforceLimits(state);
+    if (limited) return limited;
+    if (state.executed >= state.limits.maxSteps) { await stop("limit"); return failure("step_limit"); }
+    // Each observation authorizes at most one execution attempt.
+    state.observation = null;
+    state.busy = true;
+    try {
+      return success(await executeCandidate(state, candidate, observation));
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  async function executeCandidate(state, candidate, observation) {
+    const task = state.task;
+    const delivery = candidate.delivery === "foreground" ? "foreground" : "background";
+    const authObservation = { appAllowed: observation.appAllowed, elements: observation.elements, windowTitle: observation.windowTitle, treeTexts: observation.treeTexts };
+    let decision = policy.authorizeCandidate(candidate, { task, tracker: state.tracker, observation: authObservation, grantApps: state.grantApps });
+    let authorization = "allowed";
+    if (!decision.allowed && decision.extraConsent) {
+      emit({ type: "extra_consent", summary: decision.extraConsent.summary });
+      let approved = false;
+      try { approved = (await showExtraConsent(policy.extraConsentDialog(candidate, decision.extraConsent))) === true; } catch { approved = false; }
+      if (!approved) {
+        await stop("user");
+        return outcome("blocked", { authorization: "extra_consent", code: "extra_consent_denied", message: "你没有允许这一步，电脑操作已停止" });
+      }
+      if (state.stopped) return outcome("blocked", { authorization: "extra_consent", code: "stopped", message: SAFE_MESSAGES.stopped });
+      authorization = "extra_consent";
+      decision = { allowed: true };
+    }
+    if (!decision.allowed) return outcome("blocked", { authorization: "denied", code: "authorization_denied", message: decision.reason || "这一步不在本次授权范围内" });
+
+    const target = observation.target;
+    let elementToken = candidate.elementToken || null;
+    if (candidate.kind !== "activate_app") {
+      if (!target) return outcome("blocked", { authorization, code: "target_missing", message: "目标窗口不存在，未执行" });
+      if (candidate.risk !== "none") {
+        // An irreversible step is checked again on a fresh capture: the screen
+        // may have changed while Jev decided or while a dialog was open.
+        const fresh = await capture(state, target, false).catch(() => null);
+        if (!fresh || state.stopped) return outcome("blocked", { authorization, code: "target_changed", message: "界面已变化，未执行这一步" });
+        const freshElements = policy.modelElements(fresh.elements, fresh.windowBounds);
+        const freshTexts = policy.extractTreeTexts(fresh.treeMarkdown);
+        if (candidate.elementIdentity) {
+          const matches = freshElements.filter((element) => element.identity === candidate.elementIdentity && element.token);
+          if (matches.length !== 1) return outcome("blocked", { authorization, code: "target_changed", message: "要操作的控件已变化，未执行这一步" });
+          elementToken = matches[0].token;
+        }
+        if (authorization === "allowed") {
+          const again = policy.authorizeCandidate(candidate, { task, tracker: state.tracker, observation: { appAllowed: true, elements: freshElements, windowTitle: fresh.windowTitle, treeTexts: freshTexts }, grantApps: state.grantApps });
+          if (!again.allowed) return outcome("blocked", { authorization: "denied", code: "authorization_changed", message: again.reason || (again.extraConsent && again.extraConsent.reason) || "界面已变化，未执行这一步" });
+        }
+        const content = task.irreversible && task.irreversible.content;
+        if (candidate.risk === "send" && content) state.sendBaseline = policy.sentTextCount(freshElements, content);
+      }
+    }
+
+    const suspendEsc = candidate.kind === "key" && candidate.key === "escape";
+    if (suspendEsc) disarmStopShortcut();
+    let result;
+    try {
+      state.executed += 1;
+      result = await dispatch(state, candidate, target, elementToken);
+    } catch (error) {
+      result = classifyError(error);
+    } finally {
+      if (suspendEsc && activeRun() === state) armStopShortcut();
+    }
+    if (state.stopped) {
+      return outcome(result.status === "failed" ? "failed" : "unknown", { authorization, code: "stopped", delivery, message: "电脑操作已停止；最后一步的结果无法确认" });
+    }
+
+    let status = result.status;
+    if (candidate.kind !== "activate_app" && status !== "blocked") await sleep(timing.settleMs);
+    // Background keyboard input can be silently ignored by apps that need to
+    // be frontmost. A tree that did not change at all is treated as no effect,
+    // which makes the policy offer distinct foreground candidates next time.
+    if (status === "unverified" && candidate.risk === "none" && delivery === "background" &&
+      ["key", "hotkey", "type", "point"].includes(candidate.kind) && target && observation.fingerprint && !state.stopped) {
+      const after = await capture(state, target, false).catch(() => null);
+      if (after && semanticFingerprint(after) === observation.fingerprint) status = "no_effect";
+    }
+    state.tracker = policy.nextTracker(state.tracker, candidate, status, { task });
+    const code = result.code || undefined;
+    const message = code === "background_unavailable"
+      ? "目标应用不接受后台输入，下一步可改用前台输入"
+      : status === "no_effect" && delivery === "background" && candidate.risk === "none"
+        ? "界面没有变化，下一步可改用前台输入"
+        : STATUS_MESSAGES[status] || "未执行";
+    return outcome(status, { authorization, code, delivery, message });
+  }
+
+  async function stop(reason = "user") {
+    const safeReason = ["esc", "user", "limit", "window_closed", "logout"].includes(reason) ? reason : "user";
+    if (pending) pending.cancelled = true;
+    const current = run;
+    run = null;
+    disarmStopShortcut();
+    if (!current) return success({ stopped: true });
+    current.stopped = true;
+    current.observation = null;
+    await disposeDriver(current);
+    emit({ type: "stopped", reason: safeReason });
+    return success({ stopped: true });
+  }
+
+  return Object.freeze({
+    consent,
+    observe,
+    execute,
+    stop,
+    shutdown: () => stop("window_closed"),
+    isActive: () => Boolean(run || pending),
+  });
+}
+
+module.exports = {
+  APP_ALIASES,
+  BLOCKED_APPS,
+  TIMING,
+  appMatches,
+  chooseWindow,
+  classifyError,
+  createComputerAgentController,
+  isBlockedApp,
+  normalizeElement,
+  normalizeState,
+  normalizeWindowInfo,
+  supportsRequiredTools,
+  toolJson,
+};

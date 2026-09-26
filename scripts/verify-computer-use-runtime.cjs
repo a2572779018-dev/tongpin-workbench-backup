@@ -372,7 +372,11 @@ function verifyPackagedComputerUseRuntime({
   }
   const requiredArchiveEntries = [
     "/electron/computer-use.cjs",
+    "/electron/computer-agent.cjs",
+    "/electron/computer-agent-host.cjs",
+    "/electron/computer-agent-policy.cjs",
     "/node_modules/@trycua/cua-driver/dist/index.js",
+    "/node_modules/@trycua/cua-driver/dist/electron.js",
     "/node_modules/@trycua/cua-driver/dist/native/node-runtime.js",
     "/node_modules/@trycua/cua-driver/package.json",
     "/node_modules/@ubjs/node/package.json",

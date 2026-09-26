@@ -182,6 +182,8 @@ export type ComputerUseResult<T> =
 export interface ComputerUseBridge {
   /** Read-only; never prompts for or mutates OS permissions. */
   probe(): Promise<ComputerUseProbeResult>;
+  /** Unified computer executor (one consent per task; Jev decides each step). Absent in older desktop apps. */
+  agent?: import("./computerAgent").ComputerAgentBridge;
   /** Explicit member action: shows the macOS request and opens the exact
    * Privacy & Security pane. Grants nothing by itself. Optional for older apps. */
   openPrivacySettings?(pane: "accessibility" | "screenRecording"): Promise<{ ok: boolean }>;

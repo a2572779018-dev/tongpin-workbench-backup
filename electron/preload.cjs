@@ -23,6 +23,18 @@ contextBridge.exposeInMainWorld("tongpin", {
         "computer-use:open-privacy-settings",
         pane === "screenRecording" ? "screenRecording" : "accessibility",
       ),
+    // Unified computer executor: every call is re-validated in main.
+    agent: Object.freeze({
+      consent: (input) => ipcRenderer.invoke("computer-agent:consent", input),
+      observe: () => ipcRenderer.invoke("computer-agent:observe"),
+      execute: (input) => ipcRenderer.invoke("computer-agent:execute", input),
+      stop: () => ipcRenderer.invoke("computer-agent:stop"),
+      onEvent: (listener) => {
+        const handler = (_event, payload) => listener(payload);
+        ipcRenderer.on("computer-agent:event", handler);
+        return () => ipcRenderer.removeListener("computer-agent:event", handler);
+      },
+    }),
   }),
   microphone: Object.freeze({
     status: () => ipcRenderer.invoke("microphone:status"),

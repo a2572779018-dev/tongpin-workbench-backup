@@ -86,6 +86,7 @@ const {
   configureMediaPermissions,
   registerMicrophoneIpc,
 } = require("./media-permission-policy.cjs");
+const { registerComputerAgentIpc } = require("./computer-agent-host.cjs");
 
 autoUpdater.logger = null;
 const safeStorageAdapter = createSafeStorageAdapter(safeStorage);
@@ -147,6 +148,7 @@ let relationshipGraphOpenSequence = 0;
 let relationshipWindowCloseApproved = false;
 let relationshipQuitIntent = false;
 let computerUseController = null;
+let computerAgent = null;
 const pendingRelationshipFlushRequests = new Map();
 
 function prepareSameVolumeUpdaterTemp() {
@@ -239,6 +241,7 @@ function requestSilentInstallIfEligible(now = new Date()) {
 app.on("before-quit", () => {
   relationshipQuitIntent = true;
   void computerUseController?.shutdown();
+  void computerAgent?.stop("window_closed");
   if (process.platform !== "win32") return;
   if (!updateReady || updateInstallCoordinator.isInstallRequested()) return;
   try {
@@ -797,6 +800,7 @@ function configureQuickTaskLifecycle() {
     // Locking/suspending is an emergency stop, never implicit permission to
     // resume old approvals or continue typing after unlock.
     void computerUseController?.stopSession();
+    void computerAgent?.stop("user");
     quickTasksSuspended = true;
     stopQuickCornerPolling();
     hideQuickCorner({ animate: false });
@@ -1363,6 +1367,7 @@ async function createWindow() {
     const closingComputerUseController = computerUseController;
     computerUseController = null;
     void closingComputerUseController?.shutdown();
+    void computerAgent?.stop("window_closed");
     resetRelationshipGraphScope();
     mainWindow = null;
     quickTasksAvailable = false;
@@ -1421,6 +1426,7 @@ function registerDesktopIpc() {
     event.returnValue = app.getVersion();
   });
 
+  computerAgent = registerComputerAgentIpc({ ipcMain, getMainWindow: () => mainWindow, assertMainRendererEvent });
   ipcMain.handle("computer-use:probe", async (event) => {
     assertMainRendererEvent(event);
     return getComputerUseController().probe();
@@ -1431,6 +1437,8 @@ function registerDesktopIpc() {
   });
   ipcMain.handle("computer-use:stop-session", async (event) => {
     assertMainRendererEvent(event);
+    // Account change / logout also ends a running unified computer task.
+    void computerAgent?.stop("logout");
     return getComputerUseController().stopSession();
   });
   ipcMain.handle("computer-use:list-windows", async (event) => {

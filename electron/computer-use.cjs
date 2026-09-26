@@ -1310,6 +1310,10 @@ module.exports = {
   SNAPSHOT_TTL_MS,
   computerUseSystemVersion,
   createComputerUseController,
+  // Shared with the unified executor host (computer-agent.cjs).
+  loadPackagedOrInstalledSdk,
   normalizeAction,
   probePlatform,
+  validateSdk,
+  withTimeout,
 };
