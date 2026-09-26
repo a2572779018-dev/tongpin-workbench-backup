@@ -25,6 +25,7 @@ import { createVisibleStream } from "./visibleStream";
 import { generationDiagnostic } from "./generationDiagnostic";
 import { createAiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 import { describeAiRichContent } from "../../shared/aiRichContent";
+import { citationsForContent } from "./citations";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -659,7 +660,7 @@ export class AiService {
       }
     });
   }
-  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "completion" | "attempt" | "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "trace">, images?: AiImageResponse["images"]): boolean {
+  private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "completion" | "attempt" | "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "citations" | "trace">, images?: AiImageResponse["images"]): boolean {
     if (this.store.request(request.userId, request.requestId)?.status !== "pending") return false;
     if (!extras?.trace && this.store.harnessRun(request.userId, request.requestId)?.status === "running") {
       const trace = this.harness.finishRun(request.userId, request.requestId, status === "completed" ? "succeeded" : status);
@@ -956,7 +957,10 @@ export class AiService {
       const toolCapability = toolPlan ? toolPlan.kind === "image" ? "image" : toolPlan.kind === "video" ? "video" : "presentation" : computerPlan ? "computer" : undefined;
       const toolSummary = toolPlan?.summary ?? computerPlan?.summary;
       const dispatchSummary = dispatch?.kind === "text" ? dispatch.analysisSummary : undefined;
-      const extras: Pick<AiChatResponse, "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "trace"> = { ...(toolClarification ? { toolClarification } : {}), ...(dispatch ? { dispatch } : {}), ...(dispatchSummary || publicExplanation.analysisSummary ? { analysisSummary: dispatchSummary ?? publicExplanation.analysisSummary } : {}), ...(presentation ? { presentation } : {}), ...(toolPlan ? { toolPlan } : {}), ...(computerPlan ? { computerPlan } : {}), ...(result.sources.length ? { sources: result.sources } : {}) };
+      // Markers only for answer prose taken from the provider text, verified against this exact `content`.
+      const answerProse = !presentation && !toolPlan && !computerPlan && toolClarification === undefined && (!dispatch || dispatch.kind === "text");
+      const citations = answerProse ? citationsForContent(result.content, content, result.citationSpans, result.sources) : undefined;
+      const extras: Pick<AiChatResponse, "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "sources" | "citations" | "trace"> = { ...(toolClarification ? { toolClarification } : {}), ...(dispatch ? { dispatch } : {}), ...(dispatchSummary || publicExplanation.analysisSummary ? { analysisSummary: dispatchSummary ?? publicExplanation.analysisSummary } : {}), ...(presentation ? { presentation } : {}), ...(toolPlan ? { toolPlan } : {}), ...(computerPlan ? { computerPlan } : {}), ...(result.sources.length ? { sources: result.sources } : {}), ...(citations ? { citations } : {}) };
       const settled = this.store.sql.transaction(() => {
         const trace = this.harness.finishRun(userId, request.requestId, validUsage ? "succeeded" : "uncertain", toolCapability ? { capability: toolCapability, summary: toolSummary } : undefined);
         if (trace) extras.trace = trace;

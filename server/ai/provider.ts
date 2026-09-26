@@ -5,6 +5,8 @@ import { chatInstructions, chatMessages, safeSource } from "./capabilities";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { consumeProviderResponse, type ProviderReadOptions } from "./providerStream";
 import { AI_WORKSPACE_LIMITS } from "../../shared/aiWorkspace";
+import { AI_CITATION_LIMITS } from "../../shared/aiCitations";
+import { providerCitationSpans, type ProviderCitationSpan, type ProviderTextPart } from "./citations";
 
 /** Explicit allowlist from OpenAI's Responses reasoning-summary guide.
  * A matching model name on an arbitrary OpenAI-compatible gateway is not
@@ -156,12 +158,13 @@ export async function readProviderHttpError(response: Response, operation: AiPro
   return providerHttpError(response.status, operation, metadata);
 }
 export function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
-export function parseProviderResult(value: unknown, protocol: StoredProvider["protocol"]): { content: string; usage: AiUsage | null; status?: string; incompleteReason?: "output_limit" | "stream_interrupted"; sources: AiSource[]; searchCalls: number; completedSearchCalls: number } {
+export function parseProviderResult(value: unknown, protocol: StoredProvider["protocol"]): { content: string; usage: AiUsage | null; status?: string; incompleteReason?: "output_limit" | "stream_interrupted"; sources: AiSource[]; searchCalls: number; completedSearchCalls: number; citationSpans?: ProviderCitationSpan[] } {
   const root = object(value);
   const sources: AiSource[] = [];
   let searchCalls = 0;
   let completedSearchCalls = 0;
-  const addSource = (value: unknown) => { const source = safeSource(value); if (source && sources.length < 30 && !sources.some(item => item.url === source.url)) sources.push(source); };
+  const addSource = (value: unknown, limit = 30) => { const source = safeSource(value); if (source && sources.length < limit && !sources.some(item => item.url === source.url)) sources.push(source); };
+  const textParts: ProviderTextPart[] = [];
   if (protocol === "responses" && Array.isArray(root.output)) {
     for (const raw of root.output) {
       const output = object(raw);
@@ -170,11 +173,14 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
         // An attempted tool can still incur cost, but it is not proof of a completed search.
         if (output.status === "completed") completedSearchCalls++;
         const action = object(output.action);
-        if (Array.isArray(action.sources)) action.sources.forEach(addSource);
+        if (Array.isArray(action.sources)) action.sources.forEach(item => addSource(item));
       }
-      if (Array.isArray(output.content)) for (const part of output.content) {
-        const annotations = object(part).annotations;
-        if (Array.isArray(annotations)) annotations.forEach(item => { const annotation = object(item); if (annotation.type === "url_citation") addSource(annotation); });
+      if (Array.isArray(output.content)) for (const raw of output.content) {
+        const part = object(raw);
+        const annotations = Array.isArray(part.annotations) ? part.annotations : [];
+        // A page the answer actually cites stays listable after search results filled the ordinary cap.
+        annotations.forEach(item => { const annotation = object(item); if (annotation.type === "url_citation") addSource(annotation, AI_CITATION_LIMITS.sources); });
+        if (part.type === "output_text" && typeof part.text === "string") textParts.push({ text: part.text, annotations });
       }
     }
   }
@@ -203,7 +209,9 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
   const status = root.error ? "failed" : protocol === "responses" ? typeof root.status === "string" ? root.status : undefined
     : choice.finish_reason === "length" ? "incomplete" : typeof choice.finish_reason === "string" && choice.finish_reason !== "stop" ? "failed" : undefined;
   const incompleteReason = status === "incomplete" ? object(root.incomplete_details).reason === "stream_interrupted" ? "stream_interrupted" : "output_limit" : undefined;
-  return { content, usage, sources, searchCalls, completedSearchCalls, status, ...(incompleteReason ? { incompleteReason } : {}) };
+  // Positions are relative to `content`; the service re-verifies them against the stored answer.
+  const citationSpans = providerCitationSpans(textParts, content);
+  return { content, usage, sources, searchCalls, completedSearchCalls, status, ...(incompleteReason ? { incompleteReason } : {}), ...(citationSpans ? { citationSpans } : {}) };
 }
 export function providerBody(provider: StoredProvider, request: AiChatRequest, model: string, maxOutputTokens: number, persona?: AiPersonaProfile, options: { stream?: boolean } = {}): Record<string, unknown> {
   const messages = chatMessages(request);

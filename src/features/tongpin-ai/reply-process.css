@@ -1,0 +1,181 @@
+/* 回复过程: Tongpin's warm cream card, ink outlines and yellow accents. */
+.tp-ai-process {
+  max-width: 720px;
+  margin: 0 0 10px;
+  border: 1px solid #ded9ca;
+  border-radius: 12px;
+  background: #fbf9f2;
+  color: #55574f;
+  font-size: 12px;
+}
+.tp-ai-process.is-running {
+  border-color: #d9c78c;
+  background: #fdf9ec;
+  box-shadow: inset 3px 0 0 #eed887;
+}
+.tp-ai-process__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tp-ai-process__header:hover { background: #f5efdb; }
+.tp-ai-process__header:focus-visible { outline: 2px solid #716426; outline-offset: 2px; }
+.tp-ai-process__badge {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--tp-ai-ink, #292a25);
+  border-radius: 7px;
+  background: #faf7ef;
+  color: var(--tp-ai-ink, #292a25);
+}
+.tp-ai-process.is-running .tp-ai-process__badge,
+.tp-ai-process[data-outcome="completed"] .tp-ai-process__badge { background: #eed887; }
+.tp-ai-process.is-waiting .tp-ai-process__badge { background: #f8efc9; }
+.tp-ai-process[data-outcome="failed"] .tp-ai-process__badge { border-color: #954c3d; background: #fbeee9; color: #954c3d; }
+.tp-ai-process__headline {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #3f4038;
+  font-weight: 600;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tp-ai-process__elapsed { flex: 0 0 auto; color: #8a8c83; font-variant-numeric: tabular-nums; }
+.tp-ai-process__chevron { flex: 0 0 auto; color: #77796f; transition: transform 180ms cubic-bezier(0.2, 0, 0, 1); }
+.tp-ai-process.is-expanded .tp-ai-process__chevron { transform: rotate(180deg); }
+.tp-ai-process__parts {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 4px 12px 12px;
+  list-style: none;
+  animation: tp-ai-process-reveal 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+@keyframes tp-ai-process-reveal { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.tp-ai-process-part {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+/* A quiet rail joins the parts into one ordered timeline. */
+.tp-ai-process-part::before {
+  content: "";
+  position: absolute;
+  top: 24px;
+  bottom: -12px;
+  left: 10px;
+  width: 1.5px;
+  background: #e3dccb;
+}
+.tp-ai-process-part:last-child::before { display: none; }
+.tp-ai-process-part__icon {
+  position: relative;
+  z-index: 1;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid #d3cbb9;
+  border-radius: 7px;
+  background: #fffaf0;
+  color: #5d5138;
+}
+.tp-ai-process-part.is-running .tp-ai-process-part__icon { border-color: var(--tp-ai-ink, #292a25); background: #eed887; color: var(--tp-ai-ink, #292a25); }
+.tp-ai-process-part.is-waiting .tp-ai-process-part__icon { border-color: #b29c4e; background: #f8efc9; }
+.tp-ai-process-part.is-failed .tp-ai-process-part__icon,
+.tp-ai-process-part.is-outcome-failed .tp-ai-process-part__icon { border-color: #d7b3a6; background: #fbeee9; color: #954c3d; }
+.tp-ai-process-part.is-outcome-completed .tp-ai-process-part__icon { border-color: var(--tp-ai-ink, #292a25); background: #eed887; color: var(--tp-ai-ink, #292a25); }
+.tp-ai-process-part__body { min-width: 0; padding-top: 2px; }
+.tp-ai-process-part__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  margin: 0;
+  line-height: 1.55;
+}
+.tp-ai-process-part__title strong { color: #3f4038; font-weight: 650; }
+.tp-ai-process-part__title q { min-width: 0; color: #5d5138; overflow-wrap: anywhere; }
+.tp-ai-process-part__title small { color: #8a8c83; }
+.tp-ai-process-part.is-failed .tp-ai-process-part__title small { color: #954c3d; }
+.tp-ai-process-part__text {
+  max-height: 240px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding-left: 12px;
+  border-left: 2px solid #eed887;
+  color: #686b63;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tp-ai-process-plan { display: grid; gap: 6px; margin: 6px 0 0; padding: 0; list-style: none; }
+.tp-ai-process-plan li { display: flex; align-items: flex-start; gap: 6px; }
+.tp-ai-process-plan li > svg { flex: 0 0 auto; margin-top: 3px; }
+.tp-ai-process-plan li span { display: grid; gap: 2px; }
+.tp-ai-process-plan li small { color: #77796f; line-height: 1.45; }
+.tp-ai-process-plan li.is-failed { color: #954c3d; }
+.tp-ai-process-part__link {
+  padding: 1px 8px;
+  border: 1px solid #d3cbb9;
+  border-radius: 8px;
+  background: #fffaf0;
+  color: #66591d;
+  font: inherit;
+  cursor: pointer;
+}
+.tp-ai-process-part__link:hover { background: #f3e9c6; }
+.tp-ai-process-part__link:focus-visible { outline: 2px solid #716426; outline-offset: 2px; }
+.tp-ai-process .is-spinning { animation: tp-ai-process-spin .9s linear infinite; }
+@keyframes tp-ai-process-spin { to { transform: rotate(360deg); } }
+
+/* Conversation header: 过程详情：全部展开 / 全部收起. */
+.tp-ai-process-toggle-all {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid #d3cbb9;
+  border-radius: 10px;
+  background: #fffaf0;
+  color: #393c31;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tp-ai-process-toggle-all:hover { background: #f3e9c6; }
+.tp-ai-process-toggle-all.is-expanded { border-color: #b29c4e; background: #f8efc9; color: #38351d; }
+.tp-ai-process-toggle-all:focus-visible { outline: 2px solid #716426; outline-offset: 3px; }
+.tp-ai-process-toggle-all__prefix { color: #77796f; }
+.tp-ai-page .tp-ai-chat__header > .tp-ai-process-toggle-all { margin-left: auto; }
+.tp-ai-page .tp-ai-chat__header > .tp-ai-process-toggle-all + .tp-ai-persona-settings-trigger { margin-left: 0; }
+
+@media (max-width: 760px) {
+  .tp-ai-process-toggle-all { padding: 0 9px; }
+  .tp-ai-process-toggle-all__prefix { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tp-ai-process .is-spinning,
+  .tp-ai-process__parts { animation: none; }
+  .tp-ai-process__chevron { transition: none; }
+}

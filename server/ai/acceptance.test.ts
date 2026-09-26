@@ -464,7 +464,9 @@ describe.sequential("AI acceptance through real isolated account routes", () => 
   });
 
   it("does not settle a late result twice after stale-request recovery", async () => {
-    await setLimit(memberA, 8_000);
+    // Fresh headroom above earlier settled usage, so this exercises recovery
+    // rather than a local quota rejection that depends on prompt overhead.
+    await setLimit(memberA, (await status(memberA)).quota.usedTokens + 8_000);
     blockChat = true;
     const requestId = "late-result-after-recovery";
     const before = chatCalls;

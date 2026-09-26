@@ -283,7 +283,9 @@ describe("AI transactional service", () => {
   });
   it("supports Responses protocol with explicit output cap and deep reasoning", async () => {
     await runtime.service.saveProvider({ ...provider, protocol: "responses" });
-    runtime.service.setQuota("member-a", "admin", { limitTokens: 5000 });
+    // Enough headroom above the instruction reserve that the provider cap, not
+    // the remaining quota, bounds the output.
+    runtime.service.setQuota("member-a", "admin", { limitTokens: 8000 });
     transport.mockResolvedValueOnce(Response.json({ output: [{ type: "message", content: [{ type: "output_text", text: "真正回复" }] }], usage: { input_tokens: 15, output_tokens: 5, total_tokens: 20 } }));
     const result = await runtime.service.chat("member-a", { ...chat(), mode: "deep" });
     const [url, init] = transport.mock.calls[0];

@@ -1,21 +1,55 @@
-import { useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import type { AiSource } from "../../../shared/ai";
 import { aiMotionRef } from "./motion";
+import { CitationFocusContext } from "./ReplyCitation";
+import { citationListTarget } from "./replyCitations";
 import { displaySources, sourceLabel } from "./sourceDisplay";
 
-export function AiSourceLink({ source }: { source: AiSource }) {
-  return <li><AiSourceAnchor href={source.url}>{sourceLabel(source)}</AiSourceAnchor></li>;
+const CITED_HIGHLIGHT_MS = 1800;
+
+export function AiSourceLink({ source, number, cited, itemRef }: { source: AiSource; number?: number; cited?: boolean; itemRef?: (element: HTMLLIElement | null) => void }) {
+  return <li ref={itemRef} className={cited ? "is-cited" : undefined}>
+    {number === undefined ? null : <span className="tp-ai-message-sources__n">{number}</span>}
+    <AiSourceAnchor href={source.url}>{sourceLabel(source)}</AiSourceAnchor>
+  </li>;
 }
 
-/** Deduplicated citation list; beyond the first few, the rest fold away. */
+function revealCitedSource(item: HTMLLIElement): void {
+  const reduced = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  item.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
+  item.querySelector<HTMLElement>("a")?.focus({ preventScroll: true });
+}
+
+/** Numbered, deduplicated citation list; beyond the first few, the rest fold
+ * away. A marker in the answer unfolds, scrolls to and highlights its entry. */
 export function AiSourceList({ sources }: { sources: readonly AiSource[] | undefined }) {
   const [expanded, setExpanded] = useState(false);
+  const [cited, setCited] = useState<number | null>(null);
+  const request = useContext(CitationFocusContext);
+  const items = useRef(new Map<number, HTMLLIElement>());
+  const handled = useRef(0);
   const { visible, folded } = displaySources(sources);
+  useEffect(() => {
+    if (!request || request.token === handled.current) return;
+    handled.current = request.token;
+    const target = citationListTarget(request.n, visible.length, folded.length);
+    if (!target) return;
+    if (target.needsExpand) setExpanded(true);
+    setCited(request.n);
+  }, [request, visible.length, folded.length]);
+  useEffect(() => {
+    if (cited === null) return;
+    const item = items.current.get(cited);
+    if (item) revealCitedSource(item);
+    const timer = window.setTimeout(() => setCited(null), CITED_HIGHLIGHT_MS);
+    return () => window.clearTimeout(timer);
+  }, [cited, request?.token]);
   if (!visible.length) return null;
   const shown = expanded ? [...visible, ...folded] : visible;
   return <div className="tp-ai-message-sources-block">
     <ul className="tp-ai-message-sources" aria-label="参考来源" ref={aiMotionRef}>
-      {shown.map((source, index) => <AiSourceLink key={`${source.url}-${index}`} source={source} />)}
+      {shown.map((source, index) => <AiSourceLink key={`${source.url}-${index}`} source={source} number={index + 1} cited={cited === index + 1}
+        itemRef={element => { if (element) items.current.set(index + 1, element); else items.current.delete(index + 1); }} />)}
     </ul>
     {folded.length ? <button type="button" className="tp-ai-message-sources__toggle" aria-expanded={expanded}
       onClick={() => setExpanded(current => !current)}>{expanded ? "收起来源" : `展开其余 ${folded.length} 个来源`}</button> : null}

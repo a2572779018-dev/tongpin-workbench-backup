@@ -93,6 +93,21 @@ describe("workspace V2 member protocol", () => {
     expect((await call("/commit-assistant", "POST", { ...body, mutationId: crypto.randomUUID(), expectedRevision: 3, messageId: "assistant-b" })).status).toBe(409);
   });
 
+  it("commits recorded citation markers together with their sources", async () => {
+    const epoch = await activate();
+    const requestId = crypto.randomUUID();
+    const sources = [{ title: "天气", url: "https://weather.example/sh" }, { title: "新闻", url: "https://news.example/sh" }];
+    const citations = [{ n: 1, sourceIndex: 0, end: 4 }, { n: 2, sourceIndex: 1, end: 8 }];
+    new AiStore(sql).saveRequest({ requestId, userId: "member-a", hash: "hash", status: "completed", kind: "chat", createdAt: "2026-09-24T10:00:00.000Z", expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, model: "server-model", mode: "standard", conversationId: "chat-a",
+      result: { requestId, content: "今天晴。明天阴。", model: "server-model", sources, citations, usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3, estimated: false } } });
+    expect((await call("/append-user", "POST", { epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      message: { id: "prompt-a", role: "user", content: "天气", time: "10:00", requestId } })).status).toBe(200);
+    expect((await call("/commit-assistant", "POST", { epoch, mutationId: requestId, conversationId: "chat-a", expectedRevision: 2, requestId, messageId: "assistant-a" })).status).toBe(200);
+    const page = await (await call("/conversations/chat-a/messages")).json() as { messages: Array<{ sources?: unknown; citations?: unknown }> };
+    expect(page.messages.at(-1)).toMatchObject({ sources, citations });
+  });
+
   it("renames without browser message resubmission and persists draft and attachment references separately", async () => {
     const epoch = await activate();
     const renamed = await call("/rename-conversation", "POST", { epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1, title: "新标题" });

@@ -46,7 +46,7 @@ import { mediaCacheScope, videoBlobCache } from "../features/tongpin-ai/mediaCac
 import { sameHarnessTrace } from "../features/tongpin-ai/runTracePolling";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
 import { ArtifactPreview } from "../features/tongpin-ai/ArtifactPreview";
-import { applyLiveThinkingEvent, EMPTY_LIVE_THINKING, type TongpinAILiveThinking } from "../features/tongpin-ai/liveThinking";
+import { applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE, settleReplyProcess, withReplyProcessTool, type AiReplyProcessLive } from "../../shared/aiReplyProcess";
 import { ChatWorkspace } from "../features/tongpin-ai/ChatWorkspace";
 import { TongpinAIWorkspaceV2 } from "../features/tongpin-ai/TongpinAIWorkspaceV2";
 import { TONGPIN_AI_SKILLS } from "../features/tongpin-ai/mockData";
@@ -170,7 +170,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [seenResults, setSeenResults] = useState(() => readSeenResults(user.id));
   // Live deltas are transient and excluded from workspace serialization. Only
   // the final/partial result enters durable conversation state.
-  const [streamReplies, setStreamReplies] = useState<Record<string, { content: string; analysisSummary: string; liveThinking: TongpinAILiveThinking }>>({});
+  const [streamReplies, setStreamReplies] = useState<Record<string, { content: string; analysisSummary: string; liveProcess: AiReplyProcessLive }>>({});
   const [checkingQuota, setCheckingQuota] = useState(false);
   const [computerProbe, setComputerProbe] = useState<ComputerUseProbeResult | null>(null);
   const [computerRequest, setComputerRequest] = useState<ComputerUseRequest | null>(null);
@@ -1146,8 +1146,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       return;
     }
     const controller = new AbortController();
-    let liveContent = "", liveSummary = "", liveThinking = EMPTY_LIVE_THINKING, deltaTimer: ReturnType<typeof setTimeout> | undefined;
-    const flushDeltas = () => { deltaTimer = undefined; if (mountedRef.current && !controller.signal.aborted) setStreamReplies(current => ({ ...current, [messageId]: { content: liveContent, analysisSummary: liveSummary, liveThinking } })); };
+    let liveContent = "", liveSummary = "", liveProcess = EMPTY_REPLY_PROCESS_LIVE, deltaTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushDeltas = () => { deltaTimer = undefined; if (mountedRef.current && !controller.signal.aborted) setStreamReplies(current => ({ ...current, [messageId]: { content: liveContent, analysisSummary: liveSummary, liveProcess } })); };
     requestRef.current.set(conversationId, { controller, messageId });
     // Only requests that were never sent may be POSTed by the retry button.
     retryRequestsRef.current.delete(messageId);
@@ -1167,6 +1167,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       { headers: { "X-Tongpin-Account": user.id }, signal }, timeoutMs,
     ), controller.signal, deadline);
     if (typeof request === "string") { liveContent = persistedReply?.content ?? ""; liveSummary = persistedReply?.analysisSummary ?? ""; }
+    // Wall time from the member's send, measured only for a request sent live
+    // from this page; a read-only reattach cannot know when the run really ended.
+    const replyStartedAt = Number.isSafeInteger(persistedStartedAt) && persistedStartedAt! <= now ? persistedStartedAt! : now;
+    const settledProcess = (outcome: "completed" | "partial" | "stopped" | "failed", live = liveProcess) =>
+      typeof request === "string" ? undefined : settleReplyProcess(live, { outcome, durationMs: Date.now() - replyStartedAt });
     setReplyActivity(conversationId, messageId, "waiting");
     updateReply(conversationId, messageId, {
       content: liveContent,
@@ -1182,10 +1187,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           response = "prompt" in request ? await api<AiImageResponse>("/api/ai/images", {
             method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(request), signal: controller.signal,
           }, 130_000) : await readAiChatStream(api, request, { accountId: user.id, signal: controller.signal, onEvent: event => {
+            // Ordered process parts come from real events only; raw provider
+            // reasoning (reasoning_delta) is never shown or stored.
+            const nextProcess = applyReplyProcessEvent(liveProcess, event);
+            const processChanged = nextProcess !== liveProcess;
+            liveProcess = nextProcess;
             if (event.type === "answer_delta") liveContent += event.data.delta;
             else if (event.type === "public_summary_delta") liveSummary += event.data.delta;
-            else if (event.type === "reasoning_delta" || event.type === "tool_progress") liveThinking = applyLiveThinkingEvent(liveThinking, event);
-            else return;
+            else if (!processChanged || event.type === "run_finished") return;
             if (!deltaTimer) deltaTimer = setTimeout(flushDeltas, 60);
           } });
         } catch (error) {
@@ -1194,6 +1203,13 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         }
       }
       if (!mountedRef.current || controller.signal.aborted) return;
+      // Keep the bounded process record only when the live journal reached its
+      // end; a reply recovered by GET falls back to its saved summary fields.
+      if (typeof request === "string") { if (persistedReply?.process) updateReply(conversationId, messageId, { process: undefined }); }
+      else if (liveProcess.finishedAt !== undefined) {
+        const process = settledProcess(!("images" in response) && response.completion ? "partial" : "completed");
+        if (process) updateReply(conversationId, messageId, { process });
+      }
       const persistedMessage = workspaceRef.current.conversations.find(item => item.id === conversationId)?.messages.find(message => message.id === messageId);
       const harnessPlanRequestId = typeof request === "string"
         ? persistedMessage?.harnessPlanRequestId
@@ -1242,7 +1258,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         }
         clearReplyActivity(conversationId, messageId);
         const computerReady = Boolean(computerBridgeAvailable && getComputerUseBridge());
-        updateReply(conversationId, messageId, { content: computerReady ? "已识别为电脑操作任务，即将进入系统安全确认流程。" : "已识别为电脑操作任务，但当前环境未接入安全桌面能力。", status: "ready", startedAt: undefined });
+        const computerProcess = settledProcess("completed", withReplyProcessTool(liveProcess, { kind: "tool", tool: "computer", status: computerReady ? "handed_off" : "unavailable" }));
+        updateReply(conversationId, messageId, { content: computerReady ? "已识别为电脑操作任务，即将进入系统安全确认流程。" : "已识别为电脑操作任务，但当前环境未接入安全桌面能力。", status: "ready", startedAt: undefined, ...(computerProcess ? { process: computerProcess } : {}) });
         if (computerReady) beginComputerUse(decision.prompt, conversationId);
         return;
       }
@@ -1253,7 +1270,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       if (!interrupted && typeof request !== "string") availability.recordFailure("prompt" in request ? "image" : `${request.mode}:${request.webSearch ? "search" : "chat"}`, error);
       const originalMissing = typeof request === "string" && error instanceof ApiRequestError && error.status === 404;
       const recoverable = !originalMissing && canRecoverChatRequest(error instanceof ApiRequestError ? error.code : undefined, interrupted);
-      updateReply(conversationId, messageId, { status: "error", taskPhase: recoverable ? "unknown" : "failed", retryDisposition: originalMissing ? undefined : recoverable ? "recover" : "regenerate", content: originalMissing
+      const stoppedProcess = settledProcess(interrupted ? "stopped" : "failed");
+      updateReply(conversationId, messageId, { ...(stoppedProcess ? { process: stoppedProcess } : {}), status: "error", taskPhase: recoverable ? "unknown" : "failed", retryDisposition: originalMissing ? undefined : recoverable ? "recover" : "regenerate", content: originalMissing
         ? "原请求没有服务端记录或已过期，本次未自动重新发送。请重新输入任务后再发送。"
         : liveContent || (interrupted
         ? "已停止等待。请求可能仍在处理，实际扣额请查看 Token 使用详情。"
@@ -2245,6 +2263,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         />
       ) : (
         <ChatWorkspace
+          viewerId={user.id}
           assistantName={persona.profile.name || "同频 AI"}
           characterExpression={persona.profile.expression}
           characterPaused={personaSettingsOpen}

@@ -349,6 +349,11 @@ export type AiDispatchDecision =
   | { kind: "text"; content: string; /** Optional public evidence summary, never hidden reasoning. */ analysisSummary?: string }
   | { kind: "image" | "video" | "presentation" | "computer"; prompt: string; clarification?: string };
 export interface AiSource { title: string; url: string }
+/** A provider-reported `url_citation`, positioned in the final `content`.
+ * `end` is an exact UTF-16 offset where the marker belongs, `sourceIndex`
+ * indexes `sources`, and `n` is that source's 1-based number in the
+ * deduplicated source list. Never model-authored or inferred from text. */
+export interface AiCitation { n: number; sourceIndex: number; end: number }
 export interface AiChatRequest {
   requestId: string;
   /** Explicit user retry creates a new attempt; polling never does. */
@@ -423,6 +428,8 @@ export interface AiChatResponse {
   dispatch?: AiDispatchDecision;
   computerPlan?: AiComputerPlan;
   sources?: AiSource[];
+  /** Optional: omitted whenever provider positions cannot be verified against `content`. */
+  citations?: AiCitation[];
   trace?: AiHarnessTrace;
 }
 export type AiImageMimeType = "image/png" | "image/jpeg" | "image/webp";

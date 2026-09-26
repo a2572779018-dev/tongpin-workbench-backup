@@ -1,5 +1,6 @@
 import { AiError } from "./security";
 import { createSearchStreamGuard } from "./searchStreamGuard";
+import { createStreamedAnnotations } from "./citations";
 import type { AiToolProgress } from "../../shared/aiRunEvents";
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -102,6 +103,8 @@ export async function consumeProviderResponse(response: Response, options: Provi
   const seen = new Set<number>();
   const summary = options.onPublicSummaryDelta ? createSummaryTracker(options.onPublicSummaryDelta) : undefined;
   const searchProgress = options.onToolProgress ? createSearchProgress(options.onToolProgress) : undefined;
+  // Citation positions a gateway only streams; merged into the terminal envelope below.
+  const annotations = createStreamedAnnotations();
   const event = (block: string) => {
     const data = block.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n");
     if (!data || data === "[DONE]") return;
@@ -123,6 +126,7 @@ export async function consumeProviderResponse(response: Response, options: Provi
     if (value.type === "response.reasoning_summary_text.delta") summary?.delta(value);
     if (value.type === "response.reasoning_summary_text.done") summary?.done(value);
     searchProgress?.(value);
+    annotations.observe(value);
     if (value.type === "response.completed" || value.type === "response.incomplete") terminal = { ...record(value.response), status: value.type === "response.incomplete" ? "incomplete" : "completed" };
     if (Array.isArray(value.choices)) {
       chat = true;
@@ -169,7 +173,7 @@ export async function consumeProviderResponse(response: Response, options: Provi
     try { const value: unknown = JSON.parse(buffer); guard?.inspectResponse(value); return value; }
     catch (error) { if (error instanceof AiError) throw error; throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称"); }
   }
-  if (terminal) { guard?.inspectResponse(terminal); return terminal; }
+  if (terminal) { guard?.inspectResponse(terminal); return annotations.attach(terminal); }
   if (chat && chatFinish) return { choices: [{ message: { content: text }, finish_reason: chatFinish }], usage: chatUsage };
   if (text) return chat
     ? { choices: [{ message: { content: text }, finish_reason: "length" }], incomplete_details: { reason: "stream_interrupted" } }

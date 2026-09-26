@@ -1,4 +1,5 @@
-import type { AiChatResponse, AiHarnessTrace, AiMode, AiSource, AiUsage } from "./ai";
+import type { AiChatResponse, AiCitation, AiHarnessTrace, AiMode, AiSource, AiUsage } from "./ai";
+import type { AiReplyProcess } from "./aiReplyProcess";
 import type { VideoModelId, VideoResolution } from "./aiVideoModels";
 
 /** JSON-only workspace payload. Provider credentials and executable code never belong here. */
@@ -43,8 +44,13 @@ export interface AiWorkspaceMessage {
   usage?: AiUsage;
   attachments?: AiWorkspaceDocument[];
   sources?: AiSource[];
+  /** Provider citation markers bound to this exact `content` and `sources`. */
+  citations?: AiCitation[];
   /** Concise application-owned rationale and tool lifecycle; never private chain-of-thought. */
   trace?: AiHarnessTrace;
+  /** Bounded record of the reply's real process (search calls, public-summary
+   * order, durations). Assistant messages only; never answer text or raw reasoning. */
+  process?: AiReplyProcess;
 }
 
 export interface AiWorkspaceConversation {
@@ -113,7 +119,13 @@ export interface AiWorkspaceSnapshot {
   state: AiWorkspaceState | null;
   /** Optional: older servers omit it. Clients must not require it and never compare it for acknowledgement. */
   storage?: AiWorkspaceStorageUsage;
+  /** Optional additive fields this server validates. Older servers omit it;
+   * a client must not send an optional field whose feature is absent. */
+  features?: string[];
 }
+
+/** Server features a V1 client checks before persisting the matching optional field. */
+export const AI_WORKSPACE_FEATURES = Object.freeze({ replyProcess: "reply-process-v1" });
 
 export interface AiWorkspaceSaveRequest {
   expectedRevision: number;

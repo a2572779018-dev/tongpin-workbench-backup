@@ -1,5 +1,6 @@
-import type { AiChatResponse, AiHarnessTrace, AiQuota, AiUsage, AiSource } from "../../../shared/ai";
+import type { AiChatResponse, AiCitation, AiHarnessTrace, AiQuota, AiUsage, AiSource } from "../../../shared/ai";
 import type { AiWorkspaceDocument, AiWorkspaceJson } from "../../../shared/aiWorkspace";
+import type { AiReplyProcess, AiReplyProcessLive } from "../../../shared/aiReplyProcess";
 import type { TongpinAILiveThinking } from "./liveThinking";
 
 export type AiQuotaFilter = "all" | "available" | "low" | "empty";
@@ -56,10 +57,16 @@ export interface TongpinAIMessage {
   usage?: AiUsage;
   attachments?: AiWorkspaceDocument[];
   sources?: AiSource[];
+  /** Provider citation markers bound to this exact `content` and `sources`. */
+  citations?: AiCitation[];
   trace?: AiHarnessTrace;
   /** Display-only live reasoning/tool progress for an in-flight reply. Never
    * persisted in the workspace and never included in model context. */
   liveThinking?: TongpinAILiveThinking;
+  /** Settled, bounded record of the reply's real process parts. */
+  process?: AiReplyProcess;
+  /** Display-only ordered process state while the reply streams; never persisted. */
+  liveProcess?: AiReplyProcessLive;
 }
 
 export interface TongpinAIConversation {

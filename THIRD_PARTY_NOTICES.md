@@ -72,6 +72,35 @@ math/artifact directives and code/artifact index providers because Tongpin's
 current renderer does not enable those features. This is a partial UI module
 reuse, not an installation of the LibreChat backend or its agent/runtime.
 
+Reply citation markers adapt the same LibreChat commit's
+`client/src/components/Web/plugin.ts`, `Citation.tsx`, `SourceHovercard.tsx`
+and `Context.tsx` (`src/features/tongpin-ai/replyCitations.ts` and
+`ReplyCitation.tsx`): remark plugins splice custom `hName` nodes into parsed
+text so each marker renders as a React component rather than HTML, a per-reply
+context resolves marker numbers to sources, and a hover card shows the source
+title and domain. Tongpin places markers from server-verified provider
+`url_citation` offsets on the already-parsed tree instead of model-written
+private-use marker characters, links only model-written `[n]`/`【n】` numbers
+that exist in the reply's source list, omits Ariakit and remote favicon
+requests, and makes a marker jump to the reply's numbered source list.
+
+The reply "process" section (`src/features/tongpin-ai/ReplyProcess.tsx`,
+`replyProcessModel.ts`, `stopReplyShortcut.ts`, `src/lib/aiProcessPreference.ts`)
+adapts structure and state logic from the same LibreChat revision:
+`client/src/components/Chat/Messages/Content/ContentParts.tsx` and `Part.tsx`
+(one ordered list of typed parts rendered per kind), `ToolCallGroup.tsx`
+(auto-expanded while active, collapsed to a one-line summary once complete,
+with a remembered per-group user override), `Parts/Reasoning.tsx` and
+`Parts/Thinking.tsx` (live vs finished thinking label and its disclosure),
+`ProgressText.tsx`, `WebSearch.tsx` and `InProgressCall.tsx` (header row,
+search progress and source-count wording, unfinished calls shown as not
+completed once the reply stops), `client/src/store/showThinking.ts` (a
+persisted per-viewer expand preference) and `client/src/hooks/useKeyboardShortcuts.ts`
+(`anyModalOpen` / `isWithinOpenMenu` guards, reused for Esc-to-stop). Styling,
+wording and data sources are Tongpin's own: parts come only from real run
+events, the saved process record, the harness trace or linked result cards, and
+LibreChat's timer-driven `useProgress` animation is intentionally not used.
+
 LibreChat MIT License, Copyright (c) 2026 LibreChat:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -116,6 +145,72 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## AI reply code highlighting
+
+`highlight.js` 11.11.2 (https://github.com/highlightjs/highlight.js) grammars
+and core, driven through `lowlight` 3.3.0 (https://github.com/wooorm/lowlight),
+colour fenced code in assistant replies. Only fourteen grammars are bundled
+(Bash, CSS, Diff, Go, Java, JavaScript, JSON, Markdown, Python, Rust, SQL,
+TypeScript, HTML/XML and YAML), in a chunk loaded on first use. The lazy
+loading pattern is adapted from LibreChat v0.8.7 commit
+`9e74cc0e57b395926122bd4062c1fcedc48ed465`
+`client/src/components/Chat/Messages/Content/Parts/useLazyHighlight.ts`, under
+the LibreChat MIT License reproduced in the previous section. Exact dependency
+versions are locked in package-lock.json.
+
+highlight.js BSD 3-Clause License
+
+Copyright (c) 2006, Ivan Sagalaev.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+lowlight MIT License
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 ## AI document processing and export
 
 The AI workbench uses pdfjs-dist, Mammoth, PptxGenJS and JSZip through their npm
@@ -128,7 +223,8 @@ That companion notice is distributed with the application and must be retained.
 The following projects were reviewed as architecture and interaction references,
 not installed as Tongpin's backend. This release's AI workspace, account
 isolation and quota service are implemented within Tongpin. The LibreChat
-GFM block module is the specific partial reuse documented above; source from
+GFM block, citation marker and reply-process part modules are the specific
+partial reuses documented above; source from
 the other four platforms is not vendored by this integration. The license
 screening below records upstream LICENSE snapshots checked on 2026-09-05, not a
 claim that all five have unrestricted commercial or rebranding permissions.

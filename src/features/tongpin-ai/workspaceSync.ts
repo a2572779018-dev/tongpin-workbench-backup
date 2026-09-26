@@ -1,4 +1,4 @@
-import type { AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
+import { AI_WORKSPACE_FEATURES, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState } from "../../../shared/aiWorkspace";
 
 export type WorkspaceSyncStatus = "saved" | "saving" | "error" | "conflict";
 export class WorkspaceConflictError extends Error {}
@@ -12,6 +12,24 @@ const REJECTED_WITHOUT_WRITE_CODES = new Set([
 ]);
 function errorCode(error: unknown): string | undefined {
   return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+}
+
+/** A server older than a message field rejects the whole save. Send the
+ * optional reply `process` record only to a server that advertises it; the
+ * page keeps showing it locally either way. Unchanged input is returned as is. */
+export function workspaceStateForServer(state: AiWorkspaceState, features: readonly string[] | undefined): AiWorkspaceState {
+  if (features?.includes(AI_WORKSPACE_FEATURES.replyProcess)) return state;
+  let changed = false;
+  const conversations = state.conversations.map(conversation => {
+    if (!conversation.messages.some(message => message.process !== undefined)) return conversation;
+    changed = true;
+    return { ...conversation, messages: conversation.messages.map(message => {
+      if (message.process === undefined) return message;
+      const { process: _unsupportedByServer, ...rest } = message;
+      return rest;
+    }) };
+  });
+  return changed ? { ...state, conversations } : state;
 }
 
 /** Bind background saves to their originating account, independent of the current auth session. */

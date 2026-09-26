@@ -1,4 +1,6 @@
 import type { AiWorkspaceArtifact, AiWorkspaceConversation, AiWorkspaceMessage } from "../../shared/aiWorkspace";
+import type { AiRunEvent } from "../../shared/aiRunEvents";
+import { replyProcessFromRunEvents, type AiReplyProcess } from "../../shared/aiReplyProcess";
 import { AiError } from "./security";
 import { AiStore } from "./storage";
 import { aiTenantIdFromPrincipal } from "./tenant";
@@ -19,6 +21,23 @@ function object(value: unknown, keys: readonly string[]): Record<string, unknown
   const body = value as Record<string, unknown>;
   if (Object.keys(body).some(key => !keys.includes(key) || ["__proto__", "constructor", "prototype"].includes(key))) invalid("工作台请求包含不支持的字段");
   return body;
+}
+/** The journal pages at 512 events and is capped at 4096 per request. */
+function* journaledRunEvents(ai: AiStore, userId: string, requestId: string): Generator<AiRunEvent> {
+  let after = 0;
+  for (let page = 0; page < 9; page += 1) {
+    const events = ai.runEvents(userId, requestId, after);
+    yield* events;
+    if (events.length < 512) return;
+    after = events[events.length - 1].seq;
+  }
+}
+/** Server-owned process summary for a committed reply: rebuilt from this
+ * request's own journal, never accepted from the browser. Display metadata
+ * only; a journal that cannot be read simply yields no summary. */
+function journaledReplyProcess(ai: AiStore, userId: string, requestId: string, partial: boolean): AiReplyProcess | undefined {
+  try { return replyProcessFromRunEvents(journaledRunEvents(ai, userId, requestId), partial ? "partial" : "completed"); }
+  catch { return undefined; }
 }
 function respond(value: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...headers } });
@@ -137,7 +156,8 @@ export async function handleAiWorkspaceV2Request(request: Request, store: AiWork
       if (typeof body.requestId !== "string" || !UUID.test(body.requestId) ||
         typeof body.messageId !== "string" || !ID.test(body.messageId) ||
         typeof body.conversationId !== "string" || !ID.test(body.conversationId)) invalid("回复保存参数无效");
-      const recorded = new AiStore(store.sql, tenant).request(user.id, body.requestId);
+      const ai = new AiStore(store.sql, tenant);
+      const recorded = ai.request(user.id, body.requestId);
       if (!recorded || recorded.kind !== "chat" || recorded.conversationId !== body.conversationId) throw new AiError(404, "AI_REQUEST_NOT_FOUND", "没有找到这段对话的 AI 请求");
       if (recorded.status !== "completed" || !recorded.result || recorded.result.requestId !== body.requestId) throw new AiError(409, "AI_REQUEST_NOT_COMPLETE", "AI 回复尚未完成，暂不能保存");
       const parent = await store.readActiveEntity(user.id, "conversation", body.conversationId, tenant);
@@ -150,13 +170,16 @@ export async function handleAiWorkspaceV2Request(request: Request, store: AiWork
         throw new AiError(409, "AI_WORKSPACE_CONFLICT", "对话已变化，请重新读取后保存回复");
       }
       const reply = recorded.result;
+      const process = journaledReplyProcess(ai, user.id, body.requestId, Boolean(reply.completion));
       const message: AiWorkspaceMessage = { id: body.messageId, role: "assistant", content: reply.content,
         time: recorded.createdAt.slice(11, 16), requestId: body.requestId, status: "ready",
         taskPhase: reply.completion ? "partial" : "completed", model: reply.model, usage: reply.usage,
         ...(reply.analysisSummary ? { analysisSummary: reply.analysisSummary } : {}),
         ...(reply.completion ? { completion: reply.completion } : {}),
         ...(reply.sources ? { sources: reply.sources } : {}),
-        ...(reply.trace ? { trace: reply.trace } : {}) };
+        ...(reply.sources && reply.citations ? { citations: reply.citations } : {}),
+        ...(reply.trace ? { trace: reply.trace } : {}),
+        ...(process ? { process } : {}) };
       return respond(await store.appendActiveMessages(user.id, { epoch: body.epoch, mutationId: body.mutationId,
         conversationId: body.conversationId, expectedRevision: body.expectedRevision, messages: [message] }, tenant));
     }

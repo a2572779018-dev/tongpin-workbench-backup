@@ -1,5 +1,6 @@
 import type { AiChatRequest, AiChatResponse } from "../../../shared/ai";
 import { fitAiChatMessages } from "../../../shared/aiContext";
+import { sanitizeAiCitations } from "./replyCitations";
 import type { TongpinAIConversation, TongpinAIMessage, TongpinAIMode } from "./types";
 
 // Only replay a request whose result is unknown or which never entered the ledger.
@@ -30,7 +31,7 @@ export function replaceChatMessage(
   conversations: TongpinAIConversation[],
   conversationId: string,
   messageId: string,
-    patch: Partial<Pick<TongpinAIMessage, "content" | "analysisSummary" | "status" | "model" | "usage" | "artifactId" | "sources" | "trace" | "startedAt" | "taskPhase" | "completion" | "retryDisposition">>,
+    patch: Partial<Pick<TongpinAIMessage, "content" | "analysisSummary" | "status" | "model" | "usage" | "artifactId" | "sources" | "citations" | "trace" | "startedAt" | "taskPhase" | "completion" | "retryDisposition" | "process">>,
 ) {
   return conversations.map((conversation) => conversation.id === conversationId
     ? { ...conversation, messages: conversation.messages.map((message) =>
@@ -41,6 +42,8 @@ export function replaceChatMessage(
 function cleanMessagePatch(message: TongpinAIMessage, patch: Partial<TongpinAIMessage>): TongpinAIMessage {
   const next = { ...message, ...patch };
   if (patch.taskPhase === "completed") { delete next.completion; delete next.retryDisposition; }
+  // Citation offsets index one exact text: a patch that sets the text also decides its citations.
+  if (patch.content !== undefined && !("citations" in patch)) delete next.citations;
   // Optional properties must stay JSON-only when saved, including explicit clears.
   return Object.fromEntries(Object.entries(next).filter(([, value]) => value !== undefined)) as unknown as TongpinAIMessage;
 }
@@ -85,5 +88,7 @@ export function recoverInterruptedMessages(conversations: TongpinAIConversation[
 }
 
 export function completedReply(response: AiChatResponse, options: { preserveExistingTrace?: boolean } = {}) {
-  return { content: response.content, ...(response.analysisSummary ? { analysisSummary: response.analysisSummary } : {}), ...(response.completion ? { completion: response.completion } : {}), taskPhase: response.completion ? "partial" as const : "completed" as const, status: "ready" as const, model: response.model, usage: response.usage, ...(response.sources ? { sources: response.sources } : {}), ...(!options.preserveExistingTrace && response.trace ? { trace: response.trace } : {}) };
+  // Only markers verified against this exact content; replaceChatMessage clears older ones.
+  const citations = sanitizeAiCitations(response.content, response.sources, response.citations);
+  return { content: response.content, ...(response.analysisSummary ? { analysisSummary: response.analysisSummary } : {}), ...(response.completion ? { completion: response.completion } : {}), taskPhase: response.completion ? "partial" as const : "completed" as const, status: "ready" as const, model: response.model, usage: response.usage, ...(response.sources ? { sources: response.sources } : {}), ...(citations ? { citations } : {}), ...(!options.preserveExistingTrace && response.trace ? { trace: response.trace } : {}) };
 }

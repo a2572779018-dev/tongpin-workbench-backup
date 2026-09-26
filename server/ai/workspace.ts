@@ -1,4 +1,5 @@
-import { AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceDocument, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState, type AiWorkspaceStorageUsage } from "../../shared/aiWorkspace";
+import { AI_WORKSPACE_FEATURES, AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceDocument, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState, type AiWorkspaceStorageUsage } from "../../shared/aiWorkspace";
+import { AI_REPLY_PROCESS_LIMITS } from "../../shared/aiReplyProcess";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
@@ -6,6 +7,7 @@ import { validateImageBase64 } from "./capabilities";
 import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey } from "./tenant";
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
 import { videoModel } from "../../shared/aiVideoModels";
+import { AI_CITATION_LIMITS, isAiCitation } from "../../shared/aiCitations";
 
 export const AI_WORKSPACE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_workspaces (
@@ -194,6 +196,47 @@ function usage(value: unknown): void {
   if (Number(item.inputTokens) + Number(item.outputTokens) + Number(item.convertedTokens ?? 0) !== item.totalTokens || typeof item.estimated !== "boolean") invalid("消息用量格式不正确");
   // Display metadata only: quota accounting must exclusively use the server AI ledger.
 }
+/** Citation markers are bound to this message's exact content and source list. */
+function citations(value: unknown, content: string, sources: unknown): void {
+  if (value === undefined) return;
+  const sourceCount = Array.isArray(sources) ? sources.length : 0;
+  for (const item of array(value, "引用角标", AI_CITATION_LIMITS.citations)) {
+    record(item, "引用角标", ["n", "sourceIndex", "end"]);
+    if (!isAiCitation(item, content, sourceCount)) invalid("引用角标与回复内容或来源不一致");
+  }
+}
+/** Display metadata about a settled reply. Strict fields and caps: search
+ * metadata, public-summary order and durations only, never text or reasoning. */
+function replyProcess(value: unknown, role: unknown): void {
+  if (value === undefined) return;
+  if (role !== "assistant") invalid("只有回复消息可以包含回复过程");
+  const process = record(value, "回复过程", ["version", "outcome", "steps", "durationMs"]);
+  if (process.version !== 1) invalid("回复过程版本无效，请更新客户端后重试");
+  if (!["completed", "partial", "stopped", "failed"].includes(String(process.outcome))) invalid("回复过程状态无效");
+  if (process.durationMs !== undefined) boundedInteger(process.durationMs, "回复过程用时", 0, AI_REPLY_PROCESS_LIMITS.durationMs);
+  const steps = array(process.steps, "回复过程步骤", AI_REPLY_PROCESS_LIMITS.steps);
+  if (!steps.length) invalid("回复过程缺少步骤");
+  let thinkingSteps = 0;
+  for (const rawStep of steps) {
+    const kind = rawStep && typeof rawStep === "object" && !Array.isArray(rawStep) ? (rawStep as ObjectValue).kind : undefined;
+    if (kind === "thinking") {
+      record(rawStep, "回复过程步骤", ["kind"]);
+      if (++thinkingSteps > 1) invalid("回复过程思考步骤重复");
+    } else if (kind === "search") {
+      const step = record(rawStep, "回复过程步骤", ["kind", "status", "query", "sourceCount", "durationMs"]);
+      if (!["completed", "failed", "incomplete"].includes(String(step.status))) invalid("联网搜索状态无效");
+      if (step.query !== undefined) {
+        string(step.query, "搜索关键词", AI_REPLY_PROCESS_LIMITS.queryCharacters, true);
+        if (/[\u0000-\u001f\u007f]/.test(step.query)) invalid("搜索关键词格式不正确");
+      }
+      if (step.sourceCount !== undefined) boundedInteger(step.sourceCount, "搜索来源数量", 0, AI_REPLY_PROCESS_LIMITS.sourceCount);
+      if (step.durationMs !== undefined) boundedInteger(step.durationMs, "搜索用时", 0, AI_REPLY_PROCESS_LIMITS.durationMs);
+    } else if (kind === "tool") {
+      const step = record(rawStep, "回复过程步骤", ["kind", "tool", "status"]);
+      if (step.tool !== "computer" || !["handed_off", "unavailable"].includes(String(step.status))) invalid("工具调用记录无效");
+    } else invalid("回复过程步骤类型无效");
+  }
+}
 function harnessTrace(value: unknown): void {
   if (value === undefined) return;
   const trace = record(value, "处理过程", ["runId", "tier", "strategy", "status", "reasoningSummary", "nextAction", "toolBudget", "steps"]);
@@ -302,7 +345,7 @@ function validatedWorkspaceState(value: unknown, enforceAggregateLimit: boolean)
     totalMessages += messages.length;
     if (totalMessages > LIMITS.totalMessages) tooLarge("消息总数超过上限，原记录未被更改");
     for (const entry of messages) {
-      const message = record(entry, "消息", ["id", "role", "content", "analysisSummary", "completion", "retryDisposition", "taskPhase", "time", "startedAt", "status", "artifactId", "requestId", "harnessPlanRequestId", "model", "usage", "attachments", "sources", "trace"]);
+      const message = record(entry, "消息", ["id", "role", "content", "analysisSummary", "completion", "retryDisposition", "taskPhase", "time", "startedAt", "status", "artifactId", "requestId", "harnessPlanRequestId", "model", "usage", "attachments", "sources", "citations", "trace", "process"]);
       if (message.retryDisposition !== undefined && !["recover", "regenerate"].includes(String(message.retryDisposition))) invalid("回复重试方式无效");
       id(message.id, "消息"); unique(message.id, messageIds, "消息");
       if (message.role !== "user" && message.role !== "assistant") invalid("消息角色无效");
@@ -318,7 +361,7 @@ function validatedWorkspaceState(value: unknown, enforceAggregateLimit: boolean)
       if (message.status !== undefined && !["thinking", "typing", "ready", "error", "stopped"].includes(String(message.status))) invalid("消息状态无效");
       optionalId(message.artifactId, "成果"); optionalId(message.requestId, "请求"); optionalId(message.harnessPlanRequestId, "工具方案");
       if (message.model !== undefined) string(message.model, "模型名称", 160);
-      usage(message.usage); documents(message.attachments, "消息附件"); harnessTrace(message.trace);
+      usage(message.usage); documents(message.attachments, "消息附件"); harnessTrace(message.trace); replyProcess(message.process, message.role);
       if (message.sources !== undefined) {
         for (const rawSource of array(message.sources, "引用来源", 100)) {
           const source = record(rawSource, "引用来源", ["title", "url"]);
@@ -329,6 +372,7 @@ function validatedWorkspaceState(value: unknown, enforceAggregateLimit: boolean)
           if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) invalid("来源链接必须为不带账号密码的 HTTP(S) 地址");
         }
       }
+      citations(message.citations, message.content, message.sources);
       if (typeof message.artifactId === "string") messageArtifactRefs.push({ conversationId: conversation.id, artifactId: message.artifactId });
     }
   }
@@ -471,6 +515,12 @@ function chunks(serialized: string): string[] {
     start = end;
   }
   return result;
+}
+
+/** Route-level capability advertisement for additive V1 message fields. The
+ * stored snapshot and its acknowledgement semantics are unchanged. */
+export function withAiWorkspaceFeatures(snapshot: AiWorkspaceSnapshot): AiWorkspaceSnapshot {
+  return { ...snapshot, features: [AI_WORKSPACE_FEATURES.replyProcess] };
 }
 
 /** Same measure as the aggregate save check: UTF-8 bytes of the stored JSON. Storage format is unchanged. */

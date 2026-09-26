@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import packageJson from "../../package.json";
 
 describe("AI browser libraries in desktop packages", () => {
-  it.each(["pdfjs-dist", "mammoth", "pptxgenjs"])("bundles %s with Vite instead of adding its Node dependency tree to Electron", name => {
+  it.each(["pdfjs-dist", "mammoth", "pptxgenjs", "highlight.js", "lowlight"])("bundles %s with Vite instead of adding its Node dependency tree to Electron", name => {
     expect(packageJson.devDependencies).toHaveProperty(name);
     expect(packageJson.dependencies).not.toHaveProperty(name);
   });

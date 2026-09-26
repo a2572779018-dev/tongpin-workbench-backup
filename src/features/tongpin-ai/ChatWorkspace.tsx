@@ -47,6 +47,9 @@ import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT } from "../../../shared/aiMedia";
 import { AttachmentChips } from "./AttachmentChips";
 import { containsFileDrag, uniqueIntakeFiles } from "./attachmentIntake";
 import { ChatMessageRow } from "./ChatMessageRow";
+import { ReplyProcessDetailsContext, ReplyProcessDetailsToggle, useReplyProcessDetails } from "./ReplyProcess";
+import { hasReplyProcess } from "./replyProcessModel";
+import { OPEN_MODAL_SELECTOR, shouldStopReplyOnEscape } from "./stopReplyShortcut";
 import { AiVideoComposer, type VideoComposerHandle } from "./AiVideoComposer";
 import type { MediaTaskRun } from "./mediaTaskClient";
 import { ComputerUsePanel } from "./ComputerUsePanel";
@@ -64,6 +67,8 @@ const EMPTY_PROJECT_DOCUMENTS: AiWorkspaceDocument[] = [];
 
 interface ChatWorkspaceProps {
   artifactById: Map<string, TongpinAIArtifact>;
+  /** Signed-in viewer; scopes the per-viewer "过程详情" display preference. */
+  viewerId?: string;
   composerFocusRequest: number;
   conversationId?: string;
   conversationTitle?: string;
@@ -144,6 +149,7 @@ interface ChatWorkspaceProps {
 
 export function ChatWorkspace({
   artifactById,
+  viewerId,
   composerFocusRequest,
   conversationId,
   conversationTitle,
@@ -217,7 +223,9 @@ export function ChatWorkspace({
   onCloseComputer,
   onComputerResult,
 }: ChatWorkspaceProps) {
+  const chatRef = useRef<HTMLElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const [processDetails, toggleProcessDetails] = useReplyProcessDetails(viewerId);
   const onVisibleRef = useRef(onMessageVisible); onVisibleRef.current = onMessageVisible;
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<ReturnType<typeof activeSkillMention>>();
@@ -562,6 +570,38 @@ export function ChatWorkspace({
     };
   }, [menu]);
 
+  // Esc stops the running reply through the same action as the stop button.
+  // The composer's @ list and menus, dialogs and IME keep their own Escape.
+  const stopRef = useRef(onStop);
+  stopRef.current = onStop;
+  const composerPopupRef = useRef(false);
+  composerPopupRef.current = Boolean(mention) || Boolean(menu);
+  const canStopWithEscape = responding && Boolean(onStop) && !computerRequest;
+  useEffect(() => {
+    if (!canStopWithEscape) return;
+    function stopOnEscape(event: globalThis.KeyboardEvent) {
+      if (!shouldStopReplyOnEscape(event, {
+        root: chatRef.current,
+        activeElement: document.activeElement,
+        body: document.body,
+        documentElement: document.documentElement,
+        modalOpen: Boolean(document.querySelector(OPEN_MODAL_SELECTOR)),
+        popupOpen: composerPopupRef.current,
+      })) return;
+      event.preventDefault();
+      stopRef.current?.();
+    }
+    document.addEventListener("keydown", stopOnEscape);
+    return () => document.removeEventListener("keydown", stopOnEscape);
+  }, [canStopWithEscape]);
+  const processAvailable = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === "assistant" && hasReplyProcess(message, message.artifactId ? artifactById.get(message.artifactId) : undefined)) return true;
+    }
+    return false;
+  }, [artifactById, messages]);
+
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
     const { mentionedTools, requestedTool } = resolveToolIntent(draft);
@@ -684,6 +724,7 @@ export function ChatWorkspace({
 
   return (
     <section
+      ref={chatRef}
       className={`tp-ai-chat${isEmpty ? " is-empty" : ""}`}
       aria-label={`与${assistantName}对话`}
       onDragEnter={event => { if (containsFileDrag(Array.from(event.dataTransfer.types))) { event.preventDefault(); dragDepth.current += 1; setDropActive(true); } }}
@@ -719,6 +760,7 @@ export function ChatWorkspace({
             </span>
           )}
         </div>
+        {!isEmpty && processAvailable ? <ReplyProcessDetailsToggle details={processDetails} onToggle={toggleProcessDetails} /> : null}
         {onEditPersona ? <button type="button" className="tp-ai-persona-settings-trigger" aria-label="专属 AI 设置" title="专属 AI 设置" onClick={onEditPersona}><Settings2 size={18} /></button> : null}
         <TongpinAINotificationButton
           unread={notificationUnread}
@@ -765,6 +807,7 @@ export function ChatWorkspace({
               if (hiddenCount > 0) setHistoryWindow({ conversationId, count: visibleCount + CHAT_MESSAGE_PAGE_SIZE });
               else onLoadEarlierMessages?.();
             }}>{loadingEarlierMessages ? "正在加载…" : hiddenCount > 0 ? `加载更早的消息（还有 ${hiddenCount} 条）` : "加载更早的消息"}</button>}
+            <ReplyProcessDetailsContext.Provider value={processDetails}>
             {messages.slice(hiddenCount).map(message => {
               const artifact = message.artifactId ? artifactById.get(message.artifactId) : undefined;
               const isVideoArtifact = artifact?.kind === "视频" && typeof artifact.data?.videoJobId === "string";
@@ -784,6 +827,7 @@ export function ChatWorkspace({
                 onEditVideo={isVideoArtifact && onSubmitVideo ? editVideo : undefined}
               />;
             })}
+            </ReplyProcessDetailsContext.Provider>
           </>
         )}
       </div>
@@ -1061,6 +1105,8 @@ export function ChatWorkspace({
                   type="button"
                   className="tp-ai-send-button"
                   aria-label={responsePhase === "typing" ? "立即显示完整回复" : "停止等待回复"}
+                  aria-keyshortcuts={canStopWithEscape ? "Escape" : undefined}
+                  title={canStopWithEscape ? "停止（Esc）" : undefined}
                   disabled={!onStop}
                   onClick={onStop}
                 >
@@ -1081,7 +1127,7 @@ export function ChatWorkspace({
           </form>
           )}
         </div>
-        <p className="tp-ai-composer-hint">{computerRequest ? "每个动作都需要一次原生确认；关闭即停止本机会话" : "Enter 发送 · Shift + Enter 换行"}</p>
+        <p className="tp-ai-composer-hint">{computerRequest ? "每个动作都需要一次原生确认；关闭即停止本机会话" : canStopWithEscape ? "按 Esc 停止当前回复" : "Enter 发送 · Shift + Enter 换行"}</p>
       </footer>
     </section>
   );

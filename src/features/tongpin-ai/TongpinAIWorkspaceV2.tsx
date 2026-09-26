@@ -23,7 +23,7 @@ import { registerAiLeaveGuard } from "./workspaceLeaveGuard";
 import { waitForReply } from "./waitForReply";
 import { workspaceV2Client } from "./workspaceV2Client";
 import type { TongpinAIMode, TongpinAIUsage } from "./types";
-import { applyLiveThinkingEvent, EMPTY_LIVE_THINKING, type TongpinAILiveThinking } from "./liveThinking";
+import { applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE, type AiReplyProcessLive } from "../../../shared/aiReplyProcess";
 import "./workspace-v2.css";
 
 type Bootstrap = Extract<AiWorkspaceV2Bootstrap, { schemaVersion: 2 }>;
@@ -81,7 +81,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const busyRef = useRef(new Set<string>());
-  const [streamContent, setStreamContent] = useState<Record<string, { content: string; analysisSummary: string; startedAt: number; liveThinking?: TongpinAILiveThinking }>>({});
+  const [streamContent, setStreamContent] = useState<Record<string, { content: string; analysisSummary: string; startedAt: number; liveProcess?: AiReplyProcessLive }>>({});
   const [loading, setLoading] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [notice, setNotice] = useState("");
@@ -441,14 +441,24 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       try {
         result = await readAiChatStream(api, request, { accountId: user.id, signal: controller.signal, onEvent: event => {
           if (!mountedRef.current) return;
-          if (event.type === "reasoning_delta" || event.type === "tool_progress") {
-            setStreamContent(old => old[id] ? ({ ...old, [id]: { ...old[id], liveThinking: applyLiveThinkingEvent(old[id].liveThinking ?? EMPTY_LIVE_THINKING, event) } }) : old);
+          if (event.type !== "answer_delta" && event.type !== "public_summary_delta") {
+            // Ordered process parts from real events only; raw provider reasoning is ignored.
+            setStreamContent(old => {
+              const current = old[id];
+              if (!current) return old;
+              const previous = current.liveProcess ?? EMPTY_REPLY_PROCESS_LIVE;
+              const liveProcess = applyReplyProcessEvent(previous, event);
+              return liveProcess === previous ? old : { ...old, [id]: { ...current, liveProcess } };
+            });
             return;
           }
-          if (event.type !== "answer_delta" && event.type !== "public_summary_delta") return;
           const delta = event.data.delta;
-          setStreamContent(old => ({ ...old, [id]: { ...old[id], content: (old[id]?.content ?? "") + (event.type === "answer_delta" ? delta : ""),
-            analysisSummary: (old[id]?.analysisSummary ?? "") + (event.type === "public_summary_delta" ? delta : ""), startedAt } }));
+          setStreamContent(old => {
+            const liveProcess = event.type === "public_summary_delta" ? applyReplyProcessEvent(old[id]?.liveProcess ?? EMPTY_REPLY_PROCESS_LIVE, event) : old[id]?.liveProcess;
+            return { ...old, [id]: { ...old[id], content: (old[id]?.content ?? "") + (event.type === "answer_delta" ? delta : ""),
+              analysisSummary: (old[id]?.analysisSummary ?? "") + (event.type === "public_summary_delta" ? delta : ""), startedAt,
+              ...(liveProcess ? { liveProcess } : {}) } };
+          });
         } });
       } catch (error) {
         if (!(error instanceof ApiRequestError) || !["NETWORK_UNAVAILABLE", "AI_STREAM_INTERRUPTED", "AI_REQUEST_IN_PROGRESS"].includes(error.code)) throw error;
@@ -478,12 +488,12 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
     }
   }, [activeId, aiStatus.configured, aiStatus.quota.remainingTokens, aiStatus.quickAgent, aiStatus.visionEnabled, api, artifacts, client, commitRecordedReply, flushDraft, mode, putCache, refreshStatus, saveAttachments, session, user.id]);
 
-  const displayMessages: Array<AiWorkspaceMessage & { liveThinking?: TongpinAILiveThinking }> = active ? [...active.messages] : [];
+  const displayMessages: Array<AiWorkspaceMessage & { liveProcess?: AiReplyProcessLive }> = active ? [...active.messages] : [];
   if (activeId && busy[activeId] && streamContent[activeId]) displayMessages.push({
     id: `stream-${activeId}`, role: "assistant", content: streamContent[activeId].content,
     analysisSummary: streamContent[activeId].analysisSummary || undefined,
     time: timeLabel(), status: streamContent[activeId].content ? "typing" : "thinking", startedAt: streamContent[activeId].startedAt,
-    ...(streamContent[activeId].liveThinking ? { liveThinking: streamContent[activeId].liveThinking } : {}),
+    ...(streamContent[activeId].liveProcess ? { liveProcess: streamContent[activeId].liveProcess } : {}),
   });
   const activeArtifacts = new Map(Object.entries(artifacts).filter(([, item]) => item.conversationId === activeId));
   const preview = previewId ? activeArtifacts.get(previewId) : undefined;
@@ -501,7 +511,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       </nav>}
       {!collapsed && <TongpinAIAccountUsage user={user} usage={usage} quotaSynced onRefresh={refreshStatus} />}
     </aside>
-    {activeId ? <ChatWorkspace key={activeId} textOnly assistantName={persona.profile.name || "同频 AI"} characterExpression={persona.profile.expression}
+    {activeId ? <ChatWorkspace key={activeId} viewerId={user.id} textOnly assistantName={persona.profile.name || "同频 AI"} characterExpression={persona.profile.expression}
       artifactById={activeArtifacts} composerFocusRequest={focusRequest} conversationId={activeId} conversationTitle={directoryItem?.title}
       projectId={directoryItem?.projectId} projectTitle={activeProjectTitle} projectContext={active?.project?.instructions}
       projectDocuments={active?.project?.contextDocuments} draft={active?.draft ?? ""} attachments={active?.attachments ?? []}

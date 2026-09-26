@@ -1,6 +1,6 @@
 import { AI_WORKSPACE_LIMITS } from "../../../shared/aiWorkspace";
 import { AiError } from "../../../server/ai/security";
-import type { AiWorkspaceRepository } from "../../../server/ai/workspace";
+import { withAiWorkspaceFeatures, type AiWorkspaceRepository } from "../../../server/ai/workspace";
 import { json, type UserRow } from "../platform";
 import { aiTenantIdFromPrincipal } from "../../../server/ai/tenant";
 
@@ -40,9 +40,9 @@ export async function handleAiWorkspaceRequest(
     const expectedAccount = request.headers.get("X-Tongpin-Account");
     if (expectedAccount !== null && expectedAccount !== user.id) throw new AiError(409, "AI_WORKSPACE_ACCOUNT_CHANGED", "当前登录账号已改变，请重新打开工作台");
     const tenantId = aiTenantIdFromPrincipal(user);
-    if (request.method === "GET") return json(repository.read(user.id, tenantId));
+    if (request.method === "GET") return json(withAiWorkspaceFeatures(repository.read(user.id, tenantId)));
     if (request.method === "PUT") {
-      return json(await repository.save(user.id, await parseWorkspaceJson(request), tenantId));
+      return json(withAiWorkspaceFeatures(await repository.save(user.id, await parseWorkspaceJson(request), tenantId)));
     }
     return json({ error: { code: "METHOD_NOT_ALLOWED", message: "此接口仅支持读取或保存工作台" } }, 405, { Allow: "GET, PUT" });
   } catch (error) {

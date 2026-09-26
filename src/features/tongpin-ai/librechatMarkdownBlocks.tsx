@@ -14,15 +14,17 @@ export type { MarkdownBlock } from "../../../shared/librechatMarkdownBlocks";
  * on blocks (display math stays one block). Upstream directive and
  * code/artifact providers remain omitted.
  */
-type RenderBlock = (source: string) => ReactNode;
+/** `start` is the block's UTF-16 offset in the full reply (used to place citation markers). */
+type RenderBlock = (source: string, start: number) => ReactNode;
 
 /** Memoized block from LibreChat's completed-block rendering pattern. */
-const CompletedMarkdownBlock = memo(function CompletedMarkdownBlock({ source, renderBlock }: {
+const CompletedMarkdownBlock = memo(function CompletedMarkdownBlock({ source, start, renderBlock }: {
   source: string;
+  start: number;
   renderBlock: RenderBlock;
 }) {
-  return renderBlock(source);
-}, (previous, next) => previous.source === next.source && previous.renderBlock === next.renderBlock);
+  return renderBlock(source, start);
+}, (previous, next) => previous.source === next.source && previous.start === next.start && previous.renderBlock === next.renderBlock);
 
 /** Main chat renderer: only the changing final block re-parses during SSE.
  * While streaming, the still-growing final block may use `renderTail` so an
@@ -34,6 +36,6 @@ export const StableMarkdownBlocks = memo(function StableMarkdownBlocks({ content
   renderTail?: RenderBlock;
 }) {
   const blocks = useMemo(() => splitMarkdownIntoBlocks(content), [content]);
-  return <>{blocks.map((block, index) => <CompletedMarkdownBlock key={index} source={block.raw}
+  return <>{blocks.map((block, index) => <CompletedMarkdownBlock key={index} source={block.raw} start={block.start}
     renderBlock={renderTail && index === blocks.length - 1 ? renderTail : renderBlock} />)}</>;
 });

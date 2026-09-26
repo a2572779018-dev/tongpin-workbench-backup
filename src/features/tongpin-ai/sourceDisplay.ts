@@ -1,25 +1,11 @@
 import type { AiSource } from "../../../shared/ai";
+import { sourceIdentity } from "../../../shared/aiCitations";
+
+/** Shared with the server so citation numbers and this list can never disagree. */
+export { sourceIdentity };
 
 /** How many citations stay visible before the rest fold behind a toggle. */
 export const VISIBLE_SOURCE_COUNT = 5;
-
-const TRACKING_PARAM = /^(utm_[a-z]+|spm|from|ref|ref_src|fbclid|gclid)$/i;
-
-/** Same page = same scheme-less host + path + meaningful query. Fragments and
- * tracking parameters never make a citation a different source. */
-export function sourceIdentity(raw: string): string {
-  try {
-    const url = new URL(raw);
-    const query = [...url.searchParams.entries()]
-      .filter(([key]) => !TRACKING_PARAM.test(key))
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${value}`).join("&");
-    const pathname = url.pathname.replace(/\/+$/, "") || "/";
-    return `${url.hostname.replace(/^www\./, "").toLowerCase()}${pathname}${query ? `?${query}` : ""}`;
-  } catch {
-    return raw.trim();
-  }
-}
 
 /** A readable label: a real page title, or host + short path when the
  * provider only returned the bare domain as the "title". */
