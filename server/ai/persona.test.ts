@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import request from "supertest";
@@ -12,6 +11,7 @@ import type { AppConfig } from "../config";
 import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AiPersonaRepository, validateAiPersonaProfile } from "./persona";
 import { chatInstructions } from "./capabilities";
+import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 
 const workerRouteModulePath = "../../cloudflare/src/ai/personaRoutes";
 const { handleAiPersonaRequest } = await import(workerRouteModulePath) as {
@@ -24,25 +24,6 @@ function adapter(database: DatabaseSync): AiSql {
     all<T>(query: string, ...bindings: Array<string | number | null>): T[] { return database.prepare(query).all(...bindings) as T[]; },
     transaction<T>(action: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = action(); database.exec("COMMIT"); return result; } catch (error) { database.exec("ROLLBACK"); throw error; } },
   };
-}
-/**
- * supertest(app) binds the wildcard address on an ephemeral port and then dials
- * 127.0.0.1:<port>. On macOS (SO_REUSEADDR, BSD more-specific-bind-wins) that port
- * can already be held on 127.0.0.1 by a server in a parallel test worker, so the
- * request silently reaches the other runtime (different JWT secret/users) and
- * returns 401/403 from the wrong app. Bind loopback explicitly so the kernel only
- * hands out a port that is free on 127.0.0.1 and requests always reach this app.
- */
-async function listenLoopback(app: import("express").Express): Promise<Server> {
-  const server = app.listen(0, "127.0.0.1");
-  await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
-  expect((server.address() as AddressInfo).address).toBe("127.0.0.1");
-  return server;
-}
-async function closeServer(server: Server | undefined): Promise<void> {
-  if (!server?.listening) return;
-  server.closeAllConnections();
-  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 }
 function profile(name = "小频"): AiPersonaProfile {
   return { name, tone: "warm", customStyle: "语气自然、耐心，像一位长期合作的伙伴", preferences: "优先用中文回答；解释时先给结论", onboardingComplete: true };

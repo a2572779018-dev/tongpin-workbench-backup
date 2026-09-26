@@ -1,5 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import WebSocket from "ws";
 import { createRuntime, type AppRuntime } from "./app";
 import { businessDateKey, taskDatesForScope } from "./business-date";
 import { loadConfig } from "./config";
+import { closeServer, listenLoopback } from "./testSupport/loopbackServer";
 
 const TODAY = businessDateKey();
 const yesterday = new Date(`${TODAY}T00:00:00Z`);
@@ -17,6 +19,7 @@ const YESTERDAY = yesterday.toISOString().slice(0, 10);
 
 describe("同频 API 纵向流程", () => {
   let runtime: AppRuntime;
+  let http: Server;
   let temporaryRoot: string;
   let adminToken = "";
   let aliceToken = "";
@@ -46,9 +49,11 @@ describe("同频 API 纵向流程", () => {
         resolve();
       });
     });
+    http = await listenLoopback(runtime.app);
   });
 
   afterAll(async () => {
+    await closeServer(http);
     await runtime.close();
     const resolved = path.resolve(temporaryRoot);
     if (!resolved.startsWith(path.resolve(os.tmpdir()))) {
@@ -62,20 +67,20 @@ describe("同频 API 纵向流程", () => {
     email: string,
     password: string,
   ): Promise<string> {
-    const registered = await request(runtime.app)
+    const registered = await request(http)
       .post("/api/auth/register")
       .send({ name, email, password })
       .expect(201);
     expect(registered.body.delivery).toBe("preview");
     expect(registered.body.debugCode).toMatch(/^\d{6}$/);
 
-    const throttled = await request(runtime.app)
+    const throttled = await request(http)
       .post("/api/auth/resend-code")
       .send({ email, purpose: "register" })
       .expect(429);
     expect(throttled.body.error.code).toBe("CODE_COOLDOWN");
 
-    const verified = await request(runtime.app)
+    const verified = await request(http)
       .post("/api/auth/verify-email")
       .send({ email, code: registered.body.debugCode })
       .expect(200);
@@ -84,7 +89,7 @@ describe("同频 API 纵向流程", () => {
   }
 
   async function approve(userId: string): Promise<void> {
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/admin/users/${userId}/access`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ status: "active" })
@@ -141,7 +146,7 @@ describe("同频 API 纵向流程", () => {
 
   it("persists verification failures and locks registration and reset codes after five attempts", async () => {
     const registrationEmail = "registration-lockout@example.com";
-    const registration = await request(runtime.app)
+    const registration = await request(http)
       .post("/api/auth/register")
       .send({
         name: "注册锁定测试",
@@ -152,20 +157,20 @@ describe("同频 API 纵向流程", () => {
     const wrongRegistrationCode =
       registration.body.debugCode === "000000" ? "999999" : "000000";
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const rejected = await request(runtime.app)
+      const rejected = await request(http)
         .post("/api/auth/verify-email")
         .send({ email: registrationEmail, code: wrongRegistrationCode })
         .expect(400);
       expect(rejected.body.error.code).toBe("CODE_INVALID");
     }
-    const registrationLocked = await request(runtime.app)
+    const registrationLocked = await request(http)
       .post("/api/auth/verify-email")
       .send({ email: registrationEmail, code: registration.body.debugCode })
       .expect(429);
     expect(registrationLocked.body.error.code).toBe("CODE_LOCKED");
 
     const resetEmail = "reset-lockout@example.com";
-    const resetRegistration = await request(runtime.app)
+    const resetRegistration = await request(http)
       .post("/api/auth/register")
       .send({
         name: "重置锁定测试",
@@ -173,18 +178,18 @@ describe("同频 API 纵向流程", () => {
         password: "BeforeReset123",
       })
       .expect(201);
-    await request(runtime.app)
+    await request(http)
       .post("/api/auth/verify-email")
       .send({ email: resetEmail, code: resetRegistration.body.debugCode })
       .expect(200);
-    const forgot = await request(runtime.app)
+    const forgot = await request(http)
       .post("/api/auth/forgot-password")
       .send({ email: resetEmail })
       .expect(200);
     const wrongResetCode =
       forgot.body.debugCode === "000000" ? "999999" : "000000";
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const rejected = await request(runtime.app)
+      const rejected = await request(http)
         .post("/api/auth/reset-password")
         .send({
           email: resetEmail,
@@ -194,7 +199,7 @@ describe("同频 API 纵向流程", () => {
         .expect(400);
       expect(rejected.body.error.code).toBe("CODE_INVALID");
     }
-    const resetLocked = await request(runtime.app)
+    const resetLocked = await request(http)
       .post("/api/auth/reset-password")
       .send({
         email: resetEmail,
@@ -206,7 +211,7 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("完成邮箱注册、验证、等待审批、批准与登录", async () => {
-    const health = await request(runtime.app).get("/api/health").expect(200);
+    const health = await request(http).get("/api/health").expect(200);
     expect(health.body.mailMode).toBe("preview");
 
     aliceId = await registerAndVerify(
@@ -215,20 +220,20 @@ describe("同频 API 纵向流程", () => {
       "Alice1234",
     );
 
-    const pendingLogin = await request(runtime.app)
+    const pendingLogin = await request(http)
       .post("/api/auth/login")
       .send({ email: "alice@example.com", password: "Alice1234" })
       .expect(403);
     expect(pendingLogin.body.error.code).toBe("ACCOUNT_PENDING");
 
-    const adminLogin = await request(runtime.app)
+    const adminLogin = await request(http)
       .post("/api/auth/login")
       .send({ email: "admin@example.com", password: "Admin123!" })
       .expect(200);
     adminToken = adminLogin.body.accessToken;
     expect(adminLogin.body.user.role).toBe("admin");
 
-    const users = await request(runtime.app)
+    const users = await request(http)
       .get("/api/admin/users")
       .set("Authorization", `Bearer ${adminToken}`)
       .expect(200);
@@ -239,7 +244,7 @@ describe("同频 API 纵向流程", () => {
 
     await approve(aliceId);
 
-    const login = await request(runtime.app)
+    const login = await request(http)
       .post("/api/auth/login")
       .send({ email: "alice@example.com", password: "Alice1234" })
       .expect(200);
@@ -249,20 +254,20 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("支持刷新会话与完整找回密码流程", async () => {
-    const refreshed = await request(runtime.app)
+    const refreshed = await request(http)
       .post("/api/auth/refresh")
       .send({ refreshToken: aliceRefreshToken })
       .expect(200);
     aliceToken = refreshed.body.accessToken;
     aliceRefreshToken = refreshed.body.refreshToken;
 
-    const forgot = await request(runtime.app)
+    const forgot = await request(http)
       .post("/api/auth/forgot-password")
       .send({ email: "alice@example.com" })
       .expect(200);
     expect(forgot.body.debugCode).toMatch(/^\d{6}$/);
 
-    await request(runtime.app)
+    await request(http)
       .post("/api/auth/reset-password")
       .send({
         email: "alice@example.com",
@@ -271,12 +276,12 @@ describe("同频 API 纵向流程", () => {
       })
       .expect(200);
 
-    await request(runtime.app)
+    await request(http)
       .post("/api/auth/login")
       .send({ email: "alice@example.com", password: "Alice1234" })
       .expect(401);
 
-    const login = await request(runtime.app)
+    const login = await request(http)
       .post("/api/auth/login")
       .send({ email: "alice@example.com", password: "Alice5678" })
       .expect(200);
@@ -284,7 +289,7 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("成员有系统默认头像，也可以上传和恢复自定义头像", async () => {
-    const before = await request(runtime.app)
+    const before = await request(http)
       .get("/api/auth/me")
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
@@ -294,7 +299,7 @@ describe("同频 API 纵向流程", () => {
 
     const pngDataUrl =
       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-    const uploaded = await request(runtime.app)
+    const uploaded = await request(http)
       .patch("/api/auth/me/avatar")
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({ dataUrl: pngDataUrl })
@@ -303,13 +308,13 @@ describe("同频 API 纵向流程", () => {
     expect(uploaded.body.user.avatarVersion).toBe(1);
     expect(uploaded.body.user).not.toHaveProperty("avatarDataUrl");
 
-    const avatar = await request(runtime.app)
+    const avatar = await request(http)
       .get(`/api/avatars/${aliceId}?v=1`)
       .expect(200)
       .expect("Content-Type", /image\/png/);
     expect(Buffer.isBuffer(avatar.body)).toBe(true);
 
-    const restored = await request(runtime.app)
+    const restored = await request(http)
       .patch("/api/auth/me/avatar")
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({ dataUrl: null })
@@ -321,13 +326,13 @@ describe("同频 API 纵向流程", () => {
   it("服务端强制隔离成员任务，不依赖前端隐藏", async () => {
     bobId = await registerAndVerify("周野", "bob@example.com", "Bob12345");
     await approve(bobId);
-    const bobLogin = await request(runtime.app)
+    const bobLogin = await request(http)
       .post("/api/auth/login")
       .send({ email: "bob@example.com", password: "Bob12345" })
       .expect(200);
     bobToken = bobLogin.body.accessToken;
 
-    const created = await request(runtime.app)
+    const created = await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({
@@ -341,26 +346,26 @@ describe("同频 API 纵向流程", () => {
     expect(created.body.task.priority).toBe("p0");
     expect(created.body.tasks).toEqual([created.body.task]);
 
-    const bobTasks = await request(runtime.app)
+    const bobTasks = await request(http)
       .get(`/api/tasks?date=${TODAY}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
     expect(bobTasks.body.tasks).toHaveLength(0);
 
-    const deferred = await request(runtime.app)
+    const deferred = await request(http)
       .patch(`/api/tasks/${aliceTaskId}`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({ priority: "p4" })
       .expect(200);
     expect(deferred.body.task.priority).toBe("p4");
 
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/tasks/${aliceTaskId}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ status: "done" })
       .expect(404);
 
-    const completed = await request(runtime.app)
+    const completed = await request(http)
       .patch(`/api/tasks/${aliceTaskId}`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({ status: "done" })
@@ -371,7 +376,7 @@ describe("同频 API 纵向流程", () => {
   it("可从所选日期原子创建本周剩余每天的任务", async () => {
     const expectedDates = taskDatesForScope(TODAY, "rest_of_week");
     const title = `本周每日任务-${randomUUID()}`;
-    const created = await request(runtime.app)
+    const created = await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({
@@ -420,7 +425,7 @@ describe("同频 API 纵向流程", () => {
       true,
     );
 
-    await request(runtime.app)
+    await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({
@@ -438,13 +443,13 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("管理员可设置老板，老板可看进度并给成员发送通知", async () => {
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/admin/users/${aliceId}/role`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ role: "boss" })
       .expect(200);
 
-    const lockedAvatar = await request(runtime.app)
+    const lockedAvatar = await request(http)
       .patch("/api/auth/me/avatar")
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({ dataUrl: null })
@@ -454,7 +459,7 @@ describe("同频 API 纵向流程", () => {
       message: "不好意思，您无权限更换自己的头像",
     });
 
-    const team = await request(runtime.app)
+    const team = await request(http)
       .get(`/api/boss/team?date=${TODAY}`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
@@ -463,7 +468,7 @@ describe("同频 API 纵向流程", () => {
     );
     expect(alice.completionRate).toBe(100);
 
-    await request(runtime.app)
+    await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({
@@ -472,7 +477,7 @@ describe("同频 API 纵向流程", () => {
         priority: "p3",
       })
       .expect(201);
-    await request(runtime.app)
+    await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({
@@ -482,7 +487,7 @@ describe("同频 API 纵向流程", () => {
       })
       .expect(201);
 
-    const taskDetails = await request(runtime.app)
+    const taskDetails = await request(http)
       .get(`/api/boss/members/${aliceId}/tasks?date=${TODAY}`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
@@ -493,7 +498,7 @@ describe("同频 API 纵向流程", () => {
       ),
     ).toEqual(["p1:todo", "p3:todo", "p4:done"]);
 
-    const history = await request(runtime.app)
+    const history = await request(http)
       .get(
         `/api/boss/members/${aliceId}/tasks/${aliceTaskId}/history`,
       )
@@ -552,7 +557,7 @@ describe("同频 API 纵向流程", () => {
         },
       );
 
-      const sent = await request(runtime.app)
+      const sent = await request(http)
         .post("/api/boss/notifications")
         .set("Authorization", `Bearer ${aliceToken}`)
         .send({
@@ -580,7 +585,7 @@ describe("同频 API 纵向流程", () => {
         bossSocket,
         "notification:receipt",
       );
-      const delivered = await request(runtime.app)
+      const delivered = await request(http)
         .patch(`/api/notifications/${notificationId}/delivered`)
         .set("Authorization", `Bearer ${bobToken}`)
         .expect(200);
@@ -597,7 +602,7 @@ describe("同频 API 纵向流程", () => {
         socket,
         "notification:ding",
       );
-      const dinged = await request(runtime.app)
+      const dinged = await request(http)
         .post(`/api/boss/notification-dispatches/${dispatchId}/ding`)
         .set("Authorization", `Bearer ${aliceToken}`)
         .expect(200);
@@ -611,7 +616,7 @@ describe("同频 API 纵向流程", () => {
         bossSocket,
         "notification:receipt",
       );
-      const acknowledged = await request(runtime.app)
+      const acknowledged = await request(http)
         .patch(`/api/notifications/${notificationId}/acknowledge`)
         .set("Authorization", `Bearer ${bobToken}`)
         .expect(200);
@@ -624,7 +629,7 @@ describe("同频 API 纵向流程", () => {
         ).acknowledgedAt,
       ).toBeTruthy();
 
-      const dispatches = await request(runtime.app)
+      const dispatches = await request(http)
         .get("/api/boss/notification-dispatches")
         .set("Authorization", `Bearer ${aliceToken}`)
         .expect(200);
@@ -634,12 +639,12 @@ describe("同频 API 纵向流程", () => {
         acknowledged: 1,
         pending: 0,
       });
-      await request(runtime.app)
+      await request(http)
         .post(`/api/boss/notification-dispatches/${dispatchId}/ding`)
         .set("Authorization", `Bearer ${aliceToken}`)
         .expect(409);
 
-      const inbox = await request(runtime.app)
+      const inbox = await request(http)
         .get("/api/notifications")
         .set("Authorization", `Bearer ${bobToken}`)
         .expect(200);
@@ -665,7 +670,7 @@ describe("同频 API 纵向流程", () => {
       });
       await bossReady;
 
-      const sent = await request(runtime.app)
+      const sent = await request(http)
         .post("/api/boss/notifications")
         .set("Authorization", `Bearer ${aliceToken}`)
         .send({
@@ -702,7 +707,7 @@ describe("同频 API 纵向流程", () => {
         acknowledgedAt: null,
       });
 
-      const inbox = await request(runtime.app)
+      const inbox = await request(http)
         .get("/api/notifications")
         .set("Authorization", `Bearer ${bobToken}`)
         .expect(200);
@@ -713,7 +718,7 @@ describe("同频 API 纵向流程", () => {
       ).toBe(true);
 
       const receipt = waitForRealtimeMessage(bossSocket, "notification:receipt");
-      const delivered = await request(runtime.app)
+      const delivered = await request(http)
         .patch(`/api/notifications/${notificationId}/delivered`)
         .set("Authorization", `Bearer ${bobToken}`)
         .expect(200);
@@ -733,14 +738,14 @@ describe("同频 API 纵向流程", () => {
           (data as { notificationId?: string } | undefined)?.notificationId ===
           notificationId,
       );
-      const repeated = await request(runtime.app)
+      const repeated = await request(http)
         .patch(`/api/notifications/${notificationId}/delivered`)
         .set("Authorization", `Bearer ${bobToken}`)
         .expect(200);
       expect(repeated.body.notification.deliveredAt).toBe(deliveredAt);
       await noDuplicateReceipt;
 
-      const dispatches = await request(runtime.app)
+      const dispatches = await request(http)
         .get("/api/boss/notification-dispatches")
         .set("Authorization", `Bearer ${aliceToken}`)
         .expect(200);
@@ -794,7 +799,7 @@ describe("同频 API 纵向流程", () => {
       waitForRealtimeMessage(firstDevice, "notification:new", isThisReminder),
       waitForRealtimeMessage(secondDevice, "notification:new", isThisReminder),
     ];
-    const sent = await request(runtime.app)
+    const sent = await request(http)
       .post("/api/boss/notifications")
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({
@@ -836,7 +841,7 @@ describe("同频 API 纵向流程", () => {
         (data as { notificationId?: string } | undefined)?.notificationId ===
         notificationId,
     );
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/notifications/${notificationId}/delivered`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
@@ -879,7 +884,7 @@ describe("同频 API 纵向流程", () => {
             ?.acknowledgedAt,
         ),
     );
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/notifications/${notificationId}/acknowledge`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
@@ -897,7 +902,7 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("成员可按姓名确认联系人，并实时收发持久化消息", async () => {
-    const search = await request(runtime.app)
+    const search = await request(http)
       .get("/api/contacts/search?q=林小满")
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
@@ -908,7 +913,7 @@ describe("同频 API 纵向流程", () => {
       role: "boss",
     });
 
-    const added = await request(runtime.app)
+    const added = await request(http)
       .post("/api/contacts")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ userId: aliceId })
@@ -925,7 +930,7 @@ describe("同频 API 纵向流程", () => {
     await waitForRealtimeMessage(socket, "realtime:ready");
     const pushedMessage = waitForRealtimeMessage(socket, "message:new");
 
-    const sent = await request(runtime.app)
+    const sent = await request(http)
       .post(`/api/contacts/${aliceId}/messages`)
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ body: "复盘材料已经整理好了。" })
@@ -946,14 +951,14 @@ describe("同频 API 纵向流程", () => {
     });
     socket.close();
 
-    const aliceContacts = await request(runtime.app)
+    const aliceContacts = await request(http)
       .get("/api/contacts")
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
     expect(aliceContacts.body.unread).toBe(1);
     expect(aliceContacts.body.contacts[0].user.id).toBe(bobId);
 
-    const messages = await request(runtime.app)
+    const messages = await request(http)
       .get(`/api/contacts/${bobId}/messages`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
@@ -962,11 +967,11 @@ describe("同频 API 纵向流程", () => {
       "复盘材料已经整理好了。",
     );
 
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/contacts/${bobId}/read`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
-    const afterRead = await request(runtime.app)
+    const afterRead = await request(http)
       .get("/api/contacts")
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
@@ -981,7 +986,7 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("同频闪信由服务端在已读后隐去内容并保留记录", async () => {
-    const sent = await request(runtime.app)
+    const sent = await request(http)
       .post(`/api/contacts/${aliceId}/messages`)
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ body: "只在读到时出现", mode: "flash" })
@@ -989,7 +994,7 @@ describe("同频 API 纵向流程", () => {
     expect(sent.body.message.mode).toBe("flash");
     expect(sent.body.message.expiresAt).toBeNull();
 
-    const read = await request(runtime.app)
+    const read = await request(http)
       .patch(`/api/contacts/${bobId}/read`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
@@ -1005,7 +1010,7 @@ describe("同频 API 纵向流程", () => {
       );
       if (message) message.expiresAt = new Date(Date.now() - 1_000).toISOString();
     });
-    const messages = await request(runtime.app)
+    const messages = await request(http)
       .get(`/api/contacts/${bobId}/messages`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .expect(200);
@@ -1036,7 +1041,7 @@ describe("同频 API 纵向流程", () => {
     ]);
 
     const pushed = waitForRealtimeMessage(memberSocket, "task:assigned");
-    const assigned = await request(runtime.app)
+    const assigned = await request(http)
       .post(`/api/boss/members/${bobId}/tasks`)
       .set("Authorization", `Bearer ${aliceToken}`)
       .send({
@@ -1051,7 +1056,7 @@ describe("同频 API 纵向流程", () => {
       assigner: { id: aliceId },
     });
 
-    const pending = await request(runtime.app)
+    const pending = await request(http)
       .get("/api/tasks/assignments/pending")
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
@@ -1061,7 +1066,7 @@ describe("同频 API 纵向流程", () => {
       bossSocket,
       "task:assignment-receipt",
     );
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/tasks/${assigned.body.task.id}/assignment-delivered`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
@@ -1070,18 +1075,18 @@ describe("同频 API 纵向流程", () => {
       task: { id: assigned.body.task.id },
     });
 
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/tasks/${assigned.body.task.id}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ title: "擅自改名" })
       .expect(403);
-    await request(runtime.app)
+    await request(http)
       .delete(`/api/tasks/${assigned.body.task.id}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(403);
 
     const statusPush = waitForRealtimeMessage(bossSocket, "task:status");
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/tasks/${assigned.body.task.id}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ status: "done" })
@@ -1115,7 +1120,7 @@ describe("同频 API 纵向流程", () => {
       waitForRealtimeMessage(firstDevice, "task:changed"),
       waitForRealtimeMessage(secondDevice, "task:changed"),
     ];
-    const created = await request(runtime.app)
+    const created = await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({
@@ -1134,7 +1139,7 @@ describe("同频 API 纵向流程", () => {
       waitForRealtimeMessage(firstDevice, "task:batch-changed"),
       waitForRealtimeMessage(secondDevice, "task:batch-changed"),
     ];
-    const weekly = await request(runtime.app)
+    const weekly = await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({
@@ -1156,7 +1161,7 @@ describe("同频 API 纵向流程", () => {
       waitForRealtimeMessage(firstDevice, "task:changed"),
       waitForRealtimeMessage(secondDevice, "task:changed"),
     ];
-    await request(runtime.app)
+    await request(http)
       .patch(`/api/tasks/${created.body.task.id}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ status: "doing" })
@@ -1171,7 +1176,7 @@ describe("同频 API 纵向流程", () => {
       waitForRealtimeMessage(firstDevice, "task:deleted"),
       waitForRealtimeMessage(secondDevice, "task:deleted"),
     ];
-    await request(runtime.app)
+    await request(http)
       .delete(`/api/tasks/${created.body.task.id}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(204);
@@ -1187,7 +1192,7 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("昨日未完成任务只复制到今天一次，历史日期保持不变", async () => {
-    await request(runtime.app)
+    await request(http)
       .post("/api/tasks")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({
@@ -1223,13 +1228,13 @@ describe("同频 API 纵向流程", () => {
         updatedAt: seededAt,
       });
     });
-    const prompt = await request(runtime.app)
+    const prompt = await request(http)
       .get(`/api/tasks/rollover?targetDate=${TODAY}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
     expect(prompt.body.pending).toBe(true);
 
-    const carried = await request(runtime.app)
+    const carried = await request(http)
       .post("/api/tasks/rollover")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({
@@ -1243,7 +1248,7 @@ describe("同频 API 纵向流程", () => {
       sourceTaskId: originalTaskId,
     });
 
-    const repeated = await request(runtime.app)
+    const repeated = await request(http)
       .post("/api/tasks/rollover")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({
@@ -1312,7 +1317,7 @@ describe("同频 API 纵向流程", () => {
       );
     });
 
-    const candidates = await request(runtime.app)
+    const candidates = await request(http)
       .get(`/api/tasks/sync-to-today?sourceDate=${YESTERDAY}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(200);
@@ -1323,14 +1328,14 @@ describe("同频 API 纵向流程", () => {
       candidates.body.tasks.map((task: { id: string }) => task.id),
     ).not.toContain(completedTaskId);
 
-    const first = await request(runtime.app)
+    const first = await request(http)
       .post("/api/tasks/sync-to-today")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ sourceDate: YESTERDAY, taskIds: [taskId] })
       .expect(201);
     expect(first.body.created).toHaveLength(1);
 
-    const repeated = await request(runtime.app)
+    const repeated = await request(http)
       .post("/api/tasks/sync-to-today")
       .set("Authorization", `Bearer ${bobToken}`)
       .send({ sourceDate: YESTERDAY, taskIds: [taskId] })
@@ -1345,11 +1350,11 @@ describe("同频 API 纵向流程", () => {
   });
 
   it("普通成员无法访问管理员端和老板端", async () => {
-    await request(runtime.app)
+    await request(http)
       .get("/api/admin/users")
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(403);
-    await request(runtime.app)
+    await request(http)
       .get(`/api/boss/team?date=${TODAY}`)
       .set("Authorization", `Bearer ${bobToken}`)
       .expect(403);

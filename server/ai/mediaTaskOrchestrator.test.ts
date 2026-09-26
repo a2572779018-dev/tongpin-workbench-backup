@@ -309,6 +309,29 @@ describe("real AiService media orchestration", () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
+  it("carries an explicit @Skill or @Hub from the frozen request into the media planner", async () => {
+    transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+    const skillRun = await orchestrator.submit("member", { ...input(), entrypoint: "mention_image" as const, requestText: "@image @campaign-planner 画一张蓝色科技海报" });
+    await orchestrator.advance("member", skillRun.runId);
+    const skillBody = JSON.stringify(JSON.parse(transport.mock.calls[0][1].body!).messages[0]);
+    expect(skillBody).toContain("活动策划：");
+    expect(skillBody).not.toContain("受限 Hub 工作流");
+
+    transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+    const hubRun = await orchestrator.submit("member", { ...input(), conversationId: "conversation-b", entrypoint: "mention_image" as const, requestText: "@image @hub-content-delivery 画一张蓝色科技海报" });
+    await orchestrator.advance("member", hubRun.runId);
+    const hubBody = JSON.stringify(JSON.parse(transport.mock.calls[1][1].body!).messages[0]);
+    expect(hubBody).toContain("内容交付 Hub");
+    expect(hubBody).toContain("内容精修：");
+
+    transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+    const plainRun = await orchestrator.submit("member", { ...input(), conversationId: "conversation-c" });
+    await orchestrator.advance("member", plainRun.runId);
+    const plainBody = JSON.stringify(JSON.parse(transport.mock.calls[2][1].body!).messages[0]);
+    expect(plainBody).not.toContain("活动策划：");
+    expect(plainBody).not.toContain("受限 Hub 工作流");
+  });
+
   it("freezes bounded same-conversation history, strips links, and never re-reads edited history while planning", async () => {
     const state = (oldText: string) => ({
       view: "chat" as const, mode: "quick" as const, projects: [], artifacts: [], drafts: {}, enabledSkillIds: [],

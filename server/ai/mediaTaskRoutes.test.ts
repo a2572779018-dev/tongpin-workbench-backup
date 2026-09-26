@@ -1,5 +1,6 @@
 import express, { type NextFunction, type Request, type Response as ExpressResponse } from "express";
 import { mkdtemp, rm } from "node:fs/promises";
+import type { Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
@@ -11,6 +12,7 @@ import { AiWorkspaceRepository } from "./workspace";
 import { createNodeAi } from "./node";
 import type { AiTransport } from "./provider";
 import type { SubmitMediaTask } from "./mediaTaskOrchestrator";
+import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const provider = {
@@ -42,16 +44,17 @@ describe("Node authenticated media-task routes", () => {
   let directory: string;
   let node: Awaited<ReturnType<typeof createNodeAi>>;
   let app: express.Express;
+  let http: Server | undefined;
   const transport = vi.fn<AiTransport>();
   const actorHeaders = (userId = "member-a", tenantId = "tenant-alpha") => ({
     "X-Test-User": userId, "X-Authenticated-Tenant": tenantId, "X-Tongpin-Account": userId,
   });
-  const get = (url: string, userId = "member-a", tenantId = "tenant-alpha") => request(app).get(url).set(actorHeaders(userId, tenantId));
+  const get = (url: string, userId = "member-a", tenantId = "tenant-alpha") => request(http!).get(url).set(actorHeaders(userId, tenantId));
   const post = (url: string, body?: unknown, userId = "member-a", tenantId = "tenant-alpha") => {
-    const call = request(app).post(url).set(actorHeaders(userId, tenantId));
+    const call = request(http!).post(url).set(actorHeaders(userId, tenantId));
     return body === undefined ? call : call.send(body as string | object);
   };
-  const remove = (url: string, userId = "member-a", tenantId = "tenant-alpha") => request(app).delete(url).set(actorHeaders(userId, tenantId));
+  const remove = (url: string, userId = "member-a", tenantId = "tenant-alpha") => request(http!).delete(url).set(actorHeaders(userId, tenantId));
   const waitForStatus = async (requestId: string, status: string) => {
     let last: Record<string, unknown> | undefined;
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -105,9 +108,10 @@ describe("Node authenticated media-task routes", () => {
     app.use((error: { status?: number; code?: string; message?: string }, _request: Request, response: ExpressResponse, _next: NextFunction) => {
       response.status(error.status ?? 500).json({ error: { code: error.code ?? "TEST_ROUTE_ERROR", message: error.message ?? "failed" } });
     });
+    http = await listenLoopback(app);
   });
 
-  afterEach(async () => { node.close(); await rm(directory, { recursive: true }); });
+  afterEach(async () => { await closeServer(http); http = undefined; node.close(); await rm(directory, { recursive: true }); });
 
   it("returns queued before finish-time planning, recovers by request, isolates the principal, and never invents payment consent", async () => {
     const planner = deferred<Response>();
@@ -133,7 +137,7 @@ describe("Node authenticated media-task routes", () => {
     expect((await get(`/api/ai/media-tasks/${submitted.body.task.runId}/events`).expect(200)).body.events).toEqual([]);
 
     await post(`/api/ai/media-tasks/${submitted.body.task.runId}/authorize`, { confirmed: false, maxPointsPerTool: 1000 }).expect(400);
-    await request(app).post(`/api/ai/media-tasks/${submitted.body.task.runId}/authorize`).set(actorHeaders()).set("Content-Type", "application/json").send('{"confirmed":').expect(400);
+    await request(http!).post(`/api/ai/media-tasks/${submitted.body.task.runId}/authorize`).set(actorHeaders()).set("Content-Type", "application/json").send('{"confirmed":').expect(400);
     expect(transport).toHaveBeenCalledTimes(1);
     transport.mockResolvedValueOnce(image());
     const authorized = await post(`/api/ai/media-tasks/${submitted.body.task.runId}/authorize`, { confirmed: true, maxPointsPerTool: 1000 }).expect(200);
@@ -162,7 +166,7 @@ describe("Node authenticated media-task routes", () => {
     await get(eventsUrl, "member-a", "tenant-beta").expect(404);
 
     await post(`/api/ai/media-tasks/${submitted.body.task.runId}/answer`, { questionId, answer: "" }).expect(400);
-    await request(app).post(`/api/ai/media-tasks/${submitted.body.task.runId}/answer`).set(actorHeaders()).set("Content-Type", "application/json").send("not-json").expect(400);
+    await request(http!).post(`/api/ai/media-tasks/${submitted.body.task.runId}/answer`).set(actorHeaders()).set("Content-Type", "application/json").send("not-json").expect(400);
     transport.mockResolvedValueOnce(plan("一只蓝色的猫"));
     const answered = await post(`/api/ai/media-tasks/${submitted.body.task.runId}/answer`, { questionId, answer: "一只蓝色的猫" }).expect(200);
     expect(answered.body.task.status).toBe("queued");

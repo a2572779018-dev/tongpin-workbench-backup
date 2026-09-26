@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatRequest, AiProviderInput } from "../../shared/ai";
 import { createNodeAi } from "./node";
 import { type AiTransport, parseProviderResult } from "./provider";
-import { chatInputReserve, parseChatCapabilities, parsePresentation, parseToolPlan, parseToolClarification, safeSource, validateImageBase64 } from "./capabilities";
+import { REVIEWED_SKILL_IDS } from "../../src/features/tongpin-ai/skills";
+import { chatInputReserve, MEMBER_SKILL_IDS, memberMentionCapabilities, parseChatCapabilities, parsePresentation, parseToolPlan, parseToolClarification, safeSource, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
 import { AI_CHAT_CONTEXT_LIMITS, AI_CONTEXT_WINDOW_PREFIX } from "../../shared/aiContext";
 import { toolPlanContextFingerprint } from "./toolPlans";
@@ -663,5 +664,19 @@ describe("Capability input and provider output limits", () => {
   });
   it.each(["javascript:alert(1)", "file:///etc/passwd", "https://127.0.0.1/private", "https://user:pass@example.com", "https://example.local/foo", "data:text/html,abc"])("does not expose unsafe source link %s", url => {
     expect(safeSource({ title: "source", url })).toBeNull();
+  });
+});
+
+describe("member @Skill / @Hub mentions resolved on the server", () => {
+  it("keeps the client @ catalogue and the server instruction allowlist identical", () => {
+    expect([...MEMBER_SKILL_IDS].sort()).toEqual([...REVIEWED_SKILL_IDS].sort());
+    expect(MEMBER_SKILL_IDS).not.toContain("agent-continuation-v1");
+  });
+  it("resolves one Hub, up to three reviewed skills, and ignores everything else", () => {
+    expect(memberMentionCapabilities("@image @hub-research-brief 画图")).toEqual({ workflowId: "hub-research-brief", skillIds: ["deep-research", "data-reader", "content-editor"] });
+    expect(memberMentionCapabilities("@image @campaign-planner，画海报 @campaign-planner")).toEqual({ skillIds: ["campaign-planner"] });
+    expect(memberMentionCapabilities("@agent-continuation-v1 @unknown a@deep-research")).toEqual({});
+    expect(memberMentionCapabilities("@content-editor @deep-research @slide-maker @data-reader")).toEqual({});
+    expect(memberMentionCapabilities("@hub-research-brief @hub-meeting-followup")).toEqual({});
   });
 });

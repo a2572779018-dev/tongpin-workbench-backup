@@ -1,5 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import type { Server } from "node:http";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import express from "express";
@@ -12,6 +13,7 @@ import { AiStore, emptyQuota, type AiSql } from "./storage";
 import { AI_WORKSPACE_V2_ENTITY_BYTES, AiWorkspaceRepository, validateAiWorkspaceArtifactEntity, validateAiWorkspaceConversationEntity, validateAiWorkspaceProjectEntity, validateAiWorkspaceState } from "./workspace";
 import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
+import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 import { completedReply } from "../../src/features/tongpin-ai/chatRequests";
 import { WorkspaceSaveQueue } from "../../src/features/tongpin-ai/workspaceSync";
 import type { AiHarnessStep, AiHarnessTrace } from "../../shared/ai";
@@ -559,28 +561,31 @@ describe("AI durable member workspace", () => {
       resend: { apiKey: "", from: "" }, smtp: { host: "", port: 587, secure: false, user: "", pass: "", from: "" },
     };
     let runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false, aiTransport: async () => { throw new Error("Workspace tests must not contact AI providers"); } });
+    let http: Server | undefined;
     try {
+      http = await listenLoopback(runtime.app);
       await runtime.store.mutate(db => {
         const admin = db.users.find(user => user.role === "admin")!;
         db.users.push({ ...admin, id: "runtime-member", role: "member", email: "workspace-member@tongpin.test", name: "工作台验收成员" });
       });
-      const session = await request(runtime.app).post("/api/auth/login").send({ email: "workspace-member@tongpin.test", password }).expect(200);
+      const session = await request(http!).post("/api/auth/login").send({ email: "workspace-member@tongpin.test", password }).expect(200);
       const headers = { Authorization: `Bearer ${session.body.accessToken}`, "X-Tongpin-Account": session.body.user.id };
-      const denied = await request(runtime.app).put("/api/ai/workspace").set(headers).send(saveRequest()).expect(403);
+      const denied = await request(http!).put("/api/ai/workspace").set(headers).send(saveRequest()).expect(403);
       expect(denied.body.error.code).toBe("AI_ACCESS_NOT_GRANTED");
-      const adminGrant = await request(runtime.app).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
-      await request(runtime.app).put("/api/admin/ai/members/runtime-member/quota").set("Authorization", `Bearer ${adminGrant.body.accessToken}`).send({ limitTokens: 5000 }).expect(200);
+      const adminGrant = await request(http!).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
+      await request(http!).put("/api/admin/ai/members/runtime-member/quota").set("Authorization", `Bearer ${adminGrant.body.accessToken}`).send({ limitTokens: 5000 }).expect(200);
       const state = fixture(); state.artifacts[0].data = { padding: "x".repeat(900000) };
-      const saved = await request(runtime.app).put("/api/ai/workspace").set(headers).send(saveRequest(state)).expect(200);
+      const saved = await request(http!).put("/api/ai/workspace").set(headers).send(saveRequest(state)).expect(200);
       expect(saved.body.revision).toBe(1);
-      await runtime.close();
+      await closeServer(http); await runtime.close();
       runtime = await createRuntime(config, { attachSockets: false, startLoraCollector: false });
-      const restored = await request(runtime.app).get("/api/ai/workspace").set(headers).expect(200);
+      http = await listenLoopback(runtime.app);
+      const restored = await request(http!).get("/api/ai/workspace").set(headers).expect(200);
       expect(restored.body).toEqual(saved.body);
-      await request(runtime.app).get("/api/ai/workspace").expect(401);
-      const admin = await request(runtime.app).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
-      await request(runtime.app).get("/api/ai/workspace").set("Authorization", `Bearer ${admin.body.accessToken}`).expect(403);
-    } finally { await runtime.close(); }
+      await request(http!).get("/api/ai/workspace").expect(401);
+      const admin = await request(http!).post("/api/auth/login").send({ email: config.bootstrapAdminEmail, password }).expect(200);
+      await request(http!).get("/api/ai/workspace").set("Authorization", `Bearer ${admin.body.accessToken}`).expect(403);
+    } finally { await closeServer(http); await runtime.close(); }
   });
 });
 

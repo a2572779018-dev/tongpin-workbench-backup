@@ -15,6 +15,7 @@ import { TongpinAIAccountUsage } from "./TongpinAIAccountUsage";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { documentAttachments, extractAttachment, validateAttachments, workspaceAttachment } from "./attachments";
 import { buildChatRequest } from "./chatRequests";
+import { mentionedCapabilityRequest } from "./skillMentions";
 import { toolAttachmentContext } from "./attachmentContext";
 import { generatedMediaForFollowup, generatedMediaForMixedFollowup, readGeneratedMedia } from "./generatedMediaContext";
 import { mediaCacheScope } from "./mediaCache";
@@ -379,6 +380,9 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       const current = cacheRef.current[id];
       const content = current.draft.trim() || (current.attachments.length ? "请分析附件内容。" : "");
       if (!content) return;
+      // Resolve @Skill / @Hub before the turn is saved so an invalid choice
+      // fails with the draft intact instead of leaving an unanswered message.
+      const capabilityRequest = mentionedCapabilityRequest(content);
       const requestId = crypto.randomUUID();
       pendingRequestId = requestId;
       const message: AiWorkspaceMessage = { id: `user-${crypto.randomUUID()}`, role: "user", content,
@@ -428,6 +432,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       void flushDraft(id);
       const request: AiChatRequest = { ...buildChatRequest(requestId, mode, [...current.messages, message]),
         conversationId: id, attachments, outputFormat: "text",
+        ...(capabilityRequest.skillIds.length ? capabilityRequest : {}),
         ...(current.project?.instructions ? { projectContext: current.project.instructions } : {}),
         ...(mode === "quick" && aiStatus.quickAgent ? { webSearchMode: "auto" as const } : {}) };
       const startedAt = Date.now();

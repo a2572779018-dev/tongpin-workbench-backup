@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
+import type { Server } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,13 +10,15 @@ import { createSecretBox } from "./security";
 import { AiService } from "./service";
 import { AiStore, type AiSql } from "./storage";
 import type { AiTransport } from "./provider";
+import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 
 describe("Node video routes use the authenticated AI tenant", () => {
   let database: DatabaseSync;
   let app: express.Express;
+  let http: Server | undefined;
   const transport = vi.fn<AiTransport>();
 
-  beforeEach(() => {
+  beforeEach(async () => {
     database = new DatabaseSync(":memory:");
     const sql: AiSql = {
       exec(query, ...bindings) { if (bindings.length) database.prepare(query).run(...bindings); else database.exec(query); },
@@ -34,17 +37,18 @@ describe("Node video routes use the authenticated AI tenant", () => {
     };
     app = express(); app.use(express.json());
     app.use("/api/admin/ai", createAiRouter(service, users, requireAuth as ReturnType<typeof import("../middleware").createRequireAuth>, true));
+    http = await listenLoopback(app);
   });
 
-  afterEach(() => database.close());
+  afterEach(async () => { await closeServer(http); http = undefined; database.close(); });
 
   it("accepts non-default tenants, isolates their video settings and ignores a tenant header", async () => {
     const account = { "X-Tongpin-Account": "same-admin" };
-    await request(app).put("/api/admin/ai/video")
+    await request(http!).put("/api/admin/ai/video")
       .set({ ...account, "X-Authenticated-Tenant": "tenant-alpha", "X-Tongpin-Tenant": "tenant-beta" })
       .send({ enabled: true, quotaPoints: 777, apiKey: "alpha-video-key" }).expect(200);
-    const alpha = await request(app).get("/api/admin/ai/video").set({ ...account, "X-Authenticated-Tenant": "tenant-alpha" }).expect(200);
-    const beta = await request(app).get("/api/admin/ai/video").set({ ...account, "X-Authenticated-Tenant": "tenant-beta" }).expect(200);
+    const alpha = await request(http!).get("/api/admin/ai/video").set({ ...account, "X-Authenticated-Tenant": "tenant-alpha" }).expect(200);
+    const beta = await request(http!).get("/api/admin/ai/video").set({ ...account, "X-Authenticated-Tenant": "tenant-beta" }).expect(200);
     expect(alpha.body.settings).toMatchObject({ enabled: true, quotaPoints: 777 });
     expect(beta.body).toMatchObject({ settings: { enabled: false, quotaPoints: 0 }, pending: [] });
     expect(transport).not.toHaveBeenCalled();

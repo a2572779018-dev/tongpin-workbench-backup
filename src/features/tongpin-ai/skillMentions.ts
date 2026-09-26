@@ -32,6 +32,18 @@ export function workflowSkillIds(text: string): ReviewedSkillId[] | undefined {
   const workflow = aiWorkflowTemplate(mentionedWorkflowId(text));
   return workflow ? [...workflow.skillIds] as ReviewedSkillId[] : undefined;
 }
+/**
+ * Skills and Hub workflow carried by one member turn. An explicit Hub mention
+ * wins, then explicitly mentioned reviewed skills, then the locally selected
+ * reviewed skills. The server revalidates every id against its own allowlist.
+ */
+export function mentionedCapabilityRequest(text: string, selected: Iterable<string> = []): { skillIds: ReviewedSkillId[]; workflowId?: AiWorkflowId } {
+  const workflowId = mentionedWorkflowId(text);
+  const workflow = aiWorkflowTemplate(workflowId);
+  if (workflow) return { skillIds: [...workflow.skillIds] as ReviewedSkillId[], workflowId: workflow.id };
+  const mentioned = mentionedSkillIds(text);
+  return { skillIds: mentioned.length ? mentioned : skillRequestIds(new Set(selected)) };
+}
 export function mentionedToolId(text: string): ToolMentionId | undefined {
   return mentionedToolIds(text)[0];
 }

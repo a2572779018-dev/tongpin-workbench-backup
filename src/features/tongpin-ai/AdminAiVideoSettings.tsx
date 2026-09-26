@@ -3,8 +3,10 @@ import type { AiAdminVideoReconciliationJob, AiVideoSettings, AiVideoModelCheck 
 import { VIDEO_MODELS, videoModel, type VideoModelId } from "../../../shared/aiVideoModels";
 import { useAuth } from "../../auth/AuthContext";
 import { checkedVideoModelNotice } from "./videoModelSettings";
+import type { AiHarnessConfig, AiMember } from "../../../shared/ai";
+import { AdminAiPendingVideoJobSummary, AdminAiTierVideoNote, everyTierHasVideoModel, LEGACY_GROUP_LABEL, tiersManageRouting } from "./adminAiLayout";
 
-export function AdminAiVideoSettings() {
+export function AdminAiVideoSettings({ harnessConfig = null, members = [] }: { harnessConfig?: AiHarnessConfig | null; members?: AiMember[] } = {}) {
   const { api, session } = useAuth(); const account = session?.user.id;
   const [settings, setSettings] = useState<AiVideoSettings | null>(null), [enabled, setEnabled] = useState(false), [points, setPoints] = useState(""), [key, setKey] = useState("");
   const [pending, setPending] = useState<AiAdminVideoReconciliationJob[]>([]), [notice, setNotice] = useState("");
@@ -20,8 +22,17 @@ export function AdminAiVideoSettings() {
   }, [api, account]);
   async function action(fn: () => Promise<void>) { if (busyRef.current) return; busyRef.current = true; setBusy(true); setNotice(""); try { await fn(); } catch (e) { setNotice(e instanceof Error ? e.message : "操作失败"); } finally { busyRef.current = false; setBusy(false); } }
   if (openedAccount.current !== account) return null;
+  const tiersActive = tiersManageRouting(harnessConfig);
+  const hideLegacyDefault = everyTierHasVideoModel(harnessConfig);
+  const memberById = new Map(members.map(member => [member.id, member]));
+  const legacyVideoFields = <>
+    {tiersActive ? <AdminAiTierVideoNote config={harnessConfig} /> : null}
+    <label className="tp-ai-admin-field">视频 API 地址<input readOnly value="https://www.75api.com/v1" /></label>
+    {hideLegacyDefault ? null : <label className="tp-ai-admin-field">{tiersActive ? "旧版默认模型（仅未设置视频模型的档位使用）" : "默认模型"}<select value={defaultModel ?? settings?.defaultModel ?? "minimax_h3"} onChange={e => setDefaultModel(e.target.value as VideoModelId)}>{VIDEO_MODELS.map(m => <option key={m.id} value={m.id} disabled={!m.generationEnabled}>{m.label} · {m.id}{m.generationEnabled ? "" : "（暂不可用）"}</option>)}</select></label>}
+    <label className="tp-ai-admin-field">独立视频密钥<input type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} placeholder={settings?.apiKeyConfigured ? "已在服务端安全保存，留空保留" : "粘贴好漫剧专用密钥"} /></label>
+  </>;
   return <section className="tp-ai-admin-card" aria-label="视频生成接入">
-    <header className="tp-ai-admin-heading"><div><h2>视频生成与计费</h2><p>各档位的视频服务和模型在「服务与模型」中选择。</p></div></header>
+    <header className="tp-ai-admin-heading"><div><h2>视频生成与计费</h2><p>这里只管视频是否开放、每段折算多少同频点和人工核对；各档位用哪个视频模型在「服务与模型」中选择。</p></div></header>
     {!settings ? <p role="status">{notice || "读取配置中…"}</p> : <>
       <form onSubmit={e => { e.preventDefault(); void action(async () => {
         const selected = defaultModel ?? settings.defaultModel ?? "minimax_h3";
@@ -41,13 +52,12 @@ export function AdminAiVideoSettings() {
         }
       }); }}>
         <fieldset className="tp-ai-admin-fields" disabled={busy}>
-          <details className="tp-ai-provider-capabilities is-wide"><summary>旧版视频接入</summary><div className="tp-ai-admin-fields">
-          <label className="tp-ai-admin-field">视频 API 地址<input readOnly value="https://www.75api.com/v1" /></label>
-          <label className="tp-ai-admin-field">默认模型<select value={defaultModel ?? settings.defaultModel ?? "minimax_h3"} onChange={e => setDefaultModel(e.target.value as VideoModelId)}>{VIDEO_MODELS.map(m => <option key={m.id} value={m.id} disabled={!m.generationEnabled}>{m.label} · {m.id}{m.generationEnabled ? "" : "（暂不可用）"}</option>)}</select></label>
-          <label className="tp-ai-admin-field">独立视频密钥<input type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} placeholder={settings.apiKeyConfigured ? "已在服务端安全保存，留空保留" : "粘贴好漫剧专用密钥"} /></label>
-          </div></details>
+          {tiersActive ? null : <details className="tp-ai-provider-capabilities is-wide"><summary>旧版视频接入</summary><div className="tp-ai-admin-fields">{legacyVideoFields}</div></details>}
           <label className="tp-ai-admin-field">每段视频折算 · 同频点<input type="number" min="1" max="10000000" step="1" value={points} onChange={e => setPoints(e.target.value)} /></label>
           <label className="tp-ai-admin-toggle"><input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />启用视频生成</label>
+          {tiersActive ? <details className="tp-ai-provider-capabilities tp-ai-admin-legacy-group is-wide"><summary>{LEGACY_GROUP_LABEL} · 视频</summary>
+            <p className="tp-ai-admin-hint">仅供旧版客户端和未设置视频模型的档位使用。</p>
+            <div className="tp-ai-admin-fields">{legacyVideoFields}</div></details> : null}
         </fieldset>
         <p className="tp-ai-admin-hint">折算值是成员额度，不是人民币或服务商实际账单。一次生成预留一段额度，完成后结算；结果不明需人工核对。</p>
         <p className="tp-ai-admin-hint">{settings.modelsVerified
@@ -63,11 +73,11 @@ export function AdminAiVideoSettings() {
       {notice ? <p role="status">{notice}</p> : null}
       {modelCheck?.models ? <ul>{modelCheck.models.map(m => { const spec = videoModel(m.id); return <li key={m.id}>{m.label} · {m.id}：{m.listed ? "密钥列表已列出" : "未列出，请核对令牌模型范围"}{spec && !spec.generationEnabled ? `；同频已暂停：${spec.unavailableReason}` : ""}</li>; })}</ul> : null}
       {pending.length ? <details><summary>待核对的视频任务（{pending.length}）</summary>{pending.map(job => <article key={job.id} className="tp-ai-admin-usage-entry">
-        <p>成员编号：{job.userId} · 任务编号：{job.id}</p>{job.providerTaskId ? <p>服务商任务编号：{job.providerTaskId}</p> : null}
+        <AdminAiPendingVideoJobSummary job={job} member={memberById.get(job.userId)} />
         <button type="button" className="tp-ai-admin-button" disabled={busy} onClick={() => setConfirmation({ job, action: "release" })}>服务商未收费，释放预留</button>
         <button type="button" className="tp-ai-admin-button" disabled={busy} onClick={() => setConfirmation({ job, action: "charge" })}>服务商已收费，确认扣额</button>
       </article>)}</details> : null}
-      {confirmation ? <div role="alert"><p>请先核对服务商记录。确定{confirmation.action === "release" ? "释放预留" : "扣除"} {confirmation.job.quotaPoints} 同频点？</p>
+      {confirmation ? <div role="alert"><p>请先核对服务商记录。确定为 {memberById.get(confirmation.job.userId)?.name ?? "该成员"}{confirmation.action === "release" ? "释放预留" : "扣除"} {confirmation.job.quotaPoints} 同频点？</p>
         <button className="tp-ai-admin-button" disabled={busy} onClick={() => void action(async () => {
           const id = confirmation.job.id;
           await api(`/api/admin/ai/videos/${encodeURIComponent(confirmation.job.userId)}/${encodeURIComponent(id)}/reconcile`, { method: "POST", headers, body: JSON.stringify({ action: confirmation.action }) });

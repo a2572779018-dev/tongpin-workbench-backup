@@ -3,7 +3,7 @@ import type { AiMediaTaskEvent } from "../../shared/aiRunEvents";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
 import { isExplicitMediaCreationRequest, withoutLeadingMediaMention } from "../../shared/aiGenerationIntent";
 import type { AiVideoJob } from "../../shared/aiVideo";
-import { validateImageBase64 } from "./capabilities";
+import { memberMentionCapabilities, validateImageBase64 } from "./capabilities";
 import { readGeneratedAssetReference } from "./generatedAssetReference";
 import {
   MediaTaskRuntime,
@@ -356,6 +356,9 @@ export class AiServiceMediaTaskOrchestrator {
         requestId: planRequestId, conversationId: snapshot.conversationId, mode: snapshot.tier,
         messages: [...(snapshot.contextMessages ?? []).map(item => ({ role: item.role, content: item.content })), { role: "user", content: planningText }],
         outputFormat: snapshot.intent === "image" ? "image_plan" : "video_plan",
+        // The member's explicit @Skill / @Hub choice is part of the frozen
+        // request text; carry its reviewed instructions into the planner.
+        ...memberMentionCapabilities(snapshot.requestText),
         ...(source.attachments.length ? { attachments: source.attachments } : {}),
         ...(snapshot.videoParameters ? { videoParameters: {
           model: snapshot.videoParameters.model, seconds: snapshot.videoParameters.seconds,

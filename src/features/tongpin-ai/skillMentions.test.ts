@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { TONGPIN_AI_SKILLS } from "./mockData";
 import { REVIEWED_SKILL_IDS } from "./skills";
-import { activeSkillMention, ALL_MENTION_IDS, draftsWithoutComputerRequests, insertSkillMention, mentionedSkillIds, mentionedToolId, mentionedToolIds, mentionedWorkflowId, naturalGenerationToolId, resolveToolIntent, TOOL_MENTIONS, workflowSkillIds, WORKFLOW_MENTIONS } from "./skillMentions";
+import { activeSkillMention, ALL_MENTION_IDS, mentionedCapabilityRequest, draftsWithoutComputerRequests, insertSkillMention, mentionedSkillIds, mentionedToolId, mentionedToolIds, mentionedWorkflowId, naturalGenerationToolId, resolveToolIntent, TOOL_MENTIONS, workflowSkillIds, WORKFLOW_MENTIONS } from "./skillMentions";
 describe("skill mentions", () => {
   it("opens only at an explicit @ token, not email addresses", () => {
     expect(activeSkillMention("你好 @", 4)?.query).toBe("");
@@ -37,6 +37,22 @@ describe("skill mentions", () => {
       expect(mentionedWorkflowId(`${inserted.text}执行`)).toBe(id);
       expect(workflowSkillIds(`${inserted.text}执行`)).toHaveLength(3);
     }
+  });
+  it("resolves the Skill / Hub payload for one turn: Hub, then mentions, then selected skills", () => {
+    expect(mentionedCapabilityRequest("@hub-meeting-followup 整理", ["deep-research"])).toEqual({ workflowId: "hub-meeting-followup", skillIds: ["meeting-notes", "content-editor", "slide-maker"] });
+    expect(mentionedCapabilityRequest("@data-reader 看看", ["deep-research"])).toEqual({ skillIds: ["data-reader"] });
+    expect(mentionedCapabilityRequest("普通问题", ["deep-research"])).toEqual({ skillIds: ["deep-research"] });
+    expect(mentionedCapabilityRequest("普通问题")).toEqual({ skillIds: [] });
+    expect(() => mentionedCapabilityRequest("@content-editor @deep-research @slide-maker @data-reader")).toThrow("无效");
+  });
+  it("keeps Skills and Hubs in the @ menu on text-only paths and derives dispatch plans from the member turn", () => {
+    const workspace = readFileSync(new URL("./ChatWorkspace.tsx", import.meta.url), "utf8");
+    expect(workspace).toContain("...(textOnly ? [] : TOOL_MENTIONS)");
+    expect(workspace).not.toContain(".filter(s => !textOnly)");
+    const v2 = readFileSync(new URL("./TongpinAIWorkspaceV2.tsx", import.meta.url), "utf8");
+    expect(v2).toContain("mentionedCapabilityRequest(content)");
+    const page = readFileSync(new URL("../../pages/TongpinAIPage.tsx", import.meta.url), "utf8");
+    expect(page).toContain("mentionedCapabilityRequest(continuation?.originalPrompt ?? prompt, origin.skillIds)");
   });
   it("removes live computer instructions from workspace draft persistence", () => {
     const drafts = {
@@ -88,7 +104,7 @@ describe("skill mentions", () => {
   it("renders the combined catalog as a keyboard-accessible listbox", () => {
     const workspace = readFileSync(new URL("./ChatWorkspace.tsx", import.meta.url), "utf8");
     expect(workspace).toContain("...TONGPIN_AI_SKILLS.map");
-    expect(workspace).toContain("...TOOL_MENTIONS");
+    expect(workspace).toContain(": TOOL_MENTIONS).map");
     expect(workspace).toContain('role="listbox"');
     expect(workspace).toContain('role="option"');
     expect(workspace).toContain('["ArrowDown", "ArrowUp", "Enter", "Tab"]');

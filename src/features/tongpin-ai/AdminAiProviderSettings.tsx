@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { AI_BUSINESS_TIERS, type AiHarnessConfig, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
 import { BAI_ASTRA_MODEL, BAI_QUICK_MODELS, isTongpinQuickAgent } from "../../../shared/aiAuto";
+import { LEGACY_GROUP_LABEL, tiersManageRouting } from "./adminAiLayout";
 import { AdminAiModelSelect } from "./AdminAiModelSelect";
 import { adminAiErrorMessage, normalizeAiBaseUrl, validateAiProviderConnection, validateAiProviderInput } from "./adminAiForms";
 import { ModelDiscoveryRevision } from "./modelDiscoveryRevision";
@@ -256,20 +257,8 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
     }
   }
 
-  return (
-    <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`} aria-busy={loading}>
-      <header className="tp-ai-admin-heading">
-        <div><h2 id={`${id}-title`}><KeyRound size={21} aria-hidden="true" />图片与联网搜索</h2>
-          <p>设置能力开关和额度折算。各档位使用的模型在「服务与模型」中选择。</p></div>
-        <span className={`tp-ai-admin-status ${saved?.enabled ? "is-active" : ""}`}>
-          {loading ? "加载中" : loadFailed ? "读取失败" : saved?.enabled ? "已启用" : saved ? "已停用" : "未配置"}
-        </span>
-      </header>
-      {error ? <p className="tp-ai-admin-error" role="alert">{error}</p> : null}
-      {notice ? <p className="tp-ai-admin-success" role="status">{notice}</p> : null}
-      {loadFailed ? <button className="tp-ai-admin-button" type="button" onClick={() => setLoadVersion((value) => value + 1)}>重新加载</button> : (
-        <form onSubmit={save} autoComplete="off">
-          <fieldset className="tp-ai-admin-fields" disabled={loading || busy !== null}>
+  const tiersActive = tiersManageRouting(harnessConfig);
+  const legacyConnection = (
             <details className="tp-ai-provider-capabilities is-wide">
               <summary>旧版兼容连接</summary>
               <p className="tp-ai-admin-hint">供旧版客户端保留的接入配置；当前四个档位统一在「服务与模型」中设置。</p>
@@ -306,13 +295,8 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
             </label>
               </div>
             </details>
-            <details className="tp-ai-provider-capabilities is-wide">
-              <summary><Image size={17} />图片生成</summary>
-              <div className="tp-ai-admin-fields">
-                <label className="tp-ai-admin-field" htmlFor={`${id}-image-quota`}>每张图片折算 · 同频点
-                  <input id={`${id}-image-quota`} type="number" min={0} max={10_000_000} step={1} value={Number.isNaN(draft.imageQuotaTokens) ? "" : draft.imageQuotaTokens ?? 0} onChange={event => update("imageQuotaTokens", event.target.valueAsNumber)} />
-                </label>
-                <p className="tp-ai-admin-hint is-wide">图片按你设置的同频点扣减，属于折算值，不是服务商实际文本 Token。请先核对服务商图片价格和模型能力。</p>
+  );
+  const legacyImage = (
                 <details className="tp-ai-provider-capabilities is-wide"><summary>旧版图片接入</summary><div className="tp-ai-admin-fields">
                 <AdminAiModelSelect label="旧版默认图片模型" value={draft.imageModel ?? ""} models={imageModelOptions}
                   allowCustom onChange={value => update("imageModel", value)} onOpen={() => { if (!imageModels.length) void testImageConnection(); }} loading={busy === "image-test"} />
@@ -324,6 +308,30 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
                 </label>
                 <button className="tp-ai-admin-button" type="button" disabled={busy !== null} onClick={() => void testImageConnection()}><RefreshCw size={16} />{busy === "image-test" ? "测试中…" : "读取图片模型"}</button>
                 </div></details>
+  );
+  return (
+    <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`} aria-busy={loading}>
+      <header className="tp-ai-admin-heading">
+        <div><h2 id={`${id}-title`}><KeyRound size={21} aria-hidden="true" />图片与联网搜索</h2>
+          <p>设置能力开关和额度折算。各档位使用的模型在「服务与模型」中选择。</p></div>
+        <span className={`tp-ai-admin-status ${saved?.enabled ? "is-active" : ""}`}>
+          {loading ? "加载中" : loadFailed ? "读取失败" : saved?.enabled ? "已启用" : saved ? "已停用" : "未配置"}
+        </span>
+      </header>
+      {error ? <p className="tp-ai-admin-error" role="alert">{error}</p> : null}
+      {notice ? <p className="tp-ai-admin-success" role="status">{notice}</p> : null}
+      {loadFailed ? <button className="tp-ai-admin-button" type="button" onClick={() => setLoadVersion((value) => value + 1)}>重新加载</button> : (
+        <form onSubmit={save} autoComplete="off">
+          <fieldset className="tp-ai-admin-fields" disabled={loading || busy !== null}>
+            {tiersActive ? null : legacyConnection}
+            <details className="tp-ai-provider-capabilities is-wide">
+              <summary><Image size={17} />图片生成</summary>
+              <div className="tp-ai-admin-fields">
+                <label className="tp-ai-admin-field" htmlFor={`${id}-image-quota`}>每张图片折算 · 同频点
+                  <input id={`${id}-image-quota`} type="number" min={0} max={10_000_000} step={1} value={Number.isNaN(draft.imageQuotaTokens) ? "" : draft.imageQuotaTokens ?? 0} onChange={event => update("imageQuotaTokens", event.target.valueAsNumber)} />
+                </label>
+                <p className="tp-ai-admin-hint is-wide">图片按你设置的同频点扣减，属于折算值，不是服务商实际文本 Token。请先核对服务商图片价格和模型能力。</p>
+                {tiersActive ? null : legacyImage}
                 <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.imageStream ?? false} onChange={event => update("imageStream", event.target.checked)} />图片流式响应（SSE）</label>
                 <p className="tp-ai-admin-hint is-wide">服务商要求流式生图时开启。使用标准 Images 接口，仅接收最终图片；与文本的快速 / 深度思考无关。</p>
               </div>
@@ -354,6 +362,12 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
                 <p className="tp-ai-admin-hint is-wide">{draft.webSearchProtocol === "compatible" ? "兼容方式预留最多 3 次搜索的折算额度，按实际次数结算。超过预算会停止接收并记录待核对，不能保证服务商同时停止计费。" : "标准方式向服务商请求最多 1 次搜索。仅在服务商明确不支持 max_tool_calls 时选择兼容方式。"}</p>
               </div>
             </details>
+            {tiersActive ? <details className="tp-ai-provider-capabilities tp-ai-admin-legacy-group is-wide">
+              <summary>{LEGACY_GROUP_LABEL} · 文字与图片</summary>
+              <p className="tp-ai-admin-hint">四个档位已在「服务与模型」中设置，成员不使用这里的连接和默认图片模型；仅供旧版客户端保留。</p>
+              {legacyConnection}
+              {legacyImage}
+            </details> : null}
           </fieldset>
           <footer className="tp-ai-admin-actions">
             <button className="tp-ai-admin-button is-primary" type="submit" disabled={loading || busy !== null || (!dirty && saved !== null)}>

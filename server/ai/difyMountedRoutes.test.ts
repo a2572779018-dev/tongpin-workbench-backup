@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { Server } from "node:http";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createRuntime, type AppRuntime } from "../app";
@@ -12,6 +13,7 @@ import type { AiTransport } from "./provider";
 import { createNodeAi } from "./node";
 import { DifyToolRuntime } from "./difyRuntime";
 import { toolPlanContextFingerprint } from "./toolPlans";
+import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const SERVICE_SECRET = "mounted-dify-service-credential-at-least-32-bytes";
@@ -20,6 +22,7 @@ const execFileAsync = promisify(execFile);
 describe.sequential("mounted Dify routes with real Node authentication", () => {
   let directory: string;
   let runtime: AppRuntime;
+  let http: Server | undefined;
   let adminAuthorization: string;
   let memberAuthorization: string;
   let memberId: string;
@@ -39,20 +42,22 @@ describe.sequential("mounted Dify routes with real Node authentication", () => {
       attachSockets: false, startLoraCollector: false, startAiAgentScheduler: false,
       aiTransport: transport, difyConfig: { enabled: true, appId: "mounted-fixture-app" }, difyServiceSecret: SERVICE_SECRET,
     });
+    http = await listenLoopback(runtime.app);
     const admin = await runtime.store.read(database => database.users.find(user => user.role === "admin")!);
     memberId = crypto.randomUUID();
     const member = { ...admin, id: memberId, email: "dify-member@tongpin.test", role: "member" as const };
     await runtime.store.mutate(database => { database.users.push(member); });
     adminAuthorization = `Bearer ${issueAccessToken(admin, config)}`;
     memberAuthorization = `Bearer ${issueAccessToken(member, config)}`;
-    await request(runtime.app).put("/api/admin/ai/provider").set("Authorization", adminAuthorization).send({
+    await request(http!).put("/api/admin/ai/provider").set("Authorization", adminAuthorization).send({
       name: "Fixture", baseUrl: "https://provider.example.com", apiKey: "fixture-not-real", protocol: "responses",
       quickModel: "quick", deepModel: "deep", maxOutputTokens: 1024, reasoningEffort: "", enabled: true,
       imageModel: "fixture-image", imageQuotaTokens: 100,
     }).expect(200);
-    await request(runtime.app).put(`/api/admin/ai/members/${memberId}/quota`).set("Authorization", adminAuthorization).send({ limitTokens: 1000 }).expect(200);
+    await request(http!).put(`/api/admin/ai/members/${memberId}/quota`).set("Authorization", adminAuthorization).send({ limitTokens: 1000 }).expect(200);
   });
   afterAll(async () => {
+    await closeServer(http);
     if (runtime) await runtime.close();
     if (directory) await rm(directory, { recursive: true });
   });
@@ -62,11 +67,11 @@ describe.sequential("mounted Dify routes with real Node authentication", () => {
     runtime.aiStore.saveRequest({ requestId: planRequestId, userId: memberId, conversationId: "mounted-conversation", hash: "fixture", kind: "chat", status: "completed", model: "quick", mode: "quick", inputReserve: 0, outputReserve: 0, createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000, toolPlanExpiresAt: Date.now() + 600_000, toolPlanContextFingerprint: await toolPlanContextFingerprint(),
       result: { requestId: planRequestId, content: "Saved plan", model: "quick", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false }, toolPlan: { kind: "image", summary: "fixture", prompt: "one image" } } });
     const approval = { planRequestId, requestId, maxPoints: 100 };
-    await request(runtime.app).post("/api/ai/dify/grants").send(approval).expect(401);
-    await request(runtime.app).post("/api/ai/dify/grants").set("Authorization", adminAuthorization).send(approval).expect(403);
-    await request(runtime.app).post("/api/ai/dify/grants").set("Authorization", memberAuthorization).set("X-Tongpin-Account", "another-member").send(approval).expect(409);
-    await request(runtime.app).post("/api/ai/dify/grants").set("Authorization", memberAuthorization).send(approval).expect(404);
-    await request(runtime.app).get("/api/ai/dify/grants").set("Authorization", memberAuthorization).expect(404);
+    await request(http!).post("/api/ai/dify/grants").send(approval).expect(401);
+    await request(http!).post("/api/ai/dify/grants").set("Authorization", adminAuthorization).send(approval).expect(403);
+    await request(http!).post("/api/ai/dify/grants").set("Authorization", memberAuthorization).set("X-Tongpin-Account", "another-member").send(approval).expect(409);
+    await request(http!).post("/api/ai/dify/grants").set("Authorization", memberAuthorization).send(approval).expect(404);
+    await request(http!).get("/api/ai/dify/grants").set("Authorization", memberAuthorization).expect(404);
     const internal = await createNodeAi(path.join(directory, "data.json"), transport);
     let approved: Awaited<ReturnType<DifyToolRuntime["issueGrant"]>>;
     try {
@@ -75,12 +80,12 @@ describe.sequential("mounted Dify routes with real Node authentication", () => {
     expect(approved.claims).toMatchObject({ tenantId: "default", userId: memberId, conversationId: "mounted-conversation", maxPoints: 100 });
     const { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds } = approved.claims;
     const callback = { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds, toolCallId: `call-${requestId}`, toolName: "image.generate", input: approved.input };
-    await request(runtime.app).post("/api/dify/tools/invoke").send(callback).expect(401);
-    await request(runtime.app).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.authorization}`).set("X-Dify-Tool-Secret", "wrong-service-credential-at-least-32-bytes").send(callback).expect(401);
-    await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).send(callback).expect(401);
-    await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${"a".repeat(64)}`).send(callback).expect(403);
+    await request(http!).post("/api/dify/tools/invoke").send(callback).expect(401);
+    await request(http!).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.authorization}`).set("X-Dify-Tool-Secret", "wrong-service-credential-at-least-32-bytes").send(callback).expect(401);
+    await request(http!).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).send(callback).expect(401);
+    await request(http!).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${"a".repeat(64)}`).send(callback).expect(403);
     expect(transport).not.toHaveBeenCalled();
-    const first = await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.authorization}`).send(callback).expect(200);
+    const first = await request(http!).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.authorization}`).send(callback).expect(200);
     expect(first.body).toMatchObject({ output: { requestId, status: "completed" }, ledger: { chargedPoints: 100, userId: memberId } });
     const server = await new Promise<import("node:http").Server>((resolve, reject) => {
       const listener = runtime.app.listen(0, "127.0.0.1", () => resolve(listener));
@@ -97,13 +102,13 @@ describe.sequential("mounted Dify routes with real Node authentication", () => {
     } finally {
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     }
-    const replay = await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.authorization}`).send(callback).expect(200);
+    const replay = await request(http!).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.authorization}`).send(callback).expect(200);
     expect(replay.body).toEqual(first.body);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.aiStore.quota(memberId)).toMatchObject({ usedTokens: 100, reservedTokens: 0 });
-    await request(runtime.app).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.authorization}`).send({ padding: "x".repeat(17_000) }).expect(413);
+    await request(http!).post("/api/dify/tools/invoke").set("Authorization", `Bearer ${approved.authorization}`).send({ padding: "x".repeat(17_000) }).expect(413);
     await runtime.store.mutate(database => { database.users.find(user => user.id === memberId)!.status = "disabled"; });
-    const inactive = await request(runtime.app).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.authorization}`).send(callback).expect(403);
+    const inactive = await request(http!).post("/api/dify/tools/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${approved.authorization}`).send(callback).expect(403);
     expect(inactive.body.error.code).toBe("DIFY_TOOL_SCOPE_MISMATCH");
     expect(transport).toHaveBeenCalledTimes(1);
   });

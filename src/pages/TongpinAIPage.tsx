@@ -22,9 +22,9 @@ import { loadAiEntry, type AiEntry } from "../features/tongpin-ai/loadAiEntry";
 import type { AiPersonaSnapshot } from "../../shared/aiPersona";
 import type { ComputerUseProbeResult, ComputerUseWindowState } from "../../shared/computerUse";
 import { documentAttachments, ensureAttachmentWorkspaceCapacity, extractAttachment, workspaceAttachment, validateAttachments, WorkspaceCapacityError } from "../features/tongpin-ai/attachments";
-import { selectSkill, skillRequestIds } from "../features/tongpin-ai/skills";
+import { selectSkill } from "../features/tongpin-ai/skills";
 import { assertGeneratedMediaCapacity, toolAttachmentContext } from "../features/tongpin-ai/attachmentContext";
-import { draftsWithoutComputerRequests, mentionedSkillIds, mentionedWorkflowId, workflowSkillIds } from "../features/tongpin-ai/skillMentions";
+import { draftsWithoutComputerRequests, mentionedCapabilityRequest } from "../features/tongpin-ai/skillMentions";
 import { computerUseConversationRequestMessage, computerUsePlanningObservation, validateComputerUseModelPlan, type ComputerUseModelPlan } from "../features/tongpin-ai/computerUseFlow";
 import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence } from "../features/tongpin-ai/chatPerformance";
@@ -1271,12 +1271,13 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       ? imageReferencesForGeneration(origin.attachments, aiStatus?.imageEditTiers, origin.mode)
       : [];
     if (presentationAttachments.some(item => item.dataUrl) && !aiStatus?.visionEnabled) throw new Error("管理员尚未启用图片理解，请先移除图片或联系管理员启用视觉模型");
-    const workflowId = mentionedWorkflowId(prompt);
+    // A dispatch continuation plans from the model's rewritten prompt; the
+    // member's @Skill / @Hub choice lives in the original turn.
+    const capabilityRequest = mentionedCapabilityRequest(continuation?.originalPrompt ?? prompt, origin.skillIds);
     const request: AiChatRequest = {
       ...buildChatRequest(crypto.randomUUID(), origin.mode, messages),
       conversationId,
-      skillIds: workflowSkillIds(prompt) ?? (mentionedSkillIds(prompt).length ? mentionedSkillIds(prompt) : skillRequestIds(new Set(origin.skillIds))),
-      ...(workflowId ? { workflowId } : {}),
+      ...capabilityRequest,
       projectContext: origin.project?.instructions || undefined,
       outputFormat: kind === "video" ? "video_plan" : kind === "presentation" ? "presentation_plan" : "image_plan",
       ...(kind === "video" && videoRequest ? { videoParameters: {
@@ -1895,7 +1896,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       const requestMessages = generationTool === "presentation" && approvedPlan
         ? [...messages.slice(0, -1), { ...messages[messages.length - 1], content: approvedPlan.prompt }]
         : messages;
-      const workflowId = mentionedWorkflowId(content);
+      const capabilityRequest = generationTool === "image" ? undefined : mentionedCapabilityRequest(content, origin.skillIds);
       request = generationTool === "image" ? {
         requestId,
         conversationId,
@@ -1905,8 +1906,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         ...(documentPayload.length ? { attachments: documentPayload } : {}),
       } : {
         ...buildChatRequest(requestId, origin.mode, requestMessages), conversationId,
-        skillIds: workflowSkillIds(content) ?? (mentionedSkillIds(content).length ? mentionedSkillIds(content) : skillRequestIds(new Set(origin.skillIds))),
-        ...(workflowId ? { workflowId } : {}),
+        ...capabilityRequest,
         projectContext: origin.project?.instructions || undefined,
         attachments: documentPayload, outputFormat: generationTool === "presentation" ? "presentation" : generationTool === "text" ? "dispatch" : "text",
         ...(generationTool === "presentation" ? { toolPlanRequestId: approvedPlan!.planRequestId } : {}), webSearchMode: "auto",

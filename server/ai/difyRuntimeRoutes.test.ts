@@ -1,4 +1,5 @@
 import express from "express";
+import type { Server } from "node:http";
 import request from "supertest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import { toolPlanContextFingerprint } from "./toolPlans";
 import { AiWorkspaceRepository } from "./workspace";
 import type { AiTransport } from "./provider";
 import type { AiUsageEntry } from "../../shared/ai";
+import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const SERVICE_SECRET = "local-dify-test-service-credential-32-bytes";
@@ -19,6 +21,7 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
   let directory: string, file: string;
   let runtime: Awaited<ReturnType<typeof createNodeAi>>;
   let app: express.Express;
+  let http: Server | undefined;
   const transport = vi.fn<AiTransport>();
   let options: DifyRouteOptions;
   let fingerprint: string;
@@ -37,8 +40,9 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
       const response = await createDifyToolResponse(runtime.service, new Request("http://localhost/api/dify/tools/invoke", { method: "POST", headers: { Authorization: req.headers.authorization ?? "", "X-Dify-Tool-Secret": String(req.headers["x-dify-tool-secret"] ?? "") }, body: JSON.stringify(req.body) }), options);
       res.status(response.status).json(await response.json());
     });
+    http = await listenLoopback(app);
   });
-  afterEach(async () => { vi.restoreAllMocks(); runtime.close(); await rm(directory, { recursive: true, force: true }); });
+  afterEach(async () => { await closeServer(http); http = undefined; vi.restoreAllMocks(); runtime.close(); await rm(directory, { recursive: true, force: true }); });
   function plan(userId = "member-a", kind: "image" | "video" = "image") {
     const requestId = crypto.randomUUID();
     runtime.store.saveRequest({ requestId, userId, conversationId: "conversation-a", hash: "fixture", kind: "chat", status: "completed", model: "quick", mode: "quick", inputReserve: 0, outputReserve: 0, createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000, toolPlanExpiresAt: Date.now() + 600_000, toolPlanContextFingerprint: fingerprint,
@@ -49,12 +53,12 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
   const grant = (planRequestId = plan()) => issueGrant({ planRequestId, requestId: crypto.randomUUID(), maxPoints: 100 });
   function invoke(approved: Awaited<ReturnType<typeof grant>>, overrides: Record<string, unknown> = {}) {
     const { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds } = approved.claims;
-    return request(app).post("/invoke").set("Authorization", `Bearer ${approved.authorization}`).set("X-Dify-Tool-Secret", SERVICE_SECRET).send({ tenantId, userId, conversationId, runId, attemptId, sourceAssetIds, toolCallId: `call-${attemptId}`, toolName: "image.generate", input: approved.input, ...overrides });
+    return request(http!).post("/invoke").set("Authorization", `Bearer ${approved.authorization}`).set("X-Dify-Tool-Secret", SERVICE_SECRET).send({ tenantId, userId, conversationId, runId, attemptId, sourceAssetIds, toolCallId: `call-${attemptId}`, toolName: "image.generate", input: approved.input, ...overrides });
   }
   it("fails closed without runtime config or active-account verifier and rejects missing callback auth", async () => {
     options = {};
     await expect(grant()).rejects.toMatchObject({ status: 503, code: "DIFY_RUNTIME_DISABLED" });
-    await request(app).post("/invoke").send({}).expect(503);
+    await request(http!).post("/invoke").send({}).expect(503);
     expect(transport).not.toHaveBeenCalled();
   });
   it("requires both the plugin service credential and an approved per-run grant", async () => {
@@ -62,11 +66,11 @@ describe.sequential("Dify callback HTTP routes with real isolated SQLite and sim
     expect(approved.toolBinding).toEqual({ approvedRequestId: approved.input.requestId, sourceAssetIds: approved.claims.sourceAssetIds });
     const { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds } = approved.claims;
     const callback = { tenantId, userId, conversationId, runId, attemptId, sourceAssetIds, toolCallId: `call-${attemptId}`, toolName: "image.generate", input: approved.input };
-    const post = () => request(app).post("/invoke").set("Authorization", `Bearer ${approved.authorization}`).send(callback);
+    const post = () => request(http!).post("/invoke").set("Authorization", `Bearer ${approved.authorization}`).send(callback);
     expect((await post().expect(401)).body.error.code).toBe("DIFY_TOOL_AUTH_INVALID");
     expect((await post().set("X-Dify-Tool-Secret", "wrong-service-credential-32-characters").expect(401)).body.error.code).toBe("DIFY_TOOL_AUTH_INVALID");
-    expect((await request(app).post("/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).send(callback).expect(401)).body.error.code).toBe("DIFY_TOOL_AUTH_INVALID");
-    expect((await request(app).post("/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${"a".repeat(64)}`).send(callback).expect(403)).body.error.code).toMatch(/^DIFY_TOOL_AUTH_/);
+    expect((await request(http!).post("/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).send(callback).expect(401)).body.error.code).toBe("DIFY_TOOL_AUTH_INVALID");
+    expect((await request(http!).post("/invoke").set("X-Dify-Tool-Secret", SERVICE_SECRET).set("Authorization", `Bearer ${"a".repeat(64)}`).send(callback).expect(403)).body.error.code).toMatch(/^DIFY_TOOL_AUTH_/);
     expect(transport).not.toHaveBeenCalled();
   });
   it("delivers the saved approval binding to Dify app inputs without placing it in the model query", async () => {

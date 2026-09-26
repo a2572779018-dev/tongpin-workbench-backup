@@ -9,6 +9,7 @@ import { AdminAiObservability } from "./AdminAiObservability";
 import { adminAiErrorMessage, calculateAiQuotaLimit } from "./adminAiForms";
 import { aiDiagnosticDescription, aiUsageDescription, aiUsageTotal } from "./usageFormatting";
 import { AI_QUOTA_BILLING_NOTE, formatAiPoints } from "./quotaFormatting";
+import { AdminAiTabIntro, type AdminAiSection } from "./adminAiLayout";
 import "./AdminAiQuotaPanel.css";
 
 const MEMBER_STATUS: Record<string, string> = {
@@ -180,7 +181,7 @@ export function AdminAiQuotaPanel() {
   const [notice, setNotice] = useState("");
   const [quotaMember, setQuotaMember] = useState<AiMember | null>(null);
   const [usageMember, setUsageMember] = useState<AiMember | null>(null);
-  const [section, setSection] = useState<"models" | "capabilities" | "members" | "monitoring">("models");
+  const [section, setSection] = useState<AdminAiSection>("models");
   const [harnessConfig, setHarnessConfig] = useState<AiHarnessConfig | null>(null);
 
   useEffect(() => {
@@ -203,12 +204,13 @@ export function AdminAiQuotaPanel() {
       <nav className="tp-ai-admin-tabs" aria-label="AI 管理分类">{([
         ["models", "服务与模型"], ["capabilities", "生成与搜索"], ["members", "成员额度"], ["monitoring", "运行监控"],
       ] as const).map(([key, label]) => <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => setSection(key)}>{label}</button>)}</nav>
+      <AdminAiTabIntro section={section} />
       <div hidden={section !== "models"}><AdminAiHarnessSettings onConfigured={setHarnessConfig} /></div>
       <div className="tp-ai-admin-section-stack" hidden={section !== "capabilities"}>
         <AdminAiProviderSettings harnessConfig={harnessConfig} />
-        <AdminAiVideoSettings key={session?.user.id} />
+        <AdminAiVideoSettings key={session?.user.id} harnessConfig={harnessConfig} members={members} />
       </div>
-      <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} /></div>
+      <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} harnessConfig={harnessConfig} /></div>
       <section hidden={section !== "members"} className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>
         <header className="tp-ai-admin-heading">
           <div><h2 id="tp-ai-admin-members-title"><UsersRound size={21} aria-hidden="true" />成员额度</h2>

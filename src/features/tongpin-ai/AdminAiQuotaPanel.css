@@ -93,3 +93,7 @@
   .tp-ai-admin-actions .tp-ai-admin-hint { flex-basis: 100%; }
   .tp-ai-admin-quota-preview { gap: .5rem; padding: .8rem; }
 }
+.tp-ai-admin-tab-intro { margin: .75rem 0 0; padding: .7rem .9rem; border-left: 3px solid #bba54f; border-radius: .5rem; background: #faf6ea; color: var(--tpq-muted); font-size: .85rem; line-height: 1.6; }
+.tp-ai-admin-legacy-group > summary { color: var(--tpq-muted); }
+.tp-ai-admin-tier-video-note ul { margin: .4rem 0 0; padding-left: 1.2rem; font-size: .8rem; line-height: 1.7; }
+.tp-ai-admin-tier-video-note small { color: var(--tpq-muted); margin-left: .25rem; }

@@ -1,5 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
+import type { Server } from "node:http";
 import path from "node:path";
 import bcrypt from "bcryptjs";
 import request from "supertest";
@@ -7,9 +8,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createRuntime, type AppRuntime } from "./app";
 import { businessDateKey } from "./business-date";
 import { loadConfig } from "./config";
+import { closeServer, listenLoopback } from "./testSupport/loopbackServer";
 
 describe("boss work report routes", () => {
   let runtime: AppRuntime;
+  let http: Server;
   let root = "";
   let bossToken = "";
   let memberToken = "";
@@ -28,6 +31,7 @@ describe("boss work report routes", () => {
       }),
       { attachSockets: false, startLoraCollector: false },
     );
+    http = await listenLoopback(runtime.app);
     const passwordHash = await bcrypt.hash("Password123!", 4);
     const now = new Date().toISOString();
     await runtime.store.mutate((database) => {
@@ -67,13 +71,13 @@ describe("boss work report routes", () => {
       );
     });
     bossToken = (
-      await request(runtime.app)
+      await request(http)
         .post("/api/auth/login")
         .send({ email: "boss@example.com", password: "Password123!" })
         .expect(200)
     ).body.accessToken;
     memberToken = (
-      await request(runtime.app)
+      await request(http)
         .post("/api/auth/login")
         .send({ email: "member@example.com", password: "Password123!" })
         .expect(200)
@@ -81,12 +85,13 @@ describe("boss work report routes", () => {
   });
 
   afterAll(async () => {
+    await closeServer(http);
     await runtime.close();
     await rm(root, { recursive: true, force: true });
   });
 
   it("rejects members and lets only one boss device claim the day", async () => {
-    await request(runtime.app)
+    await request(http)
       .post("/api/boss/work-reports/claim")
       .set("Authorization", `Bearer ${memberToken}`)
       .send({ trigger: "startup" })
@@ -94,7 +99,7 @@ describe("boss work report routes", () => {
 
     const claims = await Promise.all(
       Array.from({ length: 4 }, () =>
-        request(runtime.app)
+        request(http)
           .post("/api/boss/work-reports/claim")
           .set("Authorization", `Bearer ${bossToken}`)
           .send({ trigger: "startup" })
@@ -107,26 +112,26 @@ describe("boss work report routes", () => {
   });
 
   it("keeps a closed report pending until it is explicitly read", async () => {
-    const dismissed = await request(runtime.app)
+    const dismissed = await request(http)
       .patch("/api/boss/work-reports/current/dismiss")
       .set("Authorization", `Bearer ${bossToken}`)
       .expect(200);
     expect(dismissed.body.report.status.dismissedAt).toBeTruthy();
     expect(dismissed.body.report.status.readAt).toBeNull();
 
-    const pending = await request(runtime.app)
+    const pending = await request(http)
       .get("/api/boss/work-reports/current")
       .set("Authorization", `Bearer ${bossToken}`)
       .expect(200);
     expect(pending.body.report.status.readAt).toBeNull();
 
-    const read = await request(runtime.app)
+    const read = await request(http)
       .patch("/api/boss/work-reports/current/read")
       .set("Authorization", `Bearer ${bossToken}`)
       .expect(200);
     expect(read.body.report.status.readAt).toBeTruthy();
 
-    const claimedAgain = await request(runtime.app)
+    const claimedAgain = await request(http)
       .post("/api/boss/work-reports/claim")
       .set("Authorization", `Bearer ${bossToken}`)
       .send({ trigger: "reconnect" })
@@ -135,13 +140,13 @@ describe("boss work report routes", () => {
   });
 
   it("lets the boss send a strong reminder to one active member", async () => {
-    await request(runtime.app)
+    await request(http)
       .post("/api/boss/work-reports/nudge")
       .set("Authorization", `Bearer ${memberToken}`)
       .send({ userId: "22222222-2222-4222-8222-222222222222" })
       .expect(403);
 
-    const nudged = await request(runtime.app)
+    const nudged = await request(http)
       .post("/api/boss/work-reports/nudge")
       .set("Authorization", `Bearer ${bossToken}`)
       .send({ userId: "22222222-2222-4222-8222-222222222222" })
@@ -153,7 +158,7 @@ describe("boss work report routes", () => {
       requiresAcknowledgement: true,
     });
 
-    const inbox = await request(runtime.app)
+    const inbox = await request(http)
       .get("/api/notifications")
       .set("Authorization", `Bearer ${memberToken}`)
       .expect(200);

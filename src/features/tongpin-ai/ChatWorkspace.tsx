@@ -226,11 +226,13 @@ export function ChatWorkspace({
   const mentionSkills = mention ? [
     ...TONGPIN_AI_SKILLS.map(({ id, name }) => ({ id, name, available: true })),
     ...WORKFLOW_MENTIONS.map(({ id, name }) => ({ id, name: `${name} · 工作流`, available: true })),
-    ...TOOL_MENTIONS.map(tool => ({
+    // Skills and Hubs are prompt-level capabilities and work on text-only
+    // paths; only generation / computer tools are withheld there.
+    ...(textOnly ? [] : TOOL_MENTIONS).map(tool => ({
       ...tool,
       available: tool.id !== "computer" || computerAvailable,
     })),
-  ].filter(s => !textOnly).filter(s => `${s.id} ${s.name}`.toLowerCase().includes(mention.query)) : [];
+  ].filter(s => `${s.id} ${s.name}`.toLowerCase().includes(mention.query)) : [];
   function trackMention(value: string, caret: number) { setMention(activeSkillMention(value, caret)); setMentionIndex(0); }
   function chooseMention(id: string) {
     if (!mention || videoBusy || (id === "computer" && !computerAvailable)) return;

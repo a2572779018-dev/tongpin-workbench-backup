@@ -1,4 +1,5 @@
 import { mkdtemp, rename, rm } from "node:fs/promises";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { createRuntime, type AppRuntime } from "./app";
 import { loadConfig, type AppConfig } from "./config";
 import { issueAccessToken } from "./security";
 import type { AiTransport } from "./ai/provider";
+import { closeServer, listenLoopback } from "./testSupport/loopbackServer";
 
 describe("Node application resource lifecycle", () => {
   let directory: string;
@@ -57,11 +59,15 @@ describe("Node application resource lifecycle", () => {
     const member = { ...admin, id: "lifecycle-member", email: "lifecycle-member@example.com", role: "member" as const };
     await runtime.store.mutate(db => { db.users.push(member); });
     const adminAuth = { Authorization: `Bearer ${issueAccessToken(admin, config)}` };
-    await request(runtime.app).put("/api/admin/ai/provider").set(adminAuth).send({
-      name: "Fixture", baseUrl: "https://provider.example.com", apiKey: "lifecycle-fixture-not-real", protocol: "responses", quickModel: "quick", deepModel: "deep",
-      maxOutputTokens: 1024, reasoningEffort: "", enabled: true,
-    }).expect(200);
-    await request(runtime.app).put(`/api/admin/ai/members/${member.id}/quota`).set(adminAuth).send({ limitTokens: 50_000 }).expect(200);
+    let http: Server | undefined;
+    try {
+      http = await listenLoopback(runtime.app);
+      await request(http).put("/api/admin/ai/provider").set(adminAuth).send({
+        name: "Fixture", baseUrl: "https://provider.example.com", apiKey: "lifecycle-fixture-not-real", protocol: "responses", quickModel: "quick", deepModel: "deep",
+        maxOutputTokens: 1024, reasoningEffort: "", enabled: true,
+      }).expect(200);
+      await request(http).put(`/api/admin/ai/members/${member.id}/quota`).set(adminAuth).send({ limitTokens: 50_000 }).expect(200);
+    } finally { await closeServer(http); }
     transport.mockImplementation(async () => {
       await new Promise<void>(resolve => { releaseGeneration = resolve; });
       return Response.json({ status: "completed", output_text: "完整回复", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } });
