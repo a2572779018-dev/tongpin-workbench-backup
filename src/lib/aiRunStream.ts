@@ -1,5 +1,6 @@
 import type { AiChatRequest, AiChatResponse } from "../../shared/ai";
 import { AI_TOOL_PROGRESS_STATUSES, type AiRunEvent } from "../../shared/aiRunEvents";
+import { readAiSubagentUpdate } from "../../shared/aiMultiAgent";
 import { validAiRichContent } from "../../shared/aiRichContent";
 import { ApiRequestError } from "./api";
 
@@ -63,6 +64,8 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
           (event.data.response.richContent !== undefined &&
             !validAiRichContent(event.data.response.content, event.data.response.richContent)))
         throw new UnsafeEvent("回复结果标识或内容块不正确");
+    } else if (event.type === "subagent_update") {
+      if (!readAiSubagentUpdate(event.data)) throw new UnsafeEvent("多 Agent 协作进度格式无效");
     } else if (event.type === "run_failed") {
       if (typeof event.data?.error?.code !== "string" || typeof event.data.error.message !== "string")
         throw new UnsafeEvent("回复失败事件格式无效");
@@ -137,8 +140,9 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
     checkAbort();
     response = await api<Response>("/api/ai/chat/stream", {
       method: "POST",
-      // liveProgress opts this client in to reasoning_delta/tool_progress events.
-      body: JSON.stringify({ ...request, liveProgress: true }), headers: accountHeaders, signal: options.signal,
+      // liveProgress opts this client in to reasoning_delta/tool_progress events;
+      // subagentEvents to 多 Agent 协作 subagent_update events.
+      body: JSON.stringify({ ...request, liveProgress: true, subagentEvents: true }), headers: accountHeaders, signal: options.signal,
     }, 130_000, "stream");
   } catch (error) {
     checkAbort();
@@ -152,7 +156,9 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
   let buffer = "";
   let bytes = 0;
   const cancel = () => { void reader.cancel().catch(() => undefined); };
-  const timer = setTimeout(cancel, 130_000);
+  // An idle limit, not a total one: a 多 Agent 协作 run keeps emitting progress
+  // for longer than one model call, while a silent stream still gives up.
+  let timer = setTimeout(cancel, 130_000);
   options.signal.addEventListener("abort", cancel, { once: true });
   try {
     while (!result) {
@@ -161,6 +167,8 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
       try { next = await reader.read(); }
       catch { break; }
       if (next.done) break;
+      clearTimeout(timer);
+      timer = setTimeout(cancel, 130_000);
       bytes += next.value.byteLength;
       if (bytes > STREAM_BYTES_LIMIT) throw new UnsafeEvent("回复数据超出传输上限");
       buffer += decoder.decode(next.value, { stream: true });

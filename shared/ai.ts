@@ -1,6 +1,7 @@
 import type { AiWorkspaceStorageUsage } from "./aiWorkspace";
 import type { AiWorkflowId } from "./aiWorkflows";
 import type { AiImageEditCapability, AiImageGenerationCapability } from "./aiImageCapabilities";
+import type { AiMultiAgentSettings } from "./aiMultiAgent";
 
 /** Browser-safe contract. API credentials and prompts never appear in admin usage records. */
 export type AiProtocol = "chat_completions" | "responses";
@@ -19,7 +20,8 @@ export type AiHarnessCapability = "chat" | "vision" | "web_search" | "image" | "
 export const AI_HARNESS_CAPABILITY_LABELS: Record<AiHarnessCapability, string> = {
   chat: "文字对话", vision: "图片理解", web_search: "联网搜索", image: "图片生成", video: "视频生成", presentation: "演示文稿", computer: "电脑操作",
 };
-export type AiHarnessStrategy = "direct" | "react" | "plan_execute";
+/** `multi_agent` (多 Agent 协作) is a per-tier choice (`AiHarnessTierRoute.multiAgent`), never the global policy. */
+export type AiHarnessStrategy = "direct" | "react" | "plan_execute" | "multi_agent";
 export interface AiHarnessProviderInput {
   id: string;
   name: string;
@@ -53,6 +55,8 @@ export interface AiHarnessTierRoute {
   /** 75API video route for this business tier. Other video protocols fail closed. */
   videoProviderId?: string;
   videoModelId?: string;
+  /** 多 Agent 协作 for this tier's text chat; absent = the global 任务处理方式. */
+  multiAgent?: AiMultiAgentSettings;
 }
 export interface AiHarnessPolicy {
   strategy: AiHarnessStrategy;

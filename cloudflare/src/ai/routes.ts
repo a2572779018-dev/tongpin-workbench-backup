@@ -146,6 +146,8 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (path === "/api/ai/chat/stream" && method === "POST") return createChatStreamResponse(service, user.id, await parseAiJson(request), keepAlive);
     const eventMatch = path.match(/^\/api\/ai\/requests\/([^/]+)\/events$/);
     if (eventMatch && method === "GET") return json({ events: service.getRunEvents(user.id, decodeURIComponent(eventMatch[1]), Number(url.searchParams.get("after") ?? 0)) });
+    const cancelMatch = path.match(/^\/api\/ai\/requests\/([^/]+)\/cancel$/);
+    if (cancelMatch && method === "POST") return json(service.cancelMultiAgentRun(user.id, decodeURIComponent(cancelMatch[1])));
     if (path === "/api/ai/media-tasks" && method === "POST") {
       const body = mediaTaskJson(await parseAiJson(request));
       const task = mediaTaskScope(await createAiServiceMediaTaskOrchestrator(service).submit(user.id, {

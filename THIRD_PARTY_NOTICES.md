@@ -145,6 +145,90 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## Pro 多 Agent 协作 (multi-agent orchestration)
+
+The Pro tier's 多 Agent 协作 strategy (coordinator → concurrent sub-agents →
+synthesis) is adapted source, not an installed framework: no npm dependency was
+added, and all model calls still go through Tongpin's own provider transport,
+quota reservation/settlement, harness trace and run journal. Selection notes:
+`docs/ai-handoff/11-多Agent协作开源选型.md`.
+
+- **LibreChat `@librechat/agents`** — https://github.com/LibreChat-AI/agents
+  (package metadata: github.com/danny-avila/agents), version 3.2.46 (the
+  version LibreChat v0.8.7 pins), tag `v3.2.46`, commit
+  `b405dffb13ba15cbefa20e7bf4d971ce6963ec6a`, MIT License, Copyright (c) 2024
+  LibreChat. Adapted: `src/tools/subagent/SubagentExecutor.ts` (`execute`: the
+  child receives only its task description, the parent AbortSignal is passed to
+  the child, a child error becomes a bounded result instead of failing the
+  parent; `truncateErrorMessage`, `filterSubagentResult`) into
+  `server/ai/multiAgentOrchestrator.ts`; `src/tools/SubagentTool.ts`
+  (`SubagentToolDescription` / `DESCRIPTION_PROP_DESCRIPTION` delegation
+  contract) into `server/ai/multiAgentPrompts.ts`; the `ON_SUBAGENT_UPDATE`
+  lifecycle envelope into `shared/aiMultiAgent.ts` (`AiSubagentUpdate`) and the
+  `subagent_update` run event in `shared/aiRunEvents.ts`.
+- **LibreChat** — https://github.com/danny-avila/LibreChat, v0.8.7, commit
+  `9e74cc0e57b395926122bd4062c1fcedc48ed465`, MIT License, Copyright (c) 2026
+  LibreChat (license text reproduced in "AI reply Markdown rendering" above).
+  Adapted: `client/src/components/Chat/Messages/Content/Parts/SubagentCall.tsx`
+  (per-sub-agent card resolving running / finished / cancelled / errored, the
+  `useThrottledValue` hook and `SUBAGENT_TICKER_THROTTLE_MS`, the label plus
+  `dir="rtl"` ticker body that keeps the newest characters visible) into
+  `src/features/tongpin-ai/MultiAgentProcess.tsx` and `multi-agent.css`.
+  Details are shown inline instead of LibreChat's dialog; styling is Tongpin's.
+- **OpenAI Agents SDK (JavaScript/TypeScript)** —
+  https://github.com/openai/openai-agents-js, version 0.18.0, commit
+  `fdaf0a66ca6e9d89498909ad7cf64745630e8afb`, MIT License, Copyright (c) 2025
+  OpenAI. Adapted: `packages/agents-core/src/runner/toolExecution.ts`
+  (`executeToolRunsWithConcurrency`: bounded worker pool pulling from a shared
+  index, every started worker drained before returning) and
+  `packages/agents-core/src/utils/abortSignals.ts` (`combineAbortSignals`) into
+  `server/ai/multiAgentOrchestrator.ts` (`runWithConcurrencyLimit`,
+  `combineAbortSignals`). Unlike upstream, one sub-agent's failure never cancels
+  its siblings.
+- **LangGraph.js** — https://github.com/langchain-ai/langgraphjs, MIT License.
+  Its orchestrator-worker (`Send` map-reduce) pattern was a design reference
+  only; no LangGraph code is copied or bundled.
+
+`@librechat/agents` MIT License, Copyright (c) 2024 LibreChat:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+OpenAI Agents SDK MIT License, Copyright (c) 2025 OpenAI:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## AI reply code highlighting
 
 `highlight.js` 11.11.2 (https://github.com/highlightjs/highlight.js) grammars

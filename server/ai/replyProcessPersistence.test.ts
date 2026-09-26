@@ -84,6 +84,44 @@ describe("reply process persistence", () => {
     expect(validateAiWorkspaceConversationEntity(stateWith({ process }).conversations[0]).messages[1].process).toEqual(process);
   });
 
+  it("round-trips a 多 Agent 协作 step and strips it for a server without the feature", async () => {
+    const live = [
+      at(1_000, { type: "run_started", data: { startedAt: 1_000 } }),
+      at(1_050, { type: "public_summary_delta", data: { delta: "先拆分任务。" } }),
+      at(1_100, { type: "subagent_update", data: { phase: "planning" } }),
+      at(1_500, { type: "subagent_update", data: { phase: "plan", maxConcurrency: 2, subtasks: [
+        { id: "agent-1", role: "研究员", title: "查天气", task: "查找上海今天的天气。", search: true },
+        { id: "agent-2", role: "核对员", title: "核对", task: "核对空气质量数据。", search: false }] } }),
+      at(1_600, { type: "subagent_update", data: { phase: "start", id: "agent-1" } }),
+      at(1_700, { type: "subagent_update", data: { phase: "start", id: "agent-2" } }),
+      at(3_000, { type: "subagent_update", data: { phase: "stop", id: "agent-1", durationMs: 1_400, summary: "今天晴。", searchCount: 1, sourceCount: 1, sources: [1] } }),
+      at(3_500, { type: "subagent_update", data: { phase: "error", id: "agent-2", reason: "failed", message: "服务暂时不可用" } }),
+      at(3_600, { type: "subagent_update", data: { phase: "synthesis" } }),
+      at(5_000, { type: "subagent_update", data: { phase: "finish", outcome: "done" } }),
+    ].reduce(applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE);
+    const process = settleReplyProcess(live, { outcome: "completed", durationMs: 4_000 })!;
+    expect(process.steps.map(step => step.kind)).toEqual(["thinking", "agents"]);
+    const session = hydrateWorkspace(stateWith({ process }));
+    await repository.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: serializeWorkspace(session) });
+    const message = hydrateWorkspace(repository.read("member-a").state).conversations[0].messages[1];
+    expect(message.process).toEqual(process);
+    expect(replyProcessSummary(replyProcessView({ message })!)).toBe("多 Agent 协作 1/2 · 搜索 1 次 · 1 个来源 · 用时 4 秒");
+    expect(validateAiWorkspaceConversationEntity(stateWith({ process }).conversations[0]).messages[1].process).toEqual(process);
+
+    const agents = process.steps[1] as Extract<AiReplyProcess["steps"][number], { kind: "agents" }>;
+    for (const bad of [{ ...agents, agents: [{ ...agents.agents[0], answer: "full text" }] }, { ...agents, maxConcurrency: 6 }, { ...agents, agents: [] }]) {
+      expect(() => validateAiWorkspaceState(stateWith({ process: { ...process, steps: [bad] } } as Partial<AiWorkspaceMessage>))).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_INVALID" }));
+    }
+    expect(() => validateAiWorkspaceState(stateWith({ process: { ...process, steps: [agents, agents] } }))).toThrow(expect.objectContaining({ code: "AI_WORKSPACE_INVALID" }));
+
+    // A server that only knows reply-process-v1 (for example after a rollback) never receives the step.
+    const older = workspaceStateForServer(stateWith({ process }), [AI_WORKSPACE_FEATURES.replyProcess]);
+    expect(older.conversations[0].messages[1].process).toEqual({ ...process, steps: [{ kind: "thinking" }] });
+    expect(() => validateAiWorkspaceState(older)).not.toThrow();
+    const agentsOnly = workspaceStateForServer(stateWith({ process: { ...process, steps: [agents] } }), [AI_WORKSPACE_FEATURES.replyProcess]);
+    expect(agentsOnly.conversations[0].messages[1]).not.toHaveProperty("process");
+  });
+
   it("rejects malformed, smuggled or oversized process records before any write", async () => {
     const valid = liveProcess();
     const invalid: Array<[string, unknown, string]> = [
@@ -121,12 +159,13 @@ describe("reply process persistence", () => {
     const put = await request(app).put("/api/ai/workspace").send(body).expect(200);
     expect(put.body.features).toContain(AI_WORKSPACE_FEATURES.replyProcess);
     const get = await request(app).get("/api/ai/workspace").expect(200);
-    expect(get.body.features).toEqual([AI_WORKSPACE_FEATURES.replyProcess]);
+    expect(get.body.features).toEqual([AI_WORKSPACE_FEATURES.replyProcess, AI_WORKSPACE_FEATURES.replyProcessAgents]);
     const worker = await handleAiWorkspaceRequest(new Request("https://tongpin.example/api/ai/workspace"), repository, { id: "member-a", role: "member", status: "active" });
-    expect(((await worker.json()) as AiWorkspaceSnapshot).features).toEqual([AI_WORKSPACE_FEATURES.replyProcess]);
+    expect(((await worker.json()) as AiWorkspaceSnapshot).features).toEqual([AI_WORKSPACE_FEATURES.replyProcess, AI_WORKSPACE_FEATURES.replyProcessAgents]);
 
     const state = stateWith({ process: liveProcess() });
     expect(workspaceStateForServer(state, [AI_WORKSPACE_FEATURES.replyProcess])).toBe(state);
+    expect(workspaceStateForServer(state, [AI_WORKSPACE_FEATURES.replyProcess, AI_WORKSPACE_FEATURES.replyProcessAgents])).toBe(state);
     const legacy = workspaceStateForServer(state, undefined);
     expect(JSON.stringify(legacy)).not.toContain("\"process\"");
     expect(legacy.conversations[0].messages[1]).toMatchObject({ content: "今天晴。", analysisSummary: "先核对来源。" });

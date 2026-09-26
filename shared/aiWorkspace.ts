@@ -125,7 +125,11 @@ export interface AiWorkspaceSnapshot {
 }
 
 /** Server features a V1 client checks before persisting the matching optional field. */
-export const AI_WORKSPACE_FEATURES = Object.freeze({ replyProcess: "reply-process-v1" });
+export const AI_WORKSPACE_FEATURES = Object.freeze({
+  replyProcess: "reply-process-v1",
+  /** 多 Agent 协作 (`kind: "agents"`) steps inside `process`. */
+  replyProcessAgents: "reply-process-agents-v1",
+});
 
 export interface AiWorkspaceSaveRequest {
   expectedRevision: number;

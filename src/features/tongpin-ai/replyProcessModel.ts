@@ -1,5 +1,6 @@
 import type { AiHarnessPublicStep, AiHarnessTrace } from "../../../shared/ai";
-import { readReplyProcess, type AiReplyProcessLive, type AiReplyProcessOutcome, type AiReplyProcessStep } from "../../../shared/aiReplyProcess";
+import { coordinatorActivity, readReplyProcess, type AiReplyProcessAgentsStep, type AiReplyProcessLive, type AiReplyProcessLiveAgents, type AiReplyProcessOutcome, type AiReplyProcessStep } from "../../../shared/aiReplyProcess";
+import { subagentActivity, type AiMultiAgentPhase, type AiSubagentStatus } from "../../../shared/aiMultiAgent";
 import type { AiToolProgress } from "../../../shared/aiRunEvents";
 import { readGeneratedImageSelection } from "./generatedImageSelection";
 import { mediaTaskStatusText, type MediaTaskStatus } from "./mediaTaskClient";
@@ -31,7 +32,33 @@ export type ReplyProcessPart =
   | { kind: "search"; key: string; query?: string; status: ReplyProcessSearchStatus; sourceCount?: number; durationMs?: number; state: ReplyProcessPartState }
   /** Older saved replies only report how many searches ran. */
   | { kind: "search-total"; key: "search-total"; count: number; state: "done" }
-  | { kind: "tool"; key: string; tool: ReplyProcessToolKind; label: string; statusText: string; state: ReplyProcessPartState; hasCard: boolean };
+  | { kind: "tool"; key: string; tool: ReplyProcessToolKind; label: string; statusText: string; state: ReplyProcessPartState; hasCard: boolean }
+  /** 多 Agent 协作: 任务分解, each sub-agent's card, then 结果综合. */
+  | { kind: "agents"; key: "agents"; phase: AiMultiAgentPhase; maxConcurrency?: number; coordinatorActivity: string; agents: ReplyProcessAgentView[];
+    synthesis?: "running" | "done" | "failed" | "cancelled"; state: ReplyProcessPartState;
+    /** Server event times (epoch ms); `updatedAt` is the latest event seen (the finish time once persisted). */
+    startedAt?: number; updatedAt?: number; finishedAt?: number };
+
+/** One sub-agent as shown on its card (live or persisted). */
+export interface ReplyProcessAgentView {
+  id: string;
+  role: string;
+  title: string;
+  task: string;
+  status: AiSubagentStatus;
+  activity?: string;
+  summary?: string;
+  error?: string;
+  durationMs?: number;
+  searchCount?: number;
+  sourceCount?: number;
+  /** 1-based numbers into the reply's own source list. */
+  sources?: number[];
+  /** Server event times (epoch ms). */
+  startedAt?: number;
+  finishedAt?: number;
+  live: boolean;
+}
 
 export type ReplyProcessPhase = "running" | "waiting" | "settled";
 
@@ -151,11 +178,44 @@ export function replyProcessToolPart(artifact: TongpinAIArtifact | undefined): E
   return { ...base, tool, label, statusText, state: "done" };
 }
 
+const AGENT_PHASE_STATE: Record<AiMultiAgentPhase, ReplyProcessPartState> = {
+  planning: "running", dispatching: "running", working: "running", synthesizing: "running", done: "done", failed: "failed", cancelled: "failed",
+};
+
+/** Live or persisted 多 Agent 协作 step → one part. A live step that is no
+ * longer streaming shows its unfinished sub-agents as stopped. */
+export function agentsPart(step: AiReplyProcessLiveAgents | AiReplyProcessAgentsStep, streaming: boolean): Extract<ReplyProcessPart, { kind: "agents" }> {
+  const live = "coordinatorActivity" in step;
+  const stalled = live && !streaming && !["done", "failed", "cancelled"].includes(step.phase);
+  const phase: AiMultiAgentPhase = stalled ? "cancelled" : step.phase;
+  const agents = step.agents.map((agent): ReplyProcessAgentView => {
+    const unfinished = stalled && !["done", "failed", "cancelled"].includes(agent.status);
+    const status: AiSubagentStatus = unfinished ? "cancelled" : agent.status;
+    const view = { ...agent, status, ...(unfinished ? { error: "已停止" } : {}) };
+    return { id: agent.id, role: agent.role, title: agent.title, task: agent.task, status,
+      activity: live && !unfinished && "activity" in agent && agent.activity ? agent.activity : subagentActivity(view),
+      ...(agent.summary ? { summary: agent.summary } : {}), ...(view.error ? { error: view.error } : {}),
+      ...(agent.durationMs !== undefined ? { durationMs: agent.durationMs } : {}), ...(agent.searchCount !== undefined ? { searchCount: agent.searchCount } : {}),
+      ...(agent.sourceCount !== undefined ? { sourceCount: agent.sourceCount } : {}), ...(agent.sources?.length ? { sources: agent.sources } : {}),
+      ...(agent.startedAt !== undefined ? { startedAt: agent.startedAt } : {}), ...(agent.finishedAt !== undefined ? { finishedAt: agent.finishedAt } : {}),
+      live: live && !unfinished && !["done", "failed", "cancelled"].includes(status) };
+  });
+  const synthesis = stalled && step.synthesis === "running" ? "cancelled" : step.synthesis;
+  const updatedAt = live ? step.updatedAt : step.finishedAt;
+  return { kind: "agents", key: "agents", phase, ...(step.maxConcurrency !== undefined ? { maxConcurrency: step.maxConcurrency } : {}),
+    coordinatorActivity: live && !stalled ? step.coordinatorActivity : coordinatorActivity({ phase, agents }),
+    agents, ...(synthesis ? { synthesis } : {}), state: AGENT_PHASE_STATE[phase],
+    ...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}), ...(updatedAt !== undefined ? { updatedAt } : {}),
+    ...(step.finishedAt !== undefined ? { finishedAt: step.finishedAt } : {}) };
+}
+
 function stepParts(steps: readonly (AiReplyProcessStep | AiReplyProcessLive["steps"][number])[], summary: string | undefined, streaming: boolean): ReplyProcessPart[] {
   const parts: ReplyProcessPart[] = [];
   let searchIndex = 0;
   for (const step of steps) {
-    if (step.kind === "thinking") {
+    if (step.kind === "agents") {
+      parts.push(agentsPart(step, streaming));
+    } else if (step.kind === "thinking") {
       if (summary) parts.push({ kind: "thinking", key: "thinking", text: summary, state: "done" });
     } else if (step.kind === "search") {
       searchIndex += 1;
@@ -232,6 +292,8 @@ export function replyProcessView(input: { message: TongpinAIMessage; artifact?: 
 
   const searches = parts.filter((part): part is Extract<ReplyProcessPart, { kind: "search" }> => part.kind === "search");
   const searchTotal = parts.find(part => part.kind === "search-total");
+  // Sub-agent searches live on their own cards; the summary still counts them.
+  const agentSearches = parts.reduce((sum, part) => part.kind === "agents" ? sum + part.agents.reduce((count, agent) => count + (agent.searchCount ?? 0), 0) : sum, 0);
   const reported = searches.filter(part => part.sourceCount !== undefined);
   const citedSources = displaySources(message.sources);
   const citedCount = citedSources.visible.length + citedSources.folded.length;
@@ -248,7 +310,7 @@ export function replyProcessView(input: { message: TongpinAIMessage; artifact?: 
     outcome: settledOutcome(message, streaming ? undefined : recorded?.outcome, tool),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(message.startedAt !== undefined && Number.isSafeInteger(message.startedAt) ? { startedAt: message.startedAt } : {}),
-    searchCount: searchTotal?.kind === "search-total" ? searchTotal.count : searches.length,
+    searchCount: searchTotal?.kind === "search-total" ? searchTotal.count : searches.length + agentSearches,
     ...(sourceCount !== undefined ? { sourceCount } : {}),
   };
 }
@@ -263,6 +325,8 @@ export function replyProcessSummary(view: ReplyProcessView): string {
   if (view.phase === "settled" && view.outcome !== "completed") segments.push(REPLY_PROCESS_OUTCOME_LABELS[view.outcome]);
   const plan = view.parts.find(part => part.kind === "plan");
   if (plan?.kind === "plan") segments.push(`${plan.label} ${plan.completed}/${plan.steps.length} 步`);
+  const agents = view.parts.find(part => part.kind === "agents");
+  if (agents?.kind === "agents") segments.push(`多 Agent 协作 ${agents.agents.filter(agent => agent.status === "done").length}/${agents.agents.length}`);
   if (view.searchCount) segments.push(`搜索 ${view.searchCount} 次`);
   if (view.sourceCount) segments.push(`${view.sourceCount} 个来源`);
   for (const part of view.parts) if (part.kind === "tool") segments.push(part.label);
@@ -275,6 +339,8 @@ export function replyProcessSummary(view: ReplyProcessView): string {
 /** What is happening right now, from the latest real state only. */
 export function replyProcessActivity(view: ReplyProcessView, message: Pick<TongpinAIMessage, "content">): string {
   if (view.parts.some(part => part.kind === "search" && part.state === "running")) return "正在联网搜索";
+  const agents = view.parts.find(part => part.kind === "agents" && part.state === "running");
+  if (agents?.kind === "agents") return agents.coordinatorActivity;
   const tool = view.parts.find(part => part.kind === "tool" && (part.state === "running" || part.state === "waiting"));
   if (tool?.kind === "tool") return tool.statusText;
   const plan = view.parts.find(part => part.kind === "plan" && (part.state === "running" || part.state === "waiting"));

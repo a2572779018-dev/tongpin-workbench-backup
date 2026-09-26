@@ -16,6 +16,7 @@ import {
   Monitor,
   Presentation,
   TriangleAlert,
+  Users,
   Video,
 } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
@@ -24,6 +25,7 @@ import type { AiReplyProcessOutcome } from "../../../shared/aiReplyProcess";
 import { useAuth } from "../../auth/AuthContext";
 import { readAiProcessDetailsExpanded, saveAiProcessDetailsExpanded } from "../../lib/aiProcessPreference";
 import { aiMotionRef, prefersReducedMotion } from "./motion";
+import { MultiAgentProcess } from "./MultiAgentProcess";
 import {
   formatProcessTotal,
   isReplyProcessExpanded,
@@ -126,6 +128,7 @@ function partIcon(part: ReplyProcessPart): ReactNode {
     case "plan": return <ListChecks size={14} aria-hidden="true" />;
     case "thinking": return <Lightbulb size={14} aria-hidden="true" />;
     case "search": case "search-total": return <Globe size={14} aria-hidden="true" />;
+    case "agents": return <Users size={14} aria-hidden="true" />;
     case "tool":
       return part.tool === "image" ? <ImageIcon size={14} aria-hidden="true" />
         : part.tool === "video" ? <Video size={14} aria-hidden="true" />
@@ -163,6 +166,10 @@ function PartRow({ part }: { part: ReplyProcessPart }) {
       break;
     case "search-total":
       title = <><strong>联网搜索</strong><small>{part.count} 次</small></>;
+      break;
+    case "agents":
+      title = <><strong>多 Agent 协作</strong><small>{part.agents.length ? `${part.agents.filter(agent => agent.status === "done").length}/${part.agents.length} 个子任务完成` : part.state === "running" ? "任务分解中" : "未完成任务分解"}</small></>;
+      detail = <MultiAgentProcess part={part} />;
       break;
     case "tool":
       title = <><strong>工具调用 · {part.label}</strong><small>{part.statusText}</small>

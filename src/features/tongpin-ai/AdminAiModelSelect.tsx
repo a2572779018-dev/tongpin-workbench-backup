@@ -2,9 +2,9 @@ import { Check, ChevronDown, Search } from "lucide-react";
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { filterAiModels } from "./adminAiModels";
 
-export function AdminAiModelSelect({ label, value, models, onChange, onOpen, disabled = false, loading = false, emptyMessage = "先填写服务连接并读取模型", allowCustom = false }: {
+export function AdminAiModelSelect({ label, value, models, onChange, onOpen, disabled = false, loading = false, emptyMessage = "先填写服务连接并读取模型", allowCustom = false, placeholder = "选择模型" }: {
   label: string; value: string; models: readonly string[]; onChange: (value: string) => void;
-  onOpen?: () => void; disabled?: boolean; loading?: boolean; emptyMessage?: string; allowCustom?: boolean;
+  onOpen?: () => void; disabled?: boolean; loading?: boolean; emptyMessage?: string; allowCustom?: boolean; placeholder?: string;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -35,7 +35,7 @@ export function AdminAiModelSelect({ label, value, models, onChange, onOpen, dis
       aria-labelledby={`${id}-label ${id}-value`} aria-haspopup="listbox" aria-expanded={open}
       aria-controls={`${id}-options`} onClick={() => open ? setOpen(false) : openList()}
       onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); openList(); } }}>
-      <span id={`${id}-value`} className={value ? "" : "is-placeholder"}>{value || "选择模型"}</span><ChevronDown size={16} aria-hidden="true" />
+      <span id={`${id}-value`} className={value ? "" : "is-placeholder"}>{value || placeholder}</span><ChevronDown size={16} aria-hidden="true" />
     </button>
     {open ? <div className="tp-ai-model-popover">
       <label className="tp-ai-model-search"><Search size={16} aria-hidden="true" /><input autoFocus value={query}

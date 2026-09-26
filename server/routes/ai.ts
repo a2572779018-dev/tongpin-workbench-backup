@@ -132,6 +132,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
       response.on("close", () => stream.destroy()); stream.on("error", () => response.destroy()); stream.pipe(response);
     });
     router.get("/requests/:id/events", (request, response) => response.json({ events: scoped(request).getRunEvents(request.currentUser!.id, request.params.id, Number(request.query.after ?? 0)) }));
+    router.post("/requests/:id/cancel", (request, response) => response.json(scoped(request).cancelMultiAgentRun(request.currentUser!.id, request.params.id)));
     router.post("/media-tasks", async (request, response) => {
       const tenantId = aiTenantIdFromPrincipal(request.currentUser);
       const userId = request.currentUser!.id;

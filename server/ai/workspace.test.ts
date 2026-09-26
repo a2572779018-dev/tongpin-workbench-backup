@@ -297,7 +297,8 @@ describe("AI durable member workspace", () => {
     Object.assign(state.conversations[0].messages[1], reply);
     const saved = await repository.save("member-a", saveRequest(state));
     expect(repository.read("member-a").state!.conversations[0].messages[1].usage).toEqual(reply.usage);
-    for (const bad of [{ searchCalls: -1 }, { searchCalls: 4 }, { searchCalls: 1.5 }, { tokenUsageEstimated: "false" }]) {
+    // 多 Agent 协作 replies may report up to 20 searches (3 sub-agents on a compatible relay plus one call).
+    for (const bad of [{ searchCalls: -1 }, { searchCalls: 21 }, { searchCalls: 1.5 }, { tokenUsageEstimated: "false" }]) {
       const invalidState = structuredClone(state); Object.assign(invalidState.conversations[0].messages[1].usage!, bad);
       await expect(repository.save("member-a", saveRequest(invalidState, 1))).rejects.toHaveProperty("code", "AI_WORKSPACE_INVALID");
       expect(repository.read("member-a")).toEqual(saved);

@@ -22,6 +22,7 @@ import { generatedMediaForFollowup, generatedMediaForMixedFollowup, readGenerate
 import { mediaCacheScope } from "./mediaCache";
 import { registerAiLeaveGuard } from "./workspaceLeaveGuard";
 import { waitForReply } from "./waitForReply";
+import { requestMultiAgentStop } from "./multiAgentClient";
 import { workspaceV2Client } from "./workspaceV2Client";
 import { preflightNotice } from "./chatPreflight";
 import { appendDraftText, draftAfterSend } from "./composerSteer";
@@ -98,6 +99,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
   const mountedRef = useRef(true);
   const controllersRef = useRef(new Set<AbortController>());
   const activeControllersRef = useRef(new Map<string, AbortController>());
+  const activeRequestIdsRef = useRef(new Map<string, string>());
   const draftTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const draftSavesRef = useRef(new Map<string, Promise<boolean>>());
   const loadingPromisesRef = useRef(new Map<string, Promise<AiWorkspaceV2MessagePage>>());
@@ -397,6 +399,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       const capabilityRequest = mentionedCapabilityRequest(content);
       const requestId = crypto.randomUUID();
       pendingRequestId = requestId;
+      activeRequestIdsRef.current.set(id, requestId);
       const message: AiWorkspaceMessage = { id: `user-${crypto.randomUUID()}`, role: "user", content,
         time: timeLabel(), requestId, ...(documents.length ? { attachments: documents } : {}) };
       const requestAttachments = toolAttachmentContext(documents, current.project?.contextDocuments ?? [], current.messages);
@@ -495,7 +498,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
     } finally {
       settle({ status: "failed", reason: "补充暂时无法发送，已放回输入框" });
       controllersRef.current.delete(controller);
-      if (activeControllersRef.current.get(id) === controller) activeControllersRef.current.delete(id);
+      if (activeControllersRef.current.get(id) === controller) { activeControllersRef.current.delete(id); activeRequestIdsRef.current.delete(id); }
       busyRef.current.delete(id);
       if (mountedRef.current) {
         setBusy(old => ({ ...old, [id]: false }));
@@ -584,7 +587,8 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       }} onSubmit={() => void send()}
       pendingSupplements={steer.bubbles(activeId)} onCancelSupplement={id => steer.cancel(id)}
       onSteer={text => { const added = steer.add(activeId, text, { kind: "followup" }); if (!added.ok) setNotice(added.reason); return added.ok; }}
-      onStop={() => { activeControllersRef.current.get(activeId)?.abort(); setNotice("已停止等待；原请求可在重新打开对话后按原编号查询，不会重新提交。"); }}
+      onStop={() => { const requestId = activeRequestIdsRef.current.get(activeId); activeControllersRef.current.get(activeId)?.abort(); setNotice("已停止等待；原请求可在重新打开对话后按原编号查询，不会重新提交。");
+        void requestMultiAgentStop(api, user.id, requestId).then(stopped => { if (stopped) setNotice("已停止多 Agent 协作，未完成的子任务已取消。"); }); }}
       onRefreshConnection={() => void refreshStatus()} /> : <main className="tp-ai-v2-empty"><h1>开始一段新对话</h1><button type="button" onClick={() => setNameDialog({ kind: "new" })}>新建对话</button></main>}
     {preview && <ArtifactPreview artifact={preview} onClose={() => setPreviewId(null)} />}
     {notice && <div className="tp-ai-v2-notice" role="alert"><span>{notice}</span>{recoveryAction && <button type="button" onClick={() => void recoverRequest(recoveryAction.conversationId, recoveryAction.requestId, true)}>查询原请求</button>}<button type="button" onClick={() => { setNotice(""); setRecoveryAction(null); }}>关闭</button></div>}

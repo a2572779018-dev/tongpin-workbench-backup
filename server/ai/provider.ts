@@ -213,11 +213,11 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
   const citationSpans = providerCitationSpans(textParts, content);
   return { content, usage, sources, searchCalls, completedSearchCalls, status, ...(incompleteReason ? { incompleteReason } : {}), ...(citationSpans ? { citationSpans } : {}) };
 }
-export function providerBody(provider: StoredProvider, request: AiChatRequest, model: string, maxOutputTokens: number, persona?: AiPersonaProfile, options: { stream?: boolean } = {}): Record<string, unknown> {
+export function providerBody(provider: StoredProvider, request: AiChatRequest, model: string, maxOutputTokens: number, persona?: AiPersonaProfile, options: { stream?: boolean; /** Server-owned instructions (多 Agent 协作 roles); default: chatInstructions. */ instructions?: string } = {}): Record<string, unknown> {
   const messages = chatMessages(request);
   const images = request.attachments?.filter(item => item.dataUrl) ?? [];
   const providerPublicSummary = supportsOfficialPublicSummary(provider, request, model);
-  const instructions = chatInstructions(request, persona, model, { providerPublicSummary });
+  const instructions = options.instructions ?? chatInstructions(request, persona, model, { providerPublicSummary });
   if (provider.protocol === "responses") return {
     model, instructions,
     input: messages.map((message, index) => images.length && index === messages.length - 1

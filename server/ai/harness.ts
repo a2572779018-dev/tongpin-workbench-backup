@@ -22,6 +22,7 @@ import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflow
 import { legacyHarnessDraft } from "./harnessMigration";
 import { parseImageEditCapability, parseImageGenerationCapability } from "./imageCapabilities";
 import type { AiImageEditCapability, AiImageGenerationCapability } from "../../shared/aiImageCapabilities";
+import { readAiMultiAgentSettings, type AiMultiAgentSettings } from "../../shared/aiMultiAgent";
 
 const CAPABILITIES = new Set<AiHarnessCapability>(["chat", "vision", "web_search", "image", "video", "presentation", "computer"]);
 const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]{1,47}$/;
@@ -115,6 +116,11 @@ export interface ResolvedHarnessRoute {
   capabilities: AiHarnessCapability[];
   policy: AiHarnessConfig["policy"];
   legacy: boolean;
+  /** Present when this tier uses 多 Agent 协作 for text turns. `policy` stays the
+   * global rule (tool steps, auto search); only a run that really goes
+   * multi-agent records `multi_agent`. An unverified sub-agent model is dropped
+   * here (sub-agents then use the tier model). */
+  multiAgent?: AiMultiAgentSettings;
 }
 
 export interface ResolvedHarnessMediaRoute {
@@ -207,8 +213,11 @@ export class AiHarness {
     if (imageEditCapability && imageEditCapability.modelId !== image.imageModelId) throw new AiError(400, "AI_IMAGE_EDIT_CAPABILITY_INVALID", "图片编辑协议与所选模型不一致，请重新选择");
     const imageGenerationCapability = parseImageGenerationCapability(route.imageGenerationCapability);
     if (imageGenerationCapability && imageGenerationCapability.modelId !== image.imageModelId) throw new AiError(400, "AI_IMAGE_GENERATION_CAPABILITY_MISMATCH", "图片生成协议与所选模型不一致，请重新选择");
+    const multiAgent = route.multiAgent === undefined || route.multiAgent === null ? undefined : readAiMultiAgentSettings(route.multiAgent, Number(route.maxOutputTokens));
+    if (multiAgent?.error) throw new AiError(400, "AI_HARNESS_INVALID", multiAgent.error);
     return { providerId, modelId, protocol, maxOutputTokens: Number(route.maxOutputTokens), reasoningEffort, capabilities, enabled: route.enabled, ...image, ...video,
-      ...(imageGenerationCapability ? { imageGenerationCapability } : {}), ...(imageEditCapability ? { imageEditCapability } : {}) };
+      ...(imageGenerationCapability ? { imageGenerationCapability } : {}), ...(imageEditCapability ? { imageEditCapability } : {}),
+      ...(multiAgent?.settings ? { multiAgent: multiAgent.settings } : {}) };
   }
 
   async save(value: unknown): Promise<AiHarnessConfig> {
@@ -324,7 +333,10 @@ export class AiHarness {
     if (!provider?.enabled) throw new AiError(503, "AI_HARNESS_PROVIDER_DISABLED", "该业务档位的模型服务暂未启用");
     const verified = provider.verifiedConfigVersion === provider.configVersion && provider.verifiedKeyVersion === provider.keyVersion;
     if (!verified || !provider.availableModels.includes(route.modelId)) throw new AiError(503, "AI_HARNESS_MODEL_UNVERIFIED", "该业务档位尚未完成当前密钥的模型校验，请管理员重新获取模型列表", true);
-    return { tier, providerId: provider.id, providerName: provider.name, baseUrl: provider.baseUrl, encryptedKey: provider.encryptedKey, modelId: route.modelId, protocol: route.protocol, maxOutputTokens: route.maxOutputTokens, reasoningEffort: route.reasoningEffort, capabilities: route.capabilities, policy: stored.policy, legacy: false };
+    const multiAgent: AiMultiAgentSettings | undefined = route.multiAgent && { maxConcurrency: route.multiAgent.maxConcurrency, subAgentMaxOutputTokens: route.multiAgent.subAgentMaxOutputTokens,
+      ...(route.multiAgent.subAgentModelId && provider.availableModels.includes(route.multiAgent.subAgentModelId) ? { subAgentModelId: route.multiAgent.subAgentModelId } : {}) };
+    return { tier, providerId: provider.id, providerName: provider.name, baseUrl: provider.baseUrl, encryptedKey: provider.encryptedKey, modelId: route.modelId, protocol: route.protocol, maxOutputTokens: route.maxOutputTokens, reasoningEffort: route.reasoningEffort, capabilities: route.capabilities,
+      policy: stored.policy, legacy: false, ...(multiAgent ? { multiAgent } : {}) };
   }
 
   /** Resolves an admin-only media binding. A missing binding deliberately
@@ -399,9 +411,11 @@ export class AiHarness {
     const runId = crypto.randomUUID();
     const capability = requestCapability(request);
     const strategy = route.policy.strategy;
-    const maxToolSteps = strategy === "direct" ? 1 : route.policy.maxToolSteps;
+    const maxToolSteps = strategy === "direct" || strategy === "multi_agent" ? 1 : route.policy.maxToolSteps;
     const strategySummary = strategy === "direct"
       ? "直接完成当前请求；如需工具，仅允许提出一个待确认操作。"
+      : strategy === "multi_agent"
+        ? `多 Agent 协作：由协调 Agent 判断是否拆分任务，最多 ${route.multiAgent?.maxConcurrency ?? 2} 个子 Agent 同时处理，完成后综合结果；如需工具，仅允许提出一个待确认操作。`
       : strategy === "react"
         ? `按“观察结果—提出下一步”的方式推进，最多 ${maxToolSteps} 个工具步骤。`
         : `先形成有界执行计划，再逐步执行，最多 ${maxToolSteps} 个工具步骤。`;
@@ -432,7 +446,7 @@ export class AiHarness {
     const metadata = this.store.harnessSteps(userId, runId).find(step => step.kind === "strategy");
     const strategy = metadata?.strategy ?? "direct";
     const configuredMax = Number.isInteger(metadata?.maxToolSteps) ? Number(metadata!.maxToolSteps) : 1;
-    return { strategy, maxToolSteps: strategy === "direct" ? 1 : Math.max(1, Math.min(8, configuredMax)), ...(metadata?.workflowId ? { workflowId: metadata.workflowId } : {}) };
+    return { strategy, maxToolSteps: strategy === "direct" || strategy === "multi_agent" ? 1 : Math.max(1, Math.min(8, configuredMax)), ...(metadata?.workflowId ? { workflowId: metadata.workflowId } : {}) };
   }
 
   /** One verified application phase can complete at most one Hub node. A model

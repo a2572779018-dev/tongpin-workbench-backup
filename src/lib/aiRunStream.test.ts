@@ -281,11 +281,38 @@ describe("AI run stream decoder", () => {
     expect(seen.map(value => value.type)).toEqual(["run_started", "tool_progress", "reasoning_delta", "run_finished"]);
   });
 
+  it("opts in to 多 Agent 协作 progress and passes validated sub-agent updates through", async () => {
+    let body = "";
+    const api = async <T,>(_path: string, init?: RequestInit) => {
+      body = String(init?.body ?? "");
+      return eventResponse([
+        event(1, "run_started", { startedAt: 1 }),
+        event(2, "subagent_update", { phase: "planning" }),
+        event(3, "subagent_update", { phase: "plan", maxConcurrency: 2, subtasks: [{ id: "agent-1", role: "研究员", title: "查资料", task: "查找资料。\n只列事实。", search: true }] }),
+        event(4, "subagent_update", { phase: "start", id: "agent-1" }),
+        event(5, "subagent_update", { phase: "search", id: "agent-1", callId: "search-1", status: "completed", query: "深圳 天气", sourceCount: 3 }),
+        event(6, "subagent_update", { phase: "stop", id: "agent-1", durationMs: 1_200, summary: "深圳今天晴。", searchCount: 1, sourceCount: 3, sources: [1, 2] }),
+        event(7, "subagent_update", { phase: "synthesis" }),
+        event(8, "answer_delta", { delta: "complete" }),
+        event(9, "subagent_update", { phase: "finish", outcome: "done" }),
+        event(10, "run_finished", { response }),
+      ]) as T;
+    };
+    const seen: AiRunEvent[] = [];
+    await expect(readAiChatStream(api, request, { accountId: "member", signal: new AbortController().signal, onEvent: value => seen.push(value) })).resolves.toEqual(response);
+    expect(JSON.parse(body)).toMatchObject({ requestId: request.requestId, liveProgress: true, subagentEvents: true });
+    expect(seen.flatMap(value => value.type === "subagent_update" ? [value.data.phase] : [])).toEqual(["planning", "plan", "start", "search", "stop", "synthesis", "finish"]);
+  });
+
   it.each([
     ["tool_progress", { tool: "shell", callId: "search-1", status: "completed" }],
     ["tool_progress", { tool: "web_search", callId: "ws_provider", status: "completed" }],
     ["tool_progress", { tool: "web_search", callId: "search-1", status: "thinking" }],
     ["reasoning_delta", { delta: "x", source: "hidden" }],
+    ["subagent_update", { phase: "start", id: "agent-9" }],
+    ["subagent_update", { phase: "stop", id: "agent-1", durationMs: 5, summary: "ok", prompt: "hidden" }],
+    ["subagent_update", { phase: "plan", maxConcurrency: 9, subtasks: [{ id: "agent-1", role: "研究员", title: "t", task: "x", search: false }] }],
+    ["subagent_update", { phase: "search", id: "agent-1", callId: "ws_provider", status: "searching" }],
   ] as const)("rejects a malformed %s event", async (type, data) => {
     const api = async <T,>() => eventResponse([event(1, "run_started", { startedAt: 1 }), event(2, type, data as AiRunEvent["data"])]) as T;
     const seen = vi.fn();

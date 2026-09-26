@@ -29,6 +29,7 @@ import { citationsForContent } from "./citations";
 import { withPendingGuidance } from "./runGuidance";
 import { AiVoiceService } from "./voice";
 import { AiMemberMemoryService } from "./memberMemoryService";
+import { cancelMultiAgentRun as cancelActiveMultiAgentRun, multiAgentPreflight, runMultiAgentChat, type MultiAgentHost } from "./multiAgentRun";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -623,7 +624,19 @@ export class AiService {
     const { provider, route } = this.chatSelection(request);
     const model = route.modelId;
     const persona = this.memberMemory.withMemory(new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile, userId, request, false);
-    return this.chatPreflight(userId, request, provider, persona, model);
+    const ordinary = this.chatPreflight(userId, request, provider, persona, model);
+    return multiAgentPreflight({ route, request, provider, persona, ordinary }) ?? ordinary;
+  }
+  /** 多 Agent 协作 host: the run reserves, streams and settles through this service. */
+  private multiAgentHost(userId: string): MultiAgentHost {
+    return { store: this.store, transport: this.transport, harness: this.harness, settle: (...args) => this.settle(...args),
+      invalidateAvailability: () => this.availabilityProbe.invalidate("chat"),
+      idempotencyKey: requestId => providerIdempotencyKey(this.store.tenantId, userId, requestId, "chat") };
+  }
+  /** Member Stop: aborts the in-flight sub-agents of this member's multi-agent run. */
+  cancelMultiAgentRun(userId: string, requestId: string): { cancelled: boolean } {
+    this.store.assertAccess(userId);
+    return { cancelled: cancelActiveMultiAgentRun(this.store.tenantId, userId, requestId) };
   }
   getAsset(userId: string, assetId: string): AiImageAsset {
     const asset = this.store.asset(userId, assetId);
@@ -747,6 +760,10 @@ export class AiService {
     const idempotencyKey = await providerIdempotencyKey(this.store.tenantId, userId, request.requestId, "chat");
     const model = route.modelId;
     const persona = this.memberMemory.withMemory(new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile, userId, request, true);
+    // Pro 多 Agent 协作: runs only when the tier opts in and its worst case fits; otherwise the ordinary path below.
+    const multiAgent = await runMultiAgentChat(this.multiAgentHost(userId), { userId, request, provider, route, key, persona, hash, parentAttempt,
+      stream: options.stream, onEvent: options.onEvent, subagentEvents: object(value).subagentEvents === true });
+    if (multiAgent) return multiAgent;
     const reserved = this.store.sql.transaction(() => {
       // Recheck after asynchronous hashing / key decryption.
       if (this.store.request(userId, request.requestId)) throw new AiError(409, "AI_REQUEST_IN_PROGRESS", "AI 正在处理这条消息，请稍候");

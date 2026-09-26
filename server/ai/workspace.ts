@@ -1,5 +1,7 @@
 import { AI_WORKSPACE_FEATURES, AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceArtifact, type AiWorkspaceConversation, type AiWorkspaceDocument, type AiWorkspaceProject, type AiWorkspaceSaveRequest, type AiWorkspaceSnapshot, type AiWorkspaceState, type AiWorkspaceStorageUsage } from "../../shared/aiWorkspace";
-import { AI_REPLY_PROCESS_LIMITS } from "../../shared/aiReplyProcess";
+import { AI_REPLY_PROCESS_LIMITS, isAiReplyProcessAgentsStep } from "../../shared/aiReplyProcess";
+import { AI_MULTI_AGENT_LIMITS } from "../../shared/aiMultiAgent";
+import { searchCallLimit } from "./searchPolicy";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
@@ -59,7 +61,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const CHUNK_MARKER = "@chunks-v1";
 const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
 const HARNESS_TIERS = new Set(["quick", "standard", "deep", "pro"]);
-const HARNESS_STRATEGIES = new Set(["direct", "react", "plan_execute"]);
+const HARNESS_STRATEGIES = new Set(["direct", "react", "plan_execute", "multi_agent"]);
 const HARNESS_RUN_STATUSES = new Set(["planned", "running", "waiting_approval", "succeeded", "failed", "cancelled", "uncertain"]);
 const HARNESS_NEXT_ACTIONS = new Set(["none", "poll", "approve_tool", "resume"]);
 const HARNESS_STEP_KINDS = new Set(["strategy", "route", "workflow", "plan", "model", "tool", "approval", "result"]);
@@ -183,6 +185,9 @@ function documents(value: unknown, label: string): void {
     }
   }
 }
+/** One reply's searches: a compatible relay allows 5 per call, and a 多 Agent 协作
+ * reply adds up to maxSearchAgents sub-agents at that limit. */
+const MAX_REPLY_SEARCH_CALLS = searchCallLimit({ webSearchProtocol: "compatible" }) * (1 + AI_MULTI_AGENT_LIMITS.maxSearchAgents);
 function usage(value: unknown): void {
   if (value === undefined) return;
   const item = record(value, "消息用量", ["inputTokens", "outputTokens", "totalTokens", "estimated", "convertedTokens", "billingKind", "searchCalls", "tokenUsageEstimated"]);
@@ -190,7 +195,7 @@ function usage(value: unknown): void {
     if (!Number.isSafeInteger(item[key]) || Number(item[key]) < 0) invalid("消息用量格式不正确");
   }
   if (item.convertedTokens !== undefined && (!Number.isSafeInteger(item.convertedTokens) || Number(item.convertedTokens) < 0)) invalid("消息折算用量格式不正确");
-  if (item.searchCalls !== undefined && (!Number.isSafeInteger(item.searchCalls) || Number(item.searchCalls) < 0 || Number(item.searchCalls) > 3)) invalid("消息搜索次数格式不正确");
+  if (item.searchCalls !== undefined && (!Number.isSafeInteger(item.searchCalls) || Number(item.searchCalls) < 0 || Number(item.searchCalls) > MAX_REPLY_SEARCH_CALLS)) invalid("消息搜索次数格式不正确");
   if (item.tokenUsageEstimated !== undefined && typeof item.tokenUsageEstimated !== "boolean") invalid("消息文本用量核对状态格式不正确");
   if (item.billingKind !== undefined && !["tokens", "image_conversion", "tokens_with_search"].includes(String(item.billingKind))) invalid("消息计量类型格式不正确");
   if (Number(item.inputTokens) + Number(item.outputTokens) + Number(item.convertedTokens ?? 0) !== item.totalTokens || typeof item.estimated !== "boolean") invalid("消息用量格式不正确");
@@ -216,12 +221,16 @@ function replyProcess(value: unknown, role: unknown): void {
   if (process.durationMs !== undefined) boundedInteger(process.durationMs, "回复过程用时", 0, AI_REPLY_PROCESS_LIMITS.durationMs);
   const steps = array(process.steps, "回复过程步骤", AI_REPLY_PROCESS_LIMITS.steps);
   if (!steps.length) invalid("回复过程缺少步骤");
-  let thinkingSteps = 0;
+  let thinkingSteps = 0, agentSteps = 0;
   for (const rawStep of steps) {
     const kind = rawStep && typeof rawStep === "object" && !Array.isArray(rawStep) ? (rawStep as ObjectValue).kind : undefined;
     if (kind === "thinking") {
       record(rawStep, "回复过程步骤", ["kind"]);
       if (++thinkingSteps > 1) invalid("回复过程思考步骤重复");
+    } else if (kind === "agents") {
+      // 多 Agent 协作: roles, bounded subtask excerpts, one-line summaries, times.
+      if (!isAiReplyProcessAgentsStep(rawStep)) invalid("多 Agent 协作记录无效");
+      if (++agentSteps > 1) invalid("多 Agent 协作记录重复");
     } else if (kind === "search") {
       const step = record(rawStep, "回复过程步骤", ["kind", "status", "query", "sourceCount", "durationMs"]);
       if (!["completed", "failed", "incomplete"].includes(String(step.status))) invalid("联网搜索状态无效");
@@ -520,7 +529,7 @@ function chunks(serialized: string): string[] {
 /** Route-level capability advertisement for additive V1 message fields. The
  * stored snapshot and its acknowledgement semantics are unchanged. */
 export function withAiWorkspaceFeatures(snapshot: AiWorkspaceSnapshot): AiWorkspaceSnapshot {
-  return { ...snapshot, features: [AI_WORKSPACE_FEATURES.replyProcess] };
+  return { ...snapshot, features: [AI_WORKSPACE_FEATURES.replyProcess, AI_WORKSPACE_FEATURES.replyProcessAgents] };
 }
 
 /** Same measure as the aggregate save check: UTF-8 bytes of the stored JSON. Storage format is unchanged. */

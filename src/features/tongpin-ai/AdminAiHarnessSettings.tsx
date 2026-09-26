@@ -10,6 +10,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { adminAiErrorMessage, normalizeAiBaseUrl } from "./adminAiForms";
 import { planModelDiscovery } from "./adminAiModels";
 import { AdminAiModelSelect } from "./AdminAiModelSelect";
+import { AdminAiMultiAgentSettings, multiAgentSettingsError } from "./AdminAiMultiAgentSettings";
 import { ModelDiscoveryRevision } from "./modelDiscoveryRevision";
 
 const CAPABILITIES: Array<[AiHarnessCapability, string]> = [
@@ -111,6 +112,8 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
           setActiveTier(tier); setError(`请为${AI_BUSINESS_TIER_LABELS[tier]}选择${capability === "image" ? "图片" : "视频"}服务和模型。`); return;
         }
       }
+      const multiAgentError = multiAgentSettingsError(route);
+      if (multiAgentError) { setActiveTier(tier); setError(`${AI_BUSINESS_TIER_LABELS[tier]}档：${multiAgentError}`); return; }
     }
     busyRef.current = true; setBusy("save"); setError(""); setNotice("");
     try {
@@ -135,7 +138,8 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
         const route = harness.tiers[tier]; if (!route.enabled) return false;
         return !verified[route.providerId]?.includes(route.modelId)
           || (route.capabilities.includes("image") && !verified[route.imageProviderId ?? ""]?.includes(route.imageModelId ?? ""))
-          || (route.capabilities.includes("video") && !verified[route.videoProviderId ?? ""]?.includes(route.videoModelId ?? ""));
+          || (route.capabilities.includes("video") && !verified[route.videoProviderId ?? ""]?.includes(route.videoModelId ?? ""))
+          || Boolean(route.multiAgent?.subAgentModelId && !verified[route.providerId]?.includes(route.multiAgent.subAgentModelId));
       });
       if (missing.length) setError(`配置已保存，${missing.map(tier => AI_BUSINESS_TIER_LABELS[tier]).join("、")}的模型尚未全部验证，请检查服务连接和模型权限。`);
       else setNotice("服务连接和四个档位已保存，模型列表校验通过。");
@@ -226,6 +230,8 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
         </div>
         <details className="is-wide tp-ai-provider-capabilities"><summary>自动调用规则</summary><div className="tp-ai-admin-fields">
           <label className="tp-ai-admin-field">任务处理方式<select value={draft.policy.strategy} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, strategy: event.target.value as AiHarnessInput["policy"]["strategy"] } }))}><option value="direct">直接回答</option><option value="react">按需要调用工具</option><option value="plan_execute">先规划再执行</option></select></label>
+          <AdminAiMultiAgentSettings tier={activeTier} route={route} models={discovered[route.providerId] ?? []} loading={busy === `discover:${route.providerId}`}
+            emptyMessage={providerErrors[route.providerId] || "点击上方服务的「读取模型」重试"} onOpenModels={() => discoverIfNeeded(route.providerId)} onChange={multiAgent => updateTier(activeTier, { multiAgent })} />
           <label className="tp-ai-admin-field">单轮工具步骤上限<input type="number" min={1} max={8} required value={draft.policy.maxToolSteps} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, maxToolSteps: Number(event.target.value) } }))} /></label>
           <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.policy.autoWebSearch} onChange={event => setDraft(current => ({ ...current, policy: { ...current.policy, autoWebSearch: event.target.checked } }))} />需要时自动联网</label>
         </div></details>

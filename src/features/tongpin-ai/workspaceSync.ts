@@ -18,13 +18,20 @@ function errorCode(error: unknown): string | undefined {
  * optional reply `process` record only to a server that advertises it; the
  * page keeps showing it locally either way. Unchanged input is returned as is. */
 export function workspaceStateForServer(state: AiWorkspaceState, features: readonly string[] | undefined): AiWorkspaceState {
-  if (features?.includes(AI_WORKSPACE_FEATURES.replyProcess)) return state;
+  const processSupported = Boolean(features?.includes(AI_WORKSPACE_FEATURES.replyProcess));
+  // 多 Agent 协作 steps need their own feature (a rolled-back server rejects them).
+  const agentsSupported = processSupported && Boolean(features?.includes(AI_WORKSPACE_FEATURES.replyProcessAgents));
+  if (agentsSupported) return state;
+  const unsupported = (message: AiWorkspaceState["conversations"][number]["messages"][number]) =>
+    message.process !== undefined && (!processSupported || message.process.steps.some(step => step.kind === "agents"));
   let changed = false;
   const conversations = state.conversations.map(conversation => {
-    if (!conversation.messages.some(message => message.process !== undefined)) return conversation;
+    if (!conversation.messages.some(unsupported)) return conversation;
     changed = true;
     return { ...conversation, messages: conversation.messages.map(message => {
-      if (message.process === undefined) return message;
+      if (!unsupported(message)) return message;
+      const steps = processSupported ? message.process!.steps.filter(step => step.kind !== "agents") : [];
+      if (steps.length) return { ...message, process: { ...message.process!, steps } };
       const { process: _unsupportedByServer, ...rest } = message;
       return rest;
     }) };

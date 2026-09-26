@@ -50,6 +50,7 @@ import { appendDraftText, awaitingUserConfirmation, latestAssistantMessage, stee
 import { runGuidanceClient, useSteerController, type SteerSendResult } from "../features/tongpin-ai/steerController";
 import { ArtifactPreview } from "../features/tongpin-ai/ArtifactPreview";
 import { applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE, settleReplyProcess, withReplyProcessTool, type AiReplyProcessLive } from "../../shared/aiReplyProcess";
+import { requestMultiAgentStop } from "../features/tongpin-ai/multiAgentClient";
 import { ChatWorkspace } from "../features/tongpin-ai/ChatWorkspace";
 import { TongpinAIWorkspaceV2 } from "../features/tongpin-ai/TongpinAIWorkspaceV2";
 import { TONGPIN_AI_SKILLS } from "../features/tongpin-ai/mockData";
@@ -2206,6 +2207,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       pendingCancelledRef.current.add(activeConversationId);
       return;
     }
+    // 多 Agent 协作 also stops its in-flight sub-agents on the server.
+    if (request) void requestMultiAgentStop(api, user.id, workspaceRef.current.conversations.find(item => item.id === activeConversationId)?.messages.find(message => message.id === request.messageId)?.requestId);
     request?.controller.abort();
   }
 

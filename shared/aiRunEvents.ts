@@ -1,4 +1,5 @@
 import type { AiChatResponse, AiUsage } from "./ai";
+import type { AiSubagentUpdate } from "./aiMultiAgent";
 
 export type AiRunEventPayload =
   | { type: "run_started"; data: { startedAt: number } }
@@ -12,6 +13,9 @@ export type AiRunEventPayload =
    * `callId` is an application-local ordinal, never a provider item id.
    * Emitted only to clients that opted in with `liveProgress: true`. */
   | { type: "tool_progress"; data: AiToolProgress }
+  /** 多 Agent 协作 lifecycle (shared/aiMultiAgent.ts). Emitted only to clients
+   * that opted in with `subagentEvents: true`; older clients reject unknown types. */
+  | { type: "subagent_update"; data: AiSubagentUpdate }
   /** Emitted only after a provider-reported token usage has been durably settled.
    * totalTokens may include administrator-configured search conversion units;
    * inputTokens/outputTokens remain the provider-reported text counts. */
