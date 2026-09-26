@@ -39,7 +39,7 @@
     "build:api": "tsup server/index.ts --format esm --out-dir dist/server --sourcemap",
     "build": "npm run typecheck && npm run test && npm run build:web && npm run build:api",
     "dist:win": "node scripts/verify-computer-use-runtime.cjs --source --target win32-x64 && npm run build && electron-builder --win nsis --publish never && node scripts/verify-asar-contents.cjs artifacts/win-unpacked/resources/app.asar --target win32-x64",
-    "dist:mac": "node scripts/prepare-computer-use-runtime.cjs --target darwin-universal && node scripts/verify-computer-use-runtime.cjs --source --target darwin-universal && npm run build && electron-builder --mac dmg zip --universal --publish never && node scripts/verify-asar-contents.cjs artifacts/mac-universal/同频.app/Contents/Resources/app.asar --target darwin-universal",
+    "dist:mac": "node scripts/prepare-computer-use-runtime.cjs --target darwin-universal && node scripts/verify-computer-use-runtime.cjs --source --target darwin-universal && npm run build && node scripts/electron-builder-mac.cjs --mac dmg zip --universal --publish never && node scripts/verify-asar-contents.cjs artifacts/mac-universal/同频.app/Contents/Resources/app.asar --target darwin-universal",
     "start:desktop": "cross-env TONGPIN_API_URL=http://127.0.0.1:4318 electron ."
   },
   "build": {
