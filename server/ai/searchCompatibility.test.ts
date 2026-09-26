@@ -55,13 +55,13 @@ describe("Explicit compatible Responses search and bounded settlement", () => {
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.service.quota("member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
   });
-  it.each([1, 2, 3])("reserves 3 conversions but settles only %i observed searches, retaining source requirements", async calls => {
+  it.each([1, 2, 3, 5])("reserves 5 conversions but settles only %i observed searches, retaining source requirements", async calls => {
     const standard = runtime.service.preflight("member", chat());
     await runtime.service.saveProvider({ ...provider, webSearchProtocol: "compatible" });
     const request = chat();
     const compatible = runtime.service.preflight("member", request);
-    expect(compatible.budget.convertedReserve).toBe(300);
-    expect(compatible.budget.minimumRequiredTokens - standard.budget.minimumRequiredTokens).toBe(200);
+    expect(compatible.budget.convertedReserve).toBe(500);
+    expect(compatible.budget.minimumRequiredTokens - standard.budget.minimumRequiredTokens).toBe(400);
     transport.mockResolvedValueOnce(Response.json(result(calls)));
     const response = await runtime.service.chat("member", request);
     const body = JSON.parse(transport.mock.calls[0][1].body!);
@@ -75,7 +75,7 @@ describe("Explicit compatible Responses search and bounded settlement", () => {
     expect((await runtime.service.chat("member", request)).usage).toEqual(response.usage);
     expect(transport).toHaveBeenCalledTimes(1);
   });
-  it("cancels on the fourth stream search, keeps uncertain settlement, and never resumes or retries it", async () => {
+  it("cancels on the sixth stream search, keeps uncertain settlement, and never resumes or retries it", async () => {
     await runtime.service.saveProvider({ ...provider, webSearchProtocol: "compatible" });
     let pulls = 0;
     const cancelled = vi.fn();
@@ -84,7 +84,7 @@ describe("Explicit compatible Responses search and bounded settlement", () => {
     const request = chat();
     const reserved = runtime.service.preflight("member", request).budget;
     await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_SEARCH_LIMIT_EXCEEDED" });
-    expect(pulls).toBe(4); expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(pulls).toBe(6); expect(cancelled).toHaveBeenCalledTimes(1);
     expect(runtime.service.quota("member")).toMatchObject({ usedTokens: reserved.inputReserve + reserved.searchInputReserve + reserved.availableOutputTokens + reserved.convertedReserve, reservedTokens: 0 });
     expect(runtime.service.getRequestResult("member", request.requestId)).toMatchObject({ status: "uncertain" });
     await expect(runtime.service.chat("member", request)).rejects.toMatchObject({ code: "AI_SEARCH_LIMIT_EXCEEDED" });

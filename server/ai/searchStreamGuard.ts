@@ -4,7 +4,7 @@ function record(value: unknown): Record<string, unknown> { return value && typeo
 
 /** Detect over-budget tool invocations while bytes arrive. Cancellation cannot guarantee upstream billing stopped. */
 export function createSearchStreamGuard(maxCalls: number) {
-  if (!Number.isInteger(maxCalls) || maxCalls < 0 || maxCalls > 3) throw new Error("Invalid local search budget");
+  if (!Number.isInteger(maxCalls) || maxCalls < 0 || maxCalls > 5) throw new Error("Invalid local search budget");
   let pending = "";
   const seen = new Set<string>();
   const limit = (count: number) => {
