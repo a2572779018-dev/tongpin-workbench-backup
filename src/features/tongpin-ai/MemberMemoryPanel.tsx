@@ -45,6 +45,7 @@ export function MemberMemoryPanel({ user, onClose }: { user: User; onClose: () =
   const busyRef = useRef(false);
   const aliveRef = useRef(true);
   const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
+  const editingRef = useRef(false); editingRef.current = editing !== null;
 
   const load = useCallback(async () => {
     setLoadError("");
@@ -57,7 +58,12 @@ export function MemberMemoryPanel({ user, onClose }: { user: User; onClose: () =
     void load();
     closeRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busyRef.current) { event.preventDefault(); event.stopPropagation(); onCloseRef.current(); return; }
+      if (event.key === "Escape" && !busyRef.current) {
+        event.preventDefault(); event.stopPropagation();
+        // First Escape leaves an in-progress edit; the next one closes the panel.
+        if (editingRef.current) setEditing(null); else onCloseRef.current();
+        return;
+      }
       if (event.key !== "Tab") return;
       const items = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled),textarea:not(:disabled)") ?? []).filter(item => item.getClientRects().length);
       const first = items[0], last = items.at(-1);

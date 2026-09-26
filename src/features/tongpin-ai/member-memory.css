@@ -1,5 +1,7 @@
 /* 「AI 对你的了解」 — member memory panel, reply badge and admin aggregates.
    Reuses the usage dialog shell (tp-ai-usage-layer / tp-ai-usage-dialog). */
+/* Above the narrow-window sidebar drawer (z-index 61) that can open it. */
+.tp-ai-usage-layer.tp-ai-memory-layer { z-index: 70; }
 .tp-ai-memory-dialog { width: min(40rem, calc(100% - 1rem)); }
 .tp-ai-memory-body { display: grid; gap: 0.85rem; padding: 0.95rem 1rem 1rem; color: var(--tp-ai-ink, #292a25); }
 .tp-ai-memory-intro { margin: 0; color: #6f6858; font-size: 13px; line-height: 1.7; }
