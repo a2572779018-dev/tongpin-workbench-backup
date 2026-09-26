@@ -49,6 +49,11 @@ function stoppedDraft(kind: ComputerUseDraft["kind"]): ComputerUseDraft {
   return { kind: "click", elementToken: "" };
 }
 
+/** Plain-language macOS permission state for the probe card. */
+export function permissionLabel(state: string): string {
+  return state === "granted" ? "已开启" : state === "denied" ? "未开启" : state === "not-required" ? "无需开启" : "未知";
+}
+
 export function ComputerUsePanel({
   requestId,
   originalPrompt,
@@ -353,9 +358,16 @@ export function ComputerUsePanel({
         <>
         <dl className="tp-ai-computer__probe">
           <div><dt>系统</dt><dd>{probe.platform} / {probe.arch} / {probe.osVersion}</dd></div>
-          <div><dt>辅助功能</dt><dd>{probe.permissions.accessibility}</dd></div>
-          <div><dt>屏幕录制</dt><dd>{probe.permissions.screenRecording}</dd></div>
+          <div><dt>辅助功能</dt><dd>{permissionLabel(probe.permissions.accessibility)}</dd></div>
+          <div><dt>屏幕录制</dt><dd>{permissionLabel(probe.permissions.screenRecording)}</dd></div>
         </dl>
+        {probe.platform === "darwin" && bridge.openPrivacySettings && (probe.permissions.accessibility === "denied" || probe.permissions.screenRecording === "denied") ? <>
+          <p className="tp-ai-computer__notice">请在「系统设置 → 隐私与安全性」里为“同频”打开下面未开启的权限，回到这里点“重新检查”。安装新版同频后，macOS 可能仍显示已开启但实际失效：先在列表里删掉旧的“同频”（选中后点“−”），再重新添加。</p>
+          <div className="tp-ai-computer__permission-actions">
+            {probe.permissions.accessibility === "denied" ? <button type="button" onClick={() => void bridge.openPrivacySettings?.("accessibility")}><ShieldCheck size={16} />去开启辅助功能</button> : null}
+            {probe.permissions.screenRecording === "denied" ? <button type="button" onClick={() => void bridge.openPrivacySettings?.("screenRecording")}><MonitorUp size={16} />去开启屏幕录制</button> : null}
+          </div>
+        </> : null}
         <button type="button" onClick={() => void checkCapability()} disabled={Boolean(busy)}><RefreshCw size={16} />重新检查</button>
         </>
       ) : !sessionStartedRef.current ? (

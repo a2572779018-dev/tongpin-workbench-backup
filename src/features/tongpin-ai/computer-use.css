@@ -46,3 +46,4 @@
   .tp-ai-computer__target,.tp-ai-computer__state { grid-template-columns:1fr; }
   .tp-ai-computer__target > button { width:100%; }
 }
+.tp-ai-computer__permission-actions { display:flex; flex-wrap:wrap; gap:8px; }

@@ -18,6 +18,11 @@ contextBridge.exposeInMainWorld("tongpin", {
       ipcRenderer.invoke("computer-use:request-action-approval", action),
     executeApprovedAction: (token) =>
       ipcRenderer.invoke("computer-use:execute-approved-action", String(token)),
+    openPrivacySettings: (pane) =>
+      ipcRenderer.invoke(
+        "computer-use:open-privacy-settings",
+        pane === "screenRecording" ? "screenRecording" : "accessibility",
+      ),
   }),
   session: {
     load: () => ipcRenderer.invoke("session:load"),

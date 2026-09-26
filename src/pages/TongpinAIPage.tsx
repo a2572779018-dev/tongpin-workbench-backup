@@ -753,20 +753,21 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     }
   }
 
-  function showAnnouncement(message: string) {
+  function showAnnouncement(message: string, durationMs = 3_200) {
     setAnnouncement(message);
     if (announcementTimerRef.current !== null)
       window.clearTimeout(announcementTimerRef.current);
     announcementTimerRef.current = window.setTimeout(() => {
       setAnnouncement("");
       announcementTimerRef.current = null;
-    }, 3_200);
+    }, durationMs);
   }
 
   useEffect(() => {
     const onDownloadFeedback = (event: Event) => {
       const detail = (event as CustomEvent<AiDownloadFeedback>).detail;
-      if (detail?.message) showAnnouncement(detail.message);
+      // A saved path or a failure is something the member needs time to read.
+      if (detail?.message) showAnnouncement(detail.message, detail.state === "saved" || detail.state === "error" ? 9_000 : 4_000);
     };
     window.addEventListener(AI_DOWNLOAD_FEEDBACK_EVENT, onDownloadFeedback);
     return () => window.removeEventListener(AI_DOWNLOAD_FEEDBACK_EVENT, onDownloadFeedback);

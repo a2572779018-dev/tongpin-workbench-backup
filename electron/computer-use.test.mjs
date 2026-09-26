@@ -925,6 +925,21 @@ describe("computer-use action schema", () => {
 });
 
 describe("computer-use Electron boundary", () => {
+  it("opens only the two fixed macOS privacy panes, from the main frame, on an explicit request", () => {
+    const main = readFileSync(new URL("./main.cjs", import.meta.url), "utf8");
+    const preload = readFileSync(new URL("./preload.cjs", import.meta.url), "utf8");
+    const start = main.indexOf('ipcMain.handle("computer-use:open-privacy-settings"');
+    expect(start).toBeGreaterThan(-1);
+    const handler = main.slice(start, main.indexOf("});", start + 200) + 3);
+    expect(handler).toContain("assertMainRendererEvent(event)");
+    expect(handler).toContain('process.platform !== "darwin"');
+    expect(handler).toContain("COMPUTER_USE_PRIVACY_PANES[");
+    expect(main).toContain('"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"');
+    expect(main).toContain('"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"');
+    // The renderer value only selects between the two keys; it is never a URL.
+    expect(preload).toContain('pane === "screenRecording" ? "screenRecording" : "accessibility"');
+  });
+
   it("exposes seven named IPC calls, checks the main frame, and exposes no generic tool", () => {
     const main = readFileSync(new URL("./main.cjs", import.meta.url), "utf8");
     const preload = readFileSync(new URL("./preload.cjs", import.meta.url), "utf8");

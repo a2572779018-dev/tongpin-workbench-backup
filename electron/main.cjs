@@ -6,6 +6,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const {
   app,
   BrowserWindow,
+  desktopCapturer,
   dialog,
   ipcMain,
   Menu,
@@ -14,6 +15,7 @@ const {
   safeStorage,
   screen,
   shell,
+  systemPreferences,
   Tray,
 } = require("electron");
 const { autoUpdater } = require("electron-updater");
@@ -928,6 +930,11 @@ function isMainRendererEvent(event) {
   }
 }
 
+const COMPUTER_USE_PRIVACY_PANES = Object.freeze({
+  accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+  screenRecording: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+});
+
 function assertMainRendererEvent(event) {
   if (!isMainRendererEvent(event)) {
     throw new Error("不允许从当前窗口访问本机安全数据");
@@ -1433,6 +1440,25 @@ function registerDesktopIpc() {
   ipcMain.handle("computer-use:execute-approved-action", async (event, token) => {
     assertMainRendererEvent(event);
     return getComputerUseController().executeApprovedAction(token);
+  });
+  // Explicit member action from the @computer panel: registers 同频 with the
+  // macOS privacy list (the system shows its own prompt) and opens the exact
+  // System Settings pane. Fixed destinations only; nothing is granted here.
+  ipcMain.handle("computer-use:open-privacy-settings", async (event, pane) => {
+    assertMainRendererEvent(event);
+    if (process.platform !== "darwin") return { ok: false };
+    const target = COMPUTER_USE_PRIVACY_PANES[pane === "screenRecording" ? "screenRecording" : "accessibility"];
+    try {
+      if (pane === "screenRecording") {
+        await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } });
+      } else {
+        systemPreferences.isTrustedAccessibilityClient(true);
+      }
+    } catch {
+      // The pane still opens; the member can add 同频 with the + button.
+    }
+    await shell.openExternal(target);
+    return { ok: true };
   });
 
   ipcMain.on("quick-task:set-availability", (event, enabled) => {

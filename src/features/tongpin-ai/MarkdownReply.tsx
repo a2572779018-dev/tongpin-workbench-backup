@@ -12,6 +12,7 @@ import { ReplyFollowups } from "./ReplyFollowups";
 import { parseReplyChart, parseReplyFollowups, pendingReplyTail, type PendingReplyTail } from "./replyRichBlocks";
 import { tableRowsFromHast, tableToCsv, tableToMarkdown, tableToTsv } from "./replyTableData";
 import { TypewriterText } from "./TypewriterText";
+import { saveBlobWithFeedback } from "./downloadFeedback";
 import "./reply-markdown.css";
 import "katex/dist/katex.min.css";
 
@@ -19,6 +20,14 @@ const plugins = [remarkGfm, remarkReplyEmphasis, remarkMath];
 // Model text is untrusted input: KaTeX renders with extensions off, errors
 // inline instead of throwing, and never executes links or scripts.
 const rehype = [[rehypeKatex, { throwOnError: false, errorColor: "#a33b2e", strict: false, trust: false, output: "html" }]] as unknown as NonNullable<Parameters<typeof Markdown>[0]>["rehypePlugins"];
+
+/** A distinct, timestamped name so a new export never collides with an older one. */
+export function csvFilename(rows: readonly (readonly string[])[], now = new Date()): string {
+  const header = (rows[0]?.[0] ?? "").replace(/[\\/:*?"<>|\s]+/g, "").slice(0, 12);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return `同频AI-表格${header ? `-${header}` : ""}-${stamp}.csv`;
+}
 
 function ReplyTable({ node, children }: { node: unknown; children: ReactNode }) {
   const rows = useMemo(() => tableRowsFromHast(node), [node]);
@@ -29,24 +38,21 @@ function ReplyTable({ node, children }: { node: unknown; children: ReactNode }) 
       setFeedback(format === "markdown" ? "已复制 Markdown" : "已复制 TSV");
     } catch { setFeedback("复制失败，请手动选择表格内容。"); }
   };
-  const downloadCsv = () => {
+  // Same save path as generated images/videos: the desktop app reports the
+  // real outcome (saved path / cancelled / failed) instead of assuming success.
+  const downloadCsv = async () => {
     try {
-      const url = URL.createObjectURL(new Blob([tableToCsv(rows)], { type: "text/csv;charset=utf-8" }));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "同频AI-表格.csv";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
-      setFeedback("下载已开始，请到下载目录确认文件。");
+      // A UTF-8 BOM keeps Chinese headers readable when the CSV opens in Excel.
+      const blob = new Blob(["\uFEFF", tableToCsv(rows)], { type: "text/csv;charset=utf-8" });
+      const result = await saveBlobWithFeedback(blob, csvFilename(rows));
+      setFeedback(result.message);
     } catch { setFeedback("下载未开始，请重试。"); }
   };
   return <div className="tp-ai-markdown-table">
     <div className="tp-ai-markdown-table__actions">
       <button type="button" disabled={!rows.length} onClick={() => void copy("markdown")}>复制 Markdown</button>
       <button type="button" disabled={!rows.length} onClick={() => void copy("tsv")}>复制 TSV</button>
-      <button type="button" disabled={!rows.length} onClick={downloadCsv}>下载 CSV</button>
+      <button type="button" disabled={!rows.length} onClick={() => void downloadCsv()}>下载 CSV</button>
       <span role="status" aria-live="polite">{feedback}</span>
     </div>
     <div className="tp-ai-markdown-table__scroll" tabIndex={0} role="region" aria-label="回复中的表格"><table>{children}</table></div>

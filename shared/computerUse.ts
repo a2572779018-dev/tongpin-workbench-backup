@@ -182,6 +182,9 @@ export type ComputerUseResult<T> =
 export interface ComputerUseBridge {
   /** Read-only; never prompts for or mutates OS permissions. */
   probe(): Promise<ComputerUseProbeResult>;
+  /** Explicit member action: shows the macOS request and opens the exact
+   * Privacy & Security pane. Grants nothing by itself. Optional for older apps. */
+  openPrivacySettings?(pane: "accessibility" | "screenRecording"): Promise<{ ok: boolean }>;
   startSession(): Promise<
     ComputerUseResult<{
       sessionId: string;

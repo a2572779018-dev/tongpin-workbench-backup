@@ -29,3 +29,20 @@ describe("AI reply table data", () => {
       .toBe("项\t值\n附件\t' @IMPORT(foo)\n换行\ta b c");
   });
 });
+
+describe("table CSV export (#13)", () => {
+  it("uses a timestamped name so a new export never collides with an older file", async () => {
+    const { csvFilename } = await import("./MarkdownReply");
+    const name = csvFilename([["日期", "最高气温"], ["今天", "32"]], new Date(2026, 8, 26, 14, 5, 9));
+    expect(name).toBe("同频AI-表格-日期-20260926-140509.csv");
+    expect(csvFilename([], new Date(2026, 0, 2, 3, 4, 5))).toBe("同频AI-表格-20260102-030405.csv");
+    expect(csvFilename([["a/b:c*?"]], new Date(2026, 0, 2, 3, 4, 5))).toBe("同频AI-表格-abc-20260102-030405.csv");
+  });
+  it("saves through the shared native-save path and reports its real outcome", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("./MarkdownReply.tsx", import.meta.url), "utf8");
+    expect(source).toContain("saveBlobWithFeedback(blob, csvFilename(rows))");
+    expect(source).not.toContain("下载已开始");
+    expect(source).not.toContain("anchor.download");
+  });
+});
