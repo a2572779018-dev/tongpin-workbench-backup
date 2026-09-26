@@ -24,6 +24,12 @@ import {
   useAuth,
 } from "../auth/AuthContext";
 import { AuthCompanion } from "../components/AuthCompanion";
+import {
+  normalizeLoginEmail,
+  rememberedAccountHint,
+  resolveRememberedPassword,
+  type RememberedAccount,
+} from "../auth/rememberedLogin";
 import { ApiRequestError, publicRequest } from "../lib/api";
 import type {
   AuthCompanionAction,
@@ -47,11 +53,6 @@ type EmailVerificationResponse = {
   nextStep: "await_approval" | "ready_to_login";
 };
 
-type RememberedAccount = {
-  email: string;
-  lastUsedAt: string;
-};
-
 type CredentialListState = "loading" | "ready" | "unavailable";
 
 export function AuthPage() {
@@ -67,6 +68,12 @@ export function AuthPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [rememberAccount, setRememberAccount] = useState(true);
+  // Opt-in only; a remembered password is autofilled on explicit selection.
+  const [rememberPassword, setRememberPassword] = useState(false);
+  const canRememberPassword =
+    typeof window !== "undefined" && Boolean(window.tongpin?.credentials?.reveal);
+  const autofilledEmailRef = useRef("");
+  const revealRequestIdRef = useRef(0);
   const [rememberedAccounts, setRememberedAccounts] = useState<
     RememberedAccount[]
   >([]);
@@ -139,7 +146,16 @@ export function AuthPage() {
     setAuthAction("idle");
   }, [mode]);
 
+  function clearAutofilledPassword() {
+    revealRequestIdRef.current += 1;
+    if (!autofilledEmailRef.current) return;
+    autofilledEmailRef.current = "";
+    setPassword("");
+  }
+
   function moveTo(next: AuthMode) {
+    // A remembered password only ever fills the sign-in form.
+    clearAutofilledPassword();
     setMode(next);
     setAccountMenuOpen(false);
     setError("");
@@ -157,7 +173,12 @@ export function AuthPage() {
     setNotice("");
     try {
       if (mode === "login") {
-        await login(email, password, rememberAccount);
+        await login(
+          email,
+          password,
+          rememberAccount,
+          rememberAccount && rememberPassword,
+        );
         return;
       }
       if (mode === "register") {
@@ -219,12 +240,18 @@ export function AuthPage() {
         });
         if (window.tongpin?.credentials) {
           try {
-            await window.tongpin.credentials.save({ email });
+            // 旧密码已失效：保留账号，删除本机记住的密码。
+            await window.tongpin.credentials.save({
+              email,
+              rememberPassword: false,
+            });
           } catch {
-            // 重置成功优先；本机只记录账号，不记录新密码。
+            // 重置成功优先；本机记录失败不影响用新密码登录。
           }
         }
         setRememberAccount(true);
+        setRememberPassword(false);
+        autofilledEmailRef.current = "";
         setPassword("");
         setCode("");
         setMode("login");
@@ -280,13 +307,32 @@ export function AuthPage() {
     }
   }
 
-  function selectRememberedAccount(account: RememberedAccount) {
+  async function selectRememberedAccount(account: RememberedAccount) {
     setError("");
+    setNotice("");
     setEmail(account.email);
     setPassword("");
+    autofilledEmailRef.current = "";
     setRememberAccount(true);
+    setRememberPassword(Boolean(account.passwordRemembered));
     setShowPassword(false);
     setAccountMenuOpen(false);
+    const requestId = revealRequestIdRef.current + 1;
+    revealRequestIdRef.current = requestId;
+    const resolved = await resolveRememberedPassword(
+      window.tongpin?.credentials,
+      account,
+      window.tongpin?.platform,
+    );
+    // Typing, editing the email or picking another account meanwhile wins.
+    if (revealRequestIdRef.current !== requestId) return;
+    setRememberPassword(resolved.rememberPassword);
+    if (resolved.password) {
+      autofilledEmailRef.current = account.email;
+      setPassword(resolved.password);
+    }
+    if (resolved.message) setError(resolved.message);
+    if (resolved.refresh) void refreshRememberedAccounts();
   }
 
   async function removeRememberedAccount(accountEmail: string) {
@@ -298,9 +344,12 @@ export function AuthPage() {
       setRememberedAccounts((current) =>
         current.filter((item) => item.email !== accountEmail),
       );
-      if (email.trim().toLowerCase() === accountEmail) {
+      if (normalizeLoginEmail(email) === accountEmail) {
+        revealRequestIdRef.current += 1;
+        autofilledEmailRef.current = "";
         setPassword("");
         setRememberAccount(true);
+        setRememberPassword(false);
       }
     } catch {
       setError("删除登录记录失败，请重试。");
@@ -480,8 +529,19 @@ export function AuthPage() {
                         placeholder="name@example.com"
                         value={email}
                         onChange={(event) => {
-                          setEmail(event.target.value);
+                          const nextEmail = event.target.value;
+                          setEmail(nextEmail);
                           setAccountMenuOpen(false);
+                          revealRequestIdRef.current += 1;
+                          if (
+                            autofilledEmailRef.current &&
+                            normalizeLoginEmail(nextEmail) !==
+                              autofilledEmailRef.current
+                          ) {
+                            // An autofilled password belongs to its account only.
+                            autofilledEmailRef.current = "";
+                            setPassword("");
+                          }
                         }}
                         onFocus={() => setActiveField("email")}
                         onBlur={() =>
@@ -556,7 +616,9 @@ export function AuthPage() {
                                   email.trim().toLowerCase() === account.email
                                 }
                                 disabled={accountBusyEmail === account.email}
-                                onClick={() => selectRememberedAccount(account)}
+                                onClick={() =>
+                                  void selectRememberedAccount(account)
+                                }
                               >
                                 <span
                                   className="account-picker__avatar"
@@ -566,14 +628,14 @@ export function AuthPage() {
                                 </span>
                                 <span>
                                   <b>{account.email}</b>
-                                  <small>仅记住账号</small>
+                                  <small>{rememberedAccountHint(account)}</small>
                                 </span>
                               </button>
                               <button
                                 className="account-picker__remove"
                                 type="button"
-                                aria-label={`删除 ${account.email} 的登录记录`}
-                                title="删除登录记录"
+                                aria-label={`移除 ${account.email} 的登录记录${account.passwordRemembered ? "和已保存的密码" : ""}`}
+                                title={account.passwordRemembered ? "移除账号并删除已保存的密码" : "移除登录记录"}
                                 disabled={accountBusyEmail === account.email}
                                 onClick={() =>
                                   void removeRememberedAccount(account.email)
@@ -635,7 +697,11 @@ export function AuthPage() {
                           mode === "login" ? "输入密码" : "至少 8 位，含字母和数字"
                         }
                         value={password}
-                        onChange={(event) => setPassword(event.target.value)}
+                        onChange={(event) => {
+                          revealRequestIdRef.current += 1;
+                          autofilledEmailRef.current = "";
+                          setPassword(event.target.value);
+                        }}
                         onFocus={() => setActiveField("password")}
                         onBlur={(event) => {
                           const nextTarget = event.relatedTarget as HTMLElement | null;
@@ -666,19 +732,43 @@ export function AuthPage() {
                 )}
 
                 {mode === "login" && (
-                  <label className="remember-login">
-                    <input
-                      type="checkbox"
-                      checked={rememberAccount}
-                      onChange={(event) =>
-                        setRememberAccount(event.target.checked)
-                      }
-                    />
-                    <span aria-hidden="true">
-                      {rememberAccount && <Check size={13} />}
-                    </span>
-                    <b>记住账号（密码每次输入）</b>
-                  </label>
+                  <div className="remember-options">
+                    <label className="remember-login">
+                      <input
+                        type="checkbox"
+                        checked={rememberAccount}
+                        onChange={(event) => {
+                          setRememberAccount(event.target.checked);
+                          if (!event.target.checked) setRememberPassword(false);
+                        }}
+                      />
+                      <span aria-hidden="true">
+                        {rememberAccount && <Check size={13} />}
+                      </span>
+                      <b>记住账号</b>
+                    </label>
+                    {canRememberPassword && (
+                      <label
+                        className="remember-login"
+                        title="密码经系统安全存储加密后只保存在这台电脑；取消勾选或移除账号即删除"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={rememberAccount && rememberPassword}
+                          onChange={(event) => {
+                            setRememberPassword(event.target.checked);
+                            if (event.target.checked) setRememberAccount(true);
+                          }}
+                        />
+                        <span aria-hidden="true">
+                          {rememberAccount && rememberPassword && (
+                            <Check size={13} />
+                          )}
+                        </span>
+                        <b>记住密码</b>
+                      </label>
+                    )}
+                  </div>
                 )}
 
                 {debugCode && (

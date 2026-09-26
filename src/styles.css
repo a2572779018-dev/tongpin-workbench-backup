@@ -754,6 +754,13 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
   opacity: 0.6;
 }
 
+.remember-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1.4rem;
+  align-items: center;
+}
+
 .remember-login {
   display: inline-flex;
   width: fit-content;

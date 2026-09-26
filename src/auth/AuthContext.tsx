@@ -15,6 +15,8 @@ import {
 } from "../lib/api";
 import { normalizeSession, normalizeUser } from "../lib/user";
 import type { Session, User } from "../types";
+import { publishNotice } from "../components/NoticeCenter";
+import { persistLoginCredentials } from "./rememberedLogin";
 import { flushAiBeforeLeave } from "../features/tongpin-ai/workspaceLeaveGuard";
 import { transferMediaCacheScope, videoBlobCache } from "../features/tongpin-ai/mediaCache";
 import { mediaTaskSnapshotCache } from "../features/tongpin-ai/mediaTaskSnapshotCache";
@@ -38,6 +40,7 @@ interface AuthContextValue {
     email: string,
     password: string,
     rememberAccount?: boolean,
+    rememberPassword?: boolean,
   ): Promise<void>;
   logout(): Promise<void>;
   retryStartup(): Promise<void>;
@@ -223,23 +226,27 @@ export function AuthProvider({ children }: PropsWithChildren) {
       email: string,
       password: string,
       rememberAccount = true,
+      rememberPassword = false,
     ) => {
       const next = await publicRequest<Session>("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      if (window.tongpin?.credentials) {
-        try {
-          if (rememberAccount) {
-            await window.tongpin.credentials.save({ email });
-          } else {
-            await window.tongpin.credentials.remove(email);
-          }
-        } catch {
-          // 本机账号历史失败不能阻止用户登录；密码始终只用于本次请求。
-        }
-      }
+      // 本机账号/密码记录失败不能阻止登录；只有勾选“记住密码”时密码才会
+      // 交给主进程用系统安全存储加密保存，其余情况会删除已记住的密码。
+      const { notice } = await persistLoginCredentials(
+        window.tongpin?.credentials,
+        { email, password, rememberAccount, rememberPassword },
+      );
       await setSession(normalizeSession(next));
+      if (notice) {
+        publishNotice({
+          title: "密码未保存",
+          body: notice,
+          tone: "warning",
+          duration: 9_000,
+        });
+      }
     },
     [setSession],
   );

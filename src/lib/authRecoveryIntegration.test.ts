@@ -14,6 +14,9 @@ const authContext = readSource(
 const authPage = readSource(
   new URL("../pages/AuthPage.tsx", import.meta.url),
 );
+const preload = readSource(
+  new URL("../../electron/preload.cjs", import.meta.url),
+);
 
 describe("cross-platform login recovery", () => {
   it("accepts the same underlying Electron main frame across wrapper objects", () => {
@@ -69,12 +72,37 @@ describe("cross-platform login recovery", () => {
     );
   });
 
-  it("keeps remembered accounts password-free and requires explicit password input", () => {
+  it("remembers a password only on explicit opt-in, inside the main-process vault", () => {
     expect(authPage).toContain('result.state');
     expect(authPage).toContain("本机账号记录暂时无法安全更新");
     expect(authPage).toContain("refreshRememberedAccounts");
-    expect(authPage).toContain("密码每次输入");
+    expect(authPage).toContain("<b>记住账号</b>");
+    expect(authPage).toContain("<b>记住密码</b>");
+    expect(authPage).toContain(
+      "const [rememberPassword, setRememberPassword] = useState(false);",
+    );
+    // Passwords never touch renderer storage and are revealed only on selection.
+    expect(authPage).not.toContain("localStorage");
+    expect(authContext).not.toMatch(/localStorage[^\n]*password/i);
+    expect(authPage).toContain("resolveRememberedPassword(");
     expect(authPage).not.toContain("credentials.load");
     expect(electronMain).not.toContain("credentials:load");
+    expect(authContext).toContain("persistLoginCredentials(");
+    expect(authPage).toContain("rememberPassword: false,");
+  });
+
+  it("guards the reveal IPC to the main window and the signed-out screen", () => {
+    const reveal = electronMain.slice(
+      electronMain.indexOf('ipcMain.handle("credentials:reveal"'),
+      electronMain.indexOf('ipcMain.handle("relationship-graph:open"'),
+    );
+    expect(reveal).toContain("assertMainRendererEvent(event);");
+    expect(reveal).toContain('if (typeof inMemorySessionPayload === "string")');
+    expect(reveal).toContain("revealPassword(emailValue)");
+    expect(electronMain).toContain(
+      'process.platform === "darwin" || process.platform === "win32"',
+    );
+    expect(preload).toContain('ipcRenderer.invoke("credentials:reveal", String(email))');
+    expect(electronMain).not.toMatch(/console\.[a-z]+\([^)]*password/i);
   });
 });

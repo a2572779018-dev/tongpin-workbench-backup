@@ -29,12 +29,27 @@ interface DesktopSessionBridge {
       accounts: Array<{
         email: string;
         lastUsedAt: string;
+        /** An encrypted password is stored; its value is never listed. */
+        passwordRemembered?: boolean;
       }>;
     }>;
+    /** The password is sent only with rememberPassword: true; any other save
+     * forgets a previously remembered password for this account. */
     save(payload: {
       email: string;
-    }): Promise<boolean>;
+      password?: string;
+      rememberPassword?: boolean;
+    }): Promise<
+      | boolean
+      | { saved: true; password: "stored" | "cleared" | "unavailable" }
+    >;
     remove(email: string): Promise<boolean>;
+    /** Explicit remembered-account selection on the sign-in screen only. */
+    reveal?(email: string): Promise<
+      | { state: "ready"; password: string }
+      | { state: "missing" }
+      | { state: "unavailable"; reason: "locked" | "unreadable" | "session-active" }
+    >;
   };
   relationshipGraph: {
     open(): Promise<{

@@ -853,6 +853,9 @@ function getCredentialVault() {
     credentialVault = createCredentialVault({
       userDataPath: app.getPath("userData"),
       safeStorageAdapter,
+      // Remembered passwords need an OS keystore (Keychain / DPAPI).
+      allowPasswordStorage:
+        process.platform === "darwin" || process.platform === "win32",
     });
   }
   return credentialVault;
@@ -1782,6 +1785,16 @@ function registerDesktopIpc() {
   ipcMain.handle("credentials:remove", async (event, emailValue) => {
     assertMainRendererEvent(event);
     return getCredentialVault().remove(emailValue);
+  });
+
+  ipcMain.handle("credentials:reveal", async (event, emailValue) => {
+    assertMainRendererEvent(event);
+    // Autofill exists only for the sign-in screen: while a session is active
+    // in this process no remembered password is handed to the renderer.
+    if (typeof inMemorySessionPayload === "string") {
+      return { state: "unavailable", reason: "session-active" };
+    }
+    return getCredentialVault().revealPassword(emailValue);
   });
 
   ipcMain.handle("relationship-graph:open", async (event) => {
