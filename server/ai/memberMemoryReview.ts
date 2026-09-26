@@ -54,7 +54,7 @@ export function parseMemberMemoryReview(content: string): ParsedMemberMemoryRevi
 
 /** Explicit member requests. `forget` wins: it is the only cue that unlocks removals. */
 const FORGET_CUE = /(?:忘掉|忘了(?:它|这|吧|这件事|这条)|(?:请|帮我)?忘记(?:我|关于|这|掉|刚才|之前|那)|别(?:再)?记(?!错|混|反|漏|得)|不要(?:再)?记(?!错|混|反|漏|得)|不用记|不必记|删(?:除|掉)[^。！？!?\n]{0,20}(?:记忆|记住的|记下的)|清(?:除|空)[^。！？!?\n]{0,20}记忆|\bforget\s+(?:that|this|about|it|my|what|everything)\b)/i;
-const REMEMBER_CUE = /(?:记住|记下|记一下|记着|帮我记|请记得|要记得|别忘了|不要忘了|以后(?:都|请|要|就|回复|回答|给我|跟我|和我|叫我|称呼|用|别|不要)|今后|从现在(?:起|开始)|从今(?:以后|往后)|下次(?:请|记得|要|别|不要)|别再|不要再|不用再|每次都|\bremember\b|\bfrom now on\b|\bgoing forward\b|\bnext time\b|\bnever again\b|\bdon'?t ever\b)/i;
+const REMEMBER_CUE = /(?:记住|记下|记一下|记着|帮我记|请记得|要记得|别忘了|不要忘了|(?:以后|今后|往后)(?!再说|再议|再看|再聊|有空|有机会|有时间)|从现在(?:起|开始)|下次(?:请|记得|要|别|不要|开始)|别再|不要再|不用再|每次都|一律|\bremember\b|\bfrom now on\b|\bgoing forward\b|\bnext time\b|\bnever again\b|\bdon'?t ever\b)/i;
 
 export function detectMemoryCue(text: string): "none" | "remember" | "forget" {
   if (FORGET_CUE.test(text)) return "forget";

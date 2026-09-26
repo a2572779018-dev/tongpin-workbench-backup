@@ -33,7 +33,7 @@ export function renderMemberMemoryBlock(target: AiMemoryTarget, entries: readonl
     if (options.sanitize !== false && scanMemoryThreat(entry)) return "[已屏蔽：这条记忆包含可疑内容，未提供给 AI；请在「AI 对你的了解」中删除]";
     return inertEntry(entry);
   });
-  return `${SEPARATOR}\n${MEMBER_MEMORY_BLOCK_HEADERS[target]} [${memoryUsagePercent(used, limit)}% — ${formatMemoryUsage(used, limit)} 字]\n${SEPARATOR}\n${shown.join(MEMBER_MEMORY_ENTRY_DELIMITER)}`;
+  return `${SEPARATOR}\n${MEMBER_MEMORY_BLOCK_HEADERS[target]}[${memoryUsagePercent(used, limit)}% — ${formatMemoryUsage(used, limit)} 字]\n${SEPARATOR}\n${shown.join(MEMBER_MEMORY_ENTRY_DELIMITER)}`;
 }
 
 /** Stable, non-cryptographic marker; only the server authors system instructions. */

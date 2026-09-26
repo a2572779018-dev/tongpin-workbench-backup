@@ -62,7 +62,7 @@ const THREAT_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/(?:绕过|突破|解除|关闭|无视)[^\n。]{0,8}(?:安全|限制|规则|审核|过滤)/, "zh_disregard_rules"],
   [/你(?:现在|从现在起|从此|今后|以后)(?:就)?是(?:一个|一名|一位|个)?/, "zh_role_hijack"],
   [/(?:假装|扮演|伪装成)(?:你是|成为|成|一个|一名)/, "zh_role_pretend"],
-  [/(?:输出|泄露|透露|打印|显示|复述)[^\n。]{0,8}(?:系统提示|系统指令|提示词|系统设定|system\s*prompt)/i, "zh_leak_system_prompt"],
+  [/(?:输出|泄露|透露|打印|显示|复述)[^\n。]{0,8}(?:系统提示|系统指令|提示词|系统设定|system\s*prompt)|(?:系统提示|系统指令|提示词|系统设定|system\s*prompt)[^\n。]{0,8}(?:输出|泄露|透露|打印|显示|复述|发给|告诉)/i, "zh_leak_system_prompt"],
   [/(?:不要|别|不得|切勿)[^\n。]{0,6}(?:告诉|透露给|通知)(?:用户|成员|本人)/, "zh_deception_hide"],
   [/越狱|开发者模式|DAN\s*模式|无限制模式|jailbreak/i, "zh_jailbreak"],
   [/(?:发送|上传|转发|提交|同步)[^\n]{0,60}(?:到|至|给)[^\n]{0,10}https?:\/\//, "zh_send_to_url"],
@@ -93,8 +93,8 @@ export function scanMemoryThreat(content: string): string | null {
 const SHOUTY_SNAKE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
 const ETH_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
-/** Credential-shaped spans. Each entry: [global pattern, reason id]. */
-const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+/** Credential-shaped spans: [global pattern, reason id, optional exemption for the captured value]. */
+const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string, ((value: string) => boolean)?]> = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----/g, "private_key"],
   // Naming the concept is fine ("钱包私钥不得写入日志"); a value is not.
   [/(?:助记词|mnemonic|seed\s*phrase|私钥|private\s*key)\s*(?:是|为|:|：|=|＝)\s*\S{4,}/gi, "wallet_secret"],
@@ -112,7 +112,8 @@ const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(?:0x)?[0-9a-fA-F]{64}\b/g, "private_key"],
   [/https?:\/\/[^\s/:@]+:[^\s/@]+@/g, "url_credentials"],
   // Keyword followed by a credential-looking value (Latin/digits, not prose).
-  [/(?:密码|口令|pass(?:word|wd|code)|pwd|pin\s*码|pin|密钥|秘钥|api[\s_-]?key|access[\s_-]?key|secret|token|令牌|凭证|cookie|session)\s*(?:是|为|:|：|=|＝)\s*["'“‘]?[A-Za-z0-9!@#$%^&*()_+\-=.,/?~]{4,}/gi, "credential"],
+  // Hermes #116221: a SHOUTY_SNAKE value names where a secret lives; it is not one.
+  [/(?:密码|口令|pass(?:word|wd|code)|pwd|pin\s*码|pin|密钥|秘钥|api[\s_-]?key|access[\s_-]?key|secret|token|令牌|凭证|cookie|session)\s*(?:是|为|:|：|=|＝)\s*["'“‘]?([A-Za-z0-9!@#$%^&*()_+\-=.,/?~]{4,})/gi, "credential", value => SHOUTY_SNAKE.test(value.replace(/["'”’]$/, ""))],
   [/\b(?:password|passcode|pwd)\s+is\s+\S{4,}/gi, "credential"],
   [/(?:验证码|校验码|动态码|动态密码|短信码|确认码|授权码|otp|one[-\s]?time\s+(?:code|password)|verification\s+code|2fa\s+code)\D{0,8}[A-Za-z0-9]{4,8}/gi, "verification_code"],
   [/(?:身份证|银行卡|信用卡|储蓄卡|卡号|账号|帐号|账户|护照|社保号)[^\n。]{0,8}\d{6,}/g, "account_number"],
@@ -129,8 +130,11 @@ interface SecretSpan { start: number; end: number; reason: string }
 function secretSpans(text: string): SecretSpan[] {
   const spans: SecretSpan[] = [];
   const bounded = text.slice(0, MAX_SCAN_CHARS);
-  for (const [pattern, reason] of SECRET_PATTERNS) {
-    for (const match of bounded.matchAll(pattern)) spans.push({ start: match.index, end: match.index + match[0].length, reason });
+  for (const [pattern, reason, exempt] of SECRET_PATTERNS) {
+    for (const match of bounded.matchAll(pattern)) {
+      if (exempt && match[1] !== undefined && exempt(match[1])) continue;
+      spans.push({ start: match.index, end: match.index + match[0].length, reason });
+    }
   }
   for (const match of bounded.matchAll(GENERIC_TOKEN)) {
     // A public wallet/contract address is useful project memory, not a credential.
