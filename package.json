@@ -12,7 +12,7 @@
     "dev": "concurrently -k -n API,WEB,DESKTOP -c blue,cyan,magenta \"npm:dev:api\" \"npm:dev:web\" \"npm:dev:desktop\"",
     "dev:api": "cross-env NODE_ENV=development tsx watch server/index.ts",
     "dev:web": "vite --host 127.0.0.1 --port 5173",
-    "dev:desktop": "wait-on tcp:127.0.0.1:4318 tcp:127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 TONGPIN_API_URL=http://127.0.0.1:4318 electron .",
+    "dev:desktop": "npm run build:opensquilla-router && wait-on tcp:127.0.0.1:4318 tcp:127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 TONGPIN_API_URL=http://127.0.0.1:4318 electron .",
     "start:api": "cross-env NODE_ENV=development tsx server/index.ts",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -37,7 +37,8 @@
     "test:watch": "vitest",
     "build:web": "vite build",
     "build:api": "tsup server/index.ts --format esm --out-dir dist/server --sourcemap",
-    "build": "npm run typecheck && npm run test && npm run build:web && npm run build:api",
+    "build:opensquilla-router": "node scripts/opensquilla-router/build-runtime.mjs",
+    "build": "npm run typecheck && npm run test && npm run build:web && npm run build:api && npm run build:opensquilla-router",
     "dist:win": "node scripts/verify-computer-use-runtime.cjs --source --target win32-x64 && npm run build && electron-builder --win nsis --publish never && node scripts/verify-asar-contents.cjs artifacts/win-unpacked/resources/app.asar --target win32-x64",
     "dist:mac": "node scripts/prepare-computer-use-runtime.cjs --target darwin-universal && node scripts/verify-computer-use-runtime.cjs --source --target darwin-universal && npm run build && node scripts/electron-builder-mac.cjs --mac dmg zip --universal --publish never && node scripts/verify-asar-contents.cjs artifacts/mac-universal/同频.app/Contents/Resources/app.asar --target darwin-universal",
     "start:desktop": "cross-env TONGPIN_API_URL=http://127.0.0.1:4318 electron ."
@@ -48,7 +49,8 @@
     "asar": true,
     "asarUnpack": [
       "node_modules/@trycua/**/*",
-      "node_modules/@ubjs/**/*"
+      "node_modules/@ubjs/**/*",
+      "electron/opensquilla-router/**/*"
     ],
     "directories": {
       "output": "artifacts"
@@ -161,10 +163,12 @@
     "cross-env": "^10.1.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
+    "esbuild": "0.28.1",
     "highlight.js": "~11.11.2",
     "jszip": "^3.10.1",
     "lowlight": "^3.3.0",
     "mammoth": "^1.12.2",
+    "onnxruntime-web": "1.30.0",
     "pdfjs-dist": "^6.3.289",
     "pptxgenjs": "^4.0.1",
     "supertest": "^7.2.2",

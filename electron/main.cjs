@@ -87,9 +87,16 @@ const {
   registerMicrophoneIpc,
 } = require("./media-permission-policy.cjs");
 const { registerComputerAgentIpc } = require("./computer-agent-host.cjs");
+const {
+  createOpenSquillaIpcHandlers,
+  createOpenSquillaRouterHost,
+  resolveOpenSquillaRouterPaths,
+} = require("./opensquilla-router.cjs");
 
 autoUpdater.logger = null;
 const safeStorageAdapter = createSafeStorageAdapter(safeStorage);
+// OpenSquilla quick-tier router: lazily started worker, never on the main thread.
+const openSquillaRouter = createOpenSquillaRouterHost(resolveOpenSquillaRouterPaths(__dirname));
 
 const isDevelopment =
   !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -242,6 +249,7 @@ app.on("before-quit", () => {
   relationshipQuitIntent = true;
   void computerUseController?.shutdown();
   void computerAgent?.stop("window_closed");
+  void openSquillaRouter.dispose();
   if (process.platform !== "win32") return;
   if (!updateReady || updateInstallCoordinator.isInstallRequested()) return;
   try {
@@ -1630,6 +1638,10 @@ function registerDesktopIpc() {
     },
     openExternal: (sourceUrl) => shell.openExternal(sourceUrl),
   }));
+
+  const openSquillaIpc = createOpenSquillaIpcHandlers({ isAllowedSender: isMainRendererEvent, host: openSquillaRouter });
+  ipcMain.handle("opensquilla:route", openSquillaIpc.route);
+  ipcMain.handle("opensquilla:warmup", openSquillaIpc.warmup);
 
   ipcMain.handle("ai-file:save", createAiFileSaver({
     assertSender: assertMainRendererEvent,

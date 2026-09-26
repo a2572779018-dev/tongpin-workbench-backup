@@ -90,6 +90,10 @@ contextBridge.exposeInMainWorld("tongpin", {
   openLoraExplorer: (target) =>
     ipcRenderer.invoke("lora-explorer:open", target),
   openAiSource: (url) => ipcRenderer.invoke("ai-source:open", url),
+  openSquilla: Object.freeze({
+    route: (input) => ipcRenderer.invoke("opensquilla:route", input),
+    warmup: () => ipcRenderer.invoke("opensquilla:warmup"),
+  }),
   saveAiFile: (input) => ipcRenderer.invoke("ai-file:save", input),
   onDesktopNoticeAcknowledge: (callback) => {
     const listener = (_event, notificationId) =>

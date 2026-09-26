@@ -18,3 +18,7 @@ test-results/
 .DS_Store
 Thumbs.db
 /(\{value
+
+# Built by scripts/opensquilla-router/build-runtime.mjs (npm run build:opensquilla-router)
+electron/opensquilla-router/runtime/
+__pycache__/

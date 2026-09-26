@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const asar = require("@electron/asar");
 const { verifyPackagedComputerUseRuntime } = require("./verify-computer-use-runtime.cjs");
+const { verifyPackagedOpenSquillaRouter } = require("./opensquilla-router/verify-packaged.cjs");
 
 const archivePath = process.argv[2];
 const targetIndex = process.argv.indexOf("--target");
@@ -108,4 +109,6 @@ if (target) {
   });
 }
 
+const openSquilla = verifyPackagedOpenSquillaRouter({ archivePath: resolvedArchive, archiveEntries: entries });
+process.stdout.write(`Verified OpenSquilla router (onnxruntime-web ${openSquilla.onnxruntimeWeb}, ${(openSquilla.bundleBytes / 1048576).toFixed(1)} MiB model, ${(openSquilla.runtimeBytes / 1048576).toFixed(1)} MiB runtime).\n`);
 process.stdout.write(`Verified ${required.length} required app.asar entries.\n`);

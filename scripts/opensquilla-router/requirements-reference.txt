@@ -1,0 +1,37 @@
+# OpenSquilla V4.2 Phase 3 router reference runtime (python >= 3.12).
+# Exact versions from OpenSquilla uv.lock at commit d27ba0e7ac452392b7c8e38f2f7f43cd5d6912c6,
+# closure of the `recommended` extra packages the router imports.
+annotated-doc==0.0.4
+anyio==4.15.1
+certifi==2026.7.22
+cloudpickle==3.1.2
+filelock==3.25.2
+flatbuffers==25.12.19
+fsspec==2026.3.0
+h11==0.16.0
+hf-xet==1.4.3
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.10.1
+idna==3.20
+joblib==1.6.0
+lightgbm==4.7.0
+markdown-it-py==4.0.0
+mdurl==0.1.2
+narwhals==2.26.0
+numpy==2.5.3
+onnxruntime==1.30.0
+packaging==26.0
+protobuf==6.33.6
+pygments==2.20.0
+pyyaml==6.0.3
+rich==15.0.0
+scikit-learn==1.9.1
+scipy==1.17.1
+shellingham==1.5.4
+structlog==26.1.0
+threadpoolctl==3.6.0
+tokenizers==0.23.2
+tqdm==4.67.3
+typer==0.27.2
+typing-extensions==4.16.0
