@@ -1,0 +1,137 @@
+/* AI 员工办公室: Tongpin's warm cream card, ink outlines and yellow accents —
+ * same palette as reply-process.css (see also palette.ts, which mirrors these
+ * hex values for the Pixi scene so the canvas and the DOM never clash). */
+
+.tp-ai-office-panel {
+  max-width: 720px;
+  margin: 0 0 10px;
+  border: 1px solid #ded9ca;
+  border-radius: 12px;
+  background: #fbf9f2;
+  color: #55574f;
+  font-size: 12px;
+}
+.tp-ai-office-panel.is-planning,
+.tp-ai-office-panel.is-dispatching,
+.tp-ai-office-panel.is-working,
+.tp-ai-office-panel.is-synthesizing {
+  border-color: #d9c78c;
+  background: #fdf9ec;
+  box-shadow: inset 3px 0 0 #eed887;
+}
+.tp-ai-office-panel.is-failed { border-color: #954c3d; box-shadow: inset 3px 0 0 #954c3d; }
+.tp-ai-office-panel.is-cancelled { background: #f3f1ea; color: #8a8c83; }
+
+.tp-ai-office-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tp-ai-office-panel__header:hover { background: #f5efdb; }
+.tp-ai-office-panel__header:focus-visible { outline: 2px solid #716426; outline-offset: 2px; }
+
+.tp-ai-office-panel__badge {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--tp-ai-ink, #292a25);
+  border-radius: 7px;
+  background: #faf7ef;
+  color: var(--tp-ai-ink, #292a25);
+}
+.tp-ai-office-panel.is-planning .tp-ai-office-panel__badge,
+.tp-ai-office-panel.is-dispatching .tp-ai-office-panel__badge,
+.tp-ai-office-panel.is-working .tp-ai-office-panel__badge,
+.tp-ai-office-panel.is-synthesizing .tp-ai-office-panel__badge { background: #eed887; }
+.tp-ai-office-panel.is-failed .tp-ai-office-panel__badge { border-color: #954c3d; background: #fbeee9; color: #954c3d; }
+
+.tp-ai-office-panel__headline {
+  flex: 0 0 auto;
+  color: #3f4038;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.tp-ai-office-panel__status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #8a8c83;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tp-ai-office-panel__chevron { flex: 0 0 auto; color: #77796f; transition: transform 180ms cubic-bezier(0.2, 0, 0, 1); }
+.tp-ai-office-panel.is-expanded .tp-ai-office-panel__chevron { transform: rotate(180deg); }
+
+.tp-ai-office-panel__body {
+  padding: 0 12px 12px;
+  animation: tp-ai-office-reveal 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+@keyframes tp-ai-office-reveal { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+/* The scene itself (also usable standalone, without the panel wrapper). */
+.tp-ai-office { position: relative; display: grid; gap: 8px; }
+.tp-ai-office__canvas-host {
+  overflow: hidden;
+  border: 1px solid #d3cbb9;
+  border-radius: 10px;
+  background: #f4efe4;
+}
+.tp-ai-office__canvas-host canvas { display: block; width: 100%; height: 100%; }
+
+/* Hover/click detail card, floated over the scene. */
+.tp-ai-office-card {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid #d3cbb9;
+  border-radius: 10px;
+  background: #fffaf0;
+  color: #55574f;
+}
+.tp-ai-office-card__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.tp-ai-office-card__head strong { color: #292a25; font-size: 12.5px; }
+.tp-ai-office-card__head span { color: #8a8c83; font-size: 11.5px; }
+.tp-ai-office-card__elapsed { margin-left: auto; font-variant-numeric: tabular-nums; }
+.tp-ai-office-card__task { margin: 0; color: #55574f; font-size: 11.5px; line-height: 1.5; }
+.tp-ai-office-card__result { margin: 0; color: #3f4038; font-size: 11.5px; line-height: 1.5; }
+
+/* No-WebGL / context-lost DOM fallback: same rows as the hover card, listed. */
+.tp-ai-office-fallback {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #d3cbb9;
+  border-radius: 10px;
+  background: #fffaf0;
+}
+.tp-ai-office-fallback__note { margin: 0 0 2px; color: #8a8c83; font-size: 11px; }
+.tp-ai-office-fallback__row {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid #e3dccb;
+  border-radius: 8px;
+  background: #fbf9f2;
+}
+.tp-ai-office-fallback__row-head { display: flex; align-items: baseline; gap: 8px; }
+.tp-ai-office-fallback__row-head strong { color: #292a25; font-size: 12px; }
+.tp-ai-office-fallback__status { color: #8a8c83; font-size: 11px; }
+.tp-ai-office-fallback__elapsed { margin-left: auto; color: #8a8c83; font-size: 11px; font-variant-numeric: tabular-nums; }
+.tp-ai-office-fallback__task { margin: 0; color: #55574f; font-size: 11.5px; line-height: 1.5; }
+.tp-ai-office-fallback__result { margin: 0; color: #3f4038; font-size: 11.5px; line-height: 1.5; }
