@@ -28,6 +28,7 @@ import { draftsWithoutComputerRequests, mentionedCapabilityRequest } from "../fe
 import { computerUseConversationRequestMessage, computerUsePlanningObservation, validateComputerUseModelPlan, type ComputerUseModelPlan } from "../features/tongpin-ai/computerUseFlow";
 import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence } from "../features/tongpin-ai/chatPerformance";
+import { computerTierNotice } from "../features/tongpin-ai/computerTier";
 import { AI_DOWNLOAD_FEEDBACK_EVENT, saveBlobWithFeedback, type AiDownloadFeedback } from "../features/tongpin-ai/downloadFeedback";
 import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "../features/tongpin-ai/videoReferenceAttachments";
 import { imageReferencesForGeneration } from "../features/tongpin-ai/imageReferenceAttachments";
@@ -627,6 +628,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     }
     if (attachments.length) {
       showAnnouncement("电脑控制不会读取聊天附件，请先移除附件");
+      return;
+    }
+    // Say it before any permission check, session or window snapshot.
+    const tierBlock = computerTierNotice(aiStatus?.computerTiers, mode);
+    if (tierBlock) {
+      showAnnouncement(tierBlock, 9_000);
       return;
     }
 

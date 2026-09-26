@@ -531,8 +531,10 @@ export class AiService {
       return Boolean(route.enabled && route.capabilities.includes("image") && capability && connection?.enabled && connection.modelsVerified
         && connection.availableModels.includes(route.imageModelId ?? "") && capability.modelId === route.imageModelId && capability.baseUrl === connection.baseUrl);
     }) : [];
+    const computerTiers = harness ? AI_BUSINESS_TIERS.filter(tier => harness.tiers[tier].enabled && harness.tiers[tier].capabilities.includes("computer")) : undefined;
     return { accessGranted: this.store.hasAccess(userId), configured, quickModel: "quick", deepModel: "deep", maxOutputTokens: harness?.tiers.quick.maxOutputTokens ?? p?.maxOutputTokens ?? 0, quota,
       imageEditTiers,
+      ...(computerTiers ? { computerTiers } : {}),
       availableTiers: harness ? AI_BUSINESS_TIERS.filter(tier => harness.tiers[tier].enabled) : ["quick", "deep"], quickAgent: Boolean(p && isTongpinQuickAgent(p.quickModel)),
       imageEnabled: Boolean(configured && p?.imageQuotaTokens && (this.store.harness() ? harnessImageConfigured : p.imageModel && p.imageApiKeyConfigured)), imageQuotaTokens: p?.imageQuotaTokens ?? 0,
       visionEnabled: Boolean(configured && (this.store.harness() ? AI_BUSINESS_TIERS.some(tier => harness!.tiers[tier].enabled && harness!.tiers[tier].capabilities.includes("vision")) : p?.visionEnabled)),
@@ -719,7 +721,7 @@ export class AiService {
       parentAttempt = this.store.request(userId, request.retryOf);
       if (!parentAttempt || parentAttempt.conversationId !== request.conversationId) throw new AiError(404, "AI_RETRY_NOT_FOUND", "没有找到本对话的原请求");
       const snapshot = this.store.requestSnapshot(userId, request.retryOf);
-      if (!snapshot || parentAttempt.kind !== "chat" || parentAttempt.status === "pending" || parentAttempt.status === "uncertain" && (!parentAttempt.result || parentAttempt.result.usage.estimated)) throw new AiError(409, "AI_RETRY_UNSAFE", "原请求仍在处理或用量待核对，请先获取原请求结果");
+      if (!snapshot || parentAttempt.kind !== "chat" || parentAttempt.status === "pending" || parentAttempt.status === "uncertain" && (!parentAttempt.result || parentAttempt.result.usage.estimated)) throw new AiError(409, "AI_RETRY_UNSAFE", parentAttempt.status === "pending" ? "原请求仍在处理，请稍候查看结果，不要重复生成" : "上一次回复被中断，用量还在核对，不能直接重新生成；请把问题重新发送一次（按新请求计费）");
       const original = parseChat(snapshot);
       if (original.outputFormat && !["text", "dispatch"].includes(original.outputFormat) || original.skillIds?.includes("agent-continuation-v1") || parentAttempt.result?.dispatch && parentAttempt.result.dispatch.kind !== "text") throw new AiError(409, "AI_RETRY_UNSAFE", "工具任务需要重新确认，不能作为文字回复重试");
       if (request.retryMode === "continue" && !parentAttempt.result?.completion?.canContinue) throw new AiError(409, "AI_RETRY_UNSAFE", "这条回复当前不能续写");

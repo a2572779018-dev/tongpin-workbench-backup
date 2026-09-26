@@ -281,6 +281,8 @@ export interface AiStatus {
   imageEnabled?: boolean;
   /** Verified business routes with an explicitly configured image edit adapter. */
   imageEditTiers?: AiMode[];
+  /** Business tiers whose route allows @computer. Absent on legacy (no-tier) setups. */
+  computerTiers?: AiMode[];
   imageQuotaTokens?: number;
   visionEnabled?: boolean;
   webSearchEnabled?: boolean;
