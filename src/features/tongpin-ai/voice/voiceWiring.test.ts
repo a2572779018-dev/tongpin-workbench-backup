@@ -8,8 +8,11 @@ describe("voice wiring in the chat workspace", () => {
     const workspace = source("../ChatWorkspace.tsx");
     const microphone = workspace.indexOf('<VoiceInputControl key={conversationId ?? "new"} disabled={videoBusy} onTranscript={insertVoiceTranscript} />');
     expect(microphone).toBeGreaterThan(workspace.indexOf('aria-label="思考模式"'));
-    expect(workspace.indexOf("{responding ? (", microphone)).toBeGreaterThan(microphone);
-    expect(workspace.slice(microphone, workspace.indexOf("{responding ? (", microphone)).trim().split("\n")).toHaveLength(1);
+    // The send control is the steer-aware one: stop spinner, steer (supplement) or send.
+    const sendControl = workspace.indexOf('{sendMode === "stop" ? (', microphone);
+    expect(sendControl).toBeGreaterThan(microphone);
+    expect(workspace.slice(microphone, sendControl).trim().split("\n")).toHaveLength(1);
+    expect(workspace.indexOf(') : sendMode === "steer" ? (', sendControl)).toBeGreaterThan(sendControl);
     expect(workspace).toContain("useVoiceAutoRead(conversationId, lastMessage);");
     // Only a plain text turn may be sent automatically.
     expect(workspace).toContain('composerTool === "text" && !videoOpen ? submitMessage() : composerRef.current?.focus()');
