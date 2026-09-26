@@ -340,10 +340,15 @@ export class AiComputerService {
 
   /** The member's tier must allow "computer"; legacy routes never grant it. */
   private assertComputerTier(mode: AiMode): void {
-    const route = this.service.harness.resolve(mode, this.store.provider(), "computer");
-    if (route.legacy || !route.capabilities.includes("computer")) {
-      throw new AiError(403, "AI_TIER_CAPABILITY_DISABLED", `${AI_BUSINESS_TIER_LABELS[mode]}档位未开放电脑操作，请联系管理员在「AI 管理 → 服务与模型」为档位勾选“电脑操作”`);
+    const closed = () => new AiError(403, "AI_TIER_CAPABILITY_DISABLED", `${AI_BUSINESS_TIER_LABELS[mode]}档位未开放电脑操作，请切换到已开放的档位，或联系管理员在「AI 管理 → 服务与模型」为档位勾选“电脑操作”`);
+    let route: ReturnType<AiService["harness"]["resolve"]>;
+    try {
+      route = this.service.harness.resolve(mode, this.store.provider(), "computer");
+    } catch (error) {
+      if (error instanceof AiError && error.code === "AI_TIER_CAPABILITY_DISABLED") throw closed();
+      throw error;
     }
+    if (route.legacy || !route.capabilities.includes("computer")) throw closed();
   }
   private enabledSettings() {
     const settings = readComputerSettings(this.store);
