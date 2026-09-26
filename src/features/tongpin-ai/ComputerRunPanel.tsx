@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AiMode, AiQuota } from "../../../shared/ai";
 import { COMPUTER_ACTION_KIND_LABELS, COMPUTER_OUTCOME_LABELS, type ComputerAgentEvent, type ComputerRunStart } from "../../../shared/computerAgent";
 import { getComputerUseBridge } from "../../lib/computerUseBridge";
-import { runComputerTask, type ComputerApi, type ComputerQuestion, type ComputerRunResult, type ComputerTimelineStep } from "./computerExecutor";
+import { computerInstructionText, runComputerTask, type ComputerApi, type ComputerQuestion, type ComputerRunResult, type ComputerTimelineStep } from "./computerExecutor";
 import "./computer-use.css";
 import "./computer-run.css";
 
@@ -145,8 +145,9 @@ export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, o
         ? <button type="button" className="tp-ai-computer-run__stop" onClick={stop} disabled={stopping} aria-label="停止电脑操作"><CircleStop size={16} aria-hidden="true" />停止</button>
         : <button type="button" onClick={onClose} aria-label="关闭电脑操作面板"><X size={16} aria-hidden="true" /></button>}
     </header>
-    <p className="tp-ai-computer__goal">{task ? task.goal : request.instruction}</p>
+    <p className="tp-ai-computer__goal">{computerInstructionText(request.instruction) || request.instruction}</p>
     {task ? <dl className="tp-ai-computer-run__spec">
+      <div><dt>任务目标</dt><dd>{task.goal}</dd></div>
       <div><dt>目标应用</dt><dd>{task.apps.map(app => `「${app.name}」`).join("、")}</dd></div>
       <div><dt>允许的动作</dt><dd>{task.actionKinds.map(kind => COMPUTER_ACTION_KIND_LABELS[kind]).join("、")}</dd></div>
       <div><dt>只会输入</dt><dd>{task.parameters.length ? task.parameters.map(parameter => `「${parameter.value}」`).join("、") : "不输入文字"}</dd></div>
