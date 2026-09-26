@@ -29,7 +29,7 @@ import { createPortal } from "react-dom";
 import type { User } from "../../types";
 import { TongpinAIAccountUsage } from "./TongpinAIAccountUsage";
 import { aiMotionRef } from "./motion";
-import { WorkspaceStorageMeter } from "./WorkspaceStorage";
+import { WorkspaceStorageMeter } from "./WorkspaceStoragePanel";
 import type { AiWorkspaceStorageUsage } from "../../../shared/aiWorkspace";
 import type { ConversationTaskStatus } from "./conversationTaskStatus";
 import type {

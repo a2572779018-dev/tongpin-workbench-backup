@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AI_WORKSPACE_LIMITS, type AiWorkspaceState } from "../../../shared/aiWorkspace";
-import { WorkspaceStorageMeter, WorkspaceStorageRelief } from "./WorkspaceStorage";
+import { WorkspaceStorageMeter, WorkspaceStorageRelief } from "./WorkspaceStoragePanel";
 import {
   conversationExportFilename,
   conversationExportJson,

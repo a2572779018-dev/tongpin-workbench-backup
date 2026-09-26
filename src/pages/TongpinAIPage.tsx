@@ -80,7 +80,7 @@ import "../features/tongpin-ai/ai-metal-theme.css";
 import "../features/tongpin-ai/ai-capabilities.css";
 import "../features/tongpin-ai/ai-refinements.css";
 import "../features/tongpin-ai/workspace-storage.css";
-import { WorkspaceStorageRelief } from "../features/tongpin-ai/WorkspaceStorage";
+import { WorkspaceStorageRelief } from "../features/tongpin-ai/WorkspaceStoragePanel";
 import { conversationExportFilename, conversationExportJson, isWorkspaceSpaceRejection, largestWorkspaceConversations } from "../features/tongpin-ai/workspaceStorage";
 
 type WorkspaceDialogState =
