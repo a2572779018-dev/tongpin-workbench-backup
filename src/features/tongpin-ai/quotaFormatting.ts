@@ -1,7 +1,7 @@
 import type { AiQuota } from "../../../shared/ai";
 
 export const AI_QUOTA_UNIT = "同频点";
-export const AI_QUOTA_BILLING_NOTE = "文本每 1 Token 计 1 同频点；图片与联网搜索按管理员设置折算为同频点。";
+export const AI_QUOTA_BILLING_NOTE = "文本每 1 Token 计 1 同频点；图片、联网搜索与代码执行按管理员设置折算为同频点。";
 
 /** Display only: no conversion, quota mutation, or ledger rewriting. */
 export const formatAiPoints = (value: number) => `${value.toLocaleString("zh-CN")} ${AI_QUOTA_UNIT}`;

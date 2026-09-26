@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { needsOnlineEvidence, routeChatProvider } from "./autoRouting";
+import { needsComputation, needsOnlineEvidence, routeChatProvider } from "./autoRouting";
 import type { AiChatRequest, AiProviderConfig } from "../../shared/ai";
 import { BAI_AGENT_MODELS, BAI_QUICK_MODELS, LEGACY_BAI_QUICK_AUTO, TONGPIN_QUICK_AGENT } from "../../shared/aiAuto";
 
@@ -60,5 +60,25 @@ describe("B.AI bounded Agent routing", () => {
   it("routes structured tools and legacy saved agent identifiers through the verified bounded agent", () => {
     expect(routeChatProvider(provider, { ...request("\u505a\u4e00\u4e2a\u89c6\u9891"), outputFormat: "video_plan" }, BAI_AGENT_MODELS).quickModel).toBe("qwen3.8-flash");
     expect(routeChatProvider({ ...provider, quickModel: LEGACY_BAI_QUICK_AUTO }, request("\u4f60\u597d"), BAI_AGENT_MODELS).quickModel).toBe("hy3");
+  });
+});
+
+describe("needsComputation heuristic", () => {
+  it("recognizes calculation, plotting and data-analysis phrasing", () => {
+    expect(needsComputation("\u5e2e\u6211\u8ba1\u7b97\u4e00\u4e0b\u8fd9\u7ec4\u6570\u636e\u7684\u5e73\u5747\u503c")).toBe(true);
+    expect(needsComputation("\u753b\u4e00\u4e2a\u67f1\u72b6\u56fe\u5c55\u793a\u8fd9\u51e0\u4e2a\u6708\u7684\u9500\u91cf")).toBe(true);
+    expect(needsComputation("\u5e2e\u6211\u5206\u6790\u4e00\u4e0b\u8fd9\u4efd\u6570\u636e")).toBe(true);
+    expect(needsComputation("\u8fd0\u884c\u4e00\u4e0b\u4ee3\u7801\u770b\u770b\u7ed3\u679c")).toBe(true);
+    expect(needsComputation("calculate the standard deviation of this list")).toBe(true);
+  });
+  it("treats a tabular data attachment as evidence on its own, independent of the message text", () => {
+    expect(needsComputation("\u5e2e\u6211\u770b\u770b\u8fd9\u4e2a\u6587\u4ef6", [{ name: "sales.csv" }])).toBe(true);
+    expect(needsComputation("\u8fd9\u662f\u4ec0\u4e48", [{ name: "report.xlsx" }])).toBe(true);
+    expect(needsComputation("\u8fd9\u662f\u4ec0\u4e48", [{ name: "photo.png" }])).toBe(false);
+  });
+  it("never fires on ordinary chat, matching needsOnlineEvidence's false-negative-biased asymmetry", () => {
+    expect(needsComputation("\u4f60\u597d\uff0c\u5f88\u9ad8\u5174\u8ba4\u8bc6\u4f60")).toBe(false);
+    expect(needsComputation("\u5e2e\u6211\u5199\u4e00\u6bb5\u5173\u4e8e\u79cb\u5929\u7684\u6563\u6587")).toBe(false);
+    expect(needsComputation("\u4ecb\u7ecd\u4e00\u4e0b\u4f60\u81ea\u5df1")).toBe(false);
   });
 });

@@ -9,9 +9,10 @@ export type AiRunEventPayload =
    * the persisted message, or any later model context. Emitted only to clients
    * that opted in with `liveProgress: true`. */
   | { type: "reasoning_delta"; data: { delta: string; source: "provider_reasoning_content" } }
-  /** Real provider tool-call state (currently Responses `web_search_call`).
-   * `callId` is an application-local ordinal, never a provider item id.
-   * Emitted only to clients that opted in with `liveProgress: true`. */
+  /** Real provider tool-call state (Responses `web_search_call` or
+   * `code_interpreter_call`). `callId` is an application-local ordinal, never
+   * a provider item id. Emitted only to clients that opted in with
+   * `liveProgress: true`. */
   | { type: "tool_progress"; data: AiToolProgress }
   /** 多 Agent 协作 lifecycle (shared/aiMultiAgent.ts). Emitted only to clients
    * that opted in with `subagentEvents: true`; older clients reject unknown types. */
@@ -22,7 +23,7 @@ export type AiRunEventPayload =
   | { type: "usage_updated"; data: { usage: AiUsage; status: "completed" | "failed" | "uncertain"; providerReported: true } }
   | { type: "run_finished"; data: { response: AiChatResponse } }
   | { type: "run_failed"; data: { error: { code: string; message: string } } };
-export interface AiToolProgress {
+export interface AiWebSearchProgress {
   tool: "web_search";
   callId: string;
   status: "in_progress" | "searching" | "completed" | "failed";
@@ -31,7 +32,23 @@ export interface AiToolProgress {
   /** Number of sources the provider attached to this call, when reported. */
   sourceCount?: number;
 }
-export const AI_TOOL_PROGRESS_STATUSES: readonly AiToolProgress["status"][] = ["in_progress", "searching", "completed", "failed"];
+export type AiCodeExecStatus = "in_progress" | "interpreting" | "completed" | "failed";
+export interface AiCodeExecProgress {
+  tool: "code_interpreter";
+  callId: string;
+  status: AiCodeExecStatus;
+  /** Streamed Python source so far, bounded and control-character free. */
+  code?: string;
+  /** Provider-reported stdout/log text, bounded; present once produced. */
+  logs?: string;
+  /** Count of provider-reported image outputs, when any were produced. */
+  imageCount?: number;
+  /** Application-level: the provider rejected this tool outright (never a
+   * provider-reported status), so the call never actually ran. */
+  unsupported?: boolean;
+}
+export type AiToolProgress = AiWebSearchProgress | AiCodeExecProgress;
+export const AI_TOOL_PROGRESS_STATUSES: readonly (AiWebSearchProgress["status"] | AiCodeExecStatus)[] = ["in_progress", "searching", "interpreting", "completed", "failed"];
 export type AiRunEvent = AiRunEventPayload & {
   requestId: string;
   runId: string;

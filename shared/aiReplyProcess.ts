@@ -1,4 +1,4 @@
-import type { AiRunEventPayload, AiToolProgress } from "./aiRunEvents";
+import type { AiCodeExecStatus, AiRunEventPayload, AiToolProgress, AiWebSearchProgress } from "./aiRunEvents";
 import {
   AI_MULTI_AGENT_LIMITS, AI_SUBAGENT_ID, boundedMultilineText, readAiSubagentUpdate, subagentActivity, validSubagentError,
   validSubagentRole, validSubagentSourceNumbers, validSubagentSummary, validSubagentTask, validSubagentTitle,
@@ -67,7 +67,25 @@ export interface AiReplyProcessAgentsStep {
   startedAt?: number;
   finishedAt?: number;
 }
-export type AiReplyProcessStep = AiReplyProcessThinkingStep | AiReplyProcessSearchStep | AiReplyProcessToolStep | AiReplyProcessAgentsStep;
+/** A persisted code execution call is settled: a live status that never
+ * reached a provider-reported terminal state is stored as `incomplete`; a
+ * provider that rejected the tool outright is stored as `unsupported`. */
+export type AiReplyProcessExecStatus = "completed" | "failed" | "incomplete" | "unsupported";
+export interface AiReplyProcessExecStep {
+  kind: "exec";
+  status: AiReplyProcessExecStatus;
+  language: "python";
+  /** Bounded source text; truncated, never the provider's raw unbounded code. */
+  code?: string;
+  /** Bounded stdout/log text. */
+  logs?: string;
+  /** Count of provider-reported image outputs; the bytes themselves are never
+   * fetched or stored here (see AiReplyProcessLiveExec). */
+  imageCount?: number;
+  /** First provider progress event to its first terminal event. */
+  durationMs?: number;
+}
+export type AiReplyProcessStep = AiReplyProcessThinkingStep | AiReplyProcessSearchStep | AiReplyProcessToolStep | AiReplyProcessAgentsStep | AiReplyProcessExecStep;
 export interface AiReplyProcess {
   version: 1;
   outcome: AiReplyProcessOutcome;
@@ -77,12 +95,16 @@ export interface AiReplyProcess {
 }
 
 export const AI_REPLY_PROCESS_LIMITS = Object.freeze({
-  /** One thinking summary, the provider's bounded search calls and a tool step fit comfortably. */
+  /** One thinking summary, the provider's bounded search/exec calls and a tool step fit comfortably. */
   steps: 8,
   /** UTF-16 units; the provider stream already bounds a query to 200 code points. */
   queryCharacters: 400,
   queryCodePoints: 200,
   sourceCount: 10_000,
+  /** Display-bounded code/log text; the provider stream already truncates to this size. */
+  execCodeCharacters: 4_000,
+  execLogsCharacters: 2_000,
+  execImageCount: 200,
   durationMs: 24 * 60 * 60 * 1000,
 });
 
@@ -91,7 +113,7 @@ export const AI_REPLY_PROCESS_LIMITS = Object.freeze({
 export interface AiReplyProcessLiveSearch {
   kind: "search";
   callId: string;
-  status: AiToolProgress["status"];
+  status: AiWebSearchProgress["status"];
   query?: string;
   sourceCount?: number;
   startedAt?: number;
@@ -136,7 +158,21 @@ export interface AiReplyProcessLiveAgents {
   updatedAt?: number;
   finishedAt?: number;
 }
-export type AiReplyProcessLiveStep = AiReplyProcessThinkingStep | AiReplyProcessLiveSearch | AiReplyProcessToolStep | AiReplyProcessLiveAgents;
+export interface AiReplyProcessLiveExec {
+  kind: "exec";
+  callId: string;
+  status: AiCodeExecStatus;
+  language: "python";
+  code?: string;
+  logs?: string;
+  imageCount?: number;
+  /** Set only by the application after a provider outright rejected the tool
+   * (never a provider-reported status). */
+  unsupported?: boolean;
+  startedAt?: number;
+  endedAt?: number;
+}
+export type AiReplyProcessLiveStep = AiReplyProcessThinkingStep | AiReplyProcessLiveSearch | AiReplyProcessLiveExec | AiReplyProcessToolStep | AiReplyProcessLiveAgents;
 export interface AiReplyProcessLive {
   steps: AiReplyProcessLiveStep[];
   /** `run_started.data.startedAt`: when the server accepted the request. */
@@ -150,11 +186,16 @@ export const EMPTY_REPLY_PROCESS_LIVE: AiReplyProcessLive = Object.freeze({ step
 /** Any journaled or streamed run event; only its payload and server timestamp are read. */
 export type AiReplyProcessEvent = AiRunEventPayload & { timestamp?: number };
 
-const TERMINAL_SEARCH = new Set<AiToolProgress["status"]>(["completed", "failed"]);
-const LIVE_SEARCH = new Set<AiToolProgress["status"]>(["in_progress", "searching", "completed", "failed"]);
+const TERMINAL_SEARCH = new Set<AiWebSearchProgress["status"]>(["completed", "failed"]);
+const LIVE_SEARCH = new Set<AiWebSearchProgress["status"]>(["in_progress", "searching", "completed", "failed"]);
+const TERMINAL_EXEC = new Set<AiCodeExecStatus>(["completed", "failed"]);
+const LIVE_EXEC = new Set<AiCodeExecStatus>(["in_progress", "interpreting", "completed", "failed"]);
 const OUTCOMES = new Set<AiReplyProcessOutcome>(["completed", "partial", "stopped", "failed"]);
 const PERSISTED_SEARCH = new Set<AiReplyProcessSearchStatus>(["completed", "failed", "incomplete"]);
+const PERSISTED_EXEC = new Set<AiReplyProcessExecStatus>(["completed", "failed", "incomplete", "unsupported"]);
 const CONTROL = /[\u0000-\u001f\u007f]/;
+/** Same as CONTROL but keeps real newlines/tabs, meaningful in code and logs. */
+const CODE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 function timestamp(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -176,6 +217,19 @@ function sourceCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? Math.min(value, AI_REPLY_PROCESS_LIMITS.sourceCount) : undefined;
 }
 
+/** Keeps real newlines/tabs (meaningful in code and logs) while stripping
+ * other control characters, then hard-truncates to `max` UTF-16 units. */
+function boundedCodeText(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.replace(new RegExp(CODE_CONTROL, "g"), "");
+  if (!clean) return undefined;
+  return clean.length > max ? clean.slice(0, max) : clean;
+}
+
+function execImageCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? Math.min(value, AI_REPLY_PROCESS_LIMITS.execImageCount) : undefined;
+}
+
 /**
  * Folds one real run event into the live process. Returns the same object when
  * the event carries no process information (answer text, usage, and any raw
@@ -195,26 +249,54 @@ export function applyReplyProcessEvent(state: AiReplyProcessLive, event: AiReply
     }
     case "tool_progress": {
       const progress = event.data;
-      if (progress.tool !== "web_search" || typeof progress.callId !== "string" || !LIVE_SEARCH.has(progress.status)) return state;
-      const index = state.steps.findIndex(step => step.kind === "search" && step.callId === progress.callId);
-      const query = boundedQuery(progress.query);
-      const sources = sourceCount(progress.sourceCount);
-      if (index < 0) {
-        if (state.steps.length >= AI_REPLY_PROCESS_LIMITS.steps) return state;
-        const created: AiReplyProcessLiveSearch = { kind: "search", callId: progress.callId, status: progress.status,
+      if (typeof progress.callId !== "string") return state;
+      if (progress.tool === "web_search") {
+        if (!LIVE_SEARCH.has(progress.status)) return state;
+        const index = state.steps.findIndex(step => step.kind === "search" && step.callId === progress.callId);
+        const query = boundedQuery(progress.query);
+        const sources = sourceCount(progress.sourceCount);
+        if (index < 0) {
+          if (state.steps.length >= AI_REPLY_PROCESS_LIMITS.steps) return state;
+          const created: AiReplyProcessLiveSearch = { kind: "search", callId: progress.callId, status: progress.status,
+            ...(query ? { query } : {}), ...(sources !== undefined ? { sourceCount: sources } : {}),
+            ...(at !== undefined ? { startedAt: at } : {}),
+            ...(at !== undefined && TERMINAL_SEARCH.has(progress.status) ? { endedAt: at } : {}) };
+          return { ...state, steps: [...state.steps, created] };
+        }
+        const current = state.steps[index] as AiReplyProcessLiveSearch;
+        // A provider-reported terminal state is final; late events never regress it.
+        if (TERMINAL_SEARCH.has(current.status) && progress.status !== current.status) return state;
+        const next: AiReplyProcessLiveSearch = { ...current, status: progress.status,
           ...(query ? { query } : {}), ...(sources !== undefined ? { sourceCount: sources } : {}),
-          ...(at !== undefined ? { startedAt: at } : {}),
-          ...(at !== undefined && TERMINAL_SEARCH.has(progress.status) ? { endedAt: at } : {}) };
-        return { ...state, steps: [...state.steps, created] };
+          ...(current.endedAt === undefined && at !== undefined && TERMINAL_SEARCH.has(progress.status) ? { endedAt: at } : {}) };
+        if (next.status === current.status && next.query === current.query && next.sourceCount === current.sourceCount && next.endedAt === current.endedAt) return state;
+        return { ...state, steps: state.steps.map((step, position) => position === index ? next : step) };
       }
-      const current = state.steps[index] as AiReplyProcessLiveSearch;
-      // A provider-reported terminal state is final; late events never regress it.
-      if (TERMINAL_SEARCH.has(current.status) && progress.status !== current.status) return state;
-      const next: AiReplyProcessLiveSearch = { ...current, status: progress.status,
-        ...(query ? { query } : {}), ...(sources !== undefined ? { sourceCount: sources } : {}),
-        ...(current.endedAt === undefined && at !== undefined && TERMINAL_SEARCH.has(progress.status) ? { endedAt: at } : {}) };
-      if (next.status === current.status && next.query === current.query && next.sourceCount === current.sourceCount && next.endedAt === current.endedAt) return state;
-      return { ...state, steps: state.steps.map((step, position) => position === index ? next : step) };
+      if (progress.tool === "code_interpreter") {
+        if (!LIVE_EXEC.has(progress.status)) return state;
+        const index = state.steps.findIndex(step => step.kind === "exec" && step.callId === progress.callId);
+        const code = boundedCodeText(progress.code, AI_REPLY_PROCESS_LIMITS.execCodeCharacters);
+        const logs = boundedCodeText(progress.logs, AI_REPLY_PROCESS_LIMITS.execLogsCharacters);
+        const images = execImageCount(progress.imageCount);
+        if (index < 0) {
+          if (state.steps.length >= AI_REPLY_PROCESS_LIMITS.steps) return state;
+          const created: AiReplyProcessLiveExec = { kind: "exec", callId: progress.callId, status: progress.status, language: "python",
+            ...(code ? { code } : {}), ...(logs ? { logs } : {}), ...(images !== undefined ? { imageCount: images } : {}),
+            ...(progress.unsupported ? { unsupported: true as const } : {}),
+            ...(at !== undefined ? { startedAt: at } : {}),
+            ...(at !== undefined && TERMINAL_EXEC.has(progress.status) ? { endedAt: at } : {}) };
+          return { ...state, steps: [...state.steps, created] };
+        }
+        const current = state.steps[index] as AiReplyProcessLiveExec;
+        // A provider-reported terminal state is final; late events never regress it.
+        if (TERMINAL_EXEC.has(current.status) && progress.status !== current.status) return state;
+        const next: AiReplyProcessLiveExec = { ...current, status: progress.status,
+          ...(code ? { code } : {}), ...(logs ? { logs } : {}), ...(images !== undefined ? { imageCount: images } : {}),
+          ...(current.endedAt === undefined && at !== undefined && TERMINAL_EXEC.has(progress.status) ? { endedAt: at } : {}) };
+        if (next.status === current.status && next.code === current.code && next.logs === current.logs && next.imageCount === current.imageCount && next.endedAt === current.endedAt) return state;
+        return { ...state, steps: state.steps.map((step, position) => position === index ? next : step) };
+      }
+      return state;
     }
     case "subagent_update": {
       const update = readAiSubagentUpdate(event.data);
@@ -415,14 +497,25 @@ export function settleReplyProcess(live: AiReplyProcessLive, options: { outcome:
       const agents = settleAgentsStep(step, options.outcome);
       return agents ? [agents] : [];
     }
-    if (step.kind !== "search") return [{ ...step }];
-    const status: AiReplyProcessSearchStatus = step.status === "completed" || step.status === "failed" ? step.status : "incomplete";
-    const query = boundedQuery(step.query);
-    const sources = sourceCount(step.sourceCount);
-    // A call first seen already finished has no observed duration.
-    const durationMs = step.startedAt !== undefined && step.endedAt !== undefined && step.endedAt > step.startedAt ? validReplyProcessDuration(step.endedAt - step.startedAt) : undefined;
-    return [{ kind: "search", status, ...(query ? { query } : {}), ...(sources !== undefined ? { sourceCount: sources } : {}),
-      ...(durationMs !== undefined ? { durationMs } : {}) }];
+    if (step.kind === "search") {
+      const status: AiReplyProcessSearchStatus = step.status === "completed" || step.status === "failed" ? step.status : "incomplete";
+      const query = boundedQuery(step.query);
+      const sources = sourceCount(step.sourceCount);
+      // A call first seen already finished has no observed duration.
+      const durationMs = step.startedAt !== undefined && step.endedAt !== undefined && step.endedAt > step.startedAt ? validReplyProcessDuration(step.endedAt - step.startedAt) : undefined;
+      return [{ kind: "search", status, ...(query ? { query } : {}), ...(sources !== undefined ? { sourceCount: sources } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {}) }];
+    }
+    if (step.kind === "exec") {
+      const status: AiReplyProcessExecStatus = step.unsupported ? "unsupported" : step.status === "completed" || step.status === "failed" ? step.status : "incomplete";
+      const code = boundedCodeText(step.code, AI_REPLY_PROCESS_LIMITS.execCodeCharacters);
+      const logs = boundedCodeText(step.logs, AI_REPLY_PROCESS_LIMITS.execLogsCharacters);
+      const images = execImageCount(step.imageCount);
+      const durationMs = step.startedAt !== undefined && step.endedAt !== undefined && step.endedAt > step.startedAt ? validReplyProcessDuration(step.endedAt - step.startedAt) : undefined;
+      return [{ kind: "exec", status, language: "python", ...(code ? { code } : {}), ...(logs ? { logs } : {}),
+        ...(images !== undefined ? { imageCount: images } : {}), ...(durationMs !== undefined ? { durationMs } : {}) }];
+    }
+    return [{ ...step }];
   });
   if (!steps.length || !OUTCOMES.has(options.outcome)) return undefined;
   const durationMs = validReplyProcessDuration(options.durationMs);
@@ -462,6 +555,13 @@ export function readReplyProcess(value: unknown): AiReplyProcess | undefined {
       const durationMs = validReplyProcessDuration(step.durationMs);
       steps.push({ kind: "search", status: step.status as AiReplyProcessSearchStatus, ...(query ? { query } : {}),
         ...(sources !== undefined ? { sourceCount: sources } : {}), ...(durationMs !== undefined ? { durationMs } : {}) });
+    } else if (step.kind === "exec" && step.language === "python" && PERSISTED_EXEC.has(step.status as AiReplyProcessExecStatus)) {
+      const code = typeof step.code === "string" && step.code.trim() && step.code.length <= AI_REPLY_PROCESS_LIMITS.execCodeCharacters && !CODE_CONTROL.test(step.code) ? step.code : undefined;
+      const logs = typeof step.logs === "string" && step.logs.trim() && step.logs.length <= AI_REPLY_PROCESS_LIMITS.execLogsCharacters && !CODE_CONTROL.test(step.logs) ? step.logs : undefined;
+      const images = typeof step.imageCount === "number" && Number.isSafeInteger(step.imageCount) && step.imageCount >= 0 && step.imageCount <= AI_REPLY_PROCESS_LIMITS.execImageCount ? step.imageCount : undefined;
+      const durationMs = validReplyProcessDuration(step.durationMs);
+      steps.push({ kind: "exec", status: step.status as AiReplyProcessExecStatus, language: "python", ...(code ? { code } : {}),
+        ...(logs ? { logs } : {}), ...(images !== undefined ? { imageCount: images } : {}), ...(durationMs !== undefined ? { durationMs } : {}) });
     } else if (step.kind === "tool" && step.tool === "computer" && (step.status === "handed_off" || step.status === "unavailable")) {
       steps.push({ kind: "tool", tool: "computer", status: step.status });
     }

@@ -15,6 +15,7 @@ import {
   LoaderCircle,
   Monitor,
   Presentation,
+  Terminal,
   TriangleAlert,
   Users,
   Video,
@@ -33,6 +34,7 @@ import {
   nextReplyProcessDetails,
   REPLY_PROCESS_OUTCOME_LABELS,
   replyProcessActivity,
+  replyProcessExecLabel,
   replyProcessSearchLabel,
   replyProcessSummary,
   replyProcessView,
@@ -42,7 +44,9 @@ import {
   type ReplyProcessView,
 } from "./replyProcessModel";
 import { harnessTraceRefresh, harnessTraceRequestId, sameHarnessTrace } from "./runTracePolling";
+import { useReplyHighlight } from "./useReplyHighlight";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
+import "./reply-markdown.css";
 import "./reply-process.css";
 
 /* Adapted from LibreChat v0.8.7 (MIT): the ordered part list follows
@@ -130,6 +134,7 @@ function partIcon(part: ReplyProcessPart): ReactNode {
     case "thinking": return <Lightbulb size={14} aria-hidden="true" />;
     case "search": case "search-total": return <Globe size={14} aria-hidden="true" />;
     case "agents": return <Users size={14} aria-hidden="true" />;
+    case "exec": return <Terminal size={14} aria-hidden="true" />;
     case "tool":
       return part.tool === "image" ? <ImageIcon size={14} aria-hidden="true" />
         : part.tool === "video" ? <Video size={14} aria-hidden="true" />
@@ -145,6 +150,34 @@ function showResultCard(event: MouseEvent<HTMLButtonElement>) {
   if (!cards) return;
   cards.scrollIntoView({ block: "nearest", behavior: prefersReducedMotion() ? "auto" : "smooth" });
   cards.querySelector<HTMLElement>("button:not(:disabled), a[href], video, [tabindex]:not([tabindex='-1'])")?.focus({ preventScroll: true });
+}
+
+/** Code highlighting reuses the same markdown code-block styling and
+ * lowlight grammar; a still-running call has no code/output to reveal yet. */
+function ExecDetail({ part }: { part: Extract<ReplyProcessPart, { kind: "exec" }> }) {
+  const [feedback, setFeedback] = useState("");
+  const highlighted = useReplyHighlight(part.code ?? null, part.language);
+  const hasOutput = Boolean(part.logs?.trim()) || Boolean(part.imageCount);
+  if (!part.code && !hasOutput) return null;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(part.code ?? ""); setFeedback("已复制代码"); }
+    catch { setFeedback("复制失败，请手动选择代码。"); }
+  };
+  return <div className="tp-ai-process-exec">
+    {part.code ? <div className="tp-ai-markdown-code">
+      <div className="tp-ai-markdown-code__actions">
+        <span className="tp-ai-markdown-code__lang">{part.language}</span>
+        <button type="button" onClick={() => void copy()}>复制代码</button>
+        <span role="status" aria-live="polite">{feedback}</span>
+      </div>
+      <pre><code className={highlighted ? `hljs language-${part.language}` : undefined}>{highlighted ?? part.code}</code></pre>
+    </div> : null}
+    {hasOutput ? <details className="tp-ai-process-exec__output">
+      <summary>运行输出</summary>
+      {part.logs?.trim() ? <pre className="tp-ai-process-exec__logs">{part.logs}</pre> : null}
+      {part.imageCount ? <p className="tp-ai-process-exec__images">生成了 {part.imageCount} 张图</p> : null}
+    </details> : null}
+  </div>;
 }
 
 function PartRow({ part, office }: { part: ReplyProcessPart; office?: AgentOfficeSnapshot | null }) {
@@ -172,6 +205,10 @@ function PartRow({ part, office }: { part: ReplyProcessPart; office?: AgentOffic
       title = <><strong>多 Agent 协作</strong><small>{part.agents.length ? `${part.agents.filter(agent => agent.status === "done").length}/${part.agents.length} 个子任务完成` : part.state === "running" ? "任务分解中" : "未完成任务分解"}</small></>;
       // The AI 员工办公室 sits with the sub-agent cards: open while the run works, collapsed once it settles.
       detail = <><MultiAgentProcess part={part} />{office ? <AgentOfficePanel snapshot={office} /> : null}</>;
+      break;
+    case "exec":
+      title = <><strong>代码执行</strong><small>{replyProcessExecLabel(part)}</small></>;
+      detail = <ExecDetail part={part} />;
       break;
     case "tool":
       title = <><strong>工具调用 · {part.label}</strong><small>{part.statusText}</small>

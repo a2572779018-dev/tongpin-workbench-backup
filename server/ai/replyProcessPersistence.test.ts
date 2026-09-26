@@ -36,6 +36,8 @@ function adapter(database: DatabaseSync): AiSql {
 const at = (timestamp: number, payload: AiReplyProcessEvent): AiReplyProcessEvent => ({ ...payload, timestamp });
 const search = (callId: string, status: "in_progress" | "completed", extra: { query?: string; sourceCount?: number } = {}) =>
   ({ type: "tool_progress", data: { tool: "web_search", callId, status, ...extra } }) as const;
+const exec = (callId: string, status: "in_progress" | "interpreting" | "completed", extra: { code?: string; logs?: string; imageCount?: number } = {}) =>
+  ({ type: "tool_progress", data: { tool: "code_interpreter", callId, status, ...extra } }) as const;
 function liveProcess(): AiReplyProcess {
   const live = [
     at(1_000, { type: "run_started", data: { startedAt: 1_000 } }),
@@ -46,6 +48,15 @@ function liveProcess(): AiReplyProcess {
     at(5_100, search("search-2", "completed", { query: "上海 空气质量", sourceCount: 6 })),
   ].reduce(applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE);
   return settleReplyProcess(live, { outcome: "completed", durationMs: 9_200 })!;
+}
+function execLiveProcess(): AiReplyProcess {
+  const live = [
+    at(1_000, { type: "run_started", data: { startedAt: 1_000 } }),
+    at(1_200, exec("exec-1", "in_progress")),
+    at(1_400, exec("exec-1", "interpreting", { code: "print(sum([1, 2, 3]) / 3)" })),
+    at(1_900, exec("exec-1", "completed", { code: "print(sum([1, 2, 3]) / 3)", logs: "1.0", imageCount: 1 })),
+  ].reduce(applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE);
+  return settleReplyProcess(live, { outcome: "completed", durationMs: 3_000 })!;
 }
 function stateWith(message: Partial<AiWorkspaceMessage>): AiWorkspaceState {
   return {
@@ -122,8 +133,26 @@ describe("reply process persistence", () => {
     expect(agentsOnly.conversations[0].messages[1]).not.toHaveProperty("process");
   });
 
+  it("round-trips a settled code-execution step through save, reload and the client view", async () => {
+    const process = execLiveProcess();
+    const session = hydrateWorkspace(stateWith({ process }));
+    const saved = await repository.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: serializeWorkspace(session) });
+    expect(saved.revision).toBe(1);
+    const reloaded = repository.read("member-a");
+    const message = reloaded.state!.conversations[0].messages[1] as TongpinAIMessage;
+    expect(message.process).toEqual(process);
+    expect(message.process).toMatchObject({ steps: [{ kind: "exec", status: "completed", language: "python", code: "print(sum([1, 2, 3]) / 3)", logs: "1.0", imageCount: 1, durationMs: 700 }] });
+    const view = replyProcessView({ message: hydrateWorkspace(reloaded.state).conversations[0].messages[1] })!;
+    expect(view.execCount).toBe(1);
+    // stateWith()'s fixture message always carries one cited source; with no
+    // search step reporting its own count, the summary falls back to it.
+    expect(replyProcessSummary(view)).toBe("代码执行 1 次 · 1 个来源 · 用时 3 秒");
+    expect(validateAiWorkspaceConversationEntity(stateWith({ process }).conversations[0]).messages[1].process).toEqual(process);
+  });
+
   it("rejects malformed, smuggled or oversized process records before any write", async () => {
     const valid = liveProcess();
+    const execValid = execLiveProcess();
     const invalid: Array<[string, unknown, string]> = [
       ["unknown field", { ...valid, note: "x" }, "AI_WORKSPACE_INVALID"],
       ["raw reasoning text", { ...valid, steps: [{ kind: "thinking", text: "raw private chain" }] }, "AI_WORKSPACE_INVALID"],
@@ -135,6 +164,10 @@ describe("reply process persistence", () => {
       ["search status", { ...valid, steps: [{ kind: "search", status: "searching" }] }, "AI_WORKSPACE_INVALID"],
       ["query control characters", { ...valid, steps: [{ kind: "search", status: "completed", query: "a\u0007b" }] }, "AI_WORKSPACE_INVALID"],
       ["negative sources", { ...valid, steps: [{ kind: "search", status: "completed", sourceCount: -1 }] }, "AI_WORKSPACE_INVALID"],
+      ["exec status", { ...execValid, steps: [{ kind: "exec", status: "interpreting", language: "python" }] }, "AI_WORKSPACE_INVALID"],
+      ["exec language", { ...execValid, steps: [{ kind: "exec", status: "completed", language: "javascript" }] }, "AI_WORKSPACE_INVALID"],
+      ["exec code control characters", { ...execValid, steps: [{ kind: "exec", status: "completed", language: "python", code: "a\u0007b" }] }, "AI_WORKSPACE_INVALID"],
+      ["exec negative image count", { ...execValid, steps: [{ kind: "exec", status: "completed", language: "python", imageCount: -1 }] }, "AI_WORKSPACE_INVALID"],
       ["duration beyond a day", { ...valid, durationMs: 24 * 60 * 60 * 1000 + 1 }, "AI_WORKSPACE_INVALID"],
       ["tool without a real hand-off", { ...valid, steps: [{ kind: "tool", tool: "image", status: "handed_off" }] }, "AI_WORKSPACE_INVALID"],
       ["too many steps", { ...valid, steps: Array.from({ length: 9 }, () => ({ kind: "search", status: "completed" })) }, "AI_WORKSPACE_TOO_LARGE"],
@@ -218,5 +251,52 @@ describe("reply process persistence", () => {
       { kind: "search", status: "completed", query: "上海 今日天气", sourceCount: 5, durationMs: 1_200 },
     ] });
     expect(JSON.stringify(page)).not.toContain("raw private chain");
+  });
+
+  it("commits a V2 reply carrying both a rebuilt search and a rebuilt code-execution step from the same journal", async () => {
+    const workspace = new AiWorkspaceRepository(sql);
+    const v2 = new AiWorkspaceV2Store(sql, workspace); v2.initialize();
+    const principal = { id: "member-a", role: "member", status: "active", tenantId: "default" };
+    const call = (route: string, method = "GET", body?: unknown) => handleAiWorkspaceV2Request(new Request(`http://localhost/api/ai/workspace-v2${route}`, {
+      method, headers: { "X-Tongpin-Account": principal.id, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }), v2, principal);
+    await workspace.save("member-a", { expectedRevision: 0, mutationId: crypto.randomUUID(), state: { ...stateWith({}), conversations: [{ id: "chat-a", title: "天气", timeLabel: "刚刚", messages: [] }] } });
+    await new AiWorkspaceV2ShadowRepository(sql, workspace).stageFromV1("member-a");
+    const epoch = (await v2.prepareFromShadow("member-a"))!.epoch;
+    sql.exec("UPDATE ai_workspace_v2_meta SET activated_at=? WHERE tenant_id='default' AND user_id='member-a'", new Date().toISOString());
+    sql.exec("UPDATE ai_workspaces SET schema_version=2 WHERE tenant_id='default' AND user_id='member-a'");
+
+    const requestId = crypto.randomUUID();
+    const result: AiChatResponse = { requestId, content: "今天晴，均值 1.0。", model: "server-model", analysisSummary: "先核对来源，再算一下数据。",
+      usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3, estimated: false }, quota: emptyQuota() };
+    const ai = new AiStore(sql);
+    ai.saveRequest({ requestId, userId: "member-a", hash: "hash", status: "completed", kind: "chat", createdAt: "2026-09-26T10:00:00.000Z", expiresAt: Date.now() + 60_000,
+      inputReserve: 0, outputReserve: 0, model: "server-model", mode: "standard", conversationId: "chat-a", result });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const journal: Array<[number, AiReplyProcessEvent]> = [
+      [1_000, { type: "run_started", data: { startedAt: 1_000 } }],
+      [1_100, { type: "public_summary_delta", data: { delta: "先核对来源，再算一下数据。" } }],
+      [1_200, search("search-1", "in_progress")],
+      [2_400, search("search-1", "completed", { query: "上海 今日天气", sourceCount: 5 })],
+      [2_500, exec("exec-1", "in_progress")],
+      [3_100, exec("exec-1", "completed", { code: "print(sum([1, 2, 3]) / 3)", logs: "1.0", imageCount: 1 })],
+      [3_200, { type: "answer_delta", data: { delta: "今天晴，均值 1.0。" } }],
+      [3_500, { type: "run_finished", data: { response: result } }],
+    ];
+    for (const [time, payload] of journal) { vi.setSystemTime(time); ai.appendRunEvent("member-a", requestId, payload); }
+    vi.useRealTimers();
+
+    expect((await call("/append-user", "POST", { epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
+      message: { id: "user-a", role: "user", content: "今天上海天气，顺便帮我算一下这组数据的平均值", time: "10:00", requestId } })).status).toBe(200);
+    const commit = { epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 2, requestId, messageId: "reply-a" };
+    expect((await call("/commit-assistant", "POST", commit)).status).toBe(200);
+    const page = await (await call("/conversations/chat-a/messages")).json() as { messages: AiWorkspaceMessage[] };
+    const reply = page.messages.at(-1)!;
+    expect(reply.process).toEqual({ version: 1, outcome: "completed", durationMs: 2_500, steps: [
+      { kind: "thinking" },
+      { kind: "search", status: "completed", query: "上海 今日天气", sourceCount: 5, durationMs: 1_200 },
+      { kind: "exec", status: "completed", language: "python", code: "print(sum([1, 2, 3]) / 3)", logs: "1.0", imageCount: 1, durationMs: 600 },
+    ] });
   });
 });

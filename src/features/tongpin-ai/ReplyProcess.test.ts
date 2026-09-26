@@ -24,15 +24,19 @@ import {
   isReplyProcessExpanded,
   nextReplyProcessDetails,
   replyProcessActivity,
+  replyProcessExecLabel,
   replyProcessSummary,
   replyProcessToolPart,
   replyProcessView,
   type ReplyProcessDetails,
+  type ReplyProcessPart,
 } from "./replyProcessModel";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
 
 const search = (callId: string, status: "in_progress" | "searching" | "completed" | "failed", extra: { query?: string; sourceCount?: number } = {}) =>
   ({ type: "tool_progress", data: { tool: "web_search", callId, status, ...extra } }) as const;
+const exec = (callId: string, status: "in_progress" | "interpreting" | "completed" | "failed", extra: { code?: string; logs?: string; imageCount?: number; unsupported?: boolean } = {}) =>
+  ({ type: "tool_progress", data: { tool: "code_interpreter", callId, status, ...extra } }) as const;
 const at = (timestamp: number, payload: AiReplyProcessEvent): AiReplyProcessEvent => ({ ...payload, timestamp });
 
 /** Mirrors a real Responses run: summary, two searches, answer, finish. */
@@ -275,6 +279,80 @@ describe("conversation header toggle", () => {
     const idle = renderToStaticMarkup(createElement(ChatWorkspace, { ...props, messages: [user, assistant()] }));
     expect(idle).not.toContain("aria-keyshortcuts");
     expect(idle).toContain("Enter 发送 · Shift + Enter 换行");
+  });
+});
+
+/** Mirrors a real Responses run: one code execution that streams code, then
+ * logs and an image, then the answer. */
+function execLiveRun(): AiReplyProcessLive {
+  const events: AiReplyProcessEvent[] = [
+    at(1_000, { type: "run_started", data: { startedAt: 1_000 } }),
+    at(1_100, exec("exec-1", "in_progress")),
+    at(1_200, exec("exec-1", "interpreting", { code: "print(1+1)" })),
+    at(1_800, exec("exec-1", "completed", { code: "print(1+1)", logs: "2\n", imageCount: 1 })),
+    at(1_900, { type: "answer_delta", data: { delta: "结果是 2。" } }),
+    at(2_000, { type: "run_finished", data: { response: { requestId: "r", content: "结果是 2。", model: "m", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimated: false }, quota: { limitTokens: 1, usedTokens: 0, reservedTokens: 0, remainingTokens: 1, inputTokens: 0, outputTokens: 0 } } } }),
+  ];
+  return events.reduce(applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE);
+}
+const settledExecProcess = (): AiReplyProcess => settleReplyProcess(execLiveRun(), { outcome: "completed", durationMs: 1_000 })!;
+
+describe("code execution process", () => {
+  it("settles a completed run with its code, logs and image count", () => {
+    const live = execLiveRun();
+    expect(live.steps.map(step => step.kind)).toEqual(["exec"]);
+    expect(settledExecProcess()).toEqual({ version: 1, outcome: "completed", durationMs: 1_000, steps: [
+      { kind: "exec", status: "completed", language: "python", code: "print(1+1)", logs: "2\n", imageCount: 1, durationMs: 700 },
+    ] });
+  });
+
+  it("marks a provider-rejected tool unsupported, never regressed by a later event, with no duration or code", () => {
+    let live = applyReplyProcessEvent(EMPTY_REPLY_PROCESS_LIVE, at(1, exec("exec-unsupported", "failed", { unsupported: true })));
+    const settled = live;
+    live = applyReplyProcessEvent(live, at(2, exec("exec-unsupported", "in_progress")));
+    expect(live).toBe(settled);
+    expect(settleReplyProcess(live, { outcome: "completed", durationMs: 10 })).toEqual({ version: 1, outcome: "completed", durationMs: 10, steps: [{ kind: "exec", status: "unsupported", language: "python" }] });
+  });
+
+  it("marks an unsettled execution incomplete when the reply stops", () => {
+    const live = applyReplyProcessEvent(EMPTY_REPLY_PROCESS_LIVE, at(1, exec("exec-1", "interpreting", { code: "x = 1" })));
+    expect(settleReplyProcess(live, { outcome: "stopped", durationMs: 500 })).toEqual({ version: 1, outcome: "stopped", durationMs: 500, steps: [{ kind: "exec", status: "incomplete", language: "python", code: "x = 1" }] });
+  });
+
+  it("reads a stored exec step defensively, dropping an invalid language or a control-character field", () => {
+    expect(readReplyProcess({ version: 1, outcome: "completed", steps: [{ kind: "exec", status: "completed", language: "javascript", code: "1+1" }] })).toBeUndefined();
+    expect(readReplyProcess({ version: 1, outcome: "completed", steps: [
+      { kind: "exec", status: "completed", language: "python", code: "print(1)\u0000bad", logs: "ok" },
+      { kind: "exec", status: "unsupported", language: "python" },
+    ] })).toEqual({ version: 1, outcome: "completed", steps: [
+      { kind: "exec", status: "completed", language: "python", logs: "ok" },
+      { kind: "exec", status: "unsupported", language: "python" },
+    ] });
+  });
+
+  it("shows the exec part in the process view, one-line summary and live activity", () => {
+    const view = replyProcessView({ message: assistant({ process: settledExecProcess() }) })!;
+    expect(view.parts).toEqual([{ kind: "exec", key: "exec:1", status: "completed", language: "python", code: "print(1+1)", logs: "2\n", imageCount: 1, durationMs: 700, state: "done" }]);
+    expect(view.execCount).toBe(1);
+    expect(replyProcessSummary(view)).toBe("代码执行 1 次 · 用时 1 秒");
+    expect(replyProcessExecLabel(view.parts[0] as Extract<ReplyProcessPart, { kind: "exec" }>)).toBe("已完成 · 生成了 1 张图 · 0.7 秒");
+    const running = replyProcessView({ message: assistant({ status: "thinking", content: "", liveProcess: applyReplyProcessEvent(EMPTY_REPLY_PROCESS_LIVE, at(1, exec("exec-1", "interpreting"))) }) })!;
+    expect(replyProcessActivity(running, { content: "" })).toBe("正在执行代码");
+  });
+
+  it("renders the code and a collapsible output panel reusing the markdown code-block style", () => {
+    const html = row(assistant({ process: settledExecProcess() }), { expanded: true, revision: 1 });
+    expect(html).toContain("代码执行");
+    expect(html).toContain("print(1+1)");
+    expect(html).toContain("运行输出");
+    expect(html).toContain("生成了 1 张图");
+    expect(html).toContain("tp-ai-markdown-code");
+  });
+
+  it("marks the unsupported step in the rendered card without a code panel", () => {
+    const html = row(assistant({ process: { version: 1, outcome: "completed", steps: [{ kind: "exec", status: "unsupported", language: "python" }] } }), { expanded: true, revision: 1 });
+    expect(html).toContain("当前服务不支持代码执行");
+    expect(html).not.toContain("tp-ai-markdown-code");
   });
 });
 

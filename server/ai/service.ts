@@ -9,9 +9,10 @@ import { AiPersonaRepository } from "./persona";
 import type { AiPersonaProfile } from "../../shared/aiPersona";
 import { prepareImageProviderRequest, MAX_IMAGE_RESPONSE_BYTES, readImageProviderResponse } from "./imageProvider";
 import { searchCallLimit } from "./searchPolicy";
+import { codeInterpreterCallLimit } from "./codeInterpreterPolicy";
 import { AiVideoService } from "./videoService";
 import { AvailabilityProbe } from "./availability";
-import { needsOnlineEvidence, routeChatProvider } from "./autoRouting";
+import { needsComputation, needsOnlineEvidence, routeChatProvider } from "./autoRouting";
 import { BAI_ASTRA_MODEL, filterBaiAgentModels, isTongpinQuickAgent, TONGPIN_QUICK_AGENT } from "../../shared/aiAuto";
 import type { AiAvailability } from "../../shared/ai";
 import { AI_CHAT_CONTEXT_LIMITS, AiCurrentContextTooLongError, fitAiChatMessages, type AiChatTextContext } from "../../shared/aiContext";
@@ -38,6 +39,9 @@ const MAX_TOKEN_LIMIT = 1_000_000_000;
 // search_context_size=low is a size preference, not a contractual token ceiling.
 // Keep the existing conservative allowance until a provider supplies a verifiable cap.
 const SEARCH_INPUT_RESERVE = 32768;
+// A code_interpreter turn does not fetch web content; the reserve only covers
+// the model's own generated code + returned logs before real usage is known.
+const CODE_EXEC_INPUT_RESERVE = 8192;
 const MIN_OUTPUT_TOKENS = 16;
 /** Upper bound on provider-published reasoning text streamed for live display. */
 export const AI_LIVE_REASONING_LIMIT = 8000;
@@ -88,11 +92,13 @@ function continuationPrompt(
 function chatBudget(request: AiChatRequest, provider: AiProviderConfig, quota: AiQuota, persona: AiPersonaProfile, model: string): AiChatBudget {
   const inputReserve = chatInputReserve(request, persona, model, provider.visionInputReserveTokens);
   const searchInputReserve = request.webSearch ? SEARCH_INPUT_RESERVE : 0;
-  const convertedReserve = request.webSearch ? provider.webSearchQuotaTokens! * searchCallLimit(provider) : 0;
+  const codeExecInputReserve = request.codeInterpreter ? CODE_EXEC_INPUT_RESERVE : 0;
+  const convertedReserve = (request.webSearch ? provider.webSearchQuotaTokens! * searchCallLimit(provider) : 0)
+    + (request.codeInterpreter ? provider.codeInterpreterQuotaTokens! * codeInterpreterCallLimit(provider) : 0);
   return {
-    inputReserve, searchInputReserve, convertedReserve, minOutputTokens: MIN_OUTPUT_TOKENS,
-    minimumRequiredTokens: inputReserve + searchInputReserve + convertedReserve + MIN_OUTPUT_TOKENS,
-    availableOutputTokens: Math.max(0, Math.min(provider.maxOutputTokens, quota.remainingTokens - inputReserve - searchInputReserve - convertedReserve)),
+    inputReserve, searchInputReserve, codeExecInputReserve, convertedReserve, minOutputTokens: MIN_OUTPUT_TOKENS,
+    minimumRequiredTokens: inputReserve + searchInputReserve + codeExecInputReserve + convertedReserve + MIN_OUTPUT_TOKENS,
+    availableOutputTokens: Math.max(0, Math.min(provider.maxOutputTokens, quota.remainingTokens - inputReserve - searchInputReserve - codeExecInputReserve - convertedReserve)),
     maxOutputTokens: provider.maxOutputTokens,
   };
 }
@@ -113,7 +119,7 @@ function text(value: unknown, name: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new AiError(400, "AI_INPUT_INVALID", `${name}格式不正确`);
   return value.trim();
 }
-function parseProvider(value: unknown, existing: StoredProvider | null, harnessSearchConfigured = false): AiProviderInput {
+function parseProvider(value: unknown, existing: StoredProvider | null, harnessSearchConfigured = false, harnessCodeInterpreterConfigured = false): AiProviderInput {
   const p = object(value);
   if (p.apiKey !== undefined && typeof p.apiKey !== "string") throw new AiError(400, "AI_INPUT_INVALID", "API 密钥格式不正确");
   const protocol = p.protocol;
@@ -129,17 +135,20 @@ function parseProvider(value: unknown, existing: StoredProvider | null, harnessS
   const imageBaseUrl = imageBaseValue.trim() ? safeBaseUrl(imageBaseValue) : "";
   const imageQuotaTokens = p.imageQuotaTokens ?? existing?.imageQuotaTokens ?? 0;
   const webSearchQuotaTokens = p.webSearchQuotaTokens ?? existing?.webSearchQuotaTokens ?? 0;
-  if (![imageQuotaTokens, webSearchQuotaTokens].every(n => Number.isSafeInteger(n) && Number(n) >= 0 && Number(n) <= 10_000_000)) throw new AiError(400, "AI_INPUT_INVALID", "工具折算额度需为 0 到 1000 万之间的整数");
+  const codeInterpreterQuotaTokens = p.codeInterpreterQuotaTokens ?? existing?.codeInterpreterQuotaTokens ?? 0;
+  if (![imageQuotaTokens, webSearchQuotaTokens, codeInterpreterQuotaTokens].every(n => Number.isSafeInteger(n) && Number(n) >= 0 && Number(n) <= 10_000_000)) throw new AiError(400, "AI_INPUT_INVALID", "工具折算额度需为 0 到 1000 万之间的整数");
   const webSearchEnabled = p.webSearchEnabled ?? existing?.webSearchEnabled ?? false;
   const webSearchProtocol = p.webSearchProtocol ?? existing?.webSearchProtocol ?? "standard";
   if (webSearchProtocol !== "standard" && webSearchProtocol !== "compatible") throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "请选择标准或兼容搜索协议");
+  const codeInterpreterEnabled = p.codeInterpreterEnabled ?? existing?.codeInterpreterEnabled ?? false;
   const visionEnabled = p.visionEnabled ?? existing?.visionEnabled ?? false;
   const visionInputReserveTokens = p.visionInputReserveTokens ?? existing?.visionInputReserveTokens ?? 4096;
   if (!Number.isSafeInteger(visionInputReserveTokens) || Number(visionInputReserveTokens) < 256 || Number(visionInputReserveTokens) > 131072) throw new AiError(400, "AI_VISION_CONFIG_INVALID", "每张图片的输入预留需为 256 到 131072 的整数估算值");
   const imageStream = p.imageStream ?? existing?.imageStream ?? false;
-  if (typeof webSearchEnabled !== "boolean" || typeof visionEnabled !== "boolean" || typeof imageStream !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "AI 能力开关格式不正确");
+  if (typeof webSearchEnabled !== "boolean" || typeof visionEnabled !== "boolean" || typeof imageStream !== "boolean" || typeof codeInterpreterEnabled !== "boolean") throw new AiError(400, "AI_INPUT_INVALID", "AI 能力开关格式不正确");
   if (imageModel && !imageQuotaTokens) throw new AiError(400, "AI_IMAGE_QUOTA_REQUIRED", "启用图片模型前，请设置每张图片的折算额度");
   if (webSearchEnabled && ((!harnessSearchConfigured && protocol !== "responses") || !webSearchQuotaTokens)) throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "联网搜索需使用 Responses 协议，并设置每次搜索的折算额度");
+  if (codeInterpreterEnabled && ((!harnessCodeInterpreterConfigured && protocol !== "responses") || !codeInterpreterQuotaTokens)) throw new AiError(400, "AI_CODE_INTERPRETER_CONFIG_INVALID", "代码执行需使用 Responses 协议，并设置每次执行的折算额度");
   if (!imageBaseUrl && typeof p.imageApiKey === "string" && p.imageApiKey.trim()) throw new AiError(400, "AI_INPUT_INVALID", "填写独立图片密钥时，还需填写图片 API 地址");
   const quickModel = text(p.quickModel, "快速模型", 160);
   const quickAgent = isTongpinQuickAgent(quickModel);
@@ -149,6 +158,7 @@ function parseProvider(value: unknown, existing: StoredProvider | null, harnessS
     quickModel: quickAgent ? TONGPIN_QUICK_AGENT : quickModel, deepModel: quickAgent ? BAI_ASTRA_MODEL : text(p.deepModel, "深度模型", 160),
     maxOutputTokens: Number(p.maxOutputTokens), reasoningEffort: (p.reasoningEffort ?? "") as AiProviderInput["reasoningEffort"], enabled: p.enabled,
     imageModel, imageBaseUrl, imageQuotaTokens: Number(imageQuotaTokens), imageStream, visionEnabled, visionInputReserveTokens: Number(visionInputReserveTokens), webSearchEnabled, webSearchQuotaTokens: Number(webSearchQuotaTokens), webSearchProtocol,
+    codeInterpreterEnabled, codeInterpreterQuotaTokens: Number(codeInterpreterQuotaTokens),
     ...(typeof p.apiKey === "string" && p.apiKey.trim() ? { apiKey: text(p.apiKey, "API 密钥", 4096) } : {}),
     ...(typeof p.imageApiKey === "string" && p.imageApiKey.trim() ? { imageApiKey: text(p.imageApiKey, "图片 API 密钥", 4096) } : {}),
   };
@@ -305,7 +315,8 @@ export class AiService {
     const existing = this.providerBaseline();
     const harness = this.store.harness();
     const harnessSearchConfigured = Boolean(harness && AI_BUSINESS_TIERS.some(tier => harness.tiers[tier].enabled && harness.tiers[tier].protocol === "responses" && harness.tiers[tier].capabilities.includes("web_search")));
-    const parsed = parseProvider(value, existing, harnessSearchConfigured);
+    const harnessCodeInterpreterConfigured = Boolean(harness && AI_BUSINESS_TIERS.some(tier => harness.tiers[tier].enabled && harness.tiers[tier].protocol === "responses" && harness.tiers[tier].capabilities.includes("code_interpreter")));
+    const parsed = parseProvider(value, existing, harnessSearchConfigured, harnessCodeInterpreterConfigured);
     if (!parsed.apiKey && (!existing?.encryptedKey || existing.baseUrl !== parsed.baseUrl)) throw new AiError(400, "AI_KEY_REQUIRED", "首次接入或更换 API 地址时，请重新填写 API 密钥");
     if (parsed.imageBaseUrl && !parsed.imageApiKey && (!existing?.encryptedImageKey || existing.imageBaseUrl !== parsed.imageBaseUrl)) throw new AiError(400, "AI_IMAGE_KEY_REQUIRED", "首次接入或更换图片 API 地址时，请重新填写图片密钥");
     const { apiKey, imageApiKey, ...config } = parsed;
@@ -585,6 +596,17 @@ export class AiService {
       request.webSearch = Boolean(route.policy.autoWebSearch && needsOnlineEvidence(latestUserText) && provider.protocol === "responses" && provider.webSearchEnabled && provider.webSearchQuotaTokens);
     }
     if (request.webSearch && (provider.protocol !== "responses" || !provider.webSearchEnabled || !provider.webSearchQuotaTokens)) throw new AiError(403, "AI_SEARCH_DISABLED", "管理员尚未启用联网搜索");
+    // Code execution is never a member toggle: always auto-decided from tier
+    // capability, admin config and a narrow computation heuristic. Never
+    // attached alongside an explicitly forced search (tool_choice would then
+    // need to single out one hosted tool over the other for the same turn).
+    const codeInterpreterAllowed = route.capabilities.includes("code_interpreter") && provider.protocol === "responses" && Boolean(provider.codeInterpreterEnabled) && Boolean(provider.codeInterpreterQuotaTokens);
+    const codeInterpreterForced = Boolean(request.webSearch) && request.webSearchMode !== "auto";
+    const ordinaryTurn = (!request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch") && !request.skillIds?.includes("agent-continuation-v1");
+    if (codeInterpreterAllowed && !codeInterpreterForced && ordinaryTurn) {
+      const latestUserText = request.messages.filter(message => message.role === "user").at(-1)?.content ?? "";
+      request.codeInterpreter = needsComputation(latestUserText, request.attachments);
+    }
     if (request.attachments?.some(item => item.dataUrl) && !provider.visionEnabled) {
       if (request.outputFormat !== "image_plan") throw new AiError(403, "AI_VISION_DISABLED", "管理员尚未启用图片理解，请上传可提取文字的文档");
       const media = this.harness.resolveMedia(request.mode, saved, "image");
@@ -609,8 +631,15 @@ export class AiService {
     const pending = pendingRequests.length + activeVideos.length >= 3
       || this.store.pendingForConversation(userId, conversationId).length > 0
       || this.store.activeVideoForConversation(userId, conversationId).length > 0;
-    const budget = chatBudget(request, provider, quota, persona, model);
-    const reason = budgetReason(budget, quota, pending);
+    let budget = chatBudget(request, provider, quota, persona, model);
+    let reason = budgetReason(budget, quota, pending);
+    // Code execution is always auto-decided, never a member toggle: an
+    // insufficient budget silently drops it instead of surfacing an error.
+    if (reason !== null && request.codeInterpreter) {
+      const withoutExec = chatBudget({ ...request, codeInterpreter: false }, provider, quota, persona, model);
+      const withoutExecReason = budgetReason(withoutExec, quota, pending);
+      if (withoutExecReason === null) { request.codeInterpreter = false; budget = withoutExec; reason = null; }
+    }
     if (!request.webSearch) return { canSend: reason === null, reason, quota, budget };
     const ordinaryBudget = chatBudget({ ...request, webSearch: false }, provider, quota, persona, model);
     const ordinaryReason = budgetReason(ordinaryBudget, quota, pending);
@@ -784,7 +813,7 @@ export class AiService {
       requireChatBudget(preflight);
       const q = preflight.quota;
       // UTF-8 bytes plus protocol overhead is deliberately conservative, not a fake provider token count.
-      const inputReserve = preflight.budget.inputReserve + preflight.budget.searchInputReserve;
+      const inputReserve = preflight.budget.inputReserve + preflight.budget.searchInputReserve + preflight.budget.codeExecInputReserve;
       const convertedReserve = preflight.budget.convertedReserve;
       const outputReserve = preflight.budget.availableOutputTokens;
       const pending: StoredRequest = { requestId: request.requestId, userId, hash, status: "pending", createdAt: new Date().toISOString(), expiresAt: Date.now() + AI_TIMEOUT_MS + 30_000, inputReserve, outputReserve, convertedReserve, kind: "chat", model, mode: request.mode, conversationId: validConversationId(request.conversationId, request.requestId), providerId: route.providerId, ...(request.toolPlanRequestId ? { toolPlanRequestId: request.toolPlanRequestId } : {}), ...(plannedContextFingerprint ? { toolPlanContextFingerprint: plannedContextFingerprint } : {}) };
@@ -821,11 +850,12 @@ export class AiService {
           ledger.estimated !== providerUsage.estimated) return;
       // These are only the settled, member-visible counters. Never emit the
       // provider response, model credentials, prompts, or admin diagnostics.
-      const { inputTokens, outputTokens, totalTokens, estimated, convertedTokens, billingKind, searchCalls, tokenUsageEstimated } = ledger;
+      const { inputTokens, outputTokens, totalTokens, estimated, convertedTokens, billingKind, searchCalls, execCalls, tokenUsageEstimated } = ledger;
       const usage: AiUsage = { inputTokens, outputTokens, totalTokens, estimated,
         ...(convertedTokens !== undefined ? { convertedTokens } : {}),
         ...(billingKind !== undefined ? { billingKind } : {}),
         ...(searchCalls !== undefined ? { searchCalls } : {}),
+        ...(execCalls !== undefined ? { execCalls } : {}),
         ...(tokenUsageEstimated !== undefined ? { tokenUsageEstimated } : {}) };
       usageEventSent = true;
       emit({ type: "usage_updated", data: { usage, status, providerReported: true } });
@@ -877,15 +907,31 @@ export class AiService {
     const toolProgress = (progress: AiToolProgress) => { if (liveProgress) { flush(); emit({ type: "tool_progress", data: progress }); } };
     try {
       emit({ type: "run_started", data: { startedAt: Date.parse(reserved.createdAt) } });
-      const response = await this.transport(`${provider.baseUrl}/${provider.protocol === "responses" ? "responses" : "chat/completions"}`, {
+      const requestBody = () => providerBody(provider, request.outputFormat === "image_plan" && !provider.visionEnabled && request.attachments?.some(item => item.dataUrl)
+        ? { ...request, attachments: request.attachments.map(({ dataUrl: _visual, ...item }) => ({ ...item, text: `${item.text ?? item.name}\n此参考图仅交给图片编辑服务，本次文字规划未看到画面。仅组织用户要求，不描述或猜测图中内容。` })) }
+        : request, model, reserved.outputReserve, persona, { stream: options.stream && canStream });
+      const send = () => this.transport(`${provider.baseUrl}/${provider.protocol === "responses" ? "responses" : "chat/completions"}`, {
         method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: provider.protocol === "responses" ? "text/event-stream, application/json" : "application/json", "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify(providerBody(provider, request.outputFormat === "image_plan" && !provider.visionEnabled && request.attachments?.some(item => item.dataUrl)
-          ? { ...request, attachments: request.attachments.map(({ dataUrl: _visual, ...item }) => ({ ...item, text: `${item.text ?? item.name}\n此参考图仅交给图片编辑服务，本次文字规划未看到画面。仅组织用户要求，不描述或猜测图中内容。` })) }
-          : request, model, reserved.outputReserve, persona, { stream: options.stream && canStream })), signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+        body: JSON.stringify(requestBody()), signal: AbortSignal.timeout(AI_TIMEOUT_MS),
       });
+      let response = await send();
+      // A gateway that does not support the hosted code_interpreter tool
+      // rejects the whole request. Retry once without it rather than fail a
+      // turn search alone would have answered; the first attempt was refused
+      // before any provider work could start, so this is never a double charge.
+      if (!response.ok && request.codeInterpreter && isProviderRejection(response.status)) {
+        const rejection = await readProviderHttpError(response, "chat");
+        const namesCodeInterpreter = rejection.diagnostic?.param === "tools" || rejection.diagnostic?.param === "tools[].type"
+          || rejection.diagnostic?.code === "unsupported_parameter" || rejection.diagnostic?.code === "unknown_parameter";
+        if (!namesCodeInterpreter) { knownRejection = true; throw rejection; }
+        request.codeInterpreter = false;
+        toolProgress({ tool: "code_interpreter", callId: "exec-unsupported", status: "failed", unsupported: true });
+        response = await send();
+      }
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "chat"); }
       const maxSearchCalls = request.webSearch ? searchCallLimit(provider) : 0;
-      const rawResult = await readProviderResponse(response, { maxSearchCalls, ...(options.stream && canStream ? { onTextDelta: (delta: string) => visible.feed(delta), onPublicSummaryDelta: publicSummary, onProviderReasoningDelta: providerReasoning, onToolProgress: toolProgress } : {}) });
+      const maxExecCalls = request.codeInterpreter ? codeInterpreterCallLimit(provider) : 0;
+      const rawResult = await readProviderResponse(response, { maxSearchCalls, maxCodeInterpreterCalls: maxExecCalls, ...(options.stream && canStream ? { onTextDelta: (delta: string) => visible.feed(delta), onPublicSummaryDelta: publicSummary, onProviderReasoningDelta: providerReasoning, onToolProgress: toolProgress } : {}) });
       const result = parseProviderResult(rawResult, provider.protocol);
       // Some compliant providers return the explicitly public summary only in
       // the terminal Responses item. This fallback is restricted to routes on
@@ -901,9 +947,15 @@ export class AiService {
       // A designated provider summary is stronger evidence than a model-authored
       // <analysis_summary> in the answer body. Never replace it with boilerplate.
       if (!summaryRejected && supportsPublicExplanation(request) && (providerSummary || terminalPublicSummary)) publicExplanation.analysisSummary = providerSummary || terminalPublicSummary;
-      const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= maxSearchCalls);
-      const convertedTokens = request.webSearch ? provider.webSearchQuotaTokens! * result.searchCalls : 0;
-      const usage: AiUsage = validUsage ? { ...result.usage!, ...(request.webSearch ? { searchCalls: result.searchCalls, tokenUsageEstimated: false } : {}), ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind: "tokens_with_search" } : {}) } : conservativeUsage(reserved);
+      const validUsage = Boolean(result.usage && result.usage.inputTokens <= reserved.inputReserve && result.usage.outputTokens <= reserved.outputReserve && result.searchCalls <= maxSearchCalls && result.execCalls <= maxExecCalls);
+      const searchConvertedTokens = request.webSearch ? provider.webSearchQuotaTokens! * result.searchCalls : 0;
+      const execConvertedTokens = request.codeInterpreter ? provider.codeInterpreterQuotaTokens! * result.execCalls : 0;
+      const convertedTokens = searchConvertedTokens + execConvertedTokens;
+      const billingKind = execConvertedTokens && searchConvertedTokens ? "tokens_with_tools" as const : execConvertedTokens ? "tokens_with_code_exec" as const : "tokens_with_search" as const;
+      const usage: AiUsage = validUsage ? { ...result.usage!,
+        ...(request.webSearch ? { searchCalls: result.searchCalls, tokenUsageEstimated: false } : {}),
+        ...(request.codeInterpreter ? { execCalls: result.execCalls, tokenUsageEstimated: false } : {}),
+        ...(convertedTokens ? { convertedTokens, totalTokens: result.usage!.totalTokens + convertedTokens, estimated: true, billingKind } : {}) } : conservativeUsage(reserved);
       if (validUsage) providerUsage = usage;
       const ordinaryOutput = (!request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch") && !request.skillIds?.includes("agent-continuation-v1");
       let partialText: string | undefined;
@@ -913,7 +965,8 @@ export class AiService {
           if (decision.kind === "text") partialText = decision.content;
         } catch { /* Never salvage a truncated action envelope. */ }
       }
-      if (partialText && (!request.webSearch || result.searchCalls <= maxSearchCalls && result.completedSearchCalls === result.searchCalls)) {
+      if (partialText && (!request.webSearch || result.searchCalls <= maxSearchCalls && result.completedSearchCalls === result.searchCalls)
+        && (!request.codeInterpreter || result.execCalls <= maxExecCalls && result.completedExecCalls === result.execCalls)) {
         const completion: AiChatResponse["completion"] = { state: "partial", reason: result.incompleteReason ?? "output_limit", canContinue: validUsage };
         const extras = { completion, ...(publicExplanation.analysisSummary ? { analysisSummary: publicExplanation.analysisSummary } : {}) };
         this.store.sql.transaction(() => {
@@ -940,6 +993,16 @@ export class AiService {
         this.store.sql.transaction(() => {
           const trace = this.harness.finishRun(userId, request.requestId, "uncertain");
           settleChat(reserved, usage, "uncertain", "联网搜索执行不符合请求限制，已记录用量，请管理员核对", undefined, error, trace ? { trace } : undefined);
+        });
+        throw error;
+      }
+      // Unlike search, code execution is never forced, so there is no "< 1"
+      // floor; only an over-limit or incompletely-returned call is rejected.
+      if (request.codeInterpreter && (result.execCalls > maxExecCalls || result.completedExecCalls !== result.execCalls)) {
+        const error = new AiError(502, "AI_CODE_EXEC_NOT_COMPLETED", "服务商未完整返回代码执行结果，请管理员检查模型支持；已记录生成用量");
+        this.store.sql.transaction(() => {
+          const trace = this.harness.finishRun(userId, request.requestId, "uncertain");
+          settleChat(reserved, usage, "uncertain", "代码执行未完整返回，已记录用量，请管理员核对", undefined, error, trace ? { trace } : undefined);
         });
         throw error;
       }
@@ -1013,7 +1076,8 @@ export class AiService {
       const settled = this.store.sql.transaction(() => {
         const trace = this.harness.finishRun(userId, request.requestId, validUsage ? "succeeded" : "uncertain", toolCapability ? { capability: toolCapability, summary: toolSummary } : undefined);
         if (trace) extras.trace = trace;
-        return settleChat(reserved, usage, validUsage ? "completed" : "uncertain", validUsage ? convertedTokens ? `服务商实际生成 Token + ${result.searchCalls} 次搜索的管理员设定折算额度` : "服务商实际 Token 用量" : "服务商未返回有效 Token 用量或报告超过请求上限，按预留上限保守计入，请管理员核对", content, undefined, extras);
+        const conversionNote = [request.webSearch ? `${result.searchCalls} 次搜索` : null, request.codeInterpreter ? `${result.execCalls} 次代码执行` : null].filter((part): part is string => part !== null).join(" + ");
+        return settleChat(reserved, usage, validUsage ? "completed" : "uncertain", validUsage ? convertedTokens ? `服务商实际生成 Token + ${conversionNote}的管理员设定折算额度` : "服务商实际 Token 用量" : "服务商未返回有效 Token 用量或报告超过请求上限，按预留上限保守计入，请管理员核对", content, undefined, extras);
       });
       if (!settled) {
         const final = this.store.request(userId, request.requestId);

@@ -4,7 +4,7 @@ import type { AiChatPreflight } from "../../../shared/ai";
 import { ChatPreflightGate, preflightNotice, sameSendContext, withPreparedChatSend } from "./chatPreflight";
 import { hydrateWorkspace, serializeWorkspace } from "./workspaceState";
 
-const budget = { inputReserve: 1800, searchInputReserve: 32768, convertedReserve: 100,
+const budget = { inputReserve: 1800, searchInputReserve: 32768, codeExecInputReserve: 0, convertedReserve: 100,
   minOutputTokens: 16, minimumRequiredTokens: 34684, availableOutputTokens: 0, maxOutputTokens: 2048 };
 const result: AiChatPreflight = { canSend: false, reason: "search_quota_insufficient", budget,
   quota: { limitTokens: 10000, usedTokens: 0, reservedTokens: 0, remainingTokens: 10000, inputTokens: 0, outputTokens: 0 },

@@ -1,18 +1,21 @@
 import { AiError } from "./security";
 import { createSearchStreamGuard } from "./searchStreamGuard";
+import { createCodeInterpreterStreamGuard } from "./codeInterpreterStreamGuard";
 import { createStreamedAnnotations } from "./citations";
-import type { AiToolProgress } from "../../shared/aiRunEvents";
+import type { AiCodeExecStatus, AiToolProgress, AiWebSearchProgress } from "../../shared/aiRunEvents";
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 export interface ProviderReadOptions {
   maxSearchCalls?: number;
+  /** Hard local cap on code_interpreter calls; independent of maxSearchCalls. */
+  maxCodeInterpreterCalls?: number;
   onTextDelta?: (delta: string) => void;
   /** Only provider-designated public summaries (`response.reasoning_summary_text.*`).
    * Raw `response.reasoning_text.*` is private reasoning and is never passed here. */
   onPublicSummaryDelta?: (delta: string) => void;
   /** Reserved; raw `reasoning_content` is private and is not forwarded. */
   onProviderReasoningDelta?: (delta: string) => void;
-  /** Real Responses `web_search_call` lifecycle, deduplicated per status. */
+  /** Real Responses `web_search_call`/`code_interpreter_call` lifecycle, deduplicated per status. */
   onToolProgress?: (progress: AiToolProgress) => void;
 }
 
@@ -48,7 +51,7 @@ function createSummaryTracker(emit: (delta: string) => void) {
 /** Maps Responses `web_search_call` events to deduplicated public progress.
  * Only status, the provider-reported query and a source count leave here. */
 function createSearchProgress(emit: (progress: AiToolProgress) => void) {
-  const calls = new Map<string, { callId: string; status: AiToolProgress["status"]; query?: string; sourceCount?: number; emitted: boolean }>();
+  const calls = new Map<string, { callId: string; status: AiWebSearchProgress["status"]; query?: string; sourceCount?: number; emitted: boolean }>();
   const byItem = new Map<string, string>();
   const resolve = (value: Record<string, unknown>, item: Record<string, unknown>) => {
     const itemId = typeof item.id === "string" ? item.id : typeof value.item_id === "string" ? value.item_id : undefined;
@@ -59,7 +62,7 @@ function createSearchProgress(emit: (progress: AiToolProgress) => void) {
     if (!call) { call = { callId: `search-${calls.size + 1}`, status: "in_progress", emitted: false }; calls.set(key, call); }
     return call;
   };
-  const update = (call: NonNullable<ReturnType<typeof resolve>>, status: AiToolProgress["status"], item: Record<string, unknown>) => {
+  const update = (call: NonNullable<ReturnType<typeof resolve>>, status: AiWebSearchProgress["status"], item: Record<string, unknown>) => {
     const action = record(item.action);
     const query = publicQuery(action) ?? call.query;
     const sourceCount = Array.isArray(action.sources) ? action.sources.length : call.sourceCount;
@@ -86,7 +89,76 @@ function createSearchProgress(emit: (progress: AiToolProgress) => void) {
     const match = typeof type === "string" ? /^response\.web_search_call\.(in_progress|searching|completed)$/.exec(type) : null;
     if (!match) return;
     const call = resolve(value, {});
-    if (call) update(call, match[1] as AiToolProgress["status"], {});
+    if (call) update(call, match[1] as AiWebSearchProgress["status"], {});
+  };
+}
+
+const CODE_ACCUMULATE_LIMIT = 20_000;
+/** Maps Responses `code_interpreter_call` events to deduplicated public progress.
+ * Streamed code and provider-reported logs/image counts leave here; container
+ * ids and raw file bytes never do (files require a separate authenticated call). */
+function createCodeExecProgress(emit: (progress: AiToolProgress) => void) {
+  const calls = new Map<string, { callId: string; status: AiCodeExecStatus; code?: string; logs?: string; imageCount?: number; emitted: boolean }>();
+  const byItem = new Map<string, string>();
+  const resolve = (value: Record<string, unknown>, item: Record<string, unknown>) => {
+    const itemId = typeof item.id === "string" ? item.id : typeof value.item_id === "string" ? value.item_id : undefined;
+    const key = Number.isSafeInteger(value.output_index) ? `index:${value.output_index}` : itemId ? byItem.get(itemId) ?? `id:${itemId}` : undefined;
+    if (!key) return undefined;
+    if (itemId) byItem.set(itemId, key);
+    let call = calls.get(key);
+    if (!call) { call = { callId: `exec-${calls.size + 1}`, status: "in_progress", emitted: false }; calls.set(key, call); }
+    return call;
+  };
+  const outputSummary = (item: Record<string, unknown>): { logs?: string; imageCount?: number } => {
+    if (!Array.isArray(item.outputs)) return {};
+    let logs = "";
+    let imageCount = 0;
+    for (const raw of item.outputs) {
+      const out = record(raw);
+      if (out.type === "logs" && typeof out.logs === "string") logs += (logs ? "\n" : "") + out.logs;
+      if (out.type === "image") imageCount++;
+    }
+    return { ...(logs ? { logs: logs.slice(0, CODE_ACCUMULATE_LIMIT) } : {}), ...(imageCount ? { imageCount } : {}) };
+  };
+  const update = (call: NonNullable<ReturnType<typeof resolve>>, status: AiCodeExecStatus, patch: { code?: string; logs?: string; imageCount?: number }) => {
+    // A terminal state is final; late in_progress/interpreting events never regress it.
+    if ((call.status === "completed" || call.status === "failed") && status !== call.status) return;
+    const code = patch.code ?? call.code;
+    const logs = patch.logs ?? call.logs;
+    const imageCount = patch.imageCount ?? call.imageCount;
+    const changed = !call.emitted || status !== call.status || code !== call.code || logs !== call.logs || imageCount !== call.imageCount;
+    call.status = status; call.code = code; call.logs = logs; call.imageCount = imageCount;
+    if (!changed) return;
+    call.emitted = true;
+    emit({ tool: "code_interpreter", callId: call.callId, status, ...(code ? { code } : {}), ...(logs ? { logs } : {}), ...(imageCount !== undefined ? { imageCount } : {}) });
+  };
+  const itemStatus = (item: Record<string, unknown>): AiCodeExecStatus =>
+    item.status === "completed" ? "completed" : item.status === "failed" ? "failed" : item.status === "interpreting" ? "interpreting" : "in_progress";
+  return (value: Record<string, unknown>) => {
+    const type = value.type;
+    if (type === "response.output_item.added" || type === "response.output_item.done") {
+      const item = record(value.item);
+      if (item.type !== "code_interpreter_call") return;
+      const call = resolve(value, item);
+      if (!call) return;
+      update(call, itemStatus(item), { code: typeof item.code === "string" && item.code.length > 0 ? item.code.slice(0, CODE_ACCUMULATE_LIMIT) : undefined, ...outputSummary(item) });
+      return;
+    }
+    if (type === "response.code_interpreter_call_code.delta" && typeof value.delta === "string") {
+      const call = resolve(value, {});
+      if (!call) return;
+      update(call, call.status, { code: ((call.code ?? "") + value.delta).slice(0, CODE_ACCUMULATE_LIMIT) });
+      return;
+    }
+    if (type === "response.code_interpreter_call_code.done" && typeof value.code === "string" && value.code.length > 0) {
+      const call = resolve(value, {});
+      if (call) update(call, call.status, { code: value.code.slice(0, CODE_ACCUMULATE_LIMIT) });
+      return;
+    }
+    const match = typeof type === "string" ? /^response\.code_interpreter_call\.(in_progress|interpreting|completed)$/.exec(type) : null;
+    if (!match) return;
+    const call = resolve(value, {});
+    if (call) update(call, match[1] as AiCodeExecStatus, {});
   };
 }
 
@@ -95,6 +167,7 @@ function createSearchProgress(emit: (progress: AiToolProgress) => void) {
 export async function consumeProviderResponse(response: Response, options: ProviderReadOptions = {}): Promise<unknown> {
   if (!response.body) throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务没有返回有效内容");
   const guard = options.maxSearchCalls === undefined ? undefined : createSearchStreamGuard(options.maxSearchCalls);
+  const codeGuard = options.maxCodeInterpreterCalls === undefined ? undefined : createCodeInterpreterStreamGuard(options.maxCodeInterpreterCalls);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "", bytes = 0, sse: boolean | undefined = response.headers.get("content-type")?.includes("text/event-stream") ? true : undefined;
@@ -103,6 +176,7 @@ export async function consumeProviderResponse(response: Response, options: Provi
   const seen = new Set<number>();
   const summary = options.onPublicSummaryDelta ? createSummaryTracker(options.onPublicSummaryDelta) : undefined;
   const searchProgress = options.onToolProgress ? createSearchProgress(options.onToolProgress) : undefined;
+  const codeProgress = options.onToolProgress ? createCodeExecProgress(options.onToolProgress) : undefined;
   // Citation positions a gateway only streams; merged into the terminal envelope below.
   const annotations = createStreamedAnnotations();
   const event = (block: string) => {
@@ -126,6 +200,7 @@ export async function consumeProviderResponse(response: Response, options: Provi
     if (value.type === "response.reasoning_summary_text.delta") summary?.delta(value);
     if (value.type === "response.reasoning_summary_text.done") summary?.done(value);
     searchProgress?.(value);
+    codeProgress?.(value);
     annotations.observe(value);
     if (value.type === "response.completed" || value.type === "response.incomplete") terminal = { ...record(value.response), status: value.type === "response.incomplete" ? "incomplete" : "completed" };
     if (Array.isArray(value.choices)) {
@@ -141,6 +216,7 @@ export async function consumeProviderResponse(response: Response, options: Provi
   };
   const feed = (chunk: string, final = false) => {
     guard?.feed(chunk, final);
+    codeGuard?.feed(chunk, final);
     buffer += chunk;
     if (sse === undefined && buffer.trimStart()) sse = /^(?:data:|event:|:)/.test(buffer.trimStart()) ? true : buffer.trimStart().startsWith("{") ? false : undefined;
     if (sse) {
@@ -170,10 +246,10 @@ export async function consumeProviderResponse(response: Response, options: Provi
     chatFinish = undefined; terminal = undefined;
   } finally { reader.releaseLock(); }
   if (!sse) {
-    try { const value: unknown = JSON.parse(buffer); guard?.inspectResponse(value); return value; }
+    try { const value: unknown = JSON.parse(buffer); guard?.inspectResponse(value); codeGuard?.inspectResponse(value); return value; }
     catch (error) { if (error instanceof AiError) throw error; throw new AiError(502, "AI_PROVIDER_RESPONSE", "AI 服务返回格式不正确，请检查接口协议和模型名称"); }
   }
-  if (terminal) { guard?.inspectResponse(terminal); return annotations.attach(terminal); }
+  if (terminal) { guard?.inspectResponse(terminal); codeGuard?.inspectResponse(terminal); return annotations.attach(terminal); }
   if (chat && chatFinish) return { choices: [{ message: { content: text }, finish_reason: chatFinish }], usage: chatUsage };
   if (text) return chat
     ? { choices: [{ message: { content: text }, finish_reason: "length" }], incomplete_details: { reason: "stream_interrupted" } }

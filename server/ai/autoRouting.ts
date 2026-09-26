@@ -1,4 +1,4 @@
-import type { AiChatRequest, AiProviderConfig } from "../../shared/ai";
+import type { AiAttachment, AiChatRequest, AiProviderConfig } from "../../shared/ai";
 import { BAI_ASTRA_MODEL, BAI_QUICK_MODELS, filterBaiAgentModels, isTongpinQuickAgent, type BaiQuickModel } from "../../shared/aiAuto";
 import { AiError } from "./security";
 
@@ -45,6 +45,21 @@ const PRICE_QUESTION = /(?:价格|售价|报价|金价|油价|房价)[^。！？
 
 export function needsOnlineEvidence(text: string): boolean {
   return FRESHNESS_SIGNAL.test(text) || QUALIFIED_FRESHNESS.test(text) || SOURCE_LOOKUP.test(text) || PRICE_QUESTION.test(text);
+}
+
+/**
+ * A deliberately narrow "needs real computation" detector, mirroring
+ * needsOnlineEvidence's asymmetry: a false negative just skips the hosted
+ * code_interpreter tool (the model still answers in plain text), while a
+ * false positive spends an administrator-owned code-exec session on an
+ * ordinary chat message. A data file attachment is evidence on its own.
+ */
+const COMPUTATION_SIGNAL = /(?:计算|算一下|算出来?|求解|求导|积分|解方程|统计(?:一下|分析)|回归分析|标准差|方差|平均值|中位数|画(?:一?个|张)(?:折线图|柱状图|饼图|环形图|散点图)|生成(?:一?个|张)(?:图表|走势图)|数据分析|分析(?:一下)?(?:这个|这份)?数据|(?:运行|执行)(?:一下)?代码|写(?:一?段|一?个)(?:python|代码|脚本)(?:来|帮我|计算|处理|分析)|用代码(?:计算|处理|分析|画)|模拟一下|蒙特卡洛|这道数学题|这道题怎么算|\b(?:calculate|computes?|regression|std\s*dev|standard\s+deviation|monte\s+carlo|plot\s+(?:a|the)\s*(?:chart|graph)|run\s+(?:the\s+)?code|write\s+(?:a\s+)?(?:python|script)\s+to)\b)/iu;
+const COMPUTATION_ATTACHMENT = /\.(?:csv|xlsx?|tsv|parquet|json)$/i;
+
+export function needsComputation(text: string, attachments?: readonly Pick<AiAttachment, "name">[]): boolean {
+  if (attachments?.some(item => COMPUTATION_ATTACHMENT.test(item.name))) return true;
+  return COMPUTATION_SIGNAL.test(text);
 }
 
 /**

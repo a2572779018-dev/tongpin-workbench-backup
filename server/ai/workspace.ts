@@ -2,6 +2,7 @@ import { AI_WORKSPACE_FEATURES, AI_WORKSPACE_LIMITS as LIMITS, type AiWorkspaceA
 import { AI_REPLY_PROCESS_LIMITS, isAiReplyProcessAgentsStep } from "../../shared/aiReplyProcess";
 import { AI_MULTI_AGENT_LIMITS } from "../../shared/aiMultiAgent";
 import { searchCallLimit } from "./searchPolicy";
+import { AI_CODE_INTERPRETER_CALL_LIMIT } from "../../shared/ai";
 import { AiError } from "./security";
 import { AiStore, type AiSql } from "./storage";
 import { AI_MEDIA_LIMITS } from "../../shared/aiMedia";
@@ -190,14 +191,15 @@ function documents(value: unknown, label: string): void {
 const MAX_REPLY_SEARCH_CALLS = searchCallLimit({ webSearchProtocol: "compatible" }) * (1 + AI_MULTI_AGENT_LIMITS.maxSearchAgents);
 function usage(value: unknown): void {
   if (value === undefined) return;
-  const item = record(value, "消息用量", ["inputTokens", "outputTokens", "totalTokens", "estimated", "convertedTokens", "billingKind", "searchCalls", "tokenUsageEstimated"]);
+  const item = record(value, "消息用量", ["inputTokens", "outputTokens", "totalTokens", "estimated", "convertedTokens", "billingKind", "searchCalls", "execCalls", "tokenUsageEstimated"]);
   for (const key of ["inputTokens", "outputTokens", "totalTokens"] as const) {
     if (!Number.isSafeInteger(item[key]) || Number(item[key]) < 0) invalid("消息用量格式不正确");
   }
   if (item.convertedTokens !== undefined && (!Number.isSafeInteger(item.convertedTokens) || Number(item.convertedTokens) < 0)) invalid("消息折算用量格式不正确");
   if (item.searchCalls !== undefined && (!Number.isSafeInteger(item.searchCalls) || Number(item.searchCalls) < 0 || Number(item.searchCalls) > MAX_REPLY_SEARCH_CALLS)) invalid("消息搜索次数格式不正确");
+  if (item.execCalls !== undefined && (!Number.isSafeInteger(item.execCalls) || Number(item.execCalls) < 0 || Number(item.execCalls) > AI_CODE_INTERPRETER_CALL_LIMIT)) invalid("消息代码执行次数格式不正确");
   if (item.tokenUsageEstimated !== undefined && typeof item.tokenUsageEstimated !== "boolean") invalid("消息文本用量核对状态格式不正确");
-  if (item.billingKind !== undefined && !["tokens", "image_conversion", "tokens_with_search"].includes(String(item.billingKind))) invalid("消息计量类型格式不正确");
+  if (item.billingKind !== undefined && !["tokens", "image_conversion", "video_conversion", "tokens_with_search", "tokens_with_code_exec", "tokens_with_tools"].includes(String(item.billingKind))) invalid("消息计量类型格式不正确");
   if (Number(item.inputTokens) + Number(item.outputTokens) + Number(item.convertedTokens ?? 0) !== item.totalTokens || typeof item.estimated !== "boolean") invalid("消息用量格式不正确");
   // Display metadata only: quota accounting must exclusively use the server AI ledger.
 }
@@ -240,6 +242,20 @@ function replyProcess(value: unknown, role: unknown): void {
       }
       if (step.sourceCount !== undefined) boundedInteger(step.sourceCount, "搜索来源数量", 0, AI_REPLY_PROCESS_LIMITS.sourceCount);
       if (step.durationMs !== undefined) boundedInteger(step.durationMs, "搜索用时", 0, AI_REPLY_PROCESS_LIMITS.durationMs);
+    } else if (kind === "exec") {
+      const step = record(rawStep, "回复过程步骤", ["kind", "status", "language", "code", "logs", "imageCount", "durationMs"]);
+      if (!["completed", "failed", "incomplete", "unsupported"].includes(String(step.status))) invalid("代码执行状态无效");
+      if (step.language !== "python") invalid("代码执行语言无效");
+      if (step.code !== undefined) {
+        string(step.code, "代码执行内容", AI_REPLY_PROCESS_LIMITS.execCodeCharacters, true);
+        if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(step.code)) invalid("代码执行内容格式不正确");
+      }
+      if (step.logs !== undefined) {
+        string(step.logs, "代码执行输出", AI_REPLY_PROCESS_LIMITS.execLogsCharacters, true);
+        if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(step.logs)) invalid("代码执行输出格式不正确");
+      }
+      if (step.imageCount !== undefined) boundedInteger(step.imageCount, "代码执行生成图片数量", 0, AI_REPLY_PROCESS_LIMITS.execImageCount);
+      if (step.durationMs !== undefined) boundedInteger(step.durationMs, "代码执行用时", 0, AI_REPLY_PROCESS_LIMITS.durationMs);
     } else if (kind === "tool") {
       const step = record(rawStep, "回复过程步骤", ["kind", "tool", "status"]);
       if (step.tool !== "computer" || !["handed_off", "unavailable"].includes(String(step.status))) invalid("工具调用记录无效");

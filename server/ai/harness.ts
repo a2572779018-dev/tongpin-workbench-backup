@@ -24,7 +24,7 @@ import { parseImageEditCapability, parseImageGenerationCapability } from "./imag
 import type { AiImageEditCapability, AiImageGenerationCapability } from "../../shared/aiImageCapabilities";
 import { readAiMultiAgentSettings, type AiMultiAgentSettings } from "../../shared/aiMultiAgent";
 
-const CAPABILITIES = new Set<AiHarnessCapability>(["chat", "vision", "web_search", "image", "video", "presentation", "computer"]);
+const CAPABILITIES = new Set<AiHarnessCapability>(["chat", "vision", "web_search", "code_interpreter", "image", "video", "presentation", "computer"]);
 const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]{1,47}$/;
 const CONVERSATION_ID = /^[a-zA-Z0-9_-]{1,120}$/;
 const TERMINAL_RUNS = new Set(["succeeded", "failed", "cancelled", "uncertain"]);
@@ -87,7 +87,7 @@ function legacyRoute(provider: StoredProvider, tier: AiMode): AiHarnessTierRoute
     protocol: provider.protocol,
     maxOutputTokens: provider.maxOutputTokens,
     reasoningEffort: deep ? provider.reasoningEffort : "",
-    capabilities: ["chat", ...(provider.visionEnabled ? ["vision" as const] : []), ...(provider.webSearchEnabled ? ["web_search" as const] : [])],
+    capabilities: ["chat", ...(provider.visionEnabled ? ["vision" as const] : []), ...(provider.webSearchEnabled ? ["web_search" as const] : []), ...(provider.codeInterpreterEnabled ? ["code_interpreter" as const] : [])],
     enabled: provider.enabled,
   };
 }
@@ -156,6 +156,7 @@ function safeTaskGoal(request: AiChatRequest, capability: AiHarnessCapability): 
     chat: "完成当前对话任务，并仅根据已校验结果判断下一步。",
     vision: "完成当前图片理解任务，并仅根据已校验结果判断下一步。",
     web_search: "完成当前需要时效性证据的对话任务，仅使用已校验来源。",
+    code_interpreter: "完成当前需要代码执行的任务，并仅根据已校验的执行结果判断下一步。",
     image: "完成当前图片生成任务，并在生成结果校验后判断是否继续。",
     video: "完成当前视频生成任务，并在生成结果校验后判断是否继续。",
     presentation: "完成当前演示文稿任务，并在产物校验后判断是否继续。",
@@ -388,6 +389,8 @@ export class AiHarness {
         webSearchEnabled: false,
         webSearchQuotaTokens: 0,
         webSearchProtocol: "standard" as const,
+        codeInterpreterEnabled: false,
+        codeInterpreterQuotaTokens: 0,
         updatedAt: null,
       }),
       name: route.providerName,
@@ -400,6 +403,7 @@ export class AiHarness {
       encryptedKey: route.encryptedKey,
       visionEnabled: route.capabilities.includes("vision"),
       webSearchEnabled: route.capabilities.includes("web_search") && Boolean(legacy?.webSearchEnabled),
+      codeInterpreterEnabled: route.capabilities.includes("code_interpreter") && Boolean(legacy?.codeInterpreterEnabled),
       updatedAt: legacy?.updatedAt ?? null,
     };
   }
@@ -485,7 +489,8 @@ export class AiHarness {
     const sequence = used + 1;
     const safeSummary: Record<AiHarnessCapability, string> = {
       chat: "已提出一个文字处理步骤，确认前不会继续。", vision: "已提出一个图片理解步骤，确认前不会继续。",
-      web_search: "已提出一个联网查询步骤，确认前不会执行。", image: "已提出一个图片生成步骤，确认前不会执行。",
+      web_search: "已提出一个联网查询步骤，确认前不会执行。", code_interpreter: "已提出一个代码执行步骤，确认前不会执行。",
+      image: "已提出一个图片生成步骤，确认前不会执行。",
       video: "已提出一个视频生成步骤，确认前不会执行。", presentation: "已提出一个演示文稿步骤，确认前不会执行。",
       computer: "已提出一个本机操作，确认前不会执行。",
     };
@@ -689,6 +694,7 @@ export class AiHarness {
       chat: "文字处理结果已通过应用完整性校验。",
       vision: "图片理解结果已通过应用完整性校验。",
       web_search: "联网查询结果已通过来源完整性校验。",
+      code_interpreter: "代码执行结果已通过完整性校验并保存。",
       image: "图片生成结果已通过完整性校验并保存。",
       video: "视频生成结果已通过状态校验并保存。",
       presentation: "演示文稿结果已通过完整性校验并保存。",

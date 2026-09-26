@@ -72,7 +72,7 @@ describe("point labels preserve underlying quota and token accounting", () => {
     quotaRemainingSummary(frozen);
     expect(frozen).toEqual(quota);
     expect(AI_QUOTA_BILLING_NOTE).toContain("每 1 Token 计 1 同频点");
-    expect(AI_QUOTA_BILLING_NOTE).toContain("图片与联网搜索");
+    expect(AI_QUOTA_BILLING_NOTE).toContain("图片、联网搜索与代码执行");
   });
 
   it("retains independent real input/output counters and the original ledger endpoint in details", () => {

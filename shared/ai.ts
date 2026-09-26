@@ -15,11 +15,17 @@ export const AI_BUSINESS_TIER_LABELS: Record<AiMode, string> = {
   deep: "深度",
   pro: "Pro",
 };
-export type AiHarnessCapability = "chat" | "vision" | "web_search" | "image" | "video" | "presentation" | "computer";
+export type AiHarnessCapability = "chat" | "vision" | "web_search" | "code_interpreter" | "image" | "video" | "presentation" | "computer";
 /** Plain-Chinese capability names shared by admin monitoring and alert messages. */
 export const AI_HARNESS_CAPABILITY_LABELS: Record<AiHarnessCapability, string> = {
-  chat: "文字对话", vision: "图片理解", web_search: "联网搜索", image: "图片生成", video: "视频生成", presentation: "演示文稿", computer: "电脑操作",
+  chat: "文字对话", vision: "图片理解", web_search: "联网搜索", code_interpreter: "代码执行", image: "图片生成", video: "视频生成", presentation: "演示文稿", computer: "电脑操作",
 };
+/** Compatible relays cannot take max_tool_calls, so the search reserve/local
+ * guard bound is local; a multi-part question routinely needs 3–4 calls. */
+export const AI_MAX_SEARCH_CALLS = 5;
+/** Hard local cap on code_interpreter calls accepted from one reply, enforced
+ * regardless of what the provider reports (mirrors AI_MAX_SEARCH_CALLS). */
+export const AI_CODE_INTERPRETER_CALL_LIMIT = 3;
 /** `multi_agent` (多 Agent 协作) is a per-tier choice (`AiHarnessTierRoute.multiAgent`), never the global policy. */
 export type AiHarnessStrategy = "direct" | "react" | "plan_execute" | "multi_agent";
 export interface AiHarnessProviderInput {
@@ -191,6 +197,9 @@ export interface AiProviderInput {
   webSearchQuotaTokens?: number;
   /** Explicit relay compatibility. Standard sends max_tool_calls; compatible uses a local bounded search budget. */
   webSearchProtocol?: "standard" | "compatible";
+  /** Hosted Responses code_interpreter tool. Requires the Responses protocol. */
+  codeInterpreterEnabled?: boolean;
+  codeInterpreterQuotaTokens?: number;
 }
 export interface AiProviderConfig extends Omit<AiProviderInput, "apiKey" | "imageApiKey"> {
   apiKeyConfigured: boolean;
@@ -227,9 +236,11 @@ export interface AiUsage {
   estimated: boolean;
   /** Quota units explicitly configured by an administrator, not provider token counts. */
   convertedTokens?: number;
-  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search" | "speech_to_text_conversion" | "text_to_speech_conversion" | "memory_conversion" | "decision_conversion";
+  billingKind?: "tokens" | "image_conversion" | "video_conversion" | "tokens_with_search" | "tokens_with_code_exec" | "tokens_with_tools" | "speech_to_text_conversion" | "text_to_speech_conversion" | "memory_conversion" | "decision_conversion";
   /** Observed provider search invocations, never inferred from generated text or citations. */
   searchCalls?: number;
+  /** Observed provider code_interpreter invocations, never inferred from answer text. */
+  execCalls?: number;
   /** Separates actual text-token reporting from administrator-defined tool conversion estimates. */
   tokenUsageEstimated?: boolean;
 }
@@ -386,6 +397,10 @@ export interface AiChatRequest {
    * reply was still running. The server adds a short framing line for the
    * model only; the UI never shows it. */
   supplement?: true;
+  /** Server-owned: whether this turn requests the hosted code_interpreter tool.
+   * Never read from the client body; decided from tier capability, admin
+   * config and a computation heuristic after route resolution. */
+  codeInterpreter?: boolean;
   /** Server-owned: tool kinds the resolved tier actually permits. Never read
    * from the client body; set after route resolution. Undefined = legacy (all). */
   dispatchKinds?: AiDispatchToolKind[];
@@ -393,9 +408,10 @@ export interface AiChatRequest {
 export type AiChatPreflightReason = null | "quota_exhausted" | "search_quota_insufficient" | "quota_insufficient" | "request_in_progress";
 /** Conservative quota reservations, not actual provider usage or currency prices. */
 export interface AiChatBudget {
-  /** Message, attachment, persona and protocol input; excludes searchInputReserve. */
+  /** Message, attachment, persona and protocol input; excludes searchInputReserve/codeExecInputReserve. */
   inputReserve: number;
   searchInputReserve: number;
+  codeExecInputReserve: number;
   convertedReserve: number;
   minOutputTokens: number;
   minimumRequiredTokens: number;

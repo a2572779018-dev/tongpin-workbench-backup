@@ -1,6 +1,6 @@
-import { Globe, Image, KeyRound, RefreshCw, Save } from "lucide-react";
+import { Globe, Image, KeyRound, RefreshCw, Save, Terminal } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { AI_BUSINESS_TIERS, type AiHarnessConfig, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult } from "../../../shared/ai";
+import { AI_BUSINESS_TIERS, AI_MAX_SEARCH_CALLS, type AiHarnessConfig, type AiProviderConfig, type AiProviderInput, type AiProviderTestResult } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
 import { BAI_ASTRA_MODEL, BAI_QUICK_MODELS, isTongpinQuickAgent } from "../../../shared/aiAuto";
 import { LEGACY_GROUP_LABEL, tiersManageRouting } from "./adminAiLayout";
@@ -41,6 +41,8 @@ const EMPTY_PROVIDER: AiProviderInput = {
   webSearchEnabled: false,
   webSearchQuotaTokens: 0,
   webSearchProtocol: "standard",
+  codeInterpreterEnabled: false,
+  codeInterpreterQuotaTokens: 0,
 };
 
 export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiHarnessConfig | null }) {
@@ -67,6 +69,11 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
   const harnessSearchConfigured = Boolean(harnessConfig && !harnessConfig.migratedFromLegacy && AI_BUSINESS_TIERS.some(tier => {
     const route = harnessConfig.tiers[tier];
     return route.enabled && route.protocol === "responses" && route.capabilities.includes("web_search")
+      && harnessConfig.providers.some(provider => provider.id === route.providerId && provider.enabled);
+  }));
+  const harnessCodeInterpreterConfigured = Boolean(harnessConfig && !harnessConfig.migratedFromLegacy && AI_BUSINESS_TIERS.some(tier => {
+    const route = harnessConfig.tiers[tier];
+    return route.enabled && route.protocol === "responses" && route.capabilities.includes("code_interpreter")
       && harnessConfig.providers.some(provider => provider.id === route.providerId && provider.enabled);
   }));
 
@@ -113,7 +120,7 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
     event.preventDefault();
     if (busyRef.current || loading || loadFailed) return;
     const input: AiProviderInput = { ...draft, ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}), ...(imageApiKey.trim() ? { imageApiKey: imageApiKey.trim() } : {}) };
-    const validation = validateAiProviderInput(input, saved, harnessSearchConfigured);
+    const validation = validateAiProviderInput(input, saved, harnessSearchConfigured, harnessCodeInterpreterConfigured);
     if (validation) { setError(validation); return; }
     discoveryRevisions.current.invalidateAll();
     const payload: AiProviderInput = {
@@ -134,6 +141,8 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
       webSearchEnabled: input.webSearchEnabled ?? false,
       webSearchQuotaTokens: input.webSearchQuotaTokens ?? 0,
       webSearchProtocol: input.webSearchProtocol ?? "standard",
+      codeInterpreterEnabled: input.codeInterpreterEnabled ?? false,
+      codeInterpreterQuotaTokens: input.codeInterpreterQuotaTokens ?? 0,
       ...(input.apiKey ? { apiKey: input.apiKey } : {}),
       ...(input.imageApiKey ? { imageApiKey: input.imageApiKey } : {}),
     };
@@ -359,7 +368,17 @@ export function AdminAiProviderSettings({ harnessConfig }: { harnessConfig?: AiH
                   </select>
                 </label>
                 <p className="tp-ai-admin-hint is-wide">仅支持 Responses 协议且模型必须支持搜索工具。文本每 1 Token 计 1 同频点，搜索另按本设置折算为同频点；实际 Token 和折算用量在明细中分开显示。</p>
-                <p className="tp-ai-admin-hint is-wide">{draft.webSearchProtocol === "compatible" ? "兼容方式预留最多 3 次搜索的折算额度，按实际次数结算。超过预算会停止接收并记录待核对，不能保证服务商同时停止计费。" : "标准方式向服务商请求最多 1 次搜索。仅在服务商明确不支持 max_tool_calls 时选择兼容方式。"}</p>
+                <p className="tp-ai-admin-hint is-wide">{draft.webSearchProtocol === "compatible" ? `兼容方式预留最多 ${AI_MAX_SEARCH_CALLS} 次搜索的折算额度，按实际次数结算。超过预算会停止接收并记录待核对，不能保证服务商同时停止计费。` : "标准方式向服务商请求最多 1 次搜索。仅在服务商明确不支持 max_tool_calls 时选择兼容方式。"}</p>
+              </div>
+            </details>
+            <details className="tp-ai-provider-capabilities is-wide">
+              <summary><Terminal size={17} />代码执行</summary>
+              <div className="tp-ai-admin-fields">
+                <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.codeInterpreterEnabled ?? false} onChange={event => update("codeInterpreterEnabled", event.target.checked)} />启用服务商代码执行工具</label>
+                <label className="tp-ai-admin-field" htmlFor={`${id}-exec-quota`}>每次代码执行折算 · 同频点
+                  <input id={`${id}-exec-quota`} type="number" min={0} max={10_000_000} step={1} value={Number.isNaN(draft.codeInterpreterQuotaTokens) ? "" : draft.codeInterpreterQuotaTokens ?? 0} onChange={event => update("codeInterpreterQuotaTokens", event.target.valueAsNumber)} />
+                </label>
+                <p className="tp-ai-admin-hint is-wide">仅支持 Responses 协议且模型必须支持代码执行（Code Interpreter）工具。系统仅在判断本轮需要计算、统计或图表时才会请求该工具，不会用于日常聊天；文本每 1 Token 计 1 同频点，代码执行另按本设置折算为同频点。若服务商拒绝该工具，会自动重试一次并跳过代码执行，不会重复扣费。</p>
               </div>
             </details>
             {tiersActive ? <details className="tp-ai-provider-capabilities tp-ai-admin-legacy-group is-wide">

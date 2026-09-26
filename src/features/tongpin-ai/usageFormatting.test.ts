@@ -20,6 +20,11 @@ describe("honest text and tool billing labels", () => {
     expect(aiUsageDescription({ ...search, estimated: true, tokenUsageEstimated: false, searchCalls: 2 })).toBe("输入 12 / 输出 8 Token · 搜索 2 次折算 2,000 同频点");
     expect(aiUsageDescription({ ...search, estimated: true, tokenUsageEstimated: true, searchCalls: 2 })).toContain("文本用量待核对");
     expect(aiUsageTotal(search)).toBe("2,020 同频点");
+    const exec = { ...search, billingKind: "tokens_with_code_exec" as const, execCalls: 1, convertedTokens: 200 };
+    expect(aiUsageDescription(exec)).toBe("输入 12 / 输出 8 Token · 代码执行 1 次折算 200 同频点");
+    expect(aiUsageDescription({ ...exec, execCalls: undefined })).toBe("输入 12 / 输出 8 Token · 代码执行折算 200 同频点");
+    const both = { ...search, billingKind: "tokens_with_tools" as const, searchCalls: 1, execCalls: 1, convertedTokens: 800 };
+    expect(aiUsageDescription(both)).toBe("输入 12 / 输出 8 Token · 搜索 1 次 + 代码执行 1 次折算 800 同频点");
   });
   it("keeps historic and estimated text records intact rather than recomputing totals", () => {
     const original = Object.freeze({ inputTokens: 123, outputTokens: 45, totalTokens: 170, estimated: true });

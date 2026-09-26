@@ -7,6 +7,8 @@ import { consumeProviderResponse, type ProviderReadOptions } from "./providerStr
 import { AI_WORKSPACE_LIMITS } from "../../shared/aiWorkspace";
 import { AI_CITATION_LIMITS } from "../../shared/aiCitations";
 import { providerCitationSpans, type ProviderCitationSpan, type ProviderTextPart } from "./citations";
+import { searchCallLimit } from "./searchPolicy";
+import { codeInterpreterCallLimit } from "./codeInterpreterPolicy";
 
 /** Explicit allowlist from OpenAI's Responses reasoning-summary guide.
  * A matching model name on an arbitrary OpenAI-compatible gateway is not
@@ -158,11 +160,13 @@ export async function readProviderHttpError(response: Response, operation: AiPro
   return providerHttpError(response.status, operation, metadata);
 }
 export function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
-export function parseProviderResult(value: unknown, protocol: StoredProvider["protocol"]): { content: string; usage: AiUsage | null; status?: string; incompleteReason?: "output_limit" | "stream_interrupted"; sources: AiSource[]; searchCalls: number; completedSearchCalls: number; citationSpans?: ProviderCitationSpan[] } {
+export function parseProviderResult(value: unknown, protocol: StoredProvider["protocol"]): { content: string; usage: AiUsage | null; status?: string; incompleteReason?: "output_limit" | "stream_interrupted"; sources: AiSource[]; searchCalls: number; completedSearchCalls: number; execCalls: number; completedExecCalls: number; citationSpans?: ProviderCitationSpan[] } {
   const root = object(value);
   const sources: AiSource[] = [];
   let searchCalls = 0;
   let completedSearchCalls = 0;
+  let execCalls = 0;
+  let completedExecCalls = 0;
   const addSource = (value: unknown, limit = 30) => { const source = safeSource(value); if (source && sources.length < limit && !sources.some(item => item.url === source.url)) sources.push(source); };
   const textParts: ProviderTextPart[] = [];
   if (protocol === "responses" && Array.isArray(root.output)) {
@@ -174,6 +178,11 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
         if (output.status === "completed") completedSearchCalls++;
         const action = object(output.action);
         if (Array.isArray(action.sources)) action.sources.forEach(item => addSource(item));
+      }
+      if (output.type === "code_interpreter_call") {
+        execCalls++;
+        // An attempted tool can still incur cost, but it is not proof of a completed run.
+        if (output.status === "completed") completedExecCalls++;
       }
       if (Array.isArray(output.content)) for (const raw of output.content) {
         const part = object(raw);
@@ -211,22 +220,33 @@ export function parseProviderResult(value: unknown, protocol: StoredProvider["pr
   const incompleteReason = status === "incomplete" ? object(root.incomplete_details).reason === "stream_interrupted" ? "stream_interrupted" : "output_limit" : undefined;
   // Positions are relative to `content`; the service re-verifies them against the stored answer.
   const citationSpans = providerCitationSpans(textParts, content);
-  return { content, usage, sources, searchCalls, completedSearchCalls, status, ...(incompleteReason ? { incompleteReason } : {}), ...(citationSpans ? { citationSpans } : {}) };
+  return { content, usage, sources, searchCalls, completedSearchCalls, execCalls, completedExecCalls, status, ...(incompleteReason ? { incompleteReason } : {}), ...(citationSpans ? { citationSpans } : {}) };
 }
 export function providerBody(provider: StoredProvider, request: AiChatRequest, model: string, maxOutputTokens: number, persona?: AiPersonaProfile, options: { stream?: boolean; /** Server-owned instructions (多 Agent 协作 roles); default: chatInstructions. */ instructions?: string } = {}): Record<string, unknown> {
   const messages = chatMessages(request);
   const images = request.attachments?.filter(item => item.dataUrl) ?? [];
   const providerPublicSummary = supportsOfficialPublicSummary(provider, request, model);
   const instructions = options.instructions ?? chatInstructions(request, persona, model, { providerPublicSummary });
-  if (provider.protocol === "responses") return {
-    model, instructions,
-    input: messages.map((message, index) => images.length && index === messages.length - 1
-      ? { role: message.role, content: [{ type: "input_text", text: message.content }, ...images.map(item => ({ type: "input_image", image_url: item.dataUrl, detail: "low" }))] }
-      : message),
-    max_output_tokens: maxOutputTokens, stream: true, store: false,
-    ...(request.webSearch ? { tools: [{ type: "web_search", search_context_size: "low" }], ...(provider.webSearchProtocol === "compatible" ? {} : { max_tool_calls: 1 }), tool_choice: request.webSearchMode === "auto" ? "auto" : "required", include: ["web_search_call.action.sources"] } : {}),
-    ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort, ...(providerPublicSummary ? { summary: "auto" } : {}) } } : {}),
-  };
+  if (provider.protocol === "responses") {
+    const tools: Record<string, unknown>[] = [];
+    const include: string[] = [];
+    if (request.webSearch) { tools.push({ type: "web_search", search_context_size: "low" }); include.push("web_search_call.action.sources"); }
+    // Never attached when this turn's search was explicitly forced (tool_choice would
+    // otherwise need to single out web_search, and the two tools share one budget below).
+    if (request.codeInterpreter) { tools.push({ type: "code_interpreter", container: { type: "auto" } }); include.push("code_interpreter_call.outputs"); }
+    // Compatible relays reject max_tool_calls outright regardless of which tool asked for it.
+    const maxToolCalls = provider.webSearchProtocol === "compatible" ? 0
+      : (request.webSearch ? searchCallLimit(provider) : 0) + (request.codeInterpreter ? codeInterpreterCallLimit(provider) : 0);
+    return {
+      model, instructions,
+      input: messages.map((message, index) => images.length && index === messages.length - 1
+        ? { role: message.role, content: [{ type: "input_text", text: message.content }, ...images.map(item => ({ type: "input_image", image_url: item.dataUrl, detail: "low" }))] }
+        : message),
+      max_output_tokens: maxOutputTokens, stream: true, store: false,
+      ...(tools.length ? { tools, ...(maxToolCalls > 0 ? { max_tool_calls: maxToolCalls } : {}), tool_choice: request.webSearch && request.webSearchMode !== "auto" ? "required" : "auto", include } : {}),
+      ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort, ...(providerPublicSummary ? { summary: "auto" } : {}) } } : {}),
+    };
+  }
   const isBaiChat = new URL(provider.baseUrl).hostname === "api.b.ai";
   return {
     model, messages: [{ role: "system", content: instructions }, ...messages.map((message, index) => images.length && index === messages.length - 1

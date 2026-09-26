@@ -14,7 +14,7 @@ import { AdminAiMultiAgentSettings, multiAgentSettingsError } from "./AdminAiMul
 import { ModelDiscoveryRevision } from "./modelDiscoveryRevision";
 
 const CAPABILITIES: Array<[AiHarnessCapability, string]> = [
-  ["vision", "图片理解"], ["web_search", "自动联网"], ["image", "生成图片"], ["video", "生成视频"],
+  ["vision", "图片理解"], ["web_search", "自动联网"], ["code_interpreter", "代码执行"], ["image", "生成图片"], ["video", "生成视频"],
   ["presentation", "生成 PPT"], ["computer", "控制电脑"],
 ];
 const emptyRoute = (): AiHarnessTierRoute => ({ providerId: "primary", modelId: "", protocol: "chat_completions", maxOutputTokens: 2048, reasoningEffort: "", capabilities: ["chat"], enabled: true });

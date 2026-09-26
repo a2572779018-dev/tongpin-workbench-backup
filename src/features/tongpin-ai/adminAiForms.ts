@@ -24,6 +24,7 @@ export function validateAiProviderInput(
   input: AiProviderInput,
   saved: AiProviderConfig | null,
   harnessSearchConfigured = false,
+  harnessCodeInterpreterConfigured = false,
 ): string {
   const connectionError = validateAiProviderConnection(input.baseUrl, input.apiKey ?? "", saved);
   if (connectionError) return connectionError;
@@ -34,7 +35,7 @@ export function validateAiProviderInput(
   if (!Number.isSafeInteger(input.maxOutputTokens) || input.maxOutputTokens < 16 || input.maxOutputTokens > 32_768) {
     return "单次最大输出请填写 16–32,768 之间的整数。";
   }
-  for (const amount of [input.imageQuotaTokens ?? 0, input.webSearchQuotaTokens ?? 0]) {
+  for (const amount of [input.imageQuotaTokens ?? 0, input.webSearchQuotaTokens ?? 0, input.codeInterpreterQuotaTokens ?? 0]) {
     if (!Number.isSafeInteger(amount) || amount < 0 || amount > 10_000_000) return "工具折算同频点需填写 0 到 10,000,000 之间的整数。";
   }
   const visionReserve = input.visionInputReserveTokens ?? 4096;
@@ -48,6 +49,7 @@ export function validateAiProviderInput(
     if ((!saved?.imageApiKeyConfigured || previous !== base) && !input.imageApiKey?.trim()) return "首次接入或更换图片 API 地址后，请重新填写图片密钥。";
   } else if (input.imageApiKey?.trim()) return "填写独立图片密钥时，还需填写图片 API 地址。";
   if (input.webSearchEnabled && ((!harnessSearchConfigured && input.protocol !== "responses") || !(input.webSearchQuotaTokens && input.webSearchQuotaTokens > 0))) return "联网搜索需要至少一个支持搜索的 Responses 档位，并设置每次搜索折算的同频点。";
+  if (input.codeInterpreterEnabled && ((!harnessCodeInterpreterConfigured && input.protocol !== "responses") || !(input.codeInterpreterQuotaTokens && input.codeInterpreterQuotaTokens > 0))) return "代码执行需要至少一个支持该能力的 Responses 档位，并设置每次执行折算的同频点。";
   return "";
 }
 
@@ -84,6 +86,7 @@ export function adminAiErrorMessage(error: unknown, fallback: string): string {
     AI_IMAGE_KEY_REQUIRED: "首次接入或更换图片 API 地址后，请重新填写图片密钥。",
     AI_IMAGE_QUOTA_REQUIRED: "请设置每张图片折算的同频点后再启用图片生成。",
     AI_SEARCH_CONFIG_INVALID: "联网搜索需要 Responses 协议和大于 0 的折算同频点，请核对模型是否支持。",
+    AI_CODE_INTERPRETER_CONFIG_INVALID: "代码执行需要 Responses 协议和大于 0 的折算同频点，请核对模型是否支持。",
     AI_VISION_CONFIG_INVALID: "每张图片的输入预留需填写 256 到 131072 之间的整数估算值。",
     AI_ASSET_STORAGE_FULL: "图片存储空间已满，请让成员下载并删除不再需要的图片。",
     AI_PROVIDER_AUTH: "API 密钥无效或无权访问，请核对服务商的密钥配置。",

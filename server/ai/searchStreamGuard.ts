@@ -1,10 +1,11 @@
+import { AI_MAX_SEARCH_CALLS } from "../../shared/ai";
 import { AiError } from "./security";
 
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 
 /** Detect over-budget tool invocations while bytes arrive. Cancellation cannot guarantee upstream billing stopped. */
 export function createSearchStreamGuard(maxCalls: number) {
-  if (!Number.isInteger(maxCalls) || maxCalls < 0 || maxCalls > 5) throw new Error("Invalid local search budget");
+  if (!Number.isInteger(maxCalls) || maxCalls < 0 || maxCalls > AI_MAX_SEARCH_CALLS) throw new Error("Invalid local search budget");
   let pending = "";
   const seen = new Set<string>();
   const limit = (count: number) => {

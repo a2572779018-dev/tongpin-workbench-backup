@@ -215,7 +215,7 @@ function affordable(prepared: PreparedRun, remainingTokens: number): "search" | 
 
 function preflightBudget(prepared: PreparedRun, search: boolean, maxOutputTokens: number): AiChatBudget {
   const parts = prepared.parts(search);
-  return { inputReserve: parts.input - parts.searchInput, searchInputReserve: parts.searchInput, convertedReserve: parts.converted, minOutputTokens: 16,
+  return { inputReserve: parts.input - parts.searchInput, searchInputReserve: parts.searchInput, codeExecInputReserve: 0, convertedReserve: parts.converted, minOutputTokens: 16,
     minimumRequiredTokens: partsTotal(parts), availableOutputTokens: parts.output, maxOutputTokens };
 }
 
@@ -642,9 +642,10 @@ class MultiAgentRun {
       parentSignal: this.controller.signal, timeoutMs,
       run: signal => this.call({ label: subtask.id, model: prepared.subModel, mode: prepared.subMode, request, instructions: call.instructions, reserve: call.reserve,
         search: subtask.search, signal, onText: delta => visible.feed(delta),
-        ...(subtask.search ? { onToolProgress: progress => this.update({ phase: "search", id: subtask.id, callId: progress.callId, status: progress.status,
+        // Sub-agents only ever request web_search; any other tool progress is ignored here.
+        ...(subtask.search ? { onToolProgress: progress => { if (progress.tool !== "web_search") return; this.update({ phase: "search", id: subtask.id, callId: progress.callId, status: progress.status,
           ...(progress.query ? { query: boundedText(progress.query, AI_MULTI_AGENT_LIMITS.queryCodePoints) } : {}),
-          ...(progress.sourceCount !== undefined ? { sourceCount: progress.sourceCount } : {}) }, true) } : {}) }),
+          ...(progress.sourceCount !== undefined ? { sourceCount: progress.sourceCount } : {}) }, true); } } : {}) }),
     });
     if (!result.ok) {
       this.update({ phase: "error", id: subtask.id, reason: result.reason, message: failureMessage(result.reason, result.error, timeoutMs), durationMs: result.durationMs });

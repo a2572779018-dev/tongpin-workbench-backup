@@ -15,6 +15,7 @@ import { createRuntime } from "../app";
 import type { AppConfig } from "../config";
 import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 import { completedReply } from "../../src/features/tongpin-ai/chatRequests";
+import type { AiReplyProcess } from "../../shared/aiReplyProcess";
 import { WorkspaceSaveQueue } from "../../src/features/tongpin-ai/workspaceSync";
 import type { AiHarnessStep, AiHarnessTrace } from "../../shared/ai";
 import { AiService } from "./service";
@@ -303,6 +304,49 @@ describe("AI durable member workspace", () => {
       await expect(repository.save("member-a", saveRequest(invalidState, 1))).rejects.toHaveProperty("code", "AI_WORKSPACE_INVALID");
       expect(repository.read("member-a")).toEqual(saved);
     }
+  });
+  it("persists a completed code-execution reply and rejects malformed exec usage metadata", async () => {
+    const state = fixture();
+    const reply = completedReply({ requestId: crypto.randomUUID(), content: "已计算并画好图", model: "fixture", quota: emptyQuota(), usage: {
+      inputTokens: 100, outputTokens: 20, convertedTokens: 600, totalTokens: 720, estimated: false, execCalls: 1, tokenUsageEstimated: false, billingKind: "tokens_with_code_exec",
+    } });
+    Object.assign(state.conversations[0].messages[1], reply);
+    const saved = await repository.save("member-a", saveRequest(state));
+    expect(repository.read("member-a").state!.conversations[0].messages[1].usage).toEqual(reply.usage);
+    for (const bad of [{ execCalls: -1 }, { execCalls: 4 }, { execCalls: 1.5 }, { billingKind: "tokens_with_video" }]) {
+      const invalidState = structuredClone(state); Object.assign(invalidState.conversations[0].messages[1].usage!, bad);
+      await expect(repository.save("member-a", saveRequest(invalidState, 1))).rejects.toHaveProperty("code", "AI_WORKSPACE_INVALID");
+      expect(repository.read("member-a")).toEqual(saved);
+    }
+  });
+  it("persists a settled code-execution process step and rejects malformed or unsafe step fields", async () => {
+    const state = fixture();
+    const process: AiReplyProcess = { version: 1, outcome: "completed", steps: [
+      { kind: "thinking" },
+      { kind: "exec", status: "completed", language: "python", code: "print(sum([1, 2, 3]) / 3)", logs: "1.0", imageCount: 1, durationMs: 900 },
+    ] };
+    Object.assign(state.conversations[0].messages[1], { process });
+    const saved = await repository.save("member-a", saveRequest(state));
+    expect(repository.read("member-a").state!.conversations[0].messages[1].process).toEqual(process);
+    const execStep = (steps: unknown[]): AiWorkspaceState => ({ ...state, conversations: [{ ...state.conversations[0], messages: [state.conversations[0].messages[0], { ...state.conversations[0].messages[1], process: { ...process, steps } }] }] }) as unknown as AiWorkspaceState;
+    const badSteps: unknown[][] = [
+      [{ kind: "exec", status: "running", language: "python" }],
+      [{ kind: "exec", status: "completed", language: "javascript" }],
+      [{ kind: "exec", status: "completed", language: "python", code: "print(1)\u0007" }],
+      [{ kind: "exec", status: "completed", language: "python", imageCount: -1 }],
+      [{ kind: "exec", status: "completed", language: "python", imageCount: 1.5 }],
+    ];
+    for (const steps of badSteps) {
+      await expect(repository.save("member-a", saveRequest(execStep(steps), 1))).rejects.toHaveProperty("code", "AI_WORKSPACE_INVALID");
+      expect(repository.read("member-a")).toEqual(saved);
+    }
+    // Over the display-bounded code length: rejected, but as a size limit, not a field-validity error.
+    await expect(repository.save("member-a", saveRequest(execStep([{ kind: "exec", status: "completed", language: "python", code: "x".repeat(4001) }]), 1))).rejects.toHaveProperty("code", "AI_WORKSPACE_TOO_LARGE");
+    expect(repository.read("member-a")).toEqual(saved);
+    // A non-assistant message can never carry a reply process.
+    const onUserMessage = { ...state, conversations: [{ ...state.conversations[0], messages: [{ ...state.conversations[0].messages[0], process }, state.conversations[0].messages[1]] }] };
+    await expect(repository.save("member-a", saveRequest(onUserMessage, 1))).rejects.toHaveProperty("code", "AI_WORKSPACE_INVALID");
+    expect(repository.read("member-a")).toEqual(saved);
   });
   it("isolates reads, writes and identical mutation ids by authenticated user", async () => {
     const request = saveRequest();

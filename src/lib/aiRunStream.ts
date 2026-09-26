@@ -42,11 +42,20 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
       if (typeof event.data?.delta !== "string" || event.data.source !== "provider_reasoning_content") throw new UnsafeEvent("思考摘要格式无效");
     } else if (event.type === "tool_progress") {
       const progress = event.data;
-      if (!progress || progress.tool !== "web_search" || typeof progress.callId !== "string" || !/^search-\d{1,3}$/.test(progress.callId) ||
-          !AI_TOOL_PROGRESS_STATUSES.includes(progress.status) ||
-          (progress.query !== undefined && (typeof progress.query !== "string" || progress.query.length > 400)) ||
-          (progress.sourceCount !== undefined && (!Number.isSafeInteger(progress.sourceCount) || progress.sourceCount < 0)))
-        throw new UnsafeEvent("工具进度格式无效");
+      if (!progress || typeof progress.callId !== "string" || !AI_TOOL_PROGRESS_STATUSES.includes(progress.status)) throw new UnsafeEvent("工具进度格式无效");
+      if (progress.tool === "web_search") {
+        if (!/^search-\d{1,3}$/.test(progress.callId) ||
+            (progress.query !== undefined && (typeof progress.query !== "string" || progress.query.length > 400)) ||
+            (progress.sourceCount !== undefined && (!Number.isSafeInteger(progress.sourceCount) || progress.sourceCount < 0)))
+          throw new UnsafeEvent("工具进度格式无效");
+      } else if (progress.tool === "code_interpreter") {
+        if (!/^exec-(?:\d{1,3}|unsupported)$/.test(progress.callId) ||
+            (progress.code !== undefined && (typeof progress.code !== "string" || progress.code.length > 20_000)) ||
+            (progress.logs !== undefined && (typeof progress.logs !== "string" || progress.logs.length > 20_000)) ||
+            (progress.imageCount !== undefined && (!Number.isSafeInteger(progress.imageCount) || progress.imageCount < 0)) ||
+            (progress.unsupported !== undefined && typeof progress.unsupported !== "boolean"))
+          throw new UnsafeEvent("工具进度格式无效");
+      } else throw new UnsafeEvent("工具进度格式无效");
     } else if (event.type === "usage_updated") {
       const usage = event.data?.usage;
       const tokenCount = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0;
@@ -54,8 +63,9 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
           usage.totalTokens < usage.inputTokens + usage.outputTokens || typeof usage.estimated !== "boolean" ||
           (usage.convertedTokens !== undefined && !tokenCount(usage.convertedTokens)) ||
           (usage.searchCalls !== undefined && !tokenCount(usage.searchCalls)) ||
+          (usage.execCalls !== undefined && !tokenCount(usage.execCalls)) ||
           (usage.tokenUsageEstimated !== undefined && typeof usage.tokenUsageEstimated !== "boolean") ||
-          (usage.billingKind !== undefined && !["tokens", "image_conversion", "video_conversion", "tokens_with_search"].includes(usage.billingKind)) ||
+          (usage.billingKind !== undefined && !["tokens", "image_conversion", "video_conversion", "tokens_with_search", "tokens_with_code_exec", "tokens_with_tools"].includes(usage.billingKind)) ||
           !["completed", "failed", "uncertain"].includes(event.data.status) || event.data.providerReported !== true)
         throw new UnsafeEvent("回复用量事件格式无效");
     } else if (event.type === "run_finished") {
