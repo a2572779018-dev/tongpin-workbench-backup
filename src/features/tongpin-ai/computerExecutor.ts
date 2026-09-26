@@ -196,9 +196,13 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
   let irreversibleAttempted = false;
   let appName = "";
 
+  let budget: { startedAt: number; limits: ComputerRunLimits } | null = null;
   const stoppedReason = (): RunStop => {
     const event = stoppedByAgent as ComputerAgentEvent | null;
-    if (event?.type === "stopped" && event.reason === "limit") return new RunStop("budget_exhausted", "time_limit", REASON_TEXT.time_limit);
+    if (event?.type === "stopped" && event.reason === "limit") {
+      const timedOut = !budget || now() - budget.startedAt >= budget.limits.maxMinutes * 60_000;
+      return timedOut ? new RunStop("budget_exhausted", "time_limit", REASON_TEXT.time_limit) : new RunStop("budget_exhausted", "step_limit", REASON_TEXT.step_limit);
+    }
     return new RunStop("abstained", "user_stopped", event?.type === "stopped" && event.reason === "esc" ? "你按 Esc 停止了电脑操作" : REASON_TEXT.user_stopped);
   };
   const checkStopped = () => { if (controller.signal.aborted) throw stoppedReason(); };
@@ -245,6 +249,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
     }
     callbacks.onConsent?.("granted", consent.value);
     const startedAt = now();
+    budget = { startedAt, limits };
 
     /* 3. Observe → decide (Jev) → authorize + execute → verify, until done. */
     const history: ComputerHistoryEntry[] = [];

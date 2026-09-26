@@ -245,7 +245,7 @@ function modelElements(elements, windowBounds) {
       frame,
       identity: JSON.stringify([key, label, value, raw.depth, raw.parentIndex ?? null, raw.elementIndex ?? null]),
     });
-    if (model.length >= 400) break;
+    if (model.length >= 1000) break;
   }
   return model;
 }

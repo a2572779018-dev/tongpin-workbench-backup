@@ -50,7 +50,9 @@ const TIMING = Object.freeze({
   openPaneAfterMs: 4_000,
   screenRecordingGraceMs: 20_000,
 });
-const CAPTURE = Object.freeze({ maxElements: 400, maxDepth: 40, maxDimension: 1280, maxTreeChars: 64 * 1024, sparseBelow: 6 });
+// Chat apps list many conversations and messages before the input box, so the
+// walk is generous; only a ranked, bounded projection ever leaves this process.
+const CAPTURE = Object.freeze({ maxElements: 1000, maxDepth: 40, maxDimension: 1280, maxTreeChars: 128 * 1024, sparseBelow: 6 });
 
 const SAFE_MESSAGES = Object.freeze({
   busy: "上一个电脑操作步骤还在进行，请稍候",
@@ -555,7 +557,7 @@ function createComputerAgentController({
         await disposeDriver(driverState);
         return failure("stopped");
       }
-      run = {
+      const current = {
         ...driverState,
         runId: parsed.runId,
         task: parsed.task,
@@ -574,17 +576,20 @@ function createComputerAgentController({
         busy: false,
         stopped: false,
       };
+      run = current;
       driverState = null;
       armStopShortcut();
       let apps = [];
-      try { apps = await resolveApps(run); } catch { apps = []; }
-      run.apps = apps;
+      try { apps = await resolveApps(current); } catch { apps = []; }
+      // Esc or Stop may arrive while the app list is read.
+      if (current.stopped) return failure("stopped");
+      current.apps = apps;
       return success({
-        runId: run.runId,
+        runId: current.runId,
         platform: platform === "darwin" ? "macos" : "windows",
         permissions: { accessibility: permissions.accessibility, screenRecording: permissions.screenRecording },
-        axOnly: run.axOnly,
-        apps: run.grantApps.map((grant, index) => ({ name: grant.name, running: Boolean(apps[index] && apps[index].running) })),
+        axOnly: current.axOnly,
+        apps: current.grantApps.map((grant, index) => ({ name: grant.name, running: Boolean(apps[index] && apps[index].running) })),
       });
     } finally {
       if (driverState) await disposeDriver(driverState);
