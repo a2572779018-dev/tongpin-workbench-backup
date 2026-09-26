@@ -1,5 +1,6 @@
 import type { AiHarnessTrace } from "../../../shared/ai";
 import { AI_CHAT_CONTEXT_LIMITS } from "../../../shared/aiContext";
+import type { AiMultiAgentPhase } from "../../../shared/aiMultiAgent";
 import { readGeneratedImageSelection } from "./generatedImageSelection";
 import { harnessTraceRequestId } from "./runTracePolling";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
@@ -103,10 +104,28 @@ export function appendDraftText(draft: string | undefined, text: string): string
 export type SteerTarget = { kind: "guidance"; runRequestId: string } | { kind: "followup" };
 
 const ACTIVE_RUN = new Set<AiHarnessTrace["status"]>(["running", "planned", "waiting_approval"]);
+/** 多 Agent 协作 phases after which the run still reaches a guidance checkpoint
+ * (before the sub-agents or before synthesis). */
+const GUIDED_AGENT_PHASES = new Set<AiMultiAgentPhase>(["planning", "dispatching", "working"]);
+
+type SteerRunMessage = Pick<TongpinAIMessage, "role" | "trace" | "requestId" | "harnessPlanRequestId" | "status" | "liveProcess">;
+
+/** The request id of a Pro 多 Agent 协作 reply that is streaming and will still
+ * take guidance at its next checkpoint. Its live process carries the agents step
+ * long before any harness trace reaches the client. */
+export function activeMultiAgentRequestId(message?: Pick<TongpinAIMessage, "role" | "requestId" | "status" | "liveProcess">): string | undefined {
+  if (message?.role !== "assistant" || (message.status !== "thinking" && message.status !== "typing")) return undefined;
+  if (!message.requestId || message.requestId.startsWith("draft-")) return undefined;
+  const agents = message.liveProcess?.steps.find(step => step.kind === "agents");
+  return agents?.kind === "agents" && GUIDED_AGENT_PHASES.has(agents.phase) ? message.requestId : undefined;
+}
 
 /** The request id of a multi-step run (any harness strategy other than
- * "direct") that will still make another model step, if `message` carries one. */
-export function activeMultiStepRunRequestId(message?: Pick<TongpinAIMessage, "role" | "trace" | "requestId" | "harnessPlanRequestId">): string | undefined {
+ * "direct", or a streaming 多 Agent 协作 reply) that will still make another
+ * model step, if `message` carries one. */
+export function activeMultiStepRunRequestId(message?: SteerRunMessage): string | undefined {
+  const multiAgent = activeMultiAgentRequestId(message);
+  if (multiAgent) return multiAgent;
   const trace = message?.role === "assistant" ? message.trace : undefined;
   if (!trace || trace.strategy === "direct" || !ACTIVE_RUN.has(trace.status) || trace.toolBudget.remaining <= 0) return undefined;
   return harnessTraceRequestId(message!);
@@ -114,7 +133,7 @@ export function activeMultiStepRunRequestId(message?: Pick<TongpinAIMessage, "ro
 
 /** Guidance goes to an active multi-step run; everything else waits and is
  * sent as one follow-up turn when the current reply ends. */
-export function steerDeliveryTarget(message?: Pick<TongpinAIMessage, "role" | "trace" | "requestId" | "harnessPlanRequestId">): SteerTarget {
+export function steerDeliveryTarget(message?: SteerRunMessage): SteerTarget {
   const runRequestId = activeMultiStepRunRequestId(message);
   return runRequestId ? { kind: "guidance", runRequestId } : { kind: "followup" };
 }

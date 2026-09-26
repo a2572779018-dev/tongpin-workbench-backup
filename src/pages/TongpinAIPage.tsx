@@ -2163,6 +2163,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
 
   // Steer: supplements typed while a reply runs (lifecycle in steerController.ts).
   const steerGuidance = useMemo(() => runGuidanceClient(api, user.id), [api, user.id]);
+  // A streaming reply's live process (e.g. its 多 Agent 协作 step) sits beside the
+  // conversation until it settles; steering reads the reply as it is rendered.
+  const withLiveReply = <T extends { id: string }>(message: T): T => streamReplies[message.id] ? { ...message, liveProcess: streamReplies[message.id].liveProcess } : message;
   const steer = useSteerController({
     sendFollowUp: sendSupplementTurn,
     restoreDraft: (conversationId, text, reason) => {
@@ -2174,7 +2177,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     recordDelivered: (conversationId, text) => setConversations(current => current.map(conversation => conversation.id === conversationId
       ? { ...conversation, messages: [...conversation.messages, { id: createLocalId("user"), role: "user" as const, content: text, time: currentTimeLabel() }] } : conversation)),
     isResponding: conversationBusy,
-    isRunActive: (conversationId, runRequestId) => steerRunActive(workspaceRef.current.conversations.find(item => item.id === conversationId)?.messages, runRequestId),
+    isRunActive: (conversationId, runRequestId) => steerRunActive(workspaceRef.current.conversations.find(item => item.id === conversationId)?.messages.map(withLiveReply), runRequestId),
     notify: message => showAnnouncement(message),
     guidance: steerGuidance,
   });
@@ -2183,7 +2186,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   // No steering while a confirmation card waits for the member.
   const steerAllowed = Boolean(activeConversation) && !awaitingUserConfirmation(activeReply, activeReply?.artifactId ? artifactById.get(activeReply.artifactId) : undefined);
   function addSupplement(conversationId: string, text: string): boolean {
-    const added = steer.add(conversationId, text, steerDeliveryTarget(latestAssistantMessage(workspaceRef.current.conversations.find(item => item.id === conversationId)?.messages)));
+    // A streaming Pro 多 Agent 协作 reply takes it as run guidance at its next checkpoint.
+    const reply = latestAssistantMessage(workspaceRef.current.conversations.find(item => item.id === conversationId)?.messages);
+    const added = steer.add(conversationId, text, steerDeliveryTarget(reply && withLiveReply(reply)));
     if (!added.ok) showAnnouncement(added.reason);
     return added.ok;
   }
