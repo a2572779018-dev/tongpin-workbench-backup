@@ -6,6 +6,7 @@ import { AdminAiProviderSettings } from "./AdminAiProviderSettings";
 import { AdminAiVideoSettings } from "./AdminAiVideoSettings";
 import { AdminAiVoiceSettings } from "./AdminAiVoiceSettings";
 import { AdminAiHarnessSettings } from "./AdminAiHarnessSettings";
+import { AdminAiJevSettings } from "./AdminAiJevSettings";
 import { AdminAiObservability } from "./AdminAiObservability";
 import { AdminAiMemorySettings } from "./AdminAiMemorySettings";
 import { useAdminAiAlertCenter } from "./AdminAiAlertCenter";
@@ -243,6 +244,7 @@ export function AdminAiQuotaPanel() {
         <AdminAiVideoSettings key={session?.user.id} harnessConfig={harnessConfig} members={members} />
         <AdminAiVoiceSettings key={`voice-${session?.user.id}`} harnessConfig={harnessConfig} />
         <AdminAiMemorySettings key={`memory-${session?.user.id}`} />
+        <AdminAiJevSettings key={`jev-${session?.user.id}`} />
       </div>
       <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} harnessConfig={harnessConfig} onDashboard={alertCenter.markViewed} /></div>
       <section hidden={section !== "members"} className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>

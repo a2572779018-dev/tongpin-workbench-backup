@@ -16,7 +16,7 @@ export const BASE_CAPABILITIES: readonly BaseCapability[] = [
   { id: "image", name: "图片生成", description: "先由同频 AI 整理要求，确认后调用管理员配置的服务。", availability: "对话内调用" },
   { id: "video", name: "视频生成", description: "保留提示词和参考图，生成状态与结果回到同一对话。", availability: "对话内审批" },
   { id: "presentation", name: "演示文稿", description: "根据对话和资料组织结构，在对话内生成可下载成果。", availability: "对话内调用" },
-  { id: "computer", name: "Computer Use", description: "使用 @computer 发起有边界的电脑操作；每个动作均需确认。", availability: "macOS 与 Windows 桌面端" },
+  { id: "computer", name: "Computer Use", description: "直接说出要在电脑上完成的事（或用 @computer），授权一次后由 Jev 逐步决策、自动执行并核对结果。", availability: "macOS 与 Windows 桌面端" },
 ];
 
 export interface CapabilityHub {

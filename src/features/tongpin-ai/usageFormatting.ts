@@ -8,6 +8,7 @@ export function aiUsageDescription(usage: AiUsage): string {
   if (usage.billingKind === "speech_to_text_conversion") return `语音转文字折算 ${formatAiPoints(usage.convertedTokens ?? usage.totalTokens)}${usage.estimated ? " · 待核对" : ""}`;
   if (usage.billingKind === "text_to_speech_conversion") return `朗读折算 ${formatAiPoints(usage.convertedTokens ?? usage.totalTokens)}${usage.estimated ? " · 待核对" : ""}`;
   if (usage.billingKind === "memory_conversion") return `记忆更新折算 ${formatAiPoints(usage.convertedTokens ?? usage.totalTokens)}`;
+  if (usage.billingKind === "decision_conversion") return `Jev 决策 · 输入 ${number(usage.inputTokens)} / 输出 ${number(usage.outputTokens)} Token 折算 ${formatAiPoints(usage.convertedTokens ?? usage.totalTokens)}${usage.estimated ? " · 按预留上限计入，待核对" : ""}`;
   const text = `输入 ${number(usage.inputTokens)} / 输出 ${number(usage.outputTokens)} Token`;
   const calls = Number.isSafeInteger(usage.searchCalls) && Number(usage.searchCalls) > 0 ? ` ${number(usage.searchCalls!)} 次` : "";
   return text + ((usage.convertedTokens ?? 0) > 0 ? ` · 搜索${calls}折算 ${formatAiPoints(usage.convertedTokens!)}` : "") + ((usage.tokenUsageEstimated ?? usage.estimated) ? " · 文本用量待核对" : "");

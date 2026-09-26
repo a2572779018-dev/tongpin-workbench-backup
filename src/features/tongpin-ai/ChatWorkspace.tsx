@@ -54,9 +54,6 @@ import { COMPOSER_STEER_LABELS, composerHintText, composerSendMode, escapeStopsR
 import { SteerSupplements } from "./SteerSupplements";
 import { AiVideoComposer, type VideoComposerHandle } from "./AiVideoComposer";
 import type { MediaTaskRun } from "./mediaTaskClient";
-import { ComputerUsePanel } from "./ComputerUsePanel";
-import type { ComputerUseModelPlan } from "./computerUseFlow";
-import type { ComputerUseWindowState } from "../../../shared/computerUse";
 import type { VideoChatRequest } from "./videoChat";
 import { CHAT_MESSAGE_PAGE_SIZE } from "./chatPerformance";
 import { TONGPIN_AI_SKILLS } from "./mockData";
@@ -146,14 +143,13 @@ interface ChatWorkspaceProps {
   computerAvailable?: boolean;
   computerRequest?: { id: string; originalPrompt: string };
   onOpenComputer?: (prompt: string) => void;
-  onPlanComputer?: (originalPrompt: string, state: ComputerUseWindowState) => Promise<ComputerUseModelPlan>;
-  onCloseComputer?: () => void;
-  onComputerResult?: (message: string) => void;
   /** Supplements typed while the reply runs (steer), shown after that reply. */
   pendingSupplements?: readonly SteerBubble[];
   /** Given only when a supplement may join the running task; returns false when not accepted. */
   onSteer?: (text: string) => boolean;
   onCancelSupplement?: (id: string) => void;
+  /** Live unified computer executor panel; replaces the composer while a task runs. */
+  computerPanel?: ReactNode;
 }
 
 export function ChatWorkspace({
@@ -228,12 +224,10 @@ export function ChatWorkspace({
   computerAvailable = false,
   computerRequest,
   onOpenComputer,
-  onPlanComputer,
-  onCloseComputer,
-  onComputerResult,
   pendingSupplements = EMPTY_SUPPLEMENTS,
   onSteer,
   onCancelSupplement,
+  computerPanel,
 }: ChatWorkspaceProps) {
   const chatRef = useRef<HTMLElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -912,14 +906,7 @@ export function ChatWorkspace({
           </p>
         )}
         <div className="tp-ai-beam-wrap">
-          {computerRequest && onPlanComputer ? <ComputerUsePanel
-            key={computerRequest.id}
-            requestId={computerRequest.id}
-            originalPrompt={computerRequest.originalPrompt}
-            onPlan={onPlanComputer}
-            onClose={onCloseComputer ?? (() => undefined)}
-            onResult={onComputerResult ?? (() => undefined)}
-          /> : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑动作规划器未接入，已停止流程。</p> : (
+          {computerRequest && computerPanel ? computerPanel : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑操作执行器未接入，已停止流程。</p> : (
           <form className="tp-ai-composer" onSubmit={submitMessage}>
             {videoOpen && onSubmitVideo && onPlanTool ? <AiVideoComposer ref={videoComposerRef} tier={mode} initialRequest={videoInitial} initialReferenceImages={videoAttachmentReferences} prompt={draft} onPlan={request => onPlanTool("video", request.prompt, request)} onSubmit={onSubmitVideo} onSubmitTask={onSubmitVideoTask} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }} /> : null}
             <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={composerTool === "image" ? AI_IMAGE_ACCEPT : visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {

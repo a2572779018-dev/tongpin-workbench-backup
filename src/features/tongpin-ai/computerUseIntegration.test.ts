@@ -2,11 +2,12 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const workspace = readFileSync(new URL("./ChatWorkspace.tsx", import.meta.url), "utf8");
-const panel = readFileSync(new URL("./ComputerUsePanel.tsx", import.meta.url), "utf8");
+const panel = readFileSync(new URL("./ComputerRunPanel.tsx", import.meta.url), "utf8");
+const loop = readFileSync(new URL("./computerExecutor.ts", import.meta.url), "utf8");
 const page = readFileSync(new URL("../../pages/TongpinAIPage.tsx", import.meta.url), "utf8");
 const auth = readFileSync(new URL("../../auth/AuthContext.tsx", import.meta.url), "utf8");
 
-describe("@computer desktop integration", () => {
+describe("unified computer executor integration", () => {
   it("intercepts @computer before video and ordinary chat submission", () => {
     const submit = workspace.slice(
       workspace.indexOf("function submitMessage"),
@@ -18,35 +19,40 @@ describe("@computer desktop integration", () => {
     expect(page).toContain("onOpenComputer={beginComputerUse}");
   });
 
-  it("keeps the action sequence observe, native approval, one execute, observe", () => {
-    const observe = panel.slice(panel.indexOf("async function observeTarget"), panel.indexOf("async function requestModelPlan"));
-    const execute = panel.slice(panel.indexOf("async function executePlan"), panel.indexOf("async function closeSession"));
-    expect(observe.indexOf("getWindowState")).toBeGreaterThan(-1);
-    expect(observe.indexOf("requestModelPlan(result.value)")).toBeGreaterThan(observe.indexOf("getWindowState"));
-    const approvalAt = execute.indexOf("requestActionApproval");
-    const actionAt = execute.indexOf("executeApprovedAction");
-    const observeAt = execute.indexOf("getWindowState", actionAt);
-    expect(approvalAt).toBeGreaterThan(-1);
-    expect(actionAt).toBeGreaterThan(approvalAt);
-    expect(observeAt).toBeGreaterThan(actionAt);
-    expect(execute.match(/executeApprovedAction/g)).toHaveLength(1);
-    expect(panel).not.toContain("kind: \"shell\"");
-    // Check coordinate object fields, not ordinary UI text that happens to
-    // contain the same character pair (for example, a scroll direction).
-    expect(panel).not.toMatch(/(?:^|[,{]\s*)[xy]\s*:/m);
+  it("enters the same executor from natural-language dispatch with the member's own words", () => {
+    expect(page).toContain("beginComputerUse(originalPrompt, conversationId, decision.prompt)");
+    expect(page).toContain("computerPanel={computerRequest ? <ComputerRunPanel");
+    expect(workspace).toContain("computerRequest && computerPanel ? computerPanel");
+    // A tier without the computer capability is told before any model call.
+    const send = page.slice(page.indexOf("async function sendMessage"), page.indexOf('api<AiChatPreflight>("/api/ai/preflight"', page.indexOf("async function sendMessage")));
+    expect(send).toContain("computerOperationIntent(content)");
+    expect(send).toContain("computerTierNotice(aiStatus?.computerTiers, origin.mode)");
+    const begin = page.slice(page.indexOf("function beginComputerUse"), page.indexOf("function recordComputerResult"));
+    expect(begin.indexOf("computerTierNotice(aiStatus?.computerTiers, mode)")).toBeLessThan(begin.indexOf("setComputerRequest("));
   });
 
-  it("does not send observed screenshots or trees to chat/backend persistence", () => {
-    expect(panel).not.toContain("/api/ai/");
-    expect(panel).not.toContain("fetch(");
-    expect(panel).not.toContain("treeMarkdown");
-    expect(page).toContain('outputFormat: "computer_plan"');
-    expect(page).toContain('api<AiChatPreflight>("/api/ai/preflight"');
-    expect(page).toContain('api<AiChatResponse');
-    expect(page).toContain('>("/api/ai/chat"');
-    expect(page).toContain("computerUsePlanningObservation(snapshot)");
+  it("runs observe → Jev decision → main-process execute, one execution per decision", () => {
+    const body = loop.slice(loop.indexOf("for (;;)"));
+    const observeAt = body.indexOf("bridge.observe()");
+    const decideAt = body.indexOf("/decide");
+    const executeAt = body.indexOf("bridge.execute(");
+    expect(observeAt).toBeGreaterThan(-1);
+    expect(decideAt).toBeGreaterThan(observeAt);
+    expect(executeAt).toBeGreaterThan(decideAt);
+    expect(loop.match(/bridge\.execute\(/g)).toHaveLength(1);
+    expect(loop.match(/bridge\.consent\(/g)).toHaveLength(1);
+    expect(loop).not.toContain("callTool");
+  });
+
+  it("keeps the instruction out of chat persistence and sends only computer routes", () => {
+    expect(page).toContain("content: computerUseConversationRequestMessage(originalPrompt)");
+    expect(page).toContain("onFinish={result => recordComputerResult(result.summary)}");
     expect(page).toContain("appendComputerResult(request.conversationId, content)");
-    expect(page).not.toContain("appendComputerResult(request.conversationId, state");
+    expect(page).not.toContain('outputFormat: "computer_plan"');
+    expect(panel).not.toContain("/api/ai/");
+    expect(panel).not.toContain("localStorage");
+    expect([...loop.matchAll(/"\/api\/ai\/[^"`]*|`\/api\/ai\/[^`]*`/g)].map(match => match[0]).every(path => path.includes("/api/ai/computer/"))).toBe(true);
+    expect(loop).not.toContain("treeMarkdown");
   });
 
   it("stops the native session on account change and error-boundary logout", () => {
