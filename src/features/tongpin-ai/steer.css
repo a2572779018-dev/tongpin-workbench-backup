@@ -1,0 +1,80 @@
+/* Steer: the running (spinner) send button and pending supplements.
+   Selectors carry .tp-ai-page so they outrank chat-layout.css, which loads later. */
+.tp-ai-page .tp-ai-send-button.is-running {
+  position: relative;
+  color: #3d3520;
+  background: #faf3da;
+  cursor: pointer;
+}
+.tp-ai-page .tp-ai-send-button.is-running:hover:not(:disabled) {
+  background: #f3e5b3;
+}
+.tp-ai-send-button__ring {
+  position: absolute;
+  inset: 4px;
+  border: 2px solid #e6d7a4;
+  border-top-color: #8a6d1d;
+  border-radius: 50%;
+  animation: tp-ai-send-spin 0.9s linear infinite;
+  pointer-events: none;
+}
+@keyframes tp-ai-send-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  /* A still, partly open ring keeps the "working" cue without motion. */
+  .tp-ai-send-button__ring {
+    animation: none;
+    border-color: #c9ae55;
+    border-right-color: #eee2b9;
+  }
+}
+
+.tp-ai-page .tp-ai-message.tp-ai-steer .tp-ai-message__body > p {
+  border: 1px dashed #c8ad5c;
+  background: #f7f0d8;
+}
+.tp-ai-page .tp-ai-message .tp-ai-steer__meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin: 0 0 0.3rem;
+}
+.tp-ai-steer__tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid #b8983a;
+  border-radius: 999px;
+  background: #fff7d6;
+  color: #6b541a;
+  font-size: 0.68rem;
+  font-weight: 650;
+  line-height: 1.5;
+}
+.tp-ai-steer__status {
+  color: #7c735f;
+  font-size: 0.68rem;
+}
+.tp-ai-steer.is-handed .tp-ai-steer__status {
+  color: #4f6b2a;
+}
+.tp-ai-page .tp-ai-steer__cancel {
+  display: grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
+  border: 1px solid #d8cfb6;
+  border-radius: 0.4rem;
+  background: #fffaf0;
+  color: #6e6552;
+  cursor: pointer;
+}
+.tp-ai-page .tp-ai-steer__cancel:hover {
+  background: #f3ead0;
+  color: #343025;
+}
+.tp-ai-page .tp-ai-steer__cancel:focus-visible {
+  outline: 2px solid #8b7028;
+  outline-offset: 2px;
+}

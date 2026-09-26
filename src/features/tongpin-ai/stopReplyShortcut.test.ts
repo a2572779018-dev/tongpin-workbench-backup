@@ -36,6 +36,12 @@ describe("Esc stops the running reply", () => {
     expect(shouldStopReplyOnEscape(key({ keyCode: 229 }), environment())).toBe(false);
   });
 
+  it("never stops the task while the composer holds a typed correction", () => {
+    expect(shouldStopReplyOnEscape(key(), environment({ composerHasText: true }))).toBe(false);
+    expect(shouldStopReplyOnEscape(key({ target: body }), environment({ activeElement: body, composerHasText: true }))).toBe(false);
+    expect(shouldStopReplyOnEscape(key(), environment({ composerHasText: false }))).toBe(true);
+  });
+
   it("never fires behind a dialog, outside the chat, for repeats, modifiers or other keys", () => {
     expect(shouldStopReplyOnEscape(key(), environment({ modalOpen: true }))).toBe(false);
     expect(shouldStopReplyOnEscape(key({ target: sidebarButton }), environment({ activeElement: sidebarButton }))).toBe(false);

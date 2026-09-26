@@ -26,6 +26,7 @@ import { generationDiagnostic } from "./generationDiagnostic";
 import { createAiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 import { describeAiRichContent } from "../../shared/aiRichContent";
 import { citationsForContent } from "./citations";
+import { withPendingGuidance } from "./runGuidance";
 
 type MemberIdentity = Omit<AiMember, "quota">;
 const MAX_TOKEN_LIMIT = 1_000_000_000;
@@ -429,7 +430,8 @@ export class AiService {
         conversationId: claim.run.conversationId,
         mode: claim.run.tier,
         skillIds: ["agent-continuation-v1"],
-        messages: [{ role: "user", content: continuationPrompt(claim.trace, claim.allowed, this.harness.decisionContext(userId, requestId)) }],
+        // Mid-run member guidance (steer) joins this next step exactly once.
+        messages: withPendingGuidance(this.store, userId, requestId, [{ role: "user", content: continuationPrompt(claim.trace, claim.allowed, this.harness.decisionContext(userId, requestId)) }], { deliveredTo: claim.continuationRequestId }),
       });
       const parsed = parseHarnessContinuationDecision(decision.content, claim.allowed);
       return this.store.sql.transaction(() => this.harness.finishContinuation(userId, requestId, claim.continuationRequestId!, parsed));

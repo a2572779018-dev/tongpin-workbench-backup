@@ -46,6 +46,8 @@ import { conversationTaskStatus, messageTaskStatus, readSeenResults, saveSeenRes
 import { mediaCacheScope, videoBlobCache } from "../features/tongpin-ai/mediaCache";
 import { sameHarnessTrace } from "../features/tongpin-ai/runTracePolling";
 import { useNotificationToolbar } from "../components/NotificationToolbarContext";
+import { appendDraftText, awaitingUserConfirmation, latestAssistantMessage, steerDeliveryTarget, steerRunActive, supplementBlockReason } from "../features/tongpin-ai/composerSteer";
+import { runGuidanceClient, useSteerController, type SteerSendResult } from "../features/tongpin-ai/steerController";
 import { ArtifactPreview } from "../features/tongpin-ai/ArtifactPreview";
 import { applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE, settleReplyProcess, withReplyProcessTool, type AiReplyProcessLive } from "../../shared/aiReplyProcess";
 import { ChatWorkspace } from "../features/tongpin-ai/ChatWorkspace";
@@ -137,7 +139,9 @@ type GenerationRequest = AiChatRequest | AiImageRequest;
 type TaskContinuation = { conversationId: string; messageId: string; originalPrompt: string; snapshot: SubmissionSnapshot;
   /** A text turn's first save, still in flight. sendMessage overlaps its read-only
    * preflight with it and awaits it before persisting the reply or calling a model. */
-  recorded?: Promise<boolean> };
+  recorded?: Promise<boolean>;
+  /** Steer follow-up: text typed while the previous reply ran (always a text turn). */
+  supplement?: boolean };
 type ComputerUseRequest = {
   id: string;
   conversationId: string;
@@ -1926,8 +1930,74 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     return true;
   }
 
+  /** Steer: supplements typed while this conversation's reply ran, sent as ONE
+   * follow-up text turn marked `supplement` (framed for the model server-side).
+   * Owned by that conversation, never by the focused composer: consumes no
+   * draft or attachment and never navigates. Resolves once the turn exists. */
+  async function sendSupplementTurn(conversationId: string, text: string): Promise<SteerSendResult> {
+    const conversation = liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId);
+    if (!conversation) return { status: "failed", reason: "对话已删除，补充未发送" };
+    const lastReply = latestAssistantMessage(conversation.messages);
+    const blocked = supplementBlockReason({ onboarded: persona.profile.onboardingComplete, serviceConnected, connectionError: Boolean(connectionError), availabilityBlocked, quotaInsufficient,
+      syncBlocked: persistenceRef.current.status === "error" || persistenceRef.current.status === "conflict", computerActive: computerRequest?.conversationId === conversationId,
+      awaitingConfirmation: awaitingUserConfirmation(lastReply, workspaceRef.current.artifacts.find(item => item.id === lastReply?.artifactId && item.conversationId === conversationId)) });
+    if (blocked) return { status: "failed", reason: blocked };
+    if (conversationBusy(conversationId)) return { status: "retry" };
+    const project = workspaceRef.current.projects.find(item => item.id === conversation.projectId) ?? null;
+    const userMessage = { id: createLocalId("user"), role: "user" as const, content: text, time: currentTimeLabel() };
+    try {
+      // Read-only check first: a turn that cannot be sent leaves no trace in the conversation.
+      const probe: AiChatRequest = { ...buildChatRequest(crypto.randomUUID(), mode, [...conversation.messages, userMessage]), conversationId,
+        ...mentionedCapabilityRequest(text, [...enabledSkillIds]), projectContext: project?.instructions || undefined,
+        attachments: toolAttachmentContext([], project?.contextDocuments ?? [], conversation.messages), outputFormat: "dispatch", webSearchMode: "auto", supplement: true };
+      const preflight = await api<AiChatPreflight>("/api/ai/preflight", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(probe) });
+      statusGenerationRef.current += 1;
+      if (mountedRef.current) setAiStatus(current => current ? { ...current, quota: preflight.quota } : current);
+      // Just after a stop the server may still finish the old request: wait, then retry.
+      if (!preflight.canSend) return { status: preflight.reason === "request_in_progress" ? "retry" : "failed", reason: preflightNotice(preflight).message };
+    } catch (error) { return { status: "failed", reason: error instanceof Error ? error.message : "额度暂时无法核对，补充内容已放回输入框" }; }
+    const latest = workspaceRef.current;
+    const current = mountedRef.current ? liveConversation(latest, deletingConversationRef.current, conversationId) : undefined;
+    if (!current) return { status: "failed", reason: "对话已删除，补充未发送" };
+    if (conversationBusy(conversationId)) return { status: "retry" };
+    const messageId = createLocalId("assistant");
+    const next = mergeContinuation({ ...persistentStateRef.current, conversations: latest.conversations }, { ...current, timeLabel: "刚刚",
+      messages: [...current.messages, userMessage, { id: messageId, role: "assistant", content: "", status: "thinking", taskPhase: "queued", startedAt: Date.now(), time: currentTimeLabel() }] });
+    try { ensureAttachmentWorkspaceCapacity(next, "reply"); }
+    catch (error) { return { status: "failed", reason: error instanceof Error ? error.message : "保存空间不足，补充内容已放回输入框" }; }
+    const snapshot = captureSubmission({ conversationId, draftKey: conversationId, conversation: current, project, attachments: [], mode, skillIds: [...enabledSkillIds], webSearch: false });
+    submissionSnapshotsRef.current.set(messageId, snapshot);
+    pendingGenerationRef.current.add(conversationId);
+    pendingCancelledRef.current.delete(conversationId);
+    setReplyActivity(conversationId, messageId, "waiting");
+    workspaceRef.current = { ...latest, conversations: next.conversations };
+    persistentStateRef.current = next;
+    setConversations(next.conversations);
+    const recorded = persistenceRef.current.saveNow(next);
+    void (async () => {
+      try {
+        updateReply(conversationId, messageId, { taskPhase: "planning" });
+        await sendMessage(undefined, { conversationId, messageId, originalPrompt: text, snapshot, recorded, supplement: true });
+        // sendMessage may bail out before any request (stopped, sync lost…): never leave it
+        // spinning. Its own failure path may already have marked it and refilled the composer.
+        const owner = liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId);
+        if (mountedRef.current && owner && !owner.messages.find(item => item.id === messageId)?.requestId) {
+          setConversations(current => current.find(item => item.id === conversationId)?.messages.some(item => item.id === messageId && !item.requestId && item.status === "thinking")
+            ? replaceChatMessage(current, conversationId, messageId, { status: "stopped", content: "补充未发送，本次未调用模型。" }) : current);
+          setDrafts(current => current[conversationId]?.trim() ? current : { ...current, [conversationId]: text });
+        }
+      } catch (error) {
+        if (mountedRef.current) updateReply(conversationId, messageId, { status: "error", content: error instanceof Error ? error.message : "补充发送失败，请重试" });
+      } finally {
+        pendingGenerationRef.current.delete(conversationId); pendingCancelledRef.current.delete(conversationId);
+        if (mountedRef.current && !requestRef.current.has(conversationId)) clearReplyActivity(conversationId, messageId);
+      }
+    })();
+    return { status: "sent" };
+  }
+
   async function sendMessage(approvedPlan?: AiToolPlan & { originalPrompt: string }, continuation?: TaskContinuation) {
-    const generationTool = approvedPlan?.kind === "image" || approvedPlan?.kind === "presentation" ? approvedPlan.kind : composerTool;
+    const generationTool = approvedPlan?.kind === "image" || approvedPlan?.kind === "presentation" ? approvedPlan.kind : continuation?.supplement ? "text" : composerTool;
     if (!persona.profile.onboardingComplete || !continuation && (!draft.trim() && !attachments.length || preflightGate.busy || fileImportRef.current.has(draftKey)) || quotaInsufficient || !serviceConnected || connectionError || availabilityBlocked) return;
     const originId = continuation?.conversationId ?? activeConversationId;
     if (originId && !liveConversation(workspaceRef.current, deletingConversationRef.current, originId)) {
@@ -1974,6 +2044,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         projectContext: origin.project?.instructions || undefined,
         attachments: documentPayload, outputFormat: generationTool === "presentation" ? "presentation" : generationTool === "text" ? "dispatch" : "text",
         ...(generationTool === "presentation" ? { toolPlanRequestId: approvedPlan!.planRequestId } : {}), webSearchMode: "auto",
+        ...(continuation?.supplement ? { supplement: true as const } : {}),
       };
     } catch (error) { showAnnouncement(error instanceof Error ? error.message : "内容超出限制"); return; }
     // Check before saving a sent message, clearing the draft or calling a provider.
@@ -2136,6 +2207,33 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       return;
     }
     request?.controller.abort();
+  }
+
+  // Steer: supplements typed while a reply runs (lifecycle in steerController.ts).
+  const steerGuidance = useMemo(() => runGuidanceClient(api, user.id), [api, user.id]);
+  const steer = useSteerController({
+    sendFollowUp: sendSupplementTurn,
+    restoreDraft: (conversationId, text, reason) => {
+      // A draft keyed by a deleted conversation would make every later save fail.
+      if (!liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId)) { showAnnouncement("对话已删除，补充未发送", 6_000); return; }
+      setDrafts(current => ({ ...current, [conversationId]: appendDraftText(current[conversationId], text) }));
+      showAnnouncement(reason, 6_000);
+    },
+    recordDelivered: (conversationId, text) => setConversations(current => current.map(conversation => conversation.id === conversationId
+      ? { ...conversation, messages: [...conversation.messages, { id: createLocalId("user"), role: "user" as const, content: text, time: currentTimeLabel() }] } : conversation)),
+    isResponding: conversationBusy,
+    isRunActive: (conversationId, runRequestId) => steerRunActive(workspaceRef.current.conversations.find(item => item.id === conversationId)?.messages, runRequestId),
+    notify: message => showAnnouncement(message),
+    guidance: steerGuidance,
+  });
+  useEffect(() => { steer.sync(); }, [steer, conversationActivity, conversations]);
+  const activeReply = latestAssistantMessage(activeConversation?.messages);
+  // No steering while a confirmation card waits for the member.
+  const steerAllowed = Boolean(activeConversation) && !awaitingUserConfirmation(activeReply, activeReply?.artifactId ? artifactById.get(activeReply.artifactId) : undefined);
+  function addSupplement(conversationId: string, text: string): boolean {
+    const added = steer.add(conversationId, text, steerDeliveryTarget(latestAssistantMessage(workspaceRef.current.conversations.find(item => item.id === conversationId)?.messages)));
+    if (!added.ok) showAnnouncement(added.reason);
+    return added.ok;
   }
 
   function openArtifact(artifactId: string) {
@@ -2345,6 +2443,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onCloseComputer={closeComputerUse}
           onComputerResult={recordComputerResult}
           onStop={stopResponse}
+          pendingSupplements={steer.bubbles(activeConversation?.id)}
+          onSteer={steerAllowed && activeConversation ? text => addSupplement(activeConversation.id, text) : undefined}
+          onCancelSupplement={id => steer.cancel(id)}
           onRetry={retryReply}
           onTraceChange={(messageId, trace) => {
             if (activeConversation) updateHarnessTrace(activeConversation.id, messageId, trace);

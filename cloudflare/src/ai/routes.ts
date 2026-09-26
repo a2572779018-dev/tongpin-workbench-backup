@@ -11,6 +11,7 @@ import {
   type SubmitMediaTask,
 } from "../../../server/ai/mediaTaskOrchestrator";
 import type { MediaTaskRun } from "../../../server/ai/mediaTaskRuntime";
+import { runGuidanceRoute } from "../../../server/ai/runGuidance";
 
 const videoTier = (value: string | null): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
 
@@ -213,6 +214,10 @@ export async function handleAiRequest(request: Request, service: AiService, user
     if (assetMatch && method === "DELETE") { service.deleteAsset(user.id, decodeURIComponent(assetMatch[1])); return json({ deleted: true }); }
     const requestMatch = path.match(/^\/api\/ai\/requests\/([^/]+)$/);
     if (requestMatch && method === "GET") return json(service.getRequestResult(user.id, decodeURIComponent(requestMatch[1])));
+    // Mid-run guidance (steer); same contract as Express via runGuidanceRoute.
+    const guidanceMatch = path.match(/^\/api\/ai\/requests\/([^/]+)\/guidance(?:\/([^/]+))?$/);
+    if (guidanceMatch && ["GET", "POST", "DELETE"].includes(method)) return json(runGuidanceRoute(service.store, user.id, method, decodeURIComponent(guidanceMatch[1]),
+      guidanceMatch[2] === undefined ? undefined : decodeURIComponent(guidanceMatch[2]), method === "POST" ? await parseAiJson(request) : undefined));
     const runMatch = path.match(/^\/api\/ai\/runs\/([^/]+)$/);
     if (runMatch && method === "GET") return json({ trace: service.harnessTrace(user.id, decodeURIComponent(runMatch[1])) });
     if (runMatch && method === "DELETE") return json({ trace: service.cancelHarnessRun(user.id, decodeURIComponent(runMatch[1])) });

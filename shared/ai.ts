@@ -378,6 +378,10 @@ export interface AiChatRequest {
   videoParameters?: AiVideoPlanParameters;
   webSearch?: boolean;
   webSearchMode?: "auto";
+  /** The latest user turn is a correction/supplement typed while the previous
+   * reply was still running. The server adds a short framing line for the
+   * model only; the UI never shows it. */
+  supplement?: true;
   /** Server-owned: tool kinds the resolved tier actually permits. Never read
    * from the client body; set after route resolution. Undefined = legacy (all). */
   dispatchKinds?: AiDispatchToolKind[];

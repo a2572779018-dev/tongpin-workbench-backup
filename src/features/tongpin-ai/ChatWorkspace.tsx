@@ -50,6 +50,8 @@ import { ChatMessageRow } from "./ChatMessageRow";
 import { ReplyProcessDetailsContext, ReplyProcessDetailsToggle, useReplyProcessDetails } from "./ReplyProcess";
 import { hasReplyProcess } from "./replyProcessModel";
 import { OPEN_MODAL_SELECTOR, shouldStopReplyOnEscape } from "./stopReplyShortcut";
+import { COMPOSER_STEER_LABELS, composerHintText, composerSendMode, escapeStopsReply, type SteerBubble } from "./composerSteer";
+import { SteerSupplements } from "./SteerSupplements";
 import { AiVideoComposer, type VideoComposerHandle } from "./AiVideoComposer";
 import type { MediaTaskRun } from "./mediaTaskClient";
 import { ComputerUsePanel } from "./ComputerUsePanel";
@@ -64,6 +66,7 @@ import { videoReferencesFromAttachments, type LocalVideoReferenceImage } from ".
 import "./skill-mentions.css";
 
 const EMPTY_PROJECT_DOCUMENTS: AiWorkspaceDocument[] = [];
+const EMPTY_SUPPLEMENTS: readonly SteerBubble[] = [];
 
 interface ChatWorkspaceProps {
   artifactById: Map<string, TongpinAIArtifact>;
@@ -145,6 +148,11 @@ interface ChatWorkspaceProps {
   onPlanComputer?: (originalPrompt: string, state: ComputerUseWindowState) => Promise<ComputerUseModelPlan>;
   onCloseComputer?: () => void;
   onComputerResult?: (message: string) => void;
+  /** Supplements typed while the reply runs (steer), shown after that reply. */
+  pendingSupplements?: readonly SteerBubble[];
+  /** Given only when a supplement may join the running task; returns false when not accepted. */
+  onSteer?: (text: string) => boolean;
+  onCancelSupplement?: (id: string) => void;
 }
 
 export function ChatWorkspace({
@@ -222,6 +230,9 @@ export function ChatWorkspace({
   onPlanComputer,
   onCloseComputer,
   onComputerResult,
+  pendingSupplements = EMPTY_SUPPLEMENTS,
+  onSteer,
+  onCancelSupplement,
 }: ChatWorkspaceProps) {
   const chatRef = useRef<HTMLElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -494,11 +505,19 @@ export function ChatWorkspace({
     if (followResponseRef.current) scheduleFollowScroll();
   }, [messages, isEmpty, scheduleFollowScroll]);
   useEffect(() => {
+    // A newly sent supplement is the member's own action: bring it into view.
+    if (!pendingSupplements.length) return;
+    followResponseRef.current = true;
+    scheduleFollowScroll();
+  }, [pendingSupplements.length, scheduleFollowScroll]);
+  useEffect(() => {
     // Local typewriter updates do not rerender this workspace. Observe only the
     // active reply's height to retain follow-to-bottom without a polling loop.
     if ((!responding && (!lastMessage?.artifactId || artifactById.get(lastMessage.artifactId)?.kind !== "视频")) || typeof ResizeObserver === "undefined") return;
     const list = messageListRef.current;
-    const reply = list?.lastElementChild;
+    // Pending supplements render after the reply; keep observing the reply row itself.
+    const rows = list?.querySelectorAll("[data-ai-message-id]");
+    const reply = rows?.length ? rows[rows.length - 1] : list?.lastElementChild;
     if (!list || !reply) return;
     const observer = new ResizeObserver(() => {
       if (followResponseRef.current) scheduleFollowScroll();
@@ -576,7 +595,13 @@ export function ChatWorkspace({
   stopRef.current = onStop;
   const composerPopupRef = useRef(false);
   composerPopupRef.current = Boolean(mention) || Boolean(menu);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const canStopWithEscape = responding && Boolean(onStop) && !computerRequest;
+  // Steer: typing never touches the running task; text turns the spinner back into a send button.
+  const steerAvailable = Boolean(onSteer) && !computerRequest && !videoOpen && !videoBusy;
+  const sendMode = composerSendMode({ responding, draft, steerAvailable });
+  const escapeStops = escapeStopsReply({ canStop: canStopWithEscape, draft });
   useEffect(() => {
     if (!canStopWithEscape) return;
     function stopOnEscape(event: globalThis.KeyboardEvent) {
@@ -587,6 +612,7 @@ export function ChatWorkspace({
         documentElement: document.documentElement,
         modalOpen: Boolean(document.querySelector(OPEN_MODAL_SELECTOR)),
         popupOpen: composerPopupRef.current,
+        composerHasText: Boolean(draftRef.current.trim()),
       })) return;
       event.preventDefault();
       stopRef.current?.();
@@ -604,6 +630,11 @@ export function ChatWorkspace({
 
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
+    if (responding) {
+      // A supplement joins the running task; it never stops or replaces it.
+      if (sendMode === "steer" && onSteer?.(draft.trim())) { onDraftChange(""); setMention(undefined); followResponseRef.current = true; }
+      return;
+    }
     const { mentionedTools, requestedTool } = resolveToolIntent(draft);
     if (textOnly && (mentionedTools.length > 0 || requestedTool)) {
       setFileError("当前对话仅支持文字与附件问答，图片、视频和 PPT 生成尚未接入这条保存路径。");
@@ -827,6 +858,7 @@ export function ChatWorkspace({
                 onEditVideo={isVideoArtifact && onSubmitVideo ? editVideo : undefined}
               />;
             })}
+            {pendingSupplements.length ? <SteerSupplements items={pendingSupplements} onCancel={onCancelSupplement} /> : null}
             </ReplyProcessDetailsContext.Provider>
           </>
         )}
@@ -1100,17 +1132,22 @@ export function ChatWorkspace({
                 </select>
                 <ChevronDown size={12} />
               </label>}
-              {responding ? (
+              {sendMode === "stop" ? (
                 <button
                   type="button"
-                  className="tp-ai-send-button"
-                  aria-label={responsePhase === "typing" ? "立即显示完整回复" : "停止等待回复"}
-                  aria-keyshortcuts={canStopWithEscape ? "Escape" : undefined}
-                  title={canStopWithEscape ? "停止（Esc）" : undefined}
+                  className="tp-ai-send-button is-running"
+                  aria-label={COMPOSER_STEER_LABELS.stop}
+                  aria-keyshortcuts={escapeStops ? "Escape" : undefined}
+                  title={escapeStops ? COMPOSER_STEER_LABELS.stopTitle : COMPOSER_STEER_LABELS.stopTitleWithoutEscape}
                   disabled={!onStop}
                   onClick={onStop}
                 >
-                  <Square size={15} fill="currentColor" />
+                  <span className="tp-ai-send-button__ring" aria-hidden="true" />
+                  <Square size={10} fill="currentColor" aria-hidden="true" />
+                </button>
+              ) : sendMode === "steer" ? (
+                <button type="submit" className="tp-ai-send-button is-steer" aria-label={COMPOSER_STEER_LABELS.steer} title={COMPOSER_STEER_LABELS.steer}>
+                  <ArrowUp size={20} strokeWidth={2.5} />
                 </button>
               ) : (
                 <button
@@ -1127,7 +1164,7 @@ export function ChatWorkspace({
           </form>
           )}
         </div>
-        <p className="tp-ai-composer-hint">{computerRequest ? "每个动作都需要一次原生确认；关闭即停止本机会话" : canStopWithEscape ? "按 Esc 停止当前回复" : "Enter 发送 · Shift + Enter 换行"}</p>
+        <p className="tp-ai-composer-hint">{computerRequest ? "每个动作都需要一次原生确认；关闭即停止本机会话" : composerHintText({ responding, steerAvailable, draft, escapeStops })}</p>
       </footer>
     </section>
   );

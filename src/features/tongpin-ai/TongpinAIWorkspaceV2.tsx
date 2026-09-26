@@ -1,6 +1,6 @@
 import { FolderKanban, MessageSquare, MessageSquarePlus, Pencil, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AiChatRequest, AiChatResponse, AiRequestResult, AiStatus } from "../../../shared/ai";
+import type { AiChatPreflight, AiChatRequest, AiChatResponse, AiRequestResult, AiStatus } from "../../../shared/ai";
 import type { AiPersonaSnapshot } from "../../../shared/aiPersona";
 import type { AiWorkspaceArtifact, AiWorkspaceDocument, AiWorkspaceMessage, AiWorkspaceProject } from "../../../shared/aiWorkspace";
 import type { AiWorkspaceV2Bootstrap, AiWorkspaceV2DirectoryItem, AiWorkspaceV2MessagePage } from "../../../shared/aiWorkspaceV2";
@@ -22,6 +22,9 @@ import { mediaCacheScope } from "./mediaCache";
 import { registerAiLeaveGuard } from "./workspaceLeaveGuard";
 import { waitForReply } from "./waitForReply";
 import { workspaceV2Client } from "./workspaceV2Client";
+import { preflightNotice } from "./chatPreflight";
+import { appendDraftText, draftAfterSend } from "./composerSteer";
+import { useSteerController, type SteerSendResult } from "./steerController";
 import type { TongpinAIMode, TongpinAIUsage } from "./types";
 import { applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE, type AiReplyProcessLive } from "../../../shared/aiReplyProcess";
 import "./workspace-v2.css";
@@ -206,7 +209,8 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
     return saved;
   }, [persistDraft]);
   const changeDraft = useCallback((value: string) => {
-    if (!activeId || busyRef.current.has(activeId)) return;
+    // Typing stays enabled while a reply runs: it never touches the running request.
+    if (!activeId) return;
     putCache(activeId, old => ({ ...old!, draft: value }));
     const prior = draftTimersRef.current.get(activeId);
     if (prior) clearTimeout(prior);
@@ -364,10 +368,16 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
     } catch (error) { setNotice(error instanceof Error ? error.message : "附件添加失败"); }
   }, [activeId, saveAttachments]);
 
-  const send = useCallback(async () => {
-    const id = activeId;
-    if (!id || !cacheRef.current[id] || busyRef.current.has(id) || !aiStatus.configured || aiStatus.quota.remainingTokens <= 0) return;
-    if (uncertainAppendsRef.current.has(id)) { setNotice("上次发送结果尚未核对。请重新打开这段对话后继续，避免重复提交。"); return; }
+  /** `supplement`: a steer follow-up for `conversationId`; it never consumes the
+   * draft or its attachments, and `settle` reports once the user turn is saved. */
+  const send = useCallback(async (supplement?: { conversationId: string; text: string; settle: (result: SteerSendResult) => void }) => {
+    const id = supplement?.conversationId ?? activeId;
+    let settled = false;
+    const settle = (result: SteerSendResult) => { if (!settled) { settled = true; supplement?.settle(result); } };
+    if (!id || !cacheRef.current[id] || busyRef.current.has(id) || !aiStatus.configured || aiStatus.quota.remainingTokens <= 0) {
+      settle(id && busyRef.current.has(id) ? { status: "retry" } : { status: "failed", reason: "AI 服务或额度暂不可用，补充内容已放回输入框" }); return;
+    }
+    if (uncertainAppendsRef.current.has(id)) { setNotice("上次发送结果尚未核对。请重新打开这段对话后继续，避免重复提交。"); settle({ status: "failed", reason: "上次发送结果尚未核对，补充内容已放回输入框" }); return; }
     busyRef.current.add(id);
     setBusy(old => ({ ...old, [id]: true })); setNotice("");
     const controller = new AbortController();
@@ -376,9 +386,10 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
     let pendingRequestId: string | null = null;
     let userMessageSaved = false;
     try {
-      if (!(await flushDraft(id))) return;
+      if (!supplement && !(await flushDraft(id))) return;
       const current = cacheRef.current[id];
-      const content = current.draft.trim() || (current.attachments.length ? "请分析附件内容。" : "");
+      const documents = supplement ? [] : current.attachments;
+      const content = supplement ? supplement.text : current.draft.trim() || (documents.length ? "请分析附件内容。" : "");
       if (!content) return;
       // Resolve @Skill / @Hub before the turn is saved so an invalid choice
       // fails with the draft intact instead of leaving an unanswered message.
@@ -386,8 +397,8 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       const requestId = crypto.randomUUID();
       pendingRequestId = requestId;
       const message: AiWorkspaceMessage = { id: `user-${crypto.randomUUID()}`, role: "user", content,
-        time: timeLabel(), requestId, ...(current.attachments.length ? { attachments: current.attachments } : {}) };
-      const requestAttachments = toolAttachmentContext(current.attachments, current.project?.contextDocuments ?? [], current.messages);
+        time: timeLabel(), requestId, ...(documents.length ? { attachments: documents } : {}) };
+      const requestAttachments = toolAttachmentContext(documents, current.project?.contextDocuments ?? [], current.messages);
       const hasVisual = requestAttachments.some(item => item.dataUrl);
       if (hasVisual && !aiStatus.visionEnabled) throw new Error("当前模型未开启图片理解，请管理员启用后再发送；草稿已保留。");
       const mediaRefs = /视频|短片|成片|图片|图像|画面|观看|好看|评价|点评|配色|构图|镜头|这张|这段|刚才生成|上面生成|生成结果|生成成果|\bvideo\b|\bimage\b/i.test(content);
@@ -398,7 +409,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
         for (const item of found) visibleArtifacts[item.ref] = item.artifact;
         if (found.length && mountedRef.current) setArtifacts(old => ({ ...old, ...Object.fromEntries(found.map(item => [item.ref, item.artifact])) }));
       }
-      const media = current.attachments.some(item => item.media)
+      const media = documents.some(item => item.media)
         ? generatedMediaForMixedFollowup({ id, title: "", timeLabel: "", messages: current.messages }, Object.values(visibleArtifacts), content)
         : generatedMediaForFollowup({ id, title: "", timeLabel: "", messages: current.messages }, Object.values(visibleArtifacts), content);
       const visual = media ? await (async () => {
@@ -406,7 +417,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
         const { extractMediaAttachment } = await import("./mediaAttachments");
         return readGeneratedMedia(media, api, user.id, mediaCacheScope(session), controller.signal, extractMediaAttachment);
       })() : undefined;
-      const attachments = visual ? toolAttachmentContext(current.attachments, current.project?.contextDocuments ?? [], current.messages, visual) : requestAttachments;
+      const attachments = visual ? toolAttachmentContext(documents, current.project?.contextDocuments ?? [], current.messages, visual) : requestAttachments;
       const appendId = crypto.randomUUID();
       let ack;
       try { ack = await client.appendUser(bootstrapRef.current.epoch, id, cacheRef.current[id].revision, message, appendId); }
@@ -425,16 +436,18 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
           }
         }
       }
-      putCache(id, old => ({ ...old!, messages: [...old!.messages, message], revision: ack.revision, draft: "" }));
+      putCache(id, old => ({ ...old!, messages: [...old!.messages, message], revision: ack.revision, draft: supplement ? old!.draft : draftAfterSend(old!.draft, current.draft) }));
       userMessageSaved = true;
+      settle({ status: "sent" });
       // Draft cleanup is not a prerequisite for the already accepted model
       // request. A failed cleanup is surfaced, never mistaken for failed send.
-      void flushDraft(id);
+      if (!supplement) void flushDraft(id);
       const request: AiChatRequest = { ...buildChatRequest(requestId, mode, [...current.messages, message]),
         conversationId: id, attachments, outputFormat: "text",
         ...(capabilityRequest.skillIds.length ? capabilityRequest : {}),
         ...(current.project?.instructions ? { projectContext: current.project.instructions } : {}),
-        ...(mode === "quick" && aiStatus.quickAgent ? { webSearchMode: "auto" as const } : {}) };
+        ...(mode === "quick" && aiStatus.quickAgent ? { webSearchMode: "auto" as const } : {}),
+        ...(supplement ? { supplement: true as const } : {}) };
       const startedAt = Date.now();
       setStreamContent(old => ({ ...old, [id]: { content: "", analysisSummary: "", startedAt } }));
       let result: AiChatResponse;
@@ -468,7 +481,7 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       }
       if (result.requestId !== requestId) throw new Error("AI 请求标识与回复不一致");
       await commitRecordedReply(id, requestId);
-      if (current.attachments.length) await saveAttachments(id, []).catch(error => {
+      if (documents.length) await saveAttachments(id, []).catch(error => {
         if (mountedRef.current) setNotice(`回复已保存，但附件草稿未清理：${error instanceof Error ? error.message : "请刷新后重试"}`);
       });
       await refreshStatus();
@@ -477,7 +490,9 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
         if (userMessageSaved && pendingRequestId && queryCanRecover(error)) setRecoveryAction({ conversationId: id, requestId: pendingRequestId });
         setNotice(error instanceof Error ? error.message : "对话未完成。已保存的用户消息不会重复提交扣费。");
       }
+      settle({ status: "failed", reason: error instanceof Error ? error.message : "补充暂时无法发送，已放回输入框" });
     } finally {
+      settle({ status: "failed", reason: "补充暂时无法发送，已放回输入框" });
       controllersRef.current.delete(controller);
       if (activeControllersRef.current.get(id) === controller) activeControllersRef.current.delete(id);
       busyRef.current.delete(id);
@@ -487,6 +502,38 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
       }
     }
   }, [activeId, aiStatus.configured, aiStatus.quota.remainingTokens, aiStatus.quickAgent, aiStatus.visionEnabled, api, artifacts, client, commitRecordedReply, flushDraft, mode, putCache, refreshStatus, saveAttachments, session, user.id]);
+
+  // Steer: text-only V2 replies are single-stream, so supplements always wait
+  // for the reply to end and go out as one follow-up turn (steerController.ts).
+  const sendSupplement = useCallback(async (conversationId: string, text: string): Promise<SteerSendResult> => {
+    if (!aiStatus.configured) return { status: "failed", reason: "AI 服务暂不可用，补充内容已放回输入框" };
+    if (aiStatus.quota.remainingTokens <= 0) return { status: "failed", reason: "AI 额度不足，补充内容已放回输入框" };
+    if (busyRef.current.has(conversationId)) return { status: "retry" };
+    const current = cacheRef.current[conversationId];
+    if (!current) return { status: "failed", reason: "对话尚未加载，补充内容已放回输入框" };
+    try {
+      const probe: AiChatRequest = { ...buildChatRequest(crypto.randomUUID(), mode, [...current.messages, { id: "steer-probe", role: "user", content: text, time: timeLabel() }]),
+        conversationId, outputFormat: "text", supplement: true };
+      const preflight = await api<AiChatPreflight>("/api/ai/preflight", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(probe) });
+      if (!preflight.canSend) return { status: preflight.reason === "request_in_progress" ? "retry" : "failed", reason: preflightNotice(preflight).message };
+    } catch (error) { return { status: "failed", reason: error instanceof Error ? error.message : "额度暂时无法核对，补充内容已放回输入框" }; }
+    if (!mountedRef.current) return { status: "failed", reason: "页面已关闭，补充未发送" };
+    return new Promise<SteerSendResult>(resolve => { void send({ conversationId, text, settle: resolve }); });
+  }, [aiStatus.configured, aiStatus.quota.remainingTokens, api, mode, send, user.id]);
+  const steer = useSteerController({
+    sendFollowUp: sendSupplement,
+    restoreDraft: (conversationId, text, reason) => {
+      if (!cacheRef.current[conversationId]) { setNotice(`${reason}：${text}`); return; }
+      putCache(conversationId, old => ({ ...old!, draft: appendDraftText(old!.draft, text) }));
+      void flushDraft(conversationId);
+      setNotice(reason);
+    },
+    recordDelivered: () => undefined,
+    isResponding: conversationId => busyRef.current.has(conversationId),
+    isRunActive: () => false,
+    notify: setNotice,
+  });
+  useEffect(() => { steer.sync(); }, [steer, busy]);
 
   const displayMessages: Array<AiWorkspaceMessage & { liveProcess?: AiReplyProcessLive }> = active ? [...active.messages] : [];
   if (activeId && busy[activeId] && streamContent[activeId]) displayMessages.push({
@@ -533,6 +580,8 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
         void client.readArtifact(id, activeId).then(artifact => { setArtifacts(old => ({ ...old, [id]: artifact })); setPreviewId(id); })
           .catch(error => setNotice(error instanceof Error ? error.message : "成果读取失败"));
       }} onSubmit={() => void send()}
+      pendingSupplements={steer.bubbles(activeId)} onCancelSupplement={id => steer.cancel(id)}
+      onSteer={text => { const added = steer.add(activeId, text, { kind: "followup" }); if (!added.ok) setNotice(added.reason); return added.ok; }}
       onStop={() => { activeControllersRef.current.get(activeId)?.abort(); setNotice("已停止等待；原请求可在重新打开对话后按原编号查询，不会重新提交。"); }}
       onRefreshConnection={() => void refreshStatus()} /> : <main className="tp-ai-v2-empty"><h1>开始一段新对话</h1><button type="button" onClick={() => setNameDialog({ kind: "new" })}>新建对话</button></main>}
     {preview && <ArtifactPreview artifact={preview} onClose={() => setPreviewId(null)} />}

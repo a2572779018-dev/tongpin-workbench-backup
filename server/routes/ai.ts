@@ -15,6 +15,7 @@ import {
   type SubmitMediaTask,
 } from "../ai/mediaTaskOrchestrator";
 import type { MediaTaskRun } from "../ai/mediaTaskRuntime";
+import { runGuidanceRoute } from "../ai/runGuidance";
 
 const videoTier = (value: unknown): AiMode => ["quick", "standard", "deep", "pro"].includes(String(value)) ? value as AiMode : "quick";
 
@@ -212,6 +213,10 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.get("/assets/:id", (request, response) => response.json(scoped(request).getAsset(request.currentUser!.id, request.params.id)));
     router.delete("/assets/:id", (request, response) => { scoped(request).deleteAsset(request.currentUser!.id, request.params.id); response.json({ deleted: true }); });
     router.get("/requests/:id", (request, response) => response.json(scoped(request).getRequestResult(request.currentUser!.id, request.params.id)));
+    // Mid-run guidance (steer); same contract as the Worker via runGuidanceRoute.
+    router.post("/requests/:id/guidance", (request, response) => response.json(runGuidanceRoute(scoped(request).store, request.currentUser!.id, "POST", request.params.id, undefined, request.body)));
+    router.get("/requests/:id/guidance", (request, response) => response.json(runGuidanceRoute(scoped(request).store, request.currentUser!.id, "GET", request.params.id)));
+    router.delete("/requests/:id/guidance/:guidanceId", (request, response) => response.json(runGuidanceRoute(scoped(request).store, request.currentUser!.id, "DELETE", request.params.id, request.params.guidanceId)));
     router.get("/runs/:id", (request, response) => response.json({ trace: scoped(request).harnessTrace(request.currentUser!.id, request.params.id) }));
     router.post("/runs/:id/resume", async (request, response) => response.json({ trace: await scoped(request).resumeHarnessRun(request.currentUser!.id, request.params.id) }));
     router.delete("/runs/:id", (request, response) => response.json({ trace: scoped(request).cancelHarnessRun(request.currentUser!.id, request.params.id) }));
