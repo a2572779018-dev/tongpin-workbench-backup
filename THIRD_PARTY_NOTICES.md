@@ -55,6 +55,47 @@ release tag. This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this file, one
 can be obtained at https://mozilla.org/MPL/2.0/.
 
+## Cua jev-use closed-candidate decision pattern
+
+Tongpin's unified computer executor adapts the closed-candidate loop from the
+`jev-use` example in the Cua repository: every observation produces an
+immutable candidate table with complete natural-language descriptions and the
+reserved `reobserve` / `abstain` choices; the Jev answer is accepted only as one
+of the supplied ids and is resolved through the original table bound to that
+capture; outcomes are classified as verified, refuted, unknown, abstained or
+budget exhausted; a background refusal produces a distinct explicit foreground
+candidate instead of a blind retry; an uncertain action is never replayed.
+
+- Source: https://github.com/trycua/cua (`libs/cua-driver/examples/jev-use`)
+- Commit: e8777e6d6a997476cc254146ade31f772c56ec48
+- License: MIT, Copyright (c) 2025 Cua AI, Inc. (same license text as the Cua
+  Driver entry above)
+- Adapted from: `typescript/core.ts`, `typescript/jev_adapter.ts`,
+  `typescript/choose_action.ts`, `typescript/run.ts`
+- Adapted into: `electron/computer-agent-policy.cjs`, `electron/computer-agent.cjs`,
+  `server/ai/computerExecutor.ts`, `shared/computerAgent.ts`,
+  `src/features/tongpin-ai/computerExecutor.ts` (rewritten for Tongpin's
+  consent, authorization, billing and Electron boundaries; no file is copied
+  verbatim)
+
+## TypeSafe System One (Jev) API contract reference
+
+The Jev client in `server/ai/computerJev.ts` is a minimal fetch client written
+against the public TypeSafe HTTP API documentation (`POST /v1/systemone`,
+`GET /v1/models`). The official JavaScript SDK `@typesafe-ai/sdk` 0.6.0
+(https://github.com/typesafe-ai/typesafe-sdk-js, commit
+66880ccded6cb642dc1809620c2b108c33730214, MIT License) was consulted only as a
+reference for request/answer shapes and error statuses; it is not a dependency
+and none of its code is redistributed.
+
+## WeChat macOS accessibility reference
+
+The WeChat application alias (`com.tencent.xinWeChat`) and the expectation that
+WeChat 4.x exposes its search box, conversation list and message input through
+macOS accessibility were checked against the public notes of WeChat-MCP
+(https://github.com/BiboyQG/WeChat-MCP, MIT License). No code from that project
+is included.
+
 ## AI reply Markdown rendering
 
 `react-markdown` 10.1.0 (https://github.com/remarkjs/react-markdown) and

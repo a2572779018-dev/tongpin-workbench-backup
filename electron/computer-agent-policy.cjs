@@ -315,7 +315,7 @@ function projectObservation({ app, windowTitle, elements, treeTexts, axSparse, t
 
 function emptyTracker() {
   return Object.freeze({
-    focus: "none", searchText: null, composerText: null, conversationTarget: null,
+    focus: "none", searchText: null, composerText: null, conversationTarget: null, conversationVia: null,
     sendCount: 0, irreversibleCounts: Object.freeze({}), typed: Object.freeze([]),
     delivery: "background", backgroundSuspect: false,
     sendBaseline: null,
@@ -549,7 +549,16 @@ function occurrences(texts, content) {
  * holding the draft is not a sent message.
  */
 function sentTextCount(elements, content) {
-  return occurrences(elements.filter((element) => !element.editable).map((element) => element.text), content);
+  const target = normalizeName(content);
+  if (!target) return 0;
+  const length = [...target].length;
+  return elements.filter((element) => {
+    if (element.editable) return false;
+    const text = normalizeName(element.text);
+    // A bubble may carry a short decoration (sender, time); long unrelated
+    // paragraphs that merely contain a short text do not count.
+    return text === target || (length >= 2 && text.includes(target) && [...text].length <= length + 16);
+  }).length;
 }
 
 /**
@@ -563,15 +572,24 @@ function sendEvidence({ task, tracker, observation }) {
   if (!irreversible || !irreversible.recipient || !irreversible.content) return { ok: false, reason: "未授予发送消息" };
   const recipient = normalizeName(irreversible.recipient);
   const content = normalizeName(irreversible.content);
-  const texts = [observation.windowTitle || "", ...observation.elements.filter((element) => !element.editable).map((element) => element.text), ...observation.treeTexts];
-  const recipientVisible = texts.some((text) => normalizeName(text) === recipient);
-  const provenance = tracker.conversationTarget !== null && normalizeName(tracker.conversationTarget) === recipient
-    || normalizeName(observation.windowTitle || "") === recipient;
+  const labels = observation.elements.filter((element) => !element.editable);
+  const exactRecipient = labels.filter((element) => normalizeName(element.text) === recipient).length;
+  const titleNamesRecipient = normalizeName(observation.windowTitle || "") === recipient;
+  const recipientVisible = titleNamesRecipient || exactRecipient > 0 || observation.treeTexts.some((text) => normalizeName(text) === recipient);
+  // Opening a chat by clicking the exact contact is strong provenance. Search
+  // + Return may open another result (a group, an article), so it also needs
+  // the name shown twice (list item and chat header), a selected list item
+  // or the window title.
+  const openedByRun = tracker.conversationTarget !== null && normalizeName(tracker.conversationTarget) === recipient;
+  const selectedRecipient = labels.some((element) => element.selected && normalizeName(element.text) === recipient);
+  const provenance = titleNamesRecipient || selectedRecipient ||
+    (openedByRun && tracker.conversationVia === "click" && exactRecipient >= 1) ||
+    (openedByRun && exactRecipient >= 2);
   const inputs = observation.elements.filter((element) => element.editable && !element.searchLike);
   const inputHolds = inputs.some((element) => normalizeName(element.value) === content)
     || (inputs.every((element) => !element.value) && tracker.composerText !== null && normalizeName(tracker.composerText) === content && (tracker.focus === "conversation" || tracker.focus === "field"));
   if (!recipientVisible) return { ok: false, reason: `界面上没有看到联系人「${irreversible.recipient}」` };
-  if (!provenance) return { ok: false, reason: `无法确认当前聊天是本次为「${irreversible.recipient}」打开的` };
+  if (!provenance) return { ok: false, reason: `无法确认当前打开的聊天就是「${irreversible.recipient}」` };
   if (!inputHolds) return { ok: false, reason: `无法确认输入框里恰好是「${irreversible.content}」` };
   return { ok: true };
 }
@@ -641,7 +659,7 @@ function nextTracker(tracker, candidate, status, { task }) {
   const recipient = recipientOf(task);
   switch (candidate.kind) {
     case "activate_app":
-      Object.assign(next, { focus: "none", searchText: null, composerText: null, conversationTarget: null, delivery: "background" });
+      Object.assign(next, { focus: "none", searchText: null, composerText: null, conversationTarget: null, conversationVia: null, delivery: "background" });
       break;
     case "hotkey":
       // Re-opening search allows the search literal to be typed again.
@@ -658,7 +676,7 @@ function nextTracker(tracker, candidate, status, { task }) {
       if (candidate.key === "return") {
         if (tracker.focus === "search" && candidate.risk === "none") {
           const opened = tracker.searchText && recipient && normalizeName(tracker.searchText) === normalizeName(recipient) ? tracker.searchText : null;
-          Object.assign(next, { focus: "conversation", conversationTarget: opened, composerText: null, searchText: null, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
+          Object.assign(next, { focus: "conversation", conversationTarget: opened, conversationVia: opened ? "search" : null, composerText: null, searchText: null, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
         }
       } else if (candidate.key === "escape") {
         Object.assign(next, { focus: tracker.focus === "search" ? "none" : tracker.focus, searchText: null });
@@ -671,9 +689,9 @@ function nextTracker(tracker, candidate, status, { task }) {
       if (candidate.editable) {
         Object.assign(next, { focus: candidate.searchLike ? "search" : candidate.messageLike ? (tracker.conversationTarget ? "conversation" : "field") : "field" });
       } else if (candidate.matchesRecipient) {
-        Object.assign(next, { focus: "conversation", conversationTarget: recipient, composerText: null, searchText: null });
+        Object.assign(next, { focus: "conversation", conversationTarget: recipient, conversationVia: "click", composerText: null, searchText: null });
       } else {
-        Object.assign(next, { focus: "none", conversationTarget: null, composerText: null, searchText: null });
+        Object.assign(next, { focus: "none", conversationTarget: null, conversationVia: null, composerText: null, searchText: null });
       }
       break;
     default:

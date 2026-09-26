@@ -97,6 +97,7 @@ const MAX_REOBSERVE_STREAK = 3;
 const MAX_FAILURE_STREAK = 3;
 const MAX_BLOCKED_STREAK = 2;
 const NEEDS_USER_THRESHOLD = 0.8;
+const SEND_RECHECK_DELAY_MS = 1_500;
 const AUTO_DONE_THRESHOLD = 0.9;
 
 class RunStop extends Error {
@@ -115,6 +116,12 @@ function percent(value: number): string {
 /** `@computer` is routing syntax, not part of the task. */
 export function computerInstructionText(text: string): string {
   return text.replace(/(^|\s)@computer(?=\s|$|[，。！？,:;])/giu, "$1").replace(/\s+/gu, " ").trim();
+}
+
+/** A send was attempted, yet the input still holds the text and no new copy is visible. */
+function sendStuck(task: ComputerTaskSpec, facts: ComputerExecutorFacts): boolean {
+  const evidence = facts.sendEvidence;
+  return task.irreversible?.kind === "send_message" && facts.irreversibleDone && Boolean(evidence && evidence.inputStillHasText === true && evidence.after <= evidence.before);
 }
 
 function sendVisible(facts: ComputerExecutorFacts): boolean {
@@ -243,7 +250,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
     const history: ComputerHistoryEntry[] = [];
     const guidance: string[] = [];
     let lastAction: ComputerDecisionRequest["lastAction"];
-    let lowConfidenceStreak = 0, reobserveStreak = 0, failureStreak = 0, blockedStreak = 0, prematureDone = 0, observeFailures = 0;
+    let lowConfidenceStreak = 0, reobserveStreak = 0, failureStreak = 0, blockedStreak = 0, prematureDone = 0, observeFailures = 0, sendStuckSeen = 0;
 
     for (;;) {
       checkStopped();
@@ -265,6 +272,17 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       observeFailures = 0;
       const view = observed.value;
       if (view.display.app) appName = view.display.app;
+      // The granted send was attempted once but the input still holds the text
+      // and no new copy appeared: give the app a moment, then stop honestly
+      // instead of sending again.
+      if (sendStuck(spec, view.facts)) {
+        sendStuckSeen += 1;
+        if (sendStuckSeen >= 2) throw new RunStop("refuted", "goal_refuted", `已按授权尝试发送一次，但输入框里仍是“${spec.irreversible?.content ?? ""}”，聊天中也没有出现这条消息。为避免重复发送已停止，请在「${appName}」里手动发送，或检查发送快捷键设置`);
+        callbacks.onStep?.({ step, phase: "verify", observation: view.display, note: "发送后输入框仍有内容，稍等后再核对一次" });
+        await sleep(SEND_RECHECK_DELAY_MS);
+        continue;
+      }
+      sendStuckSeen = 0;
       callbacks.onStep?.({ step, phase: "decide", observation: view.display, candidateCount: view.candidates.length });
 
       const body: ComputerDecisionRequest = {
@@ -332,7 +350,8 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
 
       /* Confidence floors: reobserve once, then ask the member in chat. */
       const floor = choice.risk === "none" ? limits.minConfidence : Math.max(limits.minConfidence, COMPUTER_AGENT_LIMITS.irreversibleMinConfidence);
-      const sendDoubt = choice.risk === "send" && ((verification.recipientMatch ?? 1) < 0.5 || (verification.contentMatch ?? 1) < 0.5);
+      const matchFloor = COMPUTER_AGENT_LIMITS.irreversibleMinConfidence;
+      const sendDoubt = choice.risk === "send" && ((verification.recipientMatch ?? 1) < matchFloor || (verification.contentMatch ?? 1) < matchFloor);
       if (decision.confidence < floor || sendDoubt || choice.id === "abstain") {
         lowConfidenceStreak += 1;
         if (lowConfidenceStreak === 1) {

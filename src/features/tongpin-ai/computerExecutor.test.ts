@@ -219,6 +219,17 @@ describe("computer executor loop", () => {
     expect(result.summary).toContain("无法从界面确认");
   });
 
+  it("stops honestly when the attempted send is still sitting in the input box", async () => {
+    const stuck = view(0, [candidate("click_e7", "点击「发送」", "send", "click")], { irreversibleDone: true, sendEvidence: { before: 0, after: 0, inputStillHasText: true } });
+    const h = harness({ views: [stuck], decisions: [] });
+    const result = await run(h);
+    expect(result).toMatchObject({ outcome: "refuted", reason: "goal_refuted" });
+    expect(result.summary).toContain("为避免重复发送已停止");
+    expect(h.calls.observe).toBe(2);
+    expect(h.calls.decide).toHaveLength(0);
+    expect(h.bridge.execute).not.toHaveBeenCalled();
+  });
+
   it("never continues after an uncertain irreversible step", async () => {
     const h = harness({ views: [wechatViews[4]], decisions: [{ id: "key_return", confidence: 0.95 }], executions: [{ status: "unknown", message: "结果无法确认" }] });
     const result = await run(h);

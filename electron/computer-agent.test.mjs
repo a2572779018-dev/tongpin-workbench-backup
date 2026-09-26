@@ -55,7 +55,7 @@ function wechatApp(options = {}) {
     ignoresBackground: options.ignoresBackground ?? false,
     refuseBackground: options.refuseBackground ?? false,
   };
-  const contacts = ["姐姐", "妈妈", "文件传输助手"];
+  const contacts = options.contacts ?? ["姐姐", "妈妈", "文件传输助手"];
   app.render = () => {
     app.version += 1;
     const list = [];
@@ -74,7 +74,7 @@ function wechatApp(options = {}) {
     if (options.secureField) push({ role: "AXSecureTextField", label: "支付密码", value: "", frame: { x: 500, y: 400, w: 200, h: 30 } });
     if (app.chat) {
       push({ role: "AXStaticText", label: app.chat, frame: { x: 400, y: 60, w: 200, h: 30 } });
-      app.sent.forEach((text, index) => push({ role: "AXStaticText", label: text, frame: { x: 700, y: 200 + index * 40, w: 120, h: 30 } }));
+      app.sent.forEach((text, index) => push({ role: "AXStaticText", label: options.bubblePrefix ? `${options.bubblePrefix}${text}` : text, frame: { x: 700, y: 200 + index * 40, w: 120, h: 30 } }));
       if (options.deleteButton) push({ role: "AXButton", label: "删除聊天记录", frame: { x: 900, y: 60, w: 100, h: 30 } });
       push({ role: "AXTextArea", label: "", value: app.input, frame: { x: 380, y: 640, w: 560, h: 90 } });
       push({ role: "AXButton", label: "发送", frame: { x: 950, y: 740, w: 60, h: 30 } });
@@ -84,6 +84,7 @@ function wechatApp(options = {}) {
   };
   app.byToken = (token) => app.elements.find((element) => element.elementToken === token) || null;
   app.openChat = (name) => { app.chat = name; app.focus = "input"; app.search = ""; app.input = ""; };
+  app.options = options;
   app.send = () => { if (app.input) { app.sent.push(app.input); app.input = ""; } };
   return app;
 }
@@ -152,7 +153,7 @@ function fakeSdk(app, options = {}) {
       if (name === "press_key") {
         return applyKey(() => {
           if (args.key === "return") {
-            if (app.focus === "search" && ["姐姐", "妈妈", "文件传输助手"].includes(app.search)) app.openChat(app.search);
+            if (app.focus === "search" && app.search) app.openChat(app.options.searchOpens ?? app.search);
             else if (app.focus === "input") app.send();
           } else if (args.key === "escape") { app.focus = "none"; app.search = ""; }
         }, args.delivery_mode);
@@ -545,6 +546,33 @@ describe("computer agent authorization and scope", () => {
     const again = next.candidates.find((candidate) => candidate.label === "点击「删除聊天记录」");
     await agent.controller.execute({ observationId: next.observationId, candidateId: again.id });
     expect(agent.dialogs.extra).toHaveLength(2);
+  });
+
+  it("does not treat a search result that opened another chat as the granted recipient", async () => {
+    const agent = await started({ app: wechatApp({ focusVisible: true, contacts: ["姐姐们", "姐姐", "妈妈"], searchOpens: "姐姐们" }), extraConsent: false });
+    await step(agent, "open_search");
+    await step(agent, "type_p1_focus");
+    await step(agent, "key_return");
+    await step(agent, "type_p2_focus");
+    const view = await observe(agent);
+    expect(view.observation.elements.some((element) => element.label === "姐姐们")).toBe(true);
+    const send = view.candidates.find((candidate) => candidate.id === "key_return");
+    expect(send.risk).toBe("send");
+    const result = await agent.controller.execute({ observationId: view.observationId, candidateId: send.id });
+    expect(result.value).toMatchObject({ status: "blocked", authorization: "extra_consent" });
+    expect(agent.dialogs.extra[0].message).toContain("无法确认当前打开的聊天就是「姐姐」");
+    expect(agent.app.sent).toEqual([]);
+  });
+
+  it("counts a decorated message bubble as evidence of the send", async () => {
+    const agent = await started({ app: wechatApp({ focusVisible: true, bubblePrefix: "我：" }) });
+    await step(agent, "open_search");
+    await step(agent, "type_p1_focus");
+    await step(agent, "key_return");
+    await step(agent, "type_p2_focus");
+    await step(agent, "key_return");
+    const after = await observe(agent);
+    expect(after.facts.sendEvidence).toEqual({ before: 0, after: 1, inputStillHasText: false });
   });
 
   it("never types into a secure field and withholds focus typing while one is visible", async () => {
