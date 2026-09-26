@@ -17,10 +17,15 @@ import {
 } from "lucide-react";
 import {
   RELEASE_ANNOUNCEMENT_STORAGE_KEY,
-  formatReleaseAnnouncementBody,
   getReleaseAnnouncement,
+  releaseAnnouncementNotice,
   shouldShowReleaseAnnouncement,
 } from "../lib/releaseAnnouncement";
+import {
+  MAX_RELEASE_NOTE_ITEMS,
+  MAX_RELEASE_NOTE_ITEM_LENGTH,
+  releaseNotesNotice,
+} from "../lib/releaseNotes";
 
 export type NoticeTone = "info" | "success" | "warning" | "error" | "update";
 
@@ -35,6 +40,8 @@ export interface NoticeInput {
   id?: string;
   title: string;
   body: string;
+  /** Rendered one per line; two or more become a numbered list. */
+  items?: string[];
   tone?: NoticeTone;
   progress?: number;
   duration?: number;
@@ -144,6 +151,53 @@ function normalizeProgress(progress: number | undefined) {
   return Math.max(0, Math.min(100, progress));
 }
 
+export function normalizeNoticeItems(items: unknown): string[] | undefined {
+  if (!Array.isArray(items)) return undefined;
+  const normalized = items
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, MAX_RELEASE_NOTE_ITEMS)
+    .map((item) => item.slice(0, MAX_RELEASE_NOTE_ITEM_LENGTH));
+  return normalized.length ? normalized : undefined;
+}
+
+/** Visible notice copy: the body keeps author line breaks and items never
+ * run together — two or more are numbered, one is its own paragraph. */
+export function NoticeCopy({
+  body,
+  items,
+}: {
+  body: string;
+  items?: readonly string[];
+}) {
+  return (
+    <>
+      {body ? <p>{body}</p> : null}
+      {items && items.length > 1 ? (
+        <ol className="notice-card__list">
+          {items.map((item, index) => (
+            <li key={index}>{item}</li>
+          ))}
+        </ol>
+      ) : items?.length === 1 ? (
+        <p>{items[0]}</p>
+      ) : null}
+    </>
+  );
+}
+
+export function noticeSpeechText(notice: {
+  title: string;
+  body: string;
+  items?: readonly string[];
+}) {
+  const items = (notice.items ?? []).map((item, index) =>
+    notice.items && notice.items.length > 1 ? `${index + 1}. ${item}` : item,
+  );
+  return [`${notice.title}。${notice.body}`, ...items].join("\n");
+}
+
 export function publishNotice(input: NoticeInput) {
   window.dispatchEvent(
     new CustomEvent<NoticeInput>(NOTICE_EVENT, { detail: input }),
@@ -185,6 +239,7 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
         id,
         title: input.title.slice(0, 80),
         body: input.body.slice(0, 500),
+        items: normalizeNoticeItems(input.items),
         tone: input.tone ?? "info",
         progress: normalizeProgress(input.progress),
         dismissible: input.dismissible ?? true,
@@ -294,7 +349,7 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
     notify({
       id: `release-announcement-${currentVersion}`,
       title: `同频已更新至 v${currentVersion}`,
-      body: formatReleaseAnnouncementBody(announcement),
+      ...releaseAnnouncementNotice(announcement),
       tone: "update",
       dismissible: true,
       autoExpand: true,
@@ -310,14 +365,18 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
         return;
       }
       if (status.state === "available") {
+        const notes = releaseNotesNotice(
+          status.version ? `版本 ${status.version} 更新内容：` : "更新内容：",
+          status.releaseNotes,
+        );
         notify({
           id: "online-updater",
           title: "发现同频新版本",
           body:
-            (status.releaseNotes
-              ? `版本 ${status.version ?? ""}：${status.releaseNotes}`
-              : status.message) ||
+            notes?.body ||
+            status.message ||
             `版本 ${status.version ?? ""} 正在后台下载，完成后可以立即安装。`,
+          items: notes?.items,
           tone: "update",
           dismissible: false,
           autoExpand: true,
@@ -337,14 +396,15 @@ export function NoticeCenterProvider({ children }: PropsWithChildren) {
         return;
       }
       if (status.state === "downloaded") {
+        const notes = releaseNotesNotice("本次更新：", status.releaseNotes);
         notify({
           id: "online-updater",
           title: `同频 ${status.version ?? "新版本"} 已准备好`,
           body:
-            (status.releaseNotes
-              ? `本次更新：${status.releaseNotes}`
-              : status.message) ||
+            notes?.body ||
+            status.message ||
             "现在安装会重新启动同频；选择稍后安装时，退出软件后仍会自动完成更新。",
+          items: notes?.items,
           tone: "update",
           dismissible: true,
           autoExpand: true,
@@ -557,7 +617,7 @@ function NoticeOrb({
               </button>
             )}
           </header>
-          <p>{notice.body}</p>
+          <NoticeCopy body={notice.body} items={notice.items} />
           {notice.progress !== undefined && (
             <div className="notice-progress">
               <span
@@ -606,7 +666,7 @@ function NoticeOrb({
         </button>
       </div>
       <div className="sr-only" role="status" aria-live="polite">
-        {notice.title}。{notice.body}
+        {noticeSpeechText(notice)}
       </div>
     </>
   );

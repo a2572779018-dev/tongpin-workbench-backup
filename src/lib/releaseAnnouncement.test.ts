@@ -1,11 +1,18 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import packageJson from "../../package.json";
 import {
   CURRENT_RELEASE_VERSION,
   formatReleaseAnnouncementBody,
   getReleaseAnnouncement,
+  releaseAnnouncementNotice,
   shouldShowReleaseAnnouncement,
 } from "./releaseAnnouncement";
+
+const releaseNotesSource = readFileSync(
+  new URL("../../build/release-notes.md", import.meta.url),
+  "utf8",
+);
 
 describe("release announcement", () => {
   it("keeps release notes in sync with the packaged application version", () => {
@@ -41,6 +48,23 @@ describe("release announcement", () => {
     expect(formatReleaseAnnouncementBody(announcement!)).toContain(
       "保留任务、客户脉络图、AI 历史、密钥和已有成员额度",
     );
+  });
+
+  it("shows every release-notes line as its own numbered item", () => {
+    const announcement = getReleaseAnnouncement(packageJson.version)!;
+    const sourceLines = releaseNotesSource
+      .split(/\r?\n/)
+      .filter((line) => line.trim());
+    const notice = releaseAnnouncementNotice(announcement);
+
+    expect(announcement.highlights).toHaveLength(sourceLines.length);
+    expect(notice.body).toBe("本次更新：");
+    expect(notice.items).toEqual(announcement.highlights);
+    expect(notice.items?.every((item) => !/[；\n]/.test(item))).toBe(true);
+    expect(formatReleaseAnnouncementBody(announcement).split("\n")).toEqual([
+      "本次更新：",
+      ...announcement.highlights.map((item, index) => `${index + 1}. ${item}`),
+    ]);
   });
 
   it("does not repeat an announcement for the same installed version", () => {
