@@ -789,3 +789,56 @@ SOFTWARE.
 - License: MIT
 - Use in Tongpin: lightweight message-list entry and layout transitions. The
   library's default reduced-motion behavior is preserved.
+
+## AI-employee office visualization (code reference)
+
+`src/features/tongpin-ai/agentOffice/` — the Pixi.js scene that shows the Pro
+tier's multi-agent coordinator and its workers as small animated office
+employees — adapts source from Munder Difflin, a local-first multi-agent
+harness, commit `a7452eea45d3c37dfa6f352c10a2adaf0a307c25` (v0.4.6), available
+at https://github.com/chaitanyagiri/munder-difflin. The following were ported
+or adapted from its `src/renderer/src/scene/office/` directory: the WebGL
+context-loss detection and bounded-retry recovery logic (`glRecovery.ts`), the
+camera fit/scale math (`Camera.ts`), the thought- and tool-bubble UI widgets
+(`ThoughtBubble.ts`, `ToolBubble.ts`), the coordinator/worker envelope-flight
+animation (`MessageEnvelope.ts`), and the general approach of the procedural,
+pixel-buffer-based portrait engine used to draw each employee's bust.
+
+Two things from the same upstream directory were deliberately **not** used,
+for reasons unrelated to code license:
+
+- The LimeZu tileset and map assets under upstream's `src/renderer/src/assets/`
+  are covered by a separate, non-transferable asset license
+  (`LICENSE-ASSETS` upstream) and were never copied. Tongpin's office floor,
+  desks, monitors, chairs and plants are drawn procedurally with Pixi
+  `Graphics` in Tongpin's own palette instead.
+- Upstream's character roster (`cast.ts`) and its per-character portrait
+  recipes depict a specific, recognizable television show's cast. Neither the
+  roster nor any of its recipes were copied. Tongpin's employees use
+  originally-composed recipes (varied hair, skin tone and clothing) with
+  generic Chinese role labels (协调员, 研究员, 分析员, 撰稿员, …) and no
+  reference to the source show anywhere, including code comments.
+
+The ported/adapted files above are covered by upstream's MIT License:
+
+MIT License
+
+Copyright (c) 2026 Chaitanya Giri
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
