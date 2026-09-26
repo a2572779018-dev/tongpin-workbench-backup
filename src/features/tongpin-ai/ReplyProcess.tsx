@@ -26,6 +26,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { readAiProcessDetailsExpanded, saveAiProcessDetailsExpanded } from "../../lib/aiProcessPreference";
 import { aiMotionRef, prefersReducedMotion } from "./motion";
 import { MultiAgentProcess } from "./MultiAgentProcess";
+import { AgentOfficePanel, agentOfficeSnapshotFromMessage, type AgentOfficeSnapshot } from "./agentOffice";
 import {
   formatProcessTotal,
   isReplyProcessExpanded,
@@ -146,7 +147,7 @@ function showResultCard(event: MouseEvent<HTMLButtonElement>) {
   cards.querySelector<HTMLElement>("button:not(:disabled), a[href], video, [tabindex]:not([tabindex='-1'])")?.focus({ preventScroll: true });
 }
 
-function PartRow({ part }: { part: ReplyProcessPart }) {
+function PartRow({ part, office }: { part: ReplyProcessPart; office?: AgentOfficeSnapshot | null }) {
   let title: ReactNode;
   let detail: ReactNode = null;
   switch (part.kind) {
@@ -169,7 +170,8 @@ function PartRow({ part }: { part: ReplyProcessPart }) {
       break;
     case "agents":
       title = <><strong>多 Agent 协作</strong><small>{part.agents.length ? `${part.agents.filter(agent => agent.status === "done").length}/${part.agents.length} 个子任务完成` : part.state === "running" ? "任务分解中" : "未完成任务分解"}</small></>;
-      detail = <MultiAgentProcess part={part} />;
+      // The AI 员工办公室 sits with the sub-agent cards: open while the run works, collapsed once it settles.
+      detail = <><MultiAgentProcess part={part} />{office ? <AgentOfficePanel snapshot={office} /> : null}</>;
       break;
     case "tool":
       title = <><strong>工具调用 · {part.label}</strong><small>{part.statusText}</small>
@@ -218,6 +220,7 @@ export function ReplyProcess({ message, artifact, onTraceChange }: {
     onTraceChangeRef.current?.(message.id, next);
   }, [message.id]);
   const view = useMemo(() => replyProcessView({ message, artifact, trace }), [message, artifact, trace]);
+  const office = useMemo(() => agentOfficeSnapshotFromMessage(message), [message]);
   const elapsed = useElapsedSeconds(view?.streaming ? view.startedAt : undefined);
   const traceRequestId = harnessTraceRequestId(message);
   const poller = trace && traceRequestId && harnessTraceRefresh(trace)
@@ -239,7 +242,7 @@ export function ReplyProcess({ message, artifact, onTraceChange }: {
       </button>
       {view.phase !== "settled" ? <span className="sr-only" role="status">{replyProcessActivity(view, message)}</span> : null}
       {expanded ? <ol id={bodyId} className="tp-ai-process__parts" aria-label="回复过程详情" ref={view.streaming ? aiMotionRef : undefined}>
-        {view.parts.map(part => <PartRow key={part.key} part={part} />)}
+        {view.parts.map(part => <PartRow key={part.key} part={part} office={part.kind === "agents" ? office : undefined} />)}
         {view.phase === "settled" ? <li className={`tp-ai-process-part is-done is-outcome-${view.outcome}`}>
           <span className="tp-ai-process-part__icon">{OUTCOME_ICONS[view.outcome]}</span>
           <div className="tp-ai-process-part__body"><p className="tp-ai-process-part__title">

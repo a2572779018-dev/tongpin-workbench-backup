@@ -7,6 +7,7 @@
 export { AgentOfficeView, type AgentOfficeViewProps } from "./AgentOfficeView";
 export { AgentOfficePanel, type AgentOfficePanelProps } from "./AgentOfficePanel";
 export { AgentOfficeFallback, type AgentOfficeFallbackProps } from "./AgentOfficeFallback";
+export { AGENT_OFFICE_COORDINATOR_NAME, agentOfficeSnapshotFromMessage } from "./fromMultiAgent";
 export type {
   AgentOfficePhase,
   AgentOfficeSnapshot,
