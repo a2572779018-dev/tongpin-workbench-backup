@@ -1776,6 +1776,46 @@ describe("computer agent policy units", () => {
   });
 });
 
+describe("computer agent keypad tasks (macOS Calculator)", () => {
+  const CALC_TASK = Object.freeze({
+    goal: "打开电脑上的计算器，计算 128×36，读取计算器显示的结果",
+    apps: [{ name: "计算器", bundleId: "com.apple.calculator" }],
+    parameters: [{ id: "p1", role: "text", label: "算式", value: "128×36" }],
+    successCheck: "计算器显示 128×36 的计算结果",
+    actionKinds: ["activate_app", "click", "type", "key"],
+  });
+  // Calculator's keypad in accessibility order: "=" comes last.
+  const KEYPAD = ["全部清除", "正负号", "百分比", "除", "7", "8", "9", "乘", "4", "5", "6", "减", "1", "2", "3", "加", "0", "小数点", "等于"];
+  const button = (label, index) => ({ ref: `e${index + 1}`, token: `t${index + 1}`, role: "AXButton", roleShort: "button", roleKey: "axbutton", label, value: "", description: "", text: label, enabled: true, selected: false, editable: false, secure: false, searchLike: false, messageLike: false, messageBox: false, clickable: true, scrollable: false, frame: null, identity: `b${index}` });
+  const clickLabels = (task, labels) => policy.buildCandidates({
+    platform: "darwin", task, tracker: policy.emptyTracker(),
+    target: { app: "计算器", pid: 7, windowId: "5", title: "计算器", running: true, minimized: false }, appStates: [{ name: "计算器", running: true, hasWindow: true }],
+    // Window chrome and other buttons ahead of the keypad, as in the real tree.
+    elements: [...Array.from({ length: 8 }, (_, index) => button(`工具栏 ${index + 1}`, 100 + index)), ...labels.map(button)], axSparse: false, canLaunch: true,
+  }).filter((candidate) => candidate.kind === "click").map((candidate) => candidate.clickedText);
+
+  it("offers the digits, the operator and = that the expression needs, ahead of other buttons", () => {
+    const task = policy.validateTaskSpec(CALC_TASK).task;
+    const offered = clickLabels(task, KEYPAD);
+    for (const label of ["1", "2", "8", "乘", "3", "6", "等于"]) expect(offered).toContain(label);
+    expect(offered.indexOf("等于")).toBe(0);
+    expect(policy.keypadRelevance({ text: "Equals" }, task)).toBe(70);
+    expect(policy.keypadRelevance({ text: "Multiply" }, task)).toBe(50);
+    expect(policy.keypadRelevance({ text: "4" }, task)).toBe(0);
+    expect(policy.keypadRelevance({ text: "加" }, task)).toBe(0);
+    // Ranking only: = is not a risky control.
+    expect(policy.labelRisk("等于")).toBe("none");
+  });
+
+  it("leaves tasks without a calculation ranked as before", () => {
+    const task = policy.validateTaskSpec(TASK).task;
+    expect(policy.keypadRelevance({ text: "等于" }, task)).toBe(0);
+    expect(policy.keypadRelevance({ text: "1" }, task)).toBe(0);
+    const before = clickLabels(task, KEYPAD);
+    expect(before).not.toContain("等于");
+  });
+});
+
 describe("computer agent Electron boundary", () => {
   it("exposes four named agent channels, each checked against the main renderer, and no generic tool", async () => {
     const { readFileSync } = await import("node:fs");

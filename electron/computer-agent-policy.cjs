@@ -262,8 +262,37 @@ function parameterMatch(text, parameters) {
   return null;
 }
 
+/**
+ * Keypad buttons for a calculation the task spells out ("计算 128×36"). All
+ * keypad buttons score alike (plain buttons), so the digits, the operator and
+ * "=" could fall behind the first 16 buttons in accessibility order. Seen on
+ * macOS Calculator: "=" (等于) was never a candidate, so after clicking
+ * 1 2 8 × 3 6 Jev could only consider Return with unknown focus and stopped
+ * to ask twice. Only the ranking changes; risk and authorization do not.
+ */
+const ARITHMETIC_EXPRESSION = /\d\s*[+\-−＋－×xX*＊÷/／]\s*\d/u;
+const KEYPAD_OPERATORS = Object.freeze([
+  { symbols: /[+＋]/u, labels: /^(?:\+|＋|加|加号|plus|add)$/iu },
+  { symbols: /\d\s*[-−－]/u, labels: /^(?:-|−|－|减|减号|minus|subtract)$/iu },
+  { symbols: /[×xX*＊]/u, labels: /^(?:×|\*|x|乘|乘号|multiply|times)$/iu },
+  { symbols: /[÷/／]/u, labels: /^(?:÷|\/|除|除号|divide)$/iu },
+]);
+const KEYPAD_EQUALS = /^(?:=|＝|等于|等号|equals?)$/iu;
+const KEYPAD_DECIMAL = /^(?:\.|．|小数点|decimal|point)$/iu;
+
+function keypadRelevance(element, task) {
+  const label = normalizeName(element.text);
+  if (!label || [...label].length > 8 || element.editable) return 0;
+  const expressions = task.parameters.map((parameter) => parameter.value).filter((value) => ARITHMETIC_EXPRESSION.test(value));
+  if (!expressions.length) return 0;
+  if (KEYPAD_EQUALS.test(label)) return 70;
+  if (/^\d$/u.test(label)) return expressions.some((value) => value.includes(label)) ? 50 : 0;
+  if (KEYPAD_DECIMAL.test(label)) return expressions.some((value) => /\d[.．]\d/u.test(value)) ? 50 : 0;
+  return KEYPAD_OPERATORS.some((operator) => operator.labels.test(label) && expressions.some((value) => operator.symbols.test(value))) ? 50 : 0;
+}
+
 function relevance(element, task) {
-  let score = 0;
+  let score = keypadRelevance(element, task);
   const match = parameterMatch(element.text, task.parameters);
   if (match) score += match.exact ? (match.parameter.role === "recipient" ? 120 : 100) : 60;
   const risk = labelRisk(element.text);
@@ -1277,6 +1306,7 @@ module.exports = {
   facts,
   foregroundFirst,
   floatingGeometry,
+  keypadRelevance,
   labelRisk,
   landingView,
   modelElements,
