@@ -4807,7 +4807,8 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
   display: block;
   height: 100%;
   background: var(--yellow);
-  border-right: 1.5px solid var(--ink);
+  /* A shadow, not a border: an empty (0%) bar then draws no edge line. */
+  box-shadow: 1.5px 0 0 var(--ink);
   transition: width 420ms var(--ease, ease-out);
 }
 
