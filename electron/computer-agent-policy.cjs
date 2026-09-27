@@ -318,6 +318,9 @@ function emptyTracker() {
     focus: "none", searchText: null, composerText: null, conversationTarget: null, conversationVia: null,
     sendCount: 0, irreversibleCounts: Object.freeze({}), typed: Object.freeze([]),
     delivery: "background", backgroundSuspect: false,
+    // Element identities whose background click/type was refused or had no
+    // effect. They are offered again only as distinct foreground candidates.
+    refused: Object.freeze([]),
     sendBaseline: null,
   });
 }
@@ -393,6 +396,16 @@ function buildCandidates(context) {
   const elements = context.elements || [];
   const secureVisible = elements.some((element) => element.secure);
   const typedAlready = (field, text) => tracker.typed.some((entry) => entry.field === field && entry.text === text);
+  const refused = new Set(tracker.refused || []);
+  const shot = context.screenshot;
+  const pixelMap = shot && shot.frameValid && context.windowBounds && context.windowBounds.width > 0 ? shot.width / context.windowBounds.width : null;
+  /** Window-screenshot pixel position of an element's centre, or null. */
+  const pixelPoint = (element) => {
+    if (!pixelMap || !element.frame) return null;
+    const x = Math.round((element.frame.x - context.windowBounds.x + element.frame.width / 2) * pixelMap);
+    const y = Math.round((element.frame.y - context.windowBounds.y + element.frame.height / 2) * pixelMap);
+    return x >= 0 && y >= 0 && x < shot.width && y < shot.height ? { x, y } : null;
+  };
 
   // 2. Keyboard allowlist (window-targeted).
   if (kinds.has("key")) {
@@ -443,7 +456,7 @@ function buildCandidates(context) {
           expect: `The ${focusField === "search" ? "search box" : "input box"} contains "${quote(parameter.value)}".` });
       }
     }
-    const fields = elements.filter((element) => element.editable && !element.secure && element.enabled && element.token)
+    const fields = elements.filter((element) => element.editable && !element.secure && element.enabled && element.token && !refused.has(element.identity))
       .sort((a, b) => Number(b.searchLike) - Number(a.searchLike) || Number(b.messageLike) - Number(a.messageLike))
       .slice(0, 4);
     let typeCount = 0;
@@ -466,9 +479,35 @@ function buildCandidates(context) {
   // 4. Click actionable elements (relevance ranked).
   const reserved = RESERVED.length;
   const room = () => LIMITS.maxCandidates - reserved - out.length;
+
+  // 4a. After the target refused background input (or showed no effect), offer
+  // distinct foreground clicks at element positions: the element Jev wanted
+  // first, then input boxes and task-relevant items. Never an automatic retry.
+  if (kinds.has("click") && fg && pixelMap) {
+    const positioned = elements
+      .filter((element) => element.frame && element.enabled && !element.secure && (element.text || element.editable) && (element.clickable || element.editable))
+      .map((element) => ({ element, score: relevance(element, task) + (refused.has(element.identity) ? 200 : 0) + (element.searchLike || element.messageLike ? 30 : 0) }))
+      .filter(({ element, score }) => refused.has(element.identity) || element.editable || score >= 60)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+    for (const { element } of positioned) {
+      const point = pixelPoint(element);
+      if (!point) continue;
+      const risk = element.editable ? "none" : labelRisk(element.text);
+      const matchesRecipient = Boolean(recipient && normalizeName(element.text) === normalizeName(recipient));
+      const what = element.editable ? (element.searchLike ? "search box" : element.messageLike ? "message input box" : "input box") : element.roleShort;
+      add({ id: `point_${element.ref}_fg`, kind: "point", risk, point, elementRef: element.ref, delivery: "foreground",
+        ...(element.token ? { elementIdentity: element.identity } : {}),
+        editable: element.editable, searchLike: element.searchLike, messageLike: element.messageLike, matchesRecipient, clickedText: element.text,
+        description: `Click the ${what} "${quote(element.text || element.roleShort)}" at its position on screen with foreground delivery ("${quote(appName)}" comes to the front briefly) because background input was refused or had no effect.${risk === "send" ? sendClause(task) : risk !== "none" ? " This may be an irreversible action." : ""}`,
+        label: `点击「${quote(element.text || element.roleShort)}」（前台）`,
+        expect: element.editable ? `The ${what} "${quote(element.text || element.roleShort)}" has keyboard focus.` : matchesRecipient ? `The conversation with "${quote(recipient)}" is open.` : `The "${quote(element.text)}" item reacted.` });
+    }
+  }
+
   if (kinds.has("click")) {
     const clickable = elements
-      .filter((element) => element.token && element.enabled && element.clickable && !element.secure && (element.text || element.editable))
+      .filter((element) => element.token && element.enabled && element.clickable && !element.secure && (element.text || element.editable) && !refused.has(element.identity))
       .map((element) => ({ element, score: relevance(element, task) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.max(0, Math.min(16, room() - 2)));
@@ -484,17 +523,14 @@ function buildCandidates(context) {
   }
 
   // 5. Coordinate fallback when the accessibility tree is sparse.
-  const shot = context.screenshot;
-  if (kinds.has("click") && context.axSparse && shot && shot.frameValid && context.windowBounds && context.windowBounds.width > 0) {
-    const scale = shot.width / context.windowBounds.width;
+  if (kinds.has("click") && context.axSparse && pixelMap) {
     const points = elements
       .filter((element) => !element.token && element.frame && element.text && !element.secure && (parameterMatch(element.text, task.parameters) || labelRisk(element.text) === "send"))
       .slice(0, 4);
     for (const element of points) {
-      const localX = element.frame.x - context.windowBounds.x + element.frame.width / 2;
-      const localY = element.frame.y - context.windowBounds.y + element.frame.height / 2;
-      const x = Math.round(localX * scale), y = Math.round(localY * scale);
-      if (!(x >= 0 && y >= 0 && x < shot.width && y < shot.height)) continue;
+      const position = pixelPoint(element);
+      if (!position || out.some((candidate) => candidate.kind === "point" && candidate.elementRef === element.ref)) continue;
+      const { x, y } = position;
       const risk = labelRisk(element.text);
       const matchesRecipient = Boolean(recipient && normalizeName(element.text) === normalizeName(recipient));
       add({ id: `point_${element.ref}`, kind: "point", risk, point: { x, y }, elementRef: element.ref, delivery: tracker.delivery, matchesRecipient, clickedText: element.text,
@@ -645,8 +681,12 @@ function authorizeCandidate(candidate, { task, tracker, observation, grantApps }
  */
 function nextTracker(tracker, candidate, status, { task }) {
   const landed = status === "delivered" || status === "unverified";
-  const next = { ...tracker, typed: [...tracker.typed], irreversibleCounts: { ...tracker.irreversibleCounts } };
-  if ((status === "failed" || status === "no_effect") && candidate.delivery === "background" && ["key", "hotkey", "type", "point"].includes(candidate.kind)) next.delivery = "foreground";
+  const next = { ...tracker, typed: [...tracker.typed], irreversibleCounts: { ...tracker.irreversibleCounts }, refused: [...(tracker.refused || [])] };
+  const backgroundMiss = (status === "failed" || status === "no_effect") && candidate.delivery === "background";
+  if (backgroundMiss && ["key", "hotkey", "type", "point", "click"].includes(candidate.kind)) next.delivery = "foreground";
+  // The same element is not offered again in the background; a foreground
+  // position click for it becomes a distinct candidate instead.
+  if (backgroundMiss && candidate.elementIdentity && !next.refused.includes(candidate.elementIdentity)) next.refused = [...next.refused, candidate.elementIdentity].slice(-24);
   if (candidate.risk && candidate.risk !== "none" && candidate.kind !== "reserved" && ["delivered", "unverified", "no_effect", "unknown"].includes(status)) {
     next.irreversibleCounts[candidate.risk] = (next.irreversibleCounts[candidate.risk] || 0) + 1;
     if (candidate.risk === "send") next.sendCount += 1;

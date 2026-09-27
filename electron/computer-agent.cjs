@@ -343,6 +343,20 @@ const STATUS_MESSAGES = Object.freeze({
   unknown: "结果无法确认，不会重复执行",
 });
 
+/** Plain-language reason for a refused action; unknown codes stay visible for support. */
+const FAILURE_REASONS = Object.freeze({
+  background_unavailable: "目标应用不接受后台操作",
+  stale_element: "控件已变化",
+  element_not_found: "找不到这个控件",
+  invalid_arguments: "参数不被接受",
+  tool_error: "本机操作被拒绝",
+  timeout: "等待超时",
+});
+function failureMessage(code) {
+  if (!code) return STATUS_MESSAGES.failed;
+  return `${STATUS_MESSAGES.failed}（${FAILURE_REASONS[code] || `代码 ${code}`}）`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Controller.                                                         */
 /* ------------------------------------------------------------------ */
@@ -682,8 +696,12 @@ function createComputerAgentController({
       let snapshot = null;
       let screenshotUsed = false;
       if (target) {
-        snapshot = await capture(state, target, false);
-        if (snapshot && isSparse(snapshot.elements) && state.permissions.screenRecording) {
+        // After a background refusal, foreground position clicks need the
+        // window's pixel geometry, so capture it with the tree in one call.
+        const foreground = state.tracker.delivery === "foreground" && state.permissions.screenRecording;
+        snapshot = await capture(state, target, foreground);
+        if (foreground && snapshot) screenshotUsed = true;
+        if (snapshot && !foreground && isSparse(snapshot.elements) && state.permissions.screenRecording) {
           const withShot = await capture(state, target, true);
           if (withShot) { snapshot = withShot; screenshotUsed = true; }
         }
@@ -933,11 +951,14 @@ function createComputerAgentController({
     }
     state.tracker = policy.nextTracker(state.tracker, candidate, status, { task });
     const code = result.code || undefined;
+    const escalates = delivery === "background" && candidate.risk === "none" && candidate.kind !== "activate_app";
     const message = code === "background_unavailable"
       ? "目标应用不接受后台输入，下一步可改用前台输入"
-      : status === "no_effect" && delivery === "background" && candidate.risk === "none"
+      : status === "no_effect" && escalates
         ? "界面没有变化，下一步可改用前台输入"
-        : STATUS_MESSAGES[status] || "未执行";
+        : status === "failed" && escalates
+          ? `${failureMessage(code)}，下一步可改用前台操作`
+          : status === "failed" ? failureMessage(code) : STATUS_MESSAGES[status] || "未执行";
     return outcome(status, { authorization, code, delivery, message });
   }
 

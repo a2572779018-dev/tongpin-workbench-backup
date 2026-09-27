@@ -95,6 +95,8 @@ export interface ComputerRunDeps {
 const REOBSERVE_DELAY_MS = 700;
 const MAX_REOBSERVE_STREAK = 3;
 const MAX_FAILURE_STREAK = 3;
+/** Background refusals escalate to distinct foreground candidates; they get their own, separate budget. */
+const MAX_BACKGROUND_MISSES = 3;
 const MAX_BLOCKED_STREAK = 2;
 const NEEDS_USER_THRESHOLD = 0.8;
 const SEND_RECHECK_DELAY_MS = 1_500;
@@ -255,7 +257,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
     const history: ComputerHistoryEntry[] = [];
     const guidance: string[] = [];
     let lastAction: ComputerDecisionRequest["lastAction"];
-    let lowConfidenceStreak = 0, reobserveStreak = 0, failureStreak = 0, blockedStreak = 0, prematureDone = 0, observeFailures = 0, sendStuckSeen = 0;
+    let lowConfidenceStreak = 0, reobserveStreak = 0, failureStreak = 0, backgroundMisses = 0, blockedStreak = 0, prematureDone = 0, observeFailures = 0, sendStuckSeen = 0;
 
     for (;;) {
       checkStopped();
@@ -418,10 +420,14 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
         throw new RunStop("unknown", "action_uncertain", `「${choice.label}」的结果无法确认，为避免重复执行已停止，请到「${appName}」里核对`);
       }
       if (outcome.status === "failed" || outcome.status === "no_effect") {
-        failureStreak += 1;
-        if (failureStreak >= MAX_FAILURE_STREAK) throw new RunStop(irreversibleAttempted ? "unknown" : "abstained", "repeated_failures", REASON_TEXT.repeated_failures);
+        // A harmless background miss makes the next observation offer distinct
+        // foreground candidates, so it is not yet a sign that nothing works.
+        if (outcome.delivery === "background" && choice.risk === "none") backgroundMisses += 1;
+        else failureStreak += 1;
+        if (failureStreak >= MAX_FAILURE_STREAK || backgroundMisses >= MAX_BACKGROUND_MISSES) throw new RunStop(irreversibleAttempted ? "unknown" : "abstained", "repeated_failures", REASON_TEXT.repeated_failures);
       } else {
         failureStreak = 0;
+        backgroundMisses = 0;
       }
       lastAction = { action: choice.description, expect: choice.expect ?? "The screen changed as intended by this action." };
     }

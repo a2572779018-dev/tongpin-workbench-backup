@@ -133,13 +133,23 @@ function fakeSdk(app, options = {}) {
     click: vi.fn(async (input) => {
       calls.clicks.push(input);
       if (options.clickThrows) throw options.clickThrows;
-      if (input.position.tag === "Element") {
-        const element = app.byToken(input.position.inner.elementToken);
-        if (!element) throw toolError("stale_element");
+      const press = (element) => {
         if (element.label === "发送") app.send();
         else if (element.label === "删除聊天记录") app.deleted += 1;
         else if (["姐姐", "妈妈", "文件传输助手"].includes(element.label)) app.openChat(element.label);
         else if (element.role === "AXTextArea") app.focus = element.label === "Search" ? "search" : "input";
+      };
+      if (input.position.tag === "Element") {
+        // WeChat-like: virtual accessibility nodes cannot be pressed in the background.
+        if (options.refuseElementBackground && input.deliveryMode === 0) throw toolError("background_unavailable");
+        const element = app.byToken(input.position.inner.elementToken);
+        if (!element) throw toolError("stale_element");
+        press(element);
+      } else if (options.pointHits && input.deliveryMode === 1) {
+        // Window pixels of the 2000x1600 screenshot → screen points of the 1000x800 window at (100, 50).
+        const sx = 100 + input.position.inner.x / 2, sy = 50 + input.position.inner.y / 2;
+        const hit = app.elements.find((element) => element.frame && sx >= element.frame.x && sx <= element.frame.x + element.frame.w && sy >= element.frame.y && sy <= element.frame.y + element.frame.h);
+        if (hit) press(hit);
       }
       return { effect: effect.Confirmed, route: 0 };
     }),
@@ -160,6 +170,7 @@ function fakeSdk(app, options = {}) {
       }
       if (name === "type_text") {
         if (args.element_token) {
+          if (options.refuseElementBackground) return { isError: true, errorCode: "background_unavailable", text: "", images: [], degraded: false, rawJson: "{}" };
           const element = app.byToken(args.element_token);
           if (!element) return { isError: true, errorCode: "stale_element", text: "", images: [], degraded: false, rawJson: "{}" };
           if (element.label === "Search") { app.search = args.text; app.focus = "search"; } else { app.input = args.text; app.focus = "input"; }
@@ -501,6 +512,69 @@ describe("computer agent WeChat keyboard path", () => {
     const again = after.candidates.find((candidate) => candidate.label === "点击「发送」");
     const refused = await agent.controller.execute({ observationId: after.observationId, candidateId: again.id });
     expect(refused.value).toMatchObject({ status: "blocked", authorization: "denied" });
+  });
+});
+
+describe("computer agent foreground element escalation (WeChat virtual AX nodes)", () => {
+  it("turns a refused background element click into a distinct foreground position click, then finishes", async () => {
+    const agent = await started({ app: wechatApp(), sdkOptions: { refuseElementBackground: true, pointHits: true } });
+    const first = await step(agent, (candidate) => candidate.kind === "click" && candidate.label === "点击「Search」");
+    expect(first.result).toMatchObject({ status: "failed", code: "background_unavailable", delivery: "background" });
+    expect(first.result.message).toContain("下一步可改用前台");
+    expect(agent.fake.calls.clicks).toHaveLength(1);
+
+    const view = await observe(agent);
+    // The refused element is not offered again in the background …
+    expect(view.candidates.some((candidate) => candidate.kind === "click" && candidate.label === "点击「Search」")).toBe(false);
+    // … but as an explicit foreground click at its on-screen position, with pixel geometry captured once.
+    const fgSearch = view.candidates.find((candidate) => candidate.kind === "point" && candidate.label === "点击「Search」（前台）");
+    expect(fgSearch).toBeTruthy();
+    expect(fgSearch.description).toContain("foreground delivery");
+    expect(view.display.screenshotUsed).toBe(true);
+    expect(agent.fake.calls.states.at(-1).includeScreenshot).toBe(true);
+    // Keyboard candidates escalate too.
+    expect(view.candidates.some((candidate) => candidate.id === "open_search_fg")).toBe(true);
+
+    await agent.controller.execute({ observationId: view.observationId, candidateId: fgSearch.id });
+    // (110-100+90) * 2 = 200, (70-50+12) * 2 = 64 in the 2000x1600 screenshot.
+    expect(agent.fake.calls.clicks.at(-1)).toMatchObject({ deliveryMode: 1, position: { tag: "Coordinates", inner: { x: 200, y: 64 } } });
+    expect(agent.app.focus).toBe("search");
+
+    await step(agent, "type_p1_focus_fg");
+    expect(agent.app.search).toBe("姐姐");
+    const opened = await step(agent, "key_return_fg");
+    expect(opened.candidate.risk).toBe("none");
+    expect(agent.app.chat).toBe("姐姐");
+    await step(agent, "type_p2_focus_fg");
+    const send = await step(agent, "key_return_fg");
+    expect(send.candidate.risk).toBe("send");
+    expect(send.result.authorization).toBe("allowed");
+    expect(agent.app.sent).toEqual(["中秋快乐"]);
+    expect(agent.dialogs.extra).toHaveLength(0);
+  });
+
+  it("does not replay a refused element type in the background and names the refusal", async () => {
+    const agent = await started({ app: wechatApp(), sdkOptions: { refuseElementBackground: true } });
+    const typed = await step(agent, (candidate) => candidate.kind === "type" && candidate.label === "在搜索框「Search」输入「姐姐」");
+    expect(typed.result).toMatchObject({ status: "failed", code: "background_unavailable" });
+    const view = await observe(agent);
+    expect(view.candidates.some((candidate) => candidate.kind === "type" && candidate.label === "在搜索框「Search」输入「姐姐」")).toBe(false);
+    expect(view.candidates.some((candidate) => candidate.kind === "point" && candidate.label === "点击「Search」（前台）")).toBe(true);
+  });
+
+  it("offers no position clicks without Screen Recording, only foreground keyboard candidates", async () => {
+    const agent = await started({ app: wechatApp(), sdkOptions: { refuseElementBackground: true, screenRecording: false } });
+    await step(agent, (candidate) => candidate.kind === "click" && candidate.label === "点击「Search」");
+    const view = await observe(agent);
+    expect(view.display.screenshotUsed).toBe(false);
+    expect(view.candidates.some((candidate) => candidate.kind === "point")).toBe(false);
+    expect(view.candidates.some((candidate) => candidate.id === "open_search_fg")).toBe(true);
+  });
+
+  it("explains an unknown refusal code instead of a bare 未能执行", async () => {
+    const agent = await started({ app: wechatApp(), sdkOptions: { clickThrows: Object.assign(new Error("x"), { tag: "Tool", inner: { errorCode: "ax_press_unsupported" } }) } });
+    const clicked = await step(agent, (candidate) => candidate.kind === "click" && candidate.label === "点击「姐姐」");
+    expect(clicked.result.message).toBe("未能执行（代码 ax_press_unsupported），下一步可改用前台操作");
   });
 });
 
