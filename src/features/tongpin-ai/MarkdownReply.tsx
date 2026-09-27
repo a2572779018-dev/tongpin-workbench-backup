@@ -197,7 +197,7 @@ export const MarkdownReply = memo(function MarkdownReply({ content, typing = fal
   const text = useMemo(() => replyTreeText(tree), [tree]);
   return <div className={`tp-ai-markdown${live || typing ? " is-live" : ""}`}>
     {typing ? <TypewriterText content={text} render={offset => revealReplyTree(tree, offset)} />
-      : <StableMarkdownBlocks content={live ? reveal.text : content} renderBlock={renderBlock} renderTail={live ? renderStreamingTail : undefined} />}
+      : <StableMarkdownBlocks content={content} visible={live ? reveal.visible : undefined} renderBlock={renderBlock} renderTail={live ? renderStreamingTail : undefined} />}
     {typing && <span className="tp-ai-message__typing-caret" aria-hidden="true" />}
   </div>;
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
 import { ApiRequestError } from "../../lib/api";
-import { WORKSPACE_NETWORK_RETRY_DELAYS_MS, WorkspaceSaveQueue, workspaceNetworkRetryDelay, workspaceSaveOptions, workspaceSaveTimeoutMs } from "./workspaceSync";
+import { WORKSPACE_NETWORK_RETRY_DELAYS_MS, WorkspaceSaveQueue, workspaceNetworkRetryDelay, workspaceSaveOptions, workspaceSaveTimeoutMs, workspaceStateForServer } from "./workspaceSync";
 
 function state(title = "项目"): AiWorkspaceState {
   return { view: "project", mode: "quick", projects: [{ id: "project-a", title, timeLabel: "刚刚" }], conversations: [], artifacts: [], drafts: {}, activeProjectId: "project-a", activeConversationId: null, enabledSkillIds: [] };
@@ -18,6 +18,21 @@ function deferred<T>() {
   const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
   return { promise, resolve, reject };
 }
+
+describe("workspace state for the server", () => {
+  it("never saves the local typewriter playback: a typing reply is saved as ready", () => {
+    const base = state();
+    const withTyping: AiWorkspaceState = { ...base, conversations: [{ id: "c1", title: "对话", timeLabel: "刚刚", messages: [
+      { id: "u1", role: "user", content: "问题", time: "12:00" },
+      { id: "a1", role: "assistant", content: "回答", time: "12:00", status: "typing" as never },
+    ] }] } as AiWorkspaceState;
+    const saved = workspaceStateForServer(withTyping, undefined);
+    expect(saved.conversations[0].messages[1]).toMatchObject({ id: "a1", status: "ready" });
+    expect(withTyping.conversations[0].messages[1]).toMatchObject({ status: "typing" });
+    // Without a typing reply the state passes through as it is.
+    expect(workspaceStateForServer(base, undefined)).toBe(base);
+  });
+});
 
 describe("workspace serialized save queue", () => {
   it("does not write an unchanged snapshot and does not retain mutable caller references", async () => {

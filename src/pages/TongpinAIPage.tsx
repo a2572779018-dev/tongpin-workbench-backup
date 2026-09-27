@@ -30,6 +30,7 @@ import { draftsWithoutComputerRequests, mentionedCapabilityRequest } from "../fe
 import { computerUseConversationRequestMessage } from "../features/tongpin-ai/computerUseFlow";
 import { ComputerRunPanel } from "../features/tongpin-ai/ComputerRunPanel";
 import { ComputerRunLinkContext, type ComputerRunLink } from "../features/tongpin-ai/computerRunLink";
+import { prefersReducedMotion } from "../features/tongpin-ai/motion";
 import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence, typewriterDuration } from "../features/tongpin-ai/chatPerformance";
 import { computerTierNotice } from "../features/tongpin-ai/computerTier";
@@ -706,7 +707,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     setArtifactOpen(false);
     setComposerTool("text");
     setWebSearch(false);
-    setComputerPanelOpen(true);
+    // Beside the chat on a desktop-width window; on a narrow one the panel
+    // would cover the chat, so it starts collapsed (a question still opens it).
+    setComputerPanelOpen(window.innerWidth > 760);
     setComputerRequest({
       id: createLocalId("computer"),
       conversationId,
@@ -1093,12 +1096,26 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     };
     // A reply whose text never streamed (an answer wrapped in the dispatch
     // envelope, a recovered reply) would land all at once: play it in with the
-    // local typewriter first. Stop (Esc) finishes it at once.
-    if (mountedRef.current && !shownText.trim() && response.content.trim() && !typingRef.current.has(conversationId)) {
+    // local typewriter first. The whole reply is applied now; the end of the
+    // playback (or Stop / Esc) only turns "typing" into "ready", so fields set
+    // meanwhile (taskPhase "awaiting_input", a newer trace) are kept.
+    if (mountedRef.current && !shownText.trim() && response.content.trim() && !typingRef.current.has(conversationId) && !prefersReducedMotion() && !document.hidden) {
       updateReply(conversationId, messageId, { ...completedReply(response, { preserveExistingTrace }), status: "typing" });
       setReplyActivity(conversationId, messageId, "typing");
-      const timer = window.setTimeout(finish, typewriterDuration(response.content) + 150);
-      typingRef.current.set(conversationId, { timer, messageId, finish });
+      const settle = () => {
+        const typing = typingRef.current.get(conversationId);
+        if (typing?.messageId === messageId) {
+          window.clearTimeout(typing.timer);
+          typingRef.current.delete(conversationId);
+        }
+        if (!mountedRef.current) return;
+        setConversations(current => current.some(conversation => conversation.id === conversationId && conversation.messages.some(message => message.id === messageId && message.status === "typing"))
+          ? replaceChatMessage(current, conversationId, messageId, { status: "ready" })
+          : current);
+        clearReplyActivity(conversationId, messageId);
+      };
+      const timer = window.setTimeout(settle, typewriterDuration(response.content) + 150);
+      typingRef.current.set(conversationId, { timer, messageId, finish: settle });
       return;
     }
     finish();
@@ -2163,7 +2180,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       workspaceRef.current = { ...latest, conversations: next.conversations }; persistentStateRef.current = next;
       setConversations(next.conversations); setReplyActivity(owner.id, replyId, "waiting"); pendingGenerationRef.current.add(owner.id);
       try { if (await persistenceRef.current.saveNow(next)) await performChat(owner.id, replyId, request); else updateReply(owner.id, replyId, { status: "error", content: "记录尚未保存，本次没有重新提交。" }); }
-      finally { pendingGenerationRef.current.delete(owner.id); clearReplyActivity(owner.id, replyId); }
+      finally { pendingGenerationRef.current.delete(owner.id); if (typingRef.current.get(owner.id)?.messageId !== replyId) clearReplyActivity(owner.id, replyId); }
       return;
     }
     const retry = retryRequestsRef.current.get(messageId);

@@ -30,12 +30,18 @@ const CompletedMarkdownBlock = memo(function CompletedMarkdownBlock({ source, st
  * While streaming, the still-growing final block may use `renderTail` so an
  * unfinished construct (an open chart fence, a table header without its
  * delimiter row) is not shown as raw syntax that then jumps into a widget. */
-export const StableMarkdownBlocks = memo(function StableMarkdownBlocks({ content, renderBlock, renderTail }: {
+export const StableMarkdownBlocks = memo(function StableMarkdownBlocks({ content, renderBlock, renderTail, visible }: {
   content: string;
   renderBlock: RenderBlock;
   renderTail?: RenderBlock;
+  /** Render only this much of `content` (a streamed reply catching up):
+   * blocks before it stay memoized and only the cut block re-parses. */
+  visible?: number;
 }) {
   const blocks = useMemo(() => splitMarkdownIntoBlocks(content), [content]);
-  return <>{blocks.map((block, index) => <CompletedMarkdownBlock key={index} source={block.raw} start={block.start}
-    renderBlock={renderTail && index === blocks.length - 1 ? renderTail : renderBlock} />)}</>;
+  const limit = visible === undefined ? content.length : Math.max(0, Math.min(visible, content.length));
+  const shown = limit >= content.length ? blocks : blocks.filter(block => block.start < limit);
+  return <>{shown.map((block, index) => <CompletedMarkdownBlock key={index}
+    source={block.end > limit ? block.raw.slice(0, limit - block.start) : block.raw} start={block.start}
+    renderBlock={renderTail && index === shown.length - 1 ? renderTail : renderBlock} />)}</>;
 });

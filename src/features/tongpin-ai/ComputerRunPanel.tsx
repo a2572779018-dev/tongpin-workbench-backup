@@ -257,14 +257,14 @@ export function ComputerRunStatusBar({ running, stopping, question, outcome, tex
 }) {
   const title = question ? "需要你确认" : running ? (stopping ? "正在停止" : "电脑操作进行中") : COMPUTER_OUTCOME_LABELS[outcome ?? "abstained"];
   const tone = question ? "is-question" : running ? "is-running" : outcome === "verified" ? "is-done" : "is-ended";
-  return <section className={`tp-ai-computer-bar ${tone}`} aria-label="电脑操作状态" aria-busy={running}>
+  return <section className={`tp-ai-computer-bar ${tone}`} aria-label="电脑操作状态">
     <span className="tp-ai-computer-bar__icon" aria-hidden="true">
       {question ? <TriangleAlert size={16} /> : running ? <LoaderCircle size={16} className="is-spinning" /> : outcome === "verified" ? <CircleCheck size={16} /> : <TriangleAlert size={16} />}
     </span>
     <p className="tp-ai-computer-bar__text" role="status"><strong>{title}</strong><span>{text}</span></p>
     <div className="tp-ai-computer-bar__actions">
       {question && !panelOpen ? <button type="button" className="is-primary" onClick={onTogglePanel}>去确认</button>
-        : <button type="button" onClick={onTogglePanel} aria-pressed={panelOpen}>{panelOpen ? <PanelRightClose size={15} aria-hidden="true" /> : <PanelRightOpen size={15} aria-hidden="true" />}{panelOpen ? "收起过程" : "查看过程"}</button>}
+        : <button type="button" onClick={onTogglePanel} aria-expanded={panelOpen}>{panelOpen ? <PanelRightClose size={15} aria-hidden="true" /> : <PanelRightOpen size={15} aria-hidden="true" />}{panelOpen ? "收起过程" : "查看过程"}</button>}
       {running
         ? <button type="button" className="is-stop" onClick={onStop} disabled={stopping} aria-label="停止电脑操作"><CircleStop size={15} aria-hidden="true" />停止</button>
         : <button type="button" className="is-primary" onClick={onClose}>继续对话</button>}

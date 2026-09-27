@@ -32,42 +32,53 @@ export function nextRevealLength(content: string, shown: number, streaming: bool
 }
 
 export interface StreamReveal {
-  /** The text to render now. */
-  text: string;
+  /** How much of the content to render now (UTF-16 units). */
+  visible: number;
   /** Still catching up with text that has arrived (the reply renders as live). */
   revealing: boolean;
 }
 
+/**
+ * One reveal loop per reply: it reads the latest content from a ref, so a new
+ * network flush never restarts it, and it stops once caught up. What the
+ * reply shows when it mounts is shown at once (it eases in as a whole).
+ */
 export function useStreamReveal(content: string, streaming: boolean): StreamReveal {
   const streamedRef = useRef(streaming);
   if (streaming) streamedRef.current = true;
-  // What has already arrived when the reply mounts shows at once (it eases in
-  // as a whole); only text that arrives afterwards is revealed.
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const streamingRef = useRef(streaming);
+  streamingRef.current = streaming;
   const [shown, setShown] = useState(content.length);
   const shownRef = useRef(shown);
-  shownRef.current = shown;
-  const previousRef = useRef(content);
+  const timerRef = useRef<number | undefined>(undefined);
+  // What was rendered last: a reply rewritten rather than extended (the saved
+  // text differs from the streamed one) is shown whole in that same render.
+  const renderedRef = useRef({ content, visible: content.length });
+  const rewritten = !content.startsWith(renderedRef.current.content.slice(0, Math.min(renderedRef.current.visible, content.length)));
 
+  useEffect(() => () => { window.clearTimeout(timerRef.current); timerRef.current = undefined; }, []);
   useEffect(() => {
-    const previous = previousRef.current;
-    previousRef.current = content;
     if (!streamedRef.current) return;
-    // A reply rewritten rather than extended (e.g. the saved text differs from
-    // the streamed one) is not replayed: show it as it is.
-    if (!content.startsWith(previous.slice(0, Math.min(shownRef.current, content.length))) || shownRef.current >= content.length
-      || prefersReducedMotion() || (typeof document !== "undefined" && document.hidden)) {
+    const done = () => { window.clearTimeout(timerRef.current); timerRef.current = undefined; };
+    if (rewritten || prefersReducedMotion() || (typeof document !== "undefined" && document.hidden)) {
+      done();
       if (shownRef.current !== content.length) { shownRef.current = content.length; setShown(content.length); }
       return;
     }
-    let timer = window.setTimeout(function tick() {
-      const next = nextRevealLength(content, shownRef.current, streaming);
+    if (shownRef.current >= content.length || timerRef.current !== undefined) return;
+    const tick = () => {
+      const text = contentRef.current;
+      const next = nextRevealLength(text, Math.min(shownRef.current, text.length), streamingRef.current);
       shownRef.current = next;
       setShown(next);
-      if (next < content.length) timer = window.setTimeout(tick, STREAM_REVEAL_FRAME_MS);
-    }, STREAM_REVEAL_FRAME_MS);
-    return () => window.clearTimeout(timer);
-  }, [content, streaming]);
+      timerRef.current = next < text.length ? window.setTimeout(tick, STREAM_REVEAL_FRAME_MS) : undefined;
+    };
+    timerRef.current = window.setTimeout(tick, STREAM_REVEAL_FRAME_MS);
+  }, [content, streaming, rewritten]);
 
-  const visible = Math.min(shown, content.length);
-  return { text: visible >= content.length ? content : content.slice(0, visible), revealing: streamedRef.current && visible < content.length };
+  const visible = !streamedRef.current || rewritten ? content.length : Math.min(shown, content.length);
+  renderedRef.current = { content, visible };
+  return { visible, revealing: streamedRef.current && visible < content.length };
 }

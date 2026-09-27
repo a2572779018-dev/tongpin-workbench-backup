@@ -29,20 +29,30 @@ describe("chat entrance motion plan", () => {
     const recent = [user("u3"), reply("a3")];
     expect(planMessageMotion(baseline("c1", recent), "c1", [user("u1"), reply("a1"), ...recent]).rows).toEqual([]);
     const bulk = Array.from({ length: MAX_LIVE_ROWS + 1 }, (_, index) => index % 2 ? reply(`a${index}`) : user(`u${index}`));
-    expect(planMessageMotion(baseline("c1", []), "c1", bulk).rows).toEqual([]);
+    expect(planMessageMotion(baseline("c1", [user("x0")]), "c1", [user("x0"), ...bulk]).rows).toEqual([]);
     // A streamed placeholder swapped for the saved reply is the same content.
     const streamed = [user("u1"), reply("stream-c1", "thinking", "完整回答")];
     expect(planMessageMotion(baseline("c1", streamed), "c1", [user("u1"), reply("a1", "ready", "完整回答")]).rows).toEqual([]);
   });
 
   it("fades the log when another conversation opens, but animates the rows of a first send", () => {
-    expect(planMessageMotion(baseline("c1", [user("u1")]), "c2", [user("x1"), reply("x2")])).toEqual({ list: true, rows: [] });
-    expect(planMessageMotion(baseline("c1", [user("u1")]), undefined, [])).toEqual({ list: true, rows: [] });
+    const now = 1_000_000;
+    expect(planMessageMotion(baseline("c1", [user("u1")]), "c2", [user("x1"), reply("x2")], now)).toEqual({ list: true, rows: [] });
+    expect(planMessageMotion(baseline("c1", [user("u1")]), undefined, [], now)).toEqual({ list: true, rows: [] });
     // From the welcome screen: the new conversation holds just this send.
-    expect(planMessageMotion(baseline(undefined, []), "c3", [user("n1"), reply("n2", "thinking", "")]))
+    const placeholder = { ...reply("n2", "thinking", ""), startedAt: now - 50 };
+    expect(planMessageMotion(baseline(undefined, []), "c3", [user("n1"), placeholder], now))
       .toEqual({ list: false, rows: [{ id: "n1", entrance: "user" }, { id: "n2", entrance: "assistant" }] });
     // From the welcome screen into an existing, settled conversation: a switch.
-    expect(planMessageMotion(baseline(undefined, []), "c1", [user("u1"), reply("a1")])).toEqual({ list: true, rows: [] });
+    expect(planMessageMotion(baseline(undefined, []), "c1", [user("u1"), reply("a1")], now)).toEqual({ list: true, rows: [] });
+    // …or into one whose reply has been running in the background for a while.
+    expect(planMessageMotion(baseline(undefined, []), "c1", [user("u1"), { ...reply("a1", "thinking", ""), startedAt: now - 60_000 }], now)).toEqual({ list: true, rows: [] });
+  });
+
+  it("fades in a conversation whose list loads after it opened (V2), instead of replaying a send", () => {
+    // V2 mounts the workspace for the conversation with no messages, then loads them.
+    expect(planMessageMotion(baseline("c1", []), "c1", [user("u1"), reply("a1")])).toEqual({ list: true, rows: [] });
+    expect(planMessageMotion(baseline("c1", []), "c1", [])).toEqual({ list: false, rows: [] });
   });
 });
 
@@ -67,6 +77,18 @@ describe("chat entrance motion playback", () => {
     playMessageMotion(list, { list: true, rows: [{ id: "u1", entrance: "user" }] }, () => true);
     expect(list.animate).not.toHaveBeenCalled();
     expect(rows[0].animate).not.toHaveBeenCalled();
+  });
+
+  it("renders only what the reveal allows, cutting a single block", async () => {
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { StableMarkdownBlocks } = await import("./librechatMarkdownBlocks");
+    const content = "第一段完整的内容。\n\n第二段正在出现的内容。";
+    const render = (visible?: number) => renderToStaticMarkup(createElement(StableMarkdownBlocks, { content, visible, renderBlock: (source: string) => createElement("p", null, source) }));
+    expect(render()).toBe("<p>第一段完整的内容。</p><p>第二段正在出现的内容。</p>");
+    // 9 characters, a blank line, then 4 of the second block.
+    expect(render(15)).toBe("<p>第一段完整的内容。</p><p>第二段正</p>");
+    expect(render(5)).toBe("<p>第一段完整</p>");
   });
 
   it("is wired into the workspace before paint, keyed on the conversation and its messages", () => {

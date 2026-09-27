@@ -15,6 +15,7 @@ export interface MotionMessage {
   role: string;
   status?: string;
   content: string;
+  startedAt?: number;
 }
 
 export interface MessageMotionBaseline {
@@ -43,16 +44,30 @@ function entrance(message: MotionMessage): RowEntrance | null {
   return message.role === "assistant" ? "assistant" : null;
 }
 
+/** A waiting reply this recent was just sent, not found running in the background. */
+export const FRESH_SEND_MS = 5_000;
+
+/**
+ * A conversation that appears with nothing before it (the welcome screen, or
+ * a list that just loaded) holding only a send made right now: the member's
+ * message alone, or with a reply placeholder that just started.
+ */
+function freshSend(messages: readonly MotionMessage[], now: number): boolean {
+  const last = messages.at(-1);
+  if (!last || messages.length > MAX_LIVE_ROWS) return false;
+  if (last.role === "user") return messages.length === 1;
+  return waitingReply(last) && (last.startedAt === undefined || (now - last.startedAt >= 0 && now - last.startedAt <= FRESH_SEND_MS));
+}
+
 /** What eases in after this render; `previous` is the last render's baseline (null on mount). */
-export function planMessageMotion(previous: MessageMotionBaseline | null, conversationId: string | null | undefined, messages: readonly MotionMessage[]): MessageMotionPlan {
+export function planMessageMotion(previous: MessageMotionBaseline | null, conversationId: string | null | undefined, messages: readonly MotionMessage[], now: number = Date.now()): MessageMotionPlan {
   if (!previous) return NO_MOTION;
-  if (previous.conversationId !== conversationId) {
-    // The first send from the welcome screen opens its new conversation with
-    // the member's message and the reply placeholder: those rows ease in.
-    const last = messages.at(-1);
-    const freshStart = previous.conversationId == null && messages.length > 0 && messages.length <= MAX_LIVE_ROWS
-      && Boolean(last) && (last!.role === "user" || waitingReply(last!));
-    if (!freshStart) return { list: true, rows: [] };
+  // Another conversation opened, or this one's list just loaded (V2 mounts it
+  // empty): fade the log in once, unless it holds only a send made right now
+  // (the first send from the welcome screen), whose rows ease in instead.
+  if (previous.conversationId !== conversationId || (!previous.ids.length && messages.length > 0)) {
+    const fromNothing = previous.conversationId == null || !previous.ids.length;
+    if (!fromNothing || !freshSend(messages, now)) return messages.length || previous.ids.length ? { list: true, rows: [] } : NO_MOTION;
     return { list: false, rows: messages.flatMap(message => { const kind = entrance(message); return kind ? [{ id: message.id, entrance: kind }] : []; }) };
   }
   const known = new Set(previous.ids);

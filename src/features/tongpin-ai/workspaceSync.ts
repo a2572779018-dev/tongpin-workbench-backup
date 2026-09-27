@@ -17,7 +17,13 @@ function errorCode(error: unknown): string | undefined {
 /** A server older than a message field rejects the whole save. Send the
  * optional reply `process` record only to a server that advertises it; the
  * page keeps showing it locally either way. Unchanged input is returned as is. */
-export function workspaceStateForServer(state: AiWorkspaceState, features: readonly string[] | undefined): AiWorkspaceState {
+export function workspaceStateForServer(input: AiWorkspaceState, features: readonly string[] | undefined): AiWorkspaceState {
+  // "typing" is the local typewriter playback of a reply already received: never saved.
+  const state = input.conversations.some(conversation => conversation.messages.some(message => message.status === "typing"))
+    ? { ...input, conversations: input.conversations.map(conversation => conversation.messages.some(message => message.status === "typing")
+      ? { ...conversation, messages: conversation.messages.map(message => message.status === "typing" ? { ...message, status: "ready" as const } : message) }
+      : conversation) }
+    : input;
   const processSupported = Boolean(features?.includes(AI_WORKSPACE_FEATURES.replyProcess));
   // 多 Agent 协作 steps need their own feature (a rolled-back server rejects them).
   const agentsSupported = processSupported && Boolean(features?.includes(AI_WORKSPACE_FEATURES.replyProcessAgents));
