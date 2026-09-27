@@ -1,4 +1,4 @@
-import { Children, cloneElement, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
+import { Children, cloneElement, Fragment, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -192,7 +192,7 @@ export const MarkdownReply = memo(function MarkdownReply({ content, typing = fal
   // During the post-response typewriter effect, reveal a single parsed tree.
   // The active SSE path below uses LibreChat's stable completed-block rendering.
   const tree = useMemo(() => typing
-    ? splitMarkdownIntoBlocks(content).map(block => renderBlock(block.raw, block.start))
+    ? splitMarkdownIntoBlocks(content).map(block => <Fragment key={block.start}>{renderBlock(block.raw, block.start)}</Fragment>)
     : null, [content, typing, renderBlock]);
   const text = useMemo(() => replyTreeText(tree), [tree]);
   return <div className={`tp-ai-markdown${live || typing ? " is-live" : ""}`}>
