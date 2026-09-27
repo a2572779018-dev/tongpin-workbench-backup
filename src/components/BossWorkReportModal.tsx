@@ -155,6 +155,8 @@ export function BossWorkReportModal({
               <div className="work-report-member-list">
                 {section.members.map((member) => {
                   const planned = plannedCount(member);
+                  // The bar and the number come from the same two counts, so they always agree.
+                  const percent = planned ? Math.round((member.scheduledDone / planned) * 100) : null;
                   return (
                     <article key={member.user.id} className="work-report-member">
                       <div className="work-report-member__person">
@@ -171,10 +173,10 @@ export function BossWorkReportModal({
                         role="img"
                         aria-label={`${periodWord}计划 ${planned} 项，已完成 ${member.scheduledDone} 项`}
                       >
-                        <i style={{ width: `${planned ? (member.scheduledDone / planned) * 100 : 0}%` }} />
+                        <i style={{ width: `${percent ?? 0}%` }} />
                       </div>
                       <strong title={`${periodWord}计划 ${planned} 项中已完成 ${member.scheduledDone} 项`}>
-                        {planned ? `${member.completionRate}%` : "—"}
+                        {percent === null ? "—" : `${percent}%`}
                       </strong>
                       <button
                         className="work-report-member__nudge"

@@ -35,6 +35,23 @@ describe("boss work report modal", () => {
     expect(html).toContain("width:100%");
   });
 
+  it("fills each bar exactly as far as the percentage next to it", () => {
+    const people = [[9, 7], [11, 2], [12, 1], [3, 0], [0, 0]].map(([planned, done], index) =>
+      member({ user: { ...user, id: `m${index}`, name: `成员${index}` } as User, planned, scheduled: planned, scheduledDone: done, completionRate: 100 }));
+    const section: BossWorkReportSection = {
+      period: { kind: "daily", startDate: "2026-09-26", endDate: "2026-09-26" },
+      summary: { people: 5, activePeople: 5, selfCreated: 0, carriedOver: 0, assigned: 0, completed: 10, scheduled: 35, scheduledDone: 10, doing: 0, postponed: 0, planned: 35, createdForLater: 0, completionRate: 29 },
+      members: people,
+    };
+    const report = { reportDate: "2026-09-27", generatedAt: "", status: null, daily: section, weekly: section, monthly: section } as unknown as BossWorkReportBundle;
+    const html = renderToStaticMarkup(createElement(BossWorkReportModal, {
+      report, busy: false, error: "", onClose: () => undefined, onRead: () => undefined, onNudge: () => undefined, nudgingMemberId: "", nudgedMemberIds: new Set<string>(),
+    }));
+    const rows = [...html.matchAll(/<i style="width:([\d.]+)%"><\/i><\/div><strong[^>]*>([^<]+)<\/strong>/g)].map(match => [match[1], match[2]]);
+    // A stale server rate (100%) never shows: bar and number are both done / planned.
+    expect(rows).toEqual([["78", "78%"], ["18", "18%"], ["8", "8%"], ["0", "0%"], ["0", "—"]]);
+  });
+
   it("falls back to the scheduled count from an older server", () => {
     const legacy = member({ planned: undefined, postponed: undefined, createdForLater: undefined, scheduled: 4, scheduledDone: 1, completionRate: 25 });
     expect(memberActivityNote(legacy, "昨日")).toBe("昨日新建 17 项 · 昨日共完成 7 项（含其他日期的任务）");
