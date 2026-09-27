@@ -1,4 +1,4 @@
-import { Container, Graphics } from "pixi.js";
+import { Container } from "pixi.js";
 import { Camera } from "./Camera";
 import { diffSnapshots, coordinatorCaptionText } from "./diff";
 import { EmployeeFigure, type EmployeeFigureOptions } from "./EmployeeFigure";
@@ -7,8 +7,17 @@ import { bubbleTextForWorker, visualStateForStatus, type VisualState } from "./v
 import type { BubbleKind } from "./ToolBubble";
 import { recipeForWorker, COORDINATOR_RECIPE_KEY } from "./roster";
 import { computeLayout, WORLD_HEIGHT, WORLD_WIDTH } from "./seating";
-import { drawOfficeBackdrop } from "./sceneDraw";
+import { buildOfficeBackdrop } from "./sceneDraw";
 import type { AgentOfficeSnapshot } from "./types";
+
+// Re-exported so AgentOfficeView's single dynamic `import("./OfficeSceneController")`
+// can also reach the (async) texture loader — see spriteSheets.ts — without a
+// second dynamic-import call site. AgentOfficeView awaits this right after
+// the Pixi Application initializes and before constructing this controller,
+// which is what makes every synchronous `getOfficeTextures()` call below (via
+// EmployeeFigure -> Desk/CharacterSprite, and sceneDraw's buildOfficeBackdrop)
+// safe.
+export { loadOfficeTextures } from "./spriteSheets";
 
 /**
  * The Pixi-facing half of the scene, decoupled from both `pixi.js`'s
@@ -56,10 +65,17 @@ export interface SceneEnvelope {
 export interface OfficeSceneDeps {
   createFigure(opts: EmployeeFigureOptions): SceneFigure;
   createEnvelope(start: { x: number; y: number }, end: { x: number; y: number }, kind: EnvelopeKind, instant: boolean): SceneEnvelope;
+  /** Builds the static floor/wall/decor backdrop. Its real implementation
+   *  (buildOfficeBackdrop) reads sliced sprite textures synchronously (see
+   *  spriteSheets.ts), so — like createFigure/createEnvelope — it is
+   *  injectable purely so a test can supply a plain empty Container instead
+   *  and never need a loaded texture, a canvas or WebGL. */
+  createBackdrop(): Container;
 }
 const defaultDeps: OfficeSceneDeps = {
   createFigure: (opts) => new EmployeeFigure(opts),
   createEnvelope: (start, end, kind, instant) => new MessageEnvelope(start, end, kind, instant),
+  createBackdrop: () => buildOfficeBackdrop(),
 };
 
 export interface OfficeSceneOptions {
@@ -78,7 +94,7 @@ export class OfficeSceneController {
   private readonly host: SceneHost;
   private readonly deps: OfficeSceneDeps;
   private readonly world: Container;
-  private readonly backdrop: Graphics;
+  private readonly backdrop: Container;
   private readonly camera: Camera;
   private readonly now: () => number;
   private readonly onHover?: (id: string | null) => void;
@@ -105,9 +121,8 @@ export class OfficeSceneController {
 
     this.world = new Container();
     this.world.sortableChildren = true;
-    this.backdrop = new Graphics();
+    this.backdrop = this.deps.createBackdrop();
     this.backdrop.zIndex = -1;
-    drawOfficeBackdrop(this.backdrop);
     this.world.addChild(this.backdrop);
     host.stage.addChild(this.world);
 
@@ -249,7 +264,7 @@ export class OfficeSceneController {
     this.workerFigures.clear();
     this.coordinatorFigure?.destroy();
     this.coordinatorFigure = null;
-    this.backdrop.destroy();
+    this.backdrop.destroy({ children: true });
     this.world.destroy({ children: true });
     this.host.destroy();
   }

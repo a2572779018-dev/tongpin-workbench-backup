@@ -9,12 +9,13 @@ import type { AgentOfficeSnapshot } from "./types";
 // `container` needs to be a real (but otherwise empty and DOM-free) Pixi
 // Container — constructing one needs no canvas/WebGL/DOM, unlike Text.
 
-// Real EmployeeFigure construction needs a DOM (pixi's Text measures on a
-// scratch <canvas>; this repo's vitest runs in a plain Node environment, no
-// jsdom — see AGENTS notes in OfficeSceneController.ts). So these tests
-// exercise the controller's own orchestration — mount/update/dispose,
-// idempotent snapshots, one-shot animation events — against fake figures and
-// a fake host, never a real Application/canvas/WebGL context.
+// Real EmployeeFigure/backdrop construction needs a loaded sprite-texture
+// cache (see spriteSheets.ts) and, for EmployeeFigure's Text labels, a DOM to
+// measure on (this repo's vitest runs in a plain Node environment, no
+// jsdom). So these tests exercise the controller's own orchestration —
+// mount/update/dispose, idempotent snapshots, one-shot animation events —
+// against fake figures, a fake backdrop and a fake host, never a real
+// Application/canvas/WebGL context or loaded textures.
 
 function fakeHost() {
   const tickHandlers = new Set<() => void>();
@@ -58,6 +59,11 @@ function fakeEnvelope(): SceneEnvelope & { destroy: ReturnType<typeof vi.fn> } {
   return { container: new Container(), update: vi.fn(() => true), destroy: vi.fn(() => {}) };
 }
 
+/** A plain empty Pixi Container stands in for the real sprite-based backdrop
+ *  (buildOfficeBackdrop) — same reasoning as fakeFigure/fakeEnvelope's
+ *  `.container` above, just for the one the controller builds itself. */
+const fakeBackdrop = () => new Container();
+
 function snap(overrides: Partial<AgentOfficeSnapshot> = {}): AgentOfficeSnapshot {
   return {
     runId: "run-1",
@@ -72,7 +78,7 @@ function snap(overrides: Partial<AgentOfficeSnapshot> = {}): AgentOfficeSnapshot
 describe("OfficeSceneController", () => {
   it("wires exactly one ticker handler on construction", () => {
     const { host, tickHandlers } = fakeHost();
-    const controller = new OfficeSceneController(host, { deps: { createFigure: fakeFigure, createEnvelope: fakeEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure: fakeFigure, createEnvelope: fakeEnvelope } });
     expect(tickHandlers.size).toBe(1);
     controller.dispose();
   });
@@ -80,7 +86,7 @@ describe("OfficeSceneController", () => {
   it("creates the coordinator once and reuses it across snapshots", () => {
     const { host } = fakeHost();
     const createFigure = vi.fn(fakeFigure);
-    const controller = new OfficeSceneController(host, { deps: { createFigure, createEnvelope: fakeEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure, createEnvelope: fakeEnvelope } });
     controller.applySnapshot(snap());
     controller.applySnapshot(snap({ updatedAt: 2 }));
     const coordinatorCalls = createFigure.mock.calls.filter(([opts]) => opts?.kind === "coordinator");
@@ -91,7 +97,7 @@ describe("OfficeSceneController", () => {
   it("creates one figure per worker, and only recreates them when the id set changes", () => {
     const { host } = fakeHost();
     const createFigure = vi.fn(fakeFigure);
-    const controller = new OfficeSceneController(host, { deps: { createFigure, createEnvelope: fakeEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure, createEnvelope: fakeEnvelope } });
     const workers: AgentOfficeSnapshot["workers"] = [
       { id: "w1", role: "研究员", task: "t", status: "queued" },
       { id: "w2", role: "分析员", task: "t", status: "queued" },
@@ -106,7 +112,7 @@ describe("OfficeSceneController", () => {
   it("is idempotent for a repeated, identical snapshot: no duplicate envelopes or flourishes", () => {
     const { host } = fakeHost();
     const createEnvelope = vi.fn(fakeEnvelope);
-    const controller = new OfficeSceneController(host, { deps: { createFigure: fakeFigure, createEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure: fakeFigure, createEnvelope } });
     const workers: AgentOfficeSnapshot["workers"] = [{ id: "w1", role: "研究员", task: "t", status: "queued" }];
     const first = snap({ phase: "dispatching", workers });
     controller.applySnapshot(first);
@@ -124,7 +130,7 @@ describe("OfficeSceneController", () => {
   it("spawns a dispatch envelope for a newly-appearing worker", () => {
     const { host } = fakeHost();
     const createEnvelope = vi.fn(fakeEnvelope);
-    const controller = new OfficeSceneController(host, { deps: { createFigure: fakeFigure, createEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure: fakeFigure, createEnvelope } });
     controller.applySnapshot(snap({ phase: "dispatching", workers: [{ id: "w1", role: "研究员", task: "t", status: "queued" }] }));
     expect(createEnvelope).toHaveBeenCalledWith(expect.anything(), expect.anything(), "dispatch", false);
     controller.dispose();
@@ -136,7 +142,7 @@ describe("OfficeSceneController", () => {
     const workerFigures = new Map([["w1", fakeFigure()], ["w2", fakeFigure()]]);
     const createFigure = vi.fn((opts: EmployeeFigureOptions) =>
       opts.kind === "coordinator" ? coordinatorFigure : workerFigures.get(opts.id)!);
-    const controller = new OfficeSceneController(host, { deps: { createFigure, createEnvelope: fakeEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure, createEnvelope: fakeEnvelope } });
     const workers: AgentOfficeSnapshot["workers"] = [
       { id: "w1", role: "研究员", task: "t", status: "done" },
       { id: "w2", role: "撰稿员", task: "t", status: "done" },
@@ -151,7 +157,7 @@ describe("OfficeSceneController", () => {
   it("respects reducedMotion: envelopes and flourishes are created/played as instant", () => {
     const { host } = fakeHost();
     const createEnvelope = vi.fn(fakeEnvelope);
-    const controller = new OfficeSceneController(host, { reducedMotion: true, deps: { createFigure: fakeFigure, createEnvelope } });
+    const controller = new OfficeSceneController(host, { reducedMotion: true, deps: { createBackdrop: fakeBackdrop, createFigure: fakeFigure, createEnvelope } });
     controller.applySnapshot(snap({ phase: "dispatching", workers: [{ id: "w1", role: "研究员", task: "t", status: "queued" }] }));
     expect(createEnvelope).toHaveBeenCalledWith(expect.anything(), expect.anything(), "dispatch", true);
     controller.dispose();
@@ -164,7 +170,7 @@ describe("OfficeSceneController", () => {
     let envelopeReturned = false;
     const createEnvelope = vi.fn(() => { envelopeReturned = true; return envelope; });
     const createFigure = vi.fn(() => figure);
-    const controller = new OfficeSceneController(host, { deps: { createFigure, createEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure, createEnvelope } });
     controller.applySnapshot(snap({ phase: "dispatching", workers: [{ id: "w1", role: "研究员", task: "t", status: "queued" }] }));
     expect(envelopeReturned).toBe(true);
 
@@ -179,7 +185,7 @@ describe("OfficeSceneController", () => {
   it("dispose() is idempotent and a post-dispose snapshot is a safe no-op", () => {
     const { host } = fakeHost();
     const createFigure = vi.fn(fakeFigure);
-    const controller = new OfficeSceneController(host, { deps: { createFigure, createEnvelope: fakeEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure, createEnvelope: fakeEnvelope } });
     controller.applySnapshot(snap());
     controller.dispose();
     const callsBeforeSecondDispose = createFigure.mock.calls.length;
@@ -195,6 +201,7 @@ describe("OfficeSceneController", () => {
       const { host, tickHandlers } = fakeHost();
       const controller = new OfficeSceneController(host, {
         deps: {
+          createBackdrop: fakeBackdrop,
           createFigure: () => { const f = fakeFigure(); createdFigures.push(f); return f; },
           createEnvelope: () => { const e = fakeEnvelope(); createdEnvelopes.push(e); return e; },
         },
@@ -213,7 +220,7 @@ describe("OfficeSceneController", () => {
 
   it("setPaused starts/stops the host ticker", () => {
     const { host } = fakeHost();
-    const controller = new OfficeSceneController(host, { deps: { createFigure: fakeFigure, createEnvelope: fakeEnvelope } });
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure: fakeFigure, createEnvelope: fakeEnvelope } });
     controller.setPaused(true);
     expect(host.ticker.stop).toHaveBeenCalledTimes(1);
     controller.setPaused(false);

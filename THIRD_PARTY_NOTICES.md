@@ -1168,24 +1168,20 @@ at https://github.com/chaitanyagiri/munder-difflin. The following were ported
 or adapted from its `src/renderer/src/scene/office/` directory: the WebGL
 context-loss detection and bounded-retry recovery logic (`glRecovery.ts`), the
 camera fit/scale math (`Camera.ts`), the thought- and tool-bubble UI widgets
-(`ThoughtBubble.ts`, `ToolBubble.ts`), the coordinator/worker envelope-flight
-animation (`MessageEnvelope.ts`), and the general approach of the procedural,
-pixel-buffer-based portrait engine used to draw each employee's bust.
+(`ThoughtBubble.ts`, `ToolBubble.ts`), and the coordinator/worker
+envelope-flight animation (`MessageEnvelope.ts`).
 
-Two things from the same upstream directory were deliberately **not** used,
-for reasons unrelated to code license:
-
-- The LimeZu tileset and map assets under upstream's `src/renderer/src/assets/`
-  are covered by a separate, non-transferable asset license
-  (`LICENSE-ASSETS` upstream) and were never copied. Tongpin's office floor,
-  desks, monitors, chairs and plants are drawn procedurally with Pixi
-  `Graphics` in Tongpin's own palette instead.
-- Upstream's character roster (`cast.ts`) and its per-character portrait
-  recipes depict a specific, recognizable television show's cast. Neither the
-  roster nor any of its recipes were copied. Tongpin's employees use
-  originally-composed recipes (varied hair, skin tone and clothing) with
-  generic Chinese role labels (协调员, 研究员, 分析员, 撰稿员, …) and no
-  reference to the source show anywhere, including code comments.
+One thing from the same upstream directory was deliberately **not** used, for
+reasons unrelated to code license: the LimeZu tileset and map assets under
+upstream's `src/renderer/src/assets/` are covered by a separate,
+non-transferable asset license (`LICENSE-ASSETS` upstream) and were never
+copied. Tongpin's office floor, walls, furniture and characters instead use
+real pixel-art assets from Pixel Agents and MetroCity — see the next two
+sections — rendered as sliced Pixi sprites rather than drawn procedurally.
+(An earlier version of this scene drew every employee as a procedural,
+pixel-buffer bust with originally-composed recipes; that code
+(`portraitEngine.ts`) has been removed now that real character sprites cover
+the same need.)
 
 The ported/adapted files above are covered by upstream's MIT License:
 
@@ -1210,3 +1206,78 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Pixel Agents (office floor/wall/furniture art + sprite-sheet code)
+
+`src/features/tongpin-ai/agentOffice/` renders its floor, walls, desks,
+monitors and decor with art and sprite-slicing logic from Pixel Agents, an
+open-source AI-employee-office visualizer, commit
+`3537e140c2094761beae748592aeb92ece8edfdd` (v1.4.1), available at
+https://github.com/pixel-agents-hq/pixel-agents.
+
+- Art copied byte-for-byte from `webview-ui/public/assets/` into
+  `src/features/tongpin-ai/agentOffice/assets/`: one floor tile
+  (`floors/floor_5.png`), one wall auto-tile sheet (`walls/wall_0.png`), and
+  furniture (`furniture/DESK/DESK_FRONT.png`; `furniture/PC/PC_FRONT_OFF.png`
+  and `PC_FRONT_ON_1/2/3.png`; `furniture/BOOKSHELF/BOOKSHELF.png`;
+  `furniture/WHITEBOARD/WHITEBOARD.png`; `furniture/COFFEE/COFFEE.png`;
+  `furniture/CLOCK/CLOCK.png`; `furniture/PLANT/PLANT.png`), each with its
+  upstream `manifest.json` for reference. Only the pieces this office actually
+  draws were copied — upstream's pack also has more floor/wall variants,
+  carpets, a second desk/bookshelf style and separate chair sprites that this
+  scene doesn't use.
+- Code ported (reimplemented in TypeScript as pure, unit-tested functions, not
+  copied verbatim) from `webview-ui/src/office/wallTiles.ts` (`buildWallMask`,
+  the 4-bit N/E/S/W auto-tile bitmask) and `core/src/assets/pngDecoder.ts` /
+  `core/src/assets/constants.ts` (the character-sheet and wall-sheet
+  pixel-rect slicing geometry) — see `wallAutoTile.ts` and
+  `spriteFrameMath.ts`. The two-frame typing/reading toggle timing in
+  `animationMapping.ts` (`FRAME_TOGGLE_DURATION_SEC`) matches upstream's
+  `webview-ui/src/constants.ts` (`TYPE_FRAME_DURATION_SEC`).
+- Floor tiles ship uncolored upstream (its own in-app layout editor recolors
+  them per project via an HSL "Colorize" step); Tongpin has no such editor, so
+  `sceneDraw.ts` applies one fixed warm Pixi `tint` instead of porting that
+  step. Every other asset above already ships fully colored and is drawn
+  untinted.
+
+The copied art and ported code above are covered by upstream's MIT License:
+
+MIT License
+
+Copyright (c) 2026 Pablo De Lucca
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## MetroCity character pack (office employee sprites)
+
+- Source: https://jik-a-4.itch.io/metrocity-free-topdown-character-pack, by
+  JIK-A-4.
+- License: CC0 1.0 Universal (public-domain dedication) — no attribution is
+  legally required; credited here as a courtesy, the same way Pixel Agents'
+  own README credits it ("These are based on the amazing work of JIK-A-4,
+  Metro City").
+- Use in Tongpin: six character sprite sheets
+  (`src/features/tongpin-ai/agentOffice/assets/characters/char_0.png` through
+  `char_5.png`), copied byte-for-byte from Pixel Agents'
+  `webview-ui/public/assets/characters/` (which redistributes them under the
+  same CC0 terms). Each employee — the coordinator and up to five workers — is
+  assigned one of the six sheets by a deterministic hash of its id (see
+  `roster.ts`), reserving one sheet exclusively for the coordinator. Only the
+  down-facing row of each sheet is ever shown, since this office's employees
+  stay seated and never walk or turn.

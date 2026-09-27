@@ -35,7 +35,14 @@ export class Camera {
 
   private fitScale(): number {
     if (this.viewWidth <= 0 || this.viewHeight <= 0) return 1;
-    return Math.min(this.viewWidth / this.worldWidth, this.viewHeight / this.worldHeight);
+    const raw = Math.min(this.viewWidth / this.worldWidth, this.viewHeight / this.worldHeight);
+    // Snap to a whole-pixel multiple so every sprite samples crisply at
+    // 2×/3× — real pixel art, unlike the office's old procedural Graphics
+    // drawing, shows shimmer/blur under a fractional scale. Only snap when
+    // there is room to grow into a whole step, though: a panel too small to
+    // fit the world even at 1× still shrinks smoothly instead of cropping
+    // it — a softer frame beats slicing the office in half.
+    return raw >= 1 ? Math.floor(raw) : raw;
   }
 
   /** Skip the lerp and snap straight to the fitted, centered pose — used on

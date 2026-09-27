@@ -19,12 +19,6 @@ export const paletteHex = {
   blue: "#8cbcff",
   red: "#954c3d",
   redSoft: "#fbeee9",
-  floor: "#f1ead4",
-  wall: "#f5efe4",
-  desk: "#d7cdb7",
-  deskShade: "#c3b795",
-  plant: "#7fa864",
-  plantPot: "#c17a4f",
 } as const;
 
 function toNumber(hex: string): number {

@@ -119,6 +119,23 @@ export function AgentOfficeView({ snapshot, height = 320 }: AgentOfficeViewProps
         return;
       }
 
+      try {
+        // Sprite sheets are loaded once here rather than inside
+        // OfficeSceneController, so its constructor can stay synchronous
+        // (see OfficeSceneController.test.ts, which builds one with fakes
+        // and never touches a real Pixi renderer or the network).
+        await controllerModule.loadOfficeTextures();
+      } catch (err) {
+        if (cancelled || mountIdRef.current !== mountId) return;
+        try { app.destroy(true, { children: true }); } catch { /* noop */ }
+        applyPlan(planInitFailure(err, initRetriesRef.current));
+        return;
+      }
+      if (cancelled || mountIdRef.current !== mountId) {
+        try { app.destroy(true, { children: true }); } catch { /* noop */ }
+        return;
+      }
+
       appRef.current = app;
       while (host.firstChild) host.removeChild(host.firstChild);
       host.appendChild(app.canvas);
