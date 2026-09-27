@@ -148,9 +148,11 @@ export class AiMemberActivityLog {
   record(userId: string, entry: { requestId: string; conversationId: string; recall: MemberRecall | null; skills: readonly ActivitySkill[] }, now = Date.now()): void {
     const user = this.userKey(userId);
     const snippets: AiMemoryRecallSnippet[] = (entry.recall?.snippets ?? []).map(({ conversationTitle, date, role, excerpt }) => ({ conversationTitle, date, role, excerpt }));
-    this.sql.exec(`INSERT INTO ai_member_activity(tenant_id,user_id,request_id,conversation_id,trigger,recalled,snippets,skills,created_at) VALUES(?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(tenant_id,user_id,request_id) DO UPDATE SET conversation_id=excluded.conversation_id,trigger=excluded.trigger,recalled=excluded.recalled,snippets=excluded.snippets,skills=excluded.skills,created_at=excluded.created_at`,
-    this.tenantId, user, entry.requestId, entry.conversationId, entry.recall?.trigger ?? null, snippets.length, JSON.stringify(snippets), JSON.stringify(entry.skills), now);
+    // Source conversations are kept (not shown) so deleting one also removes its excerpts here.
+    const sources = [...new Set((entry.recall?.snippets ?? []).map(snippet => snippet.conversationId))];
+    this.sql.exec(`INSERT INTO ai_member_activity(tenant_id,user_id,request_id,conversation_id,trigger,recalled,snippets,skills,sources,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(tenant_id,user_id,request_id) DO UPDATE SET conversation_id=excluded.conversation_id,trigger=excluded.trigger,recalled=excluded.recalled,snippets=excluded.snippets,skills=excluded.skills,sources=excluded.sources,created_at=excluded.created_at`,
+    this.tenantId, user, entry.requestId, entry.conversationId, entry.recall?.trigger ?? null, snippets.length, JSON.stringify(snippets), JSON.stringify(entry.skills), JSON.stringify(sources), now);
     this.sql.exec(`DELETE FROM ai_member_activity WHERE tenant_id=? AND user_id=? AND (created_at<? OR request_id NOT IN (
       SELECT request_id FROM ai_member_activity WHERE tenant_id=? AND user_id=? ORDER BY created_at DESC LIMIT ${AI_MEMORY_RECALL_LIMITS.logEntries}))`,
     this.tenantId, user, now - AI_MEMORY_RECALL_LIMITS.logDays * 24 * 60 * 60_000, this.tenantId, user);

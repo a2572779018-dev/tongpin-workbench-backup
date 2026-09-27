@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS ai_member_activity (
   recalled INTEGER NOT NULL DEFAULT 0,
   snippets TEXT NOT NULL DEFAULT '[]',
   skills TEXT NOT NULL DEFAULT '[]',
+  sources TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   PRIMARY KEY (tenant_id, user_id, request_id)
 );

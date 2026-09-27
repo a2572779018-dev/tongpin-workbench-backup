@@ -104,6 +104,11 @@ describe("member history recall and personal skills (service)", () => {
     expect(status(reply.requestId, "member-b")).toEqual({ requestId: reply.requestId, status: "none" });
     // Another organization cannot reach the account at all.
     expect(() => runtime.service.forTenant("org-2").memberMemory.recallDetail("member-a", reply.requestId)).toThrow(expect.objectContaining({ code: "AI_ACCESS_NOT_GRANTED" }));
+    // Deleting the source conversation removes it from recall and from the recall log.
+    await save([]);
+    expect(memory().recallDetail("member-a", reply.requestId)).toBeNull();
+    await send("上次那个汇报模板再发我看看", "conv-new");
+    expect(systemPrompt()).not.toContain("member_history");
   });
 
   it("recalls nothing for ordinary messages or from the current conversation; an explicit search admits it found nothing", async () => {

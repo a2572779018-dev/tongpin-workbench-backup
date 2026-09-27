@@ -340,6 +340,9 @@ export class AiMemberHistoryIndex {
   private dropConversation(user: string, item: { conversation_id: string; chunks: number; chars: number; messages: string; generation: number }, state: StateRow, generation: number): number {
     this.deleteChunks(user, item.conversation_id);
     this.sql.exec("DELETE FROM ai_member_history_conversations WHERE tenant_id=? AND user_id=? AND conversation_id=?", this.tenantId, user, item.conversation_id);
+    // Excerpts shown earlier from a deleted conversation go with it.
+    try { this.sql.exec("DELETE FROM ai_member_activity WHERE tenant_id=? AND user_id=? AND instr(sources, ?)>0", this.tenantId, user, JSON.stringify(item.conversation_id)); }
+    catch { /* activity log absent in minimal fixtures */ }
     if (item.generation !== generation) return 0;
     const messages = parseMessages(item.messages);
     state.indexed_chunks -= item.chunks; state.indexed_chars -= item.chars;
