@@ -50,8 +50,12 @@ export interface OfficeTextures {
   whiteboard: Texture;
   plantBig: Texture;
   plantSmall: Texture;
-  coffee: readonly Texture[];
-  clock: readonly Texture[];
+  /** Single static frame — see extract-limezu.py: this office never
+   *  animates backdrop decor, so only one frame of the source spritesheet is
+   *  ever cropped or loaded. */
+  coffee: Texture;
+  /** Single static frame — see the `coffee` doc comment above. */
+  clock: Texture;
   signboard: Texture;
 }
 
@@ -68,14 +72,6 @@ function sub(sheet: Texture, rect: Rect): Texture {
 function nearest(texture: Texture): Texture {
   texture.source.scaleMode = "nearest";
   return texture;
-}
-
-/** Slices a left-to-right frame strip (every animated prop here ships as one
- *  row of same-size frames) into its individual textures. */
-function framesOf(sheet: Texture, frameCount: number, frameW: number, frameH: number): Texture[] {
-  const frames: Texture[] = [];
-  for (let i = 0; i < frameCount; i++) frames.push(sub(sheet, { x: i * frameW, y: 0, w: frameW, h: frameH }));
-  return frames;
 }
 
 let cache: OfficeTextures | null = null;
@@ -105,8 +101,6 @@ export function loadOfficeTextures(): Promise<OfficeTextures> {
     const characters = characterSheets.map(buildCharacterSet);
 
     const deskOn = FURNITURE_URLS.deskOn.map((url) => nearest(loaded[url])) as [Texture, Texture];
-    const coffeeSheet = nearest(loaded[FURNITURE_URLS.coffee]);
-    const clockSheet = nearest(loaded[FURNITURE_URLS.clock]);
 
     const textures: OfficeTextures = {
       characters,
@@ -122,9 +116,8 @@ export function loadOfficeTextures(): Promise<OfficeTextures> {
       whiteboard: nearest(loaded[FURNITURE_URLS.whiteboard]),
       plantBig: nearest(loaded[FURNITURE_URLS.plantBig]),
       plantSmall: nearest(loaded[FURNITURE_URLS.plantSmall]),
-      // Both strips are 4 frames of 16×32 — see extract-limezu.py.
-      coffee: framesOf(coffeeSheet, 4, 16, 32),
-      clock: framesOf(clockSheet, 4, 16, 32),
+      coffee: nearest(loaded[FURNITURE_URLS.coffee]),
+      clock: nearest(loaded[FURNITURE_URLS.clock]),
       signboard: nearest(loaded[FURNITURE_URLS.signboard]),
     };
     cache = textures;

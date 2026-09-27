@@ -45,7 +45,7 @@ export function buildOfficeBackdrop(): Container {
   root.addChild(baseboard);
 
   placeSprite(root, textures.door, DECOR_LAYOUT.door.x, DECOR_LAYOUT.door.y);
-  placeSprite(root, textures.clock[0], DECOR_LAYOUT.clock.x, DECOR_LAYOUT.clock.y);
+  placeSprite(root, textures.clock, DECOR_LAYOUT.clock.x, DECOR_LAYOUT.clock.y);
   placeSprite(root, textures.signboard, DECOR_LAYOUT.signboard.x, DECOR_LAYOUT.signboard.y);
   placeSprite(root, textures.whiteboard, DECOR_LAYOUT.whiteboard.x, DECOR_LAYOUT.whiteboard.y);
   placeSprite(root, textures.bookshelfA, DECOR_LAYOUT.bookshelf.x, DECOR_LAYOUT.bookshelf.y);
@@ -53,7 +53,7 @@ export function buildOfficeBackdrop(): Container {
   placeSprite(root, textures.plantBig, DECOR_LAYOUT.plantLeft.x, DECOR_LAYOUT.plantLeft.y);
   placeSprite(root, textures.plantSmall, DECOR_LAYOUT.plantRight.x, DECOR_LAYOUT.plantRight.y);
   placeSprite(root, textures.waterCooler, DECOR_LAYOUT.waterCooler.x, DECOR_LAYOUT.waterCooler.y);
-  placeSprite(root, textures.coffee[0], DECOR_LAYOUT.coffee.x, DECOR_LAYOUT.coffee.y);
+  placeSprite(root, textures.coffee, DECOR_LAYOUT.coffee.x, DECOR_LAYOUT.coffee.y);
 
   return root;
 }

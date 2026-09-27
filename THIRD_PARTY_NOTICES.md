@@ -1307,9 +1307,11 @@ produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
   has no plain white board; this reads as the same kind of object).
 - `limezu/plant_big.png` / `plant_small.png` — `Theme_Sorter_Singles/
   2_Living_Room_Singles/Living_Room_Singles_18.png` and `_15.png`.
-- `limezu/coffee.png` / `limezu/clock.png` — the first 4 of 6 frames of
-  `3_Animated_objects/16x16/spritesheets/animated_coffee.png`, and the first 4
-  of 10 frames of `animated_cuckoo_clock.png`.
+- `limezu/coffee.png` / `limezu/clock.png` — the first (16×32) frame only of
+  `3_Animated_objects/16x16/spritesheets/animated_coffee.png` (of 6) and of
+  `animated_cuckoo_clock.png` (of 10). This office never animates its
+  backdrop decor (see `sceneDraw.ts`), so the remaining in-between frames of
+  either sheet are never cropped, loaded or committed.
 - `limezu/characters/char_1.png` through `char_7.png` — one compact 80×16
   strip per character, each 5 frames (idle / working ×2 / phone ×2) re-packed
   from fixed 16×16 rects inside `2_Characters/Character_Generator/

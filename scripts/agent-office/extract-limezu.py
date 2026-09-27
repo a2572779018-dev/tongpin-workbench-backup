@@ -129,17 +129,21 @@ def build_furniture() -> None:
         save(im, out_name)
 
 
-# ── Animated props: trimmed frame strips from 3_Animated_objects ──────────
+# ── Static props: single frame from 3_Animated_objects ────────────────────
+# This office never animates its backdrop decor (see sceneDraw.ts's doc
+# comment — only per-desk monitors and character poses ever animate, driven
+# by OfficeSceneController's own paused-aware tick, not Pixi's global
+# Ticker.shared that AnimatedSprite would default to), so only the first
+# 16x32 frame of each multi-frame spritesheet is cropped — never the
+# remaining in-between frames, which this scene has no code path that ever
+# reads.
 
 def build_animated_props() -> None:
     coffee = load(os.path.join(ANIMATED, "animated_coffee.png"))
-    # First 4 of the sheet's 6 16x32 frames — a full, slightly shorter loop.
-    save(crop(coffee, 0, 0, 16 * 4, 32), "coffee.png")
+    save(crop(coffee, 0, 0, 16, 32), "coffee.png")
 
     clock = load(os.path.join(ANIMATED, "animated_cuckoo_clock.png"))
-    # First 4 of the sheet's 10 16x32 frames — same reasoning as the coffee
-    # loop: a full cycle without shipping every repetitive in-between frame.
-    save(crop(clock, 0, 0, 16 * 4, 32), "clock.png")
+    save(crop(clock, 0, 0, 16, 32), "clock.png")
 
 
 # ── Characters: 6 workers + 1 coordinator-exclusive, from LimeZu's own      ─
