@@ -11,7 +11,7 @@ import type {
   ComputerObserveResult,
   ComputerTaskSpec,
 } from "../../../shared/computerAgent";
-import { computerInstructionText, evaluateComputerDone, runComputerTask, type ComputerApi, type ComputerQuestion, type ComputerTimelineStep } from "./computerExecutor";
+import { computerInstructionText, evaluateComputerDone, runComputerTask, type ComputerAnswer, type ComputerApi, type ComputerQuestion, type ComputerTimelineStep } from "./computerExecutor";
 
 const QUOTA: AiQuota = { limitTokens: 100_000, usedTokens: 0, reservedTokens: 0, remainingTokens: 100_000, inputTokens: 0, outputTokens: 0 };
 const TASK: ComputerTaskSpec = {
@@ -264,7 +264,64 @@ describe("computer executor loop", () => {
     const askUser = vi.fn(async (_question: ComputerQuestion): Promise<string | null> => null);
     const result = await run(h, {}, { askUser });
     expect(askUser.mock.calls[0]![0].question).toContain("不能确认当前聊天就是「姐姐」");
+    // Jev chose the send with confidence: the member may confirm after checking the app.
+    expect(askUser.mock.calls[0]![0].confirmLabel).toBe("已核对，按回车发送「中秋快乐」");
     expect(h.bridge.execute).not.toHaveBeenCalled();
+    expect(result.reason).toBe("low_confidence");
+  });
+
+  it("sends once the member checked the app and confirmed, and only then", async () => {
+    const h = harness({
+      views: [wechatViews[4], wechatViews[4], wechatViews[5]],
+      decisions: [
+        { id: "key_return", confidence: 0.95, recipientMatch: 0.9, contentMatch: 0.1 },
+        { id: "key_return", confidence: 0.95, recipientMatch: 0.9, contentMatch: 0.1 },
+        { id: "done", goalDone: 0.9 },
+      ],
+    });
+    const askUser = vi.fn(async (_question: ComputerQuestion): Promise<ComputerAnswer | null> => ({ confirmed: true }));
+    const steps: ComputerTimelineStep[] = [];
+    const result = await run(h, {}, { askUser, onStep: step => steps.push(step) });
+    expect(askUser).toHaveBeenCalledTimes(1);
+    expect(h.calls.execute.map(item => item.candidateId)).toEqual(["key_return"]);
+    // The confirmed send runs on the observation the member checked.
+    expect(h.calls.execute[0].observationId).toBe(h.calls.decide[1].observationId);
+    expect(steps.some(step => step.note === "你已核对界面并确认发送")).toBe(true);
+    expect(result).toMatchObject({ outcome: "verified" });
+  });
+
+  it("offers no confirmation when Jev is itself unsure about sending", async () => {
+    const h = harness({
+      views: [wechatViews[4]],
+      decisions: [{ id: "key_return", confidence: 0.6, recipientMatch: 0.9, contentMatch: 0.1 }, { id: "key_return", confidence: 0.6, recipientMatch: 0.9, contentMatch: 0.1 }],
+    });
+    // A confirmation it did not offer is not taken as one.
+    const askUser = vi.fn(async (_question: ComputerQuestion): Promise<ComputerAnswer | null> => ({ confirmed: true }));
+    const result = await run(h, {}, { askUser });
+    expect(askUser.mock.calls[0]![0].confirmLabel).toBeUndefined();
+    expect(h.bridge.execute).not.toHaveBeenCalled();
+    expect(result.reason).toBe("low_confidence");
+  });
+
+  it("keeps a confirmation only for the send it was given for", async () => {
+    const h = harness({
+      views: [wechatViews[4], wechatViews[4], wechatViews[3], wechatViews[4], wechatViews[4]],
+      decisions: [
+        { id: "key_return", confidence: 0.95, contentMatch: 0.1 },
+        { id: "key_return", confidence: 0.95, contentMatch: 0.1 },
+        { id: "type_p2_focus" },
+        { id: "key_return", confidence: 0.95, contentMatch: 0.1 },
+        { id: "key_return", confidence: 0.95, contentMatch: 0.1 },
+      ],
+      // The confirmed send is refused by the executor (the screen changed).
+      executions: [{ status: "blocked", authorization: "denied", message: "界面已变化，未执行这一步", code: "authorization_changed" }],
+    });
+    const answers: Array<ComputerAnswer | null> = [{ confirmed: true }, null];
+    const askUser = vi.fn(async (_question: ComputerQuestion) => answers.shift() ?? null);
+    const result = await run(h, {}, { askUser });
+    // After another action the member is asked again before any second attempt.
+    expect(askUser).toHaveBeenCalledTimes(2);
+    expect(h.calls.execute.map(item => item.candidateId)).toEqual(["key_return", "type_p2_focus"]);
     expect(result.reason).toBe("low_confidence");
   });
 

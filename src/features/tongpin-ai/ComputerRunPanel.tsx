@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AiMode, AiQuota } from "../../../shared/ai";
 import { COMPUTER_ACTION_KIND_LABELS, COMPUTER_OUTCOME_LABELS, type ComputerAgentEvent, type ComputerRunStart } from "../../../shared/computerAgent";
 import { getComputerUseBridge } from "../../lib/computerUseBridge";
-import { computerInstructionText, runComputerTask, type ComputerApi, type ComputerQuestion, type ComputerRunResult, type ComputerTimelineStep } from "./computerExecutor";
+import { computerInstructionText, runComputerTask, type ComputerAnswer, type ComputerApi, type ComputerQuestion, type ComputerRunResult, type ComputerTimelineStep } from "./computerExecutor";
 import "./computer-use.css";
 import "./computer-run.css";
 
@@ -38,7 +38,7 @@ function mergeStep(steps: ComputerTimelineStep[], next: ComputerTimelineStep): C
 }
 
 /** Windows the app floats over the target (its search list), read with it. */
-function popupText(observation: NonNullable<ComputerTimelineStep["observation"]>): string {
+export function popupText(observation: NonNullable<ComputerTimelineStep["observation"]>): string {
   if (!observation.popupCount) return "";
   const what = observation.searchListShown ? "搜索列表" : "浮层窗口";
   const count = observation.popupElementCount ? ` ${observation.popupElementCount} 项` : "（读不到内容）";
@@ -47,6 +47,18 @@ function popupText(observation: NonNullable<ComputerTimelineStep["observation"]>
     ? `〔${observation.floating.popups.map(item => `${item.list ? "列表" : "浮层"} ${item.x},${item.y} ${item.w}×${item.h}`).join("；")}${observation.floating.searchBox ? `；搜索框 ${observation.floating.searchBox.x},${observation.floating.searchBox.y} ${observation.floating.searchBox.w}×${observation.floating.searchBox.h}` : ""}〕`
     : "";
   return ` · ${what}${count}${where}`;
+}
+
+/**
+ * Buttons under a question: the confirmation (only when offered, for a send
+ * Jev chose but cannot verify on screen), guidance for Jev, or stop.
+ */
+export function ComputerQuestionActions({ confirmLabel, canSubmit, onConfirm, onStop }: { confirmLabel?: string; canSubmit: boolean; onConfirm: () => void; onStop: () => void }) {
+  return <div className="tp-ai-computer-run__question-actions">
+    {confirmLabel ? <button type="button" className="tp-ai-computer__primary" onClick={onConfirm}>{confirmLabel}</button> : null}
+    <button type="submit" className={confirmLabel ? undefined : "tp-ai-computer__primary"} disabled={!canSubmit}>补充后继续</button>
+    <button type="button" onClick={onStop}>停止任务</button>
+  </div>;
 }
 
 function StepChain({ step }: { step: ComputerTimelineStep & { verifiedEffect?: number } }) {
@@ -67,7 +79,7 @@ function StepChain({ step }: { step: ComputerTimelineStep & { verifiedEffect?: n
 export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, onClose }: ComputerRunPanelProps) {
   const bridge = getComputerUseBridge()?.agent;
   const controllerRef = useRef<AbortController | null>(null);
-  const answerRef = useRef<((value: string | null) => void) | null>(null);
+  const answerRef = useRef<((value: ComputerAnswer | null) => void) | null>(null);
   const callbacksRef = useRef({ onQuota, onFinish });
   callbacksRef.current = { onQuota, onFinish };
   const [run, setRun] = useState<ComputerRunStart | null>(null);
@@ -148,6 +160,14 @@ export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, o
     setStatus("已收到补充说明，Jev 继续决策。");
   }
 
+  /** The member checked the app and confirms the send Jev chose. */
+  function confirmChecked() {
+    answerRef.current?.({ confirmed: true });
+    answerRef.current = null;
+    setQuestion(null);
+    setStatus("已确认，正在执行这一步（执行前会再核对一次界面）。");
+  }
+
   const task = run?.task;
   const running = !result;
   return <section className="tp-ai-computer tp-ai-computer-run" aria-label="电脑操作执行器" aria-busy={running}>
@@ -177,10 +197,7 @@ export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, o
     {question ? <form className="tp-ai-computer-run__question" onSubmit={submitAnswer}>
       <p>{question.question}</p>
       <textarea value={answer} maxLength={300} rows={2} placeholder="例如：联系人在微信里的备注是“大姐”" onChange={event => setAnswer(event.target.value)} aria-label="给 Jev 的补充说明" />
-      <div className="tp-ai-computer-run__question-actions">
-        <button type="submit" className="tp-ai-computer__primary" disabled={!answer.trim()}>补充后继续</button>
-        <button type="button" onClick={stop}>停止任务</button>
-      </div>
+      <ComputerQuestionActions confirmLabel={question.confirmLabel} canSubmit={Boolean(answer.trim())} onConfirm={confirmChecked} onStop={stop} />
     </form> : null}
     {result ? <p className={`tp-ai-computer-run__result is-${result.outcome}`}>{result.summary}</p> : null}
     <p className="tp-ai-computer__boundary"><ShieldCheck size={13} aria-hidden="true" />只在你授权的应用里操作；Jev 只收到界面结构摘要，不接收截图；超出授权的发送、删除、付款会先停下来问你。按 Esc 可随时停止。</p>

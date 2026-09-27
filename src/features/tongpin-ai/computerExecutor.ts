@@ -60,7 +60,17 @@ export interface ComputerQuestion {
   step: number;
   question: string;
   options: string[];
+  /**
+   * Offered only when Jev chose the granted send with confidence but cannot
+   * verify the recipient or the text from the screen structure (WeChat does
+   * not expose its message box): the label of the button with which the
+   * member confirms they checked the app themselves.
+   */
+  confirmLabel?: string;
 }
+
+/** The member's reply: guidance for Jev, or the confirmation offered in `confirmLabel`. */
+export type ComputerAnswer = string | { confirmed: true };
 
 export interface ComputerRunResult {
   outcome: ComputerRunOutcome;
@@ -79,8 +89,8 @@ export interface ComputerRunCallbacks {
   onAgentEvent?(event: ComputerAgentEvent): void;
   onStep?(step: ComputerTimelineStep): void;
   onQuota?(quota: AiQuota): void;
-  /** Ask the member in chat. Resolve with guidance text, or null to stop. */
-  askUser?(question: ComputerQuestion): Promise<string | null>;
+  /** Ask the member in chat. Resolve with guidance text (or the offered confirmation), or null to stop. */
+  askUser?(question: ComputerQuestion): Promise<ComputerAnswer | null>;
 }
 
 export interface ComputerRunDeps {
@@ -258,6 +268,9 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
     const guidance: string[] = [];
     let lastAction: ComputerDecisionRequest["lastAction"];
     let lowConfidenceStreak = 0, reobserveStreak = 0, failureStreak = 0, backgroundMisses = 0, blockedStreak = 0, prematureDone = 0, observeFailures = 0, sendStuckSeen = 0;
+    // The member checked the app and confirmed the recipient and the text of
+    // the send Jev chose; it holds until the next executed action.
+    let memberConfirmedSend = false;
 
     for (;;) {
       checkStopped();
@@ -371,7 +384,8 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       /* Confidence floors: reobserve once, then ask the member in chat. */
       const floor = choice.risk === "none" ? limits.minConfidence : Math.max(limits.minConfidence, COMPUTER_AGENT_LIMITS.irreversibleMinConfidence);
       const matchFloor = COMPUTER_AGENT_LIMITS.irreversibleMinConfidence;
-      const sendDoubt = choice.risk === "send" && ((verification.recipientMatch ?? 1) < matchFloor || (verification.contentMatch ?? 1) < matchFloor);
+      const sendDoubt = choice.risk === "send" && !memberConfirmedSend && ((verification.recipientMatch ?? 1) < matchFloor || (verification.contentMatch ?? 1) < matchFloor);
+      if (choice.risk !== "send") memberConfirmedSend = false;
       if (decision.confidence < floor || sendDoubt || choice.id === "abstain") {
         lowConfidenceStreak += 1;
         if (lowConfidenceStreak === 1) {
@@ -386,17 +400,31 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
           .filter((candidate): candidate is ComputerCandidate => Boolean(candidate && candidate.kind !== "reserved"))
           .slice(0, 3)
           .map(candidate => candidate.label);
+        // Jev chose the granted send with confidence and only cannot see the
+        // chat or the text: the member may check the app and confirm it.
+        const confirmable = sendDoubt && decision.confidence >= floor;
+        const where = appName ? `「${appName}」` : "目标应用";
         const question = sendDoubt
-          ? `Jev 不能确认当前聊天就是「${spec.irreversible?.recipient ?? ""}」、输入框里恰好是“${spec.irreversible?.content ?? ""}”。请看一眼${appName ? `「${appName}」` : "目标应用"}，告诉我需要怎么调整，或者停止。`
+          ? `Jev 不能确认当前聊天就是「${spec.irreversible?.recipient ?? ""}」、输入框里恰好是“${spec.irreversible?.content ?? ""}”。请看一眼${where}：${confirmable ? "核对无误就点确认按钮，否则" : ""}告诉我需要怎么调整，或者停止。`
           : `Jev 对下一步把握不足（${percent(decision.confidence)}）。${ranked.length ? `它在考虑：${ranked.join("；")}。` : ""}可以补充一句说明（例如联系人的完整备注名），或者停止。`;
-        callbacks.onStep?.({ step, phase: "ask", note: "等待你的补充说明" });
-        const answer = callbacks.askUser ? await callbacks.askUser({ step, question, options: ranked }) : null;
+        callbacks.onStep?.({ step, phase: "ask", note: confirmable ? "等待你核对后确认" : "等待你的补充说明" });
+        const answer = callbacks.askUser
+          ? await callbacks.askUser({ step, question, options: ranked, ...(confirmable ? { confirmLabel: `已核对，${choice.label}` } : {}) })
+          : null;
         checkStopped();
-        if (!answer || !answer.trim()) throw new RunStop(irreversibleAttempted ? "unknown" : "abstained", "low_confidence", REASON_TEXT.low_confidence);
-        guidance.push([...answer.trim()].slice(0, COMPUTER_AGENT_LIMITS.maxGuidanceChars).join(""));
-        lowConfidenceStreak = 0;
-        lastAction = undefined;
-        continue;
+        if (confirmable && answer !== null && typeof answer === "object" && answer.confirmed === true) {
+          // The chosen send runs now; the executor still re-checks it on a
+          // fresh capture and asks natively when it cannot verify it.
+          memberConfirmedSend = true;
+          callbacks.onStep?.({ step, phase: "ask", note: "你已核对界面并确认发送" });
+        } else {
+          const text = typeof answer === "string" ? answer.trim() : "";
+          if (!text) throw new RunStop(irreversibleAttempted ? "unknown" : "abstained", "low_confidence", REASON_TEXT.low_confidence);
+          guidance.push([...text].slice(0, COMPUTER_AGENT_LIMITS.maxGuidanceChars).join(""));
+          lowConfidenceStreak = 0;
+          lastAction = undefined;
+          continue;
+        }
       }
       lowConfidenceStreak = 0;
 
@@ -417,6 +445,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
         continue;
       }
       const outcome = executed.value;
+      memberConfirmedSend = false;
       if (outcome.status !== "blocked") actions += 1;
       if (choice.risk !== "none" && outcome.status !== "blocked" && outcome.status !== "failed") irreversibleAttempted = true;
       callbacks.onStep?.({ step, phase: outcome.status === "blocked" ? "authorize" : "verify", authorization: outcome.authorization, execution: { status: outcome.status, message: outcome.message, ...(outcome.delivery ? { delivery: outcome.delivery } : {}) } });
