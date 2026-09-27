@@ -13,11 +13,11 @@ import type { WorkerPose } from "./visualState";
 export type FrameToggle = 0 | 1;
 
 /** idle / done / failed / cancelled all rest on the same standing frame —
- *  matches upstream's own idle pose (`sprites.walk[dir][1]`, the middle frame
- *  of the walk cycle); what tells them apart is the overlay badge and grey
- *  tint applied on top (see visualState.ts + EmployeeFigure.ts), not the
- *  character's own pose. */
-export const RESTING_FRAME: CharacterFrame = CharacterFrame.WALK_2;
+ *  LimeZu's premade character sheets have no distinct "happy/done" pose worth
+ *  using (see spriteFrameMath.ts / the feature's report), so what tells these
+ *  four states apart is the overlay badge and grey tint applied on top (see
+ *  visualState.ts + EmployeeFigure.ts), not the character's own pose. */
+export const RESTING_FRAME: CharacterFrame = CharacterFrame.IDLE;
 
 /** The two-frame loop for an animated pose, or null for a static one. */
 export function animatedFramesForPose(pose: WorkerPose): [CharacterFrame, CharacterFrame] | null {

@@ -1,5 +1,9 @@
 // Vite asset URLs for the office's pixel-art sprite sheets — see
-// THIRD_PARTY_NOTICES.md for provenance (Pixel Agents MIT / MetroCity CC0).
+// THIRD_PARTY_NOTICES.md for provenance (LimeZu "Modern Interiors", a pack
+// Tongpin's owner separately purchased a full-version license for; see that
+// file for the exact license terms). Every file here is a small crop
+// produced by `scripts/agent-office/extract-limezu.py` — never the pack's own
+// master sheets, which the license does not allow redistributing.
 //
 // Every import uses `?url&no-inline`, not just `?url`: on its own, `?url`
 // only picks the *shape* of the import (a plain URL string, rather than a
@@ -14,41 +18,57 @@
 // modules that OfficeSceneController pulls in — all of which AgentOfficeView
 // reaches through a dynamic `import()`, so these PNGs are fetched only inside
 // that lazy "office" chunk, never from the main bundle.
+//
+// The one deliberate exception is portraits.ts, a separate, eager module for
+// the tiny DOM-fallback portraits — see its own doc comment for why those
+// must NOT follow this file's lazy-chunk convention.
 
-import char0 from "./assets/characters/char_0.png?url&no-inline";
-import char1 from "./assets/characters/char_1.png?url&no-inline";
-import char2 from "./assets/characters/char_2.png?url&no-inline";
-import char3 from "./assets/characters/char_3.png?url&no-inline";
-import char4 from "./assets/characters/char_4.png?url&no-inline";
-import char5 from "./assets/characters/char_5.png?url&no-inline";
-import floorUrl from "./assets/floors/floor_5.png?url&no-inline";
-import wallUrl from "./assets/walls/wall_0.png?url&no-inline";
-import deskFrontUrl from "./assets/furniture/DESK/DESK_FRONT.png?url&no-inline";
-import pcFrontOffUrl from "./assets/furniture/PC/PC_FRONT_OFF.png?url&no-inline";
-import pcFrontOn1Url from "./assets/furniture/PC/PC_FRONT_ON_1.png?url&no-inline";
-import pcFrontOn2Url from "./assets/furniture/PC/PC_FRONT_ON_2.png?url&no-inline";
-import pcFrontOn3Url from "./assets/furniture/PC/PC_FRONT_ON_3.png?url&no-inline";
-import bookshelfUrl from "./assets/furniture/BOOKSHELF/BOOKSHELF.png?url&no-inline";
-import whiteboardUrl from "./assets/furniture/WHITEBOARD/WHITEBOARD.png?url&no-inline";
-import coffeeUrl from "./assets/furniture/COFFEE/COFFEE.png?url&no-inline";
-import clockUrl from "./assets/furniture/CLOCK/CLOCK.png?url&no-inline";
-import plantUrl from "./assets/furniture/PLANT/PLANT.png?url&no-inline";
+import char1 from "./assets/limezu/characters/char_1.png?url&no-inline";
+import char2 from "./assets/limezu/characters/char_2.png?url&no-inline";
+import char3 from "./assets/limezu/characters/char_3.png?url&no-inline";
+import char4 from "./assets/limezu/characters/char_4.png?url&no-inline";
+import char5 from "./assets/limezu/characters/char_5.png?url&no-inline";
+import char6 from "./assets/limezu/characters/char_6.png?url&no-inline";
+import char7 from "./assets/limezu/characters/char_7.png?url&no-inline";
+import floorUrl from "./assets/limezu/floor.png?url&no-inline";
+import wallUrl from "./assets/limezu/wall.png?url&no-inline";
+import baseboardUrl from "./assets/limezu/baseboard.png?url&no-inline";
+import deskOffUrl from "./assets/limezu/desk_off.png?url&no-inline";
+import deskOnAUrl from "./assets/limezu/desk_on_a.png?url&no-inline";
+import deskOnBUrl from "./assets/limezu/desk_on_b.png?url&no-inline";
+import waterCoolerUrl from "./assets/limezu/water_cooler.png?url&no-inline";
+import doorUrl from "./assets/limezu/door.png?url&no-inline";
+import bookshelfAUrl from "./assets/limezu/bookshelf_a.png?url&no-inline";
+import bookshelfBUrl from "./assets/limezu/bookshelf_b.png?url&no-inline";
+import whiteboardUrl from "./assets/limezu/whiteboard.png?url&no-inline";
+import plantBigUrl from "./assets/limezu/plant_big.png?url&no-inline";
+import plantSmallUrl from "./assets/limezu/plant_small.png?url&no-inline";
+import coffeeUrl from "./assets/limezu/coffee.png?url&no-inline";
+import clockUrl from "./assets/limezu/clock.png?url&no-inline";
+import signboardUrl from "./assets/limezu/signboard.png?url&no-inline";
 
-/** One 112×96 sheet per character palette — see spriteFrameMath.ts for how each is sliced. */
-export const CHARACTER_SHEET_URLS: readonly string[] = [char0, char1, char2, char3, char4, char5];
+/** One 80×16 strip per character — see spriteFrameMath.ts for how each is
+ *  sliced. Index 0-5 are worker-eligible, index 6 is the coordinator's
+ *  exclusive sprite (see roster.ts). */
+export const CHARACTER_SHEET_URLS: readonly string[] = [char1, char2, char3, char4, char5, char6, char7];
 
 export const FLOOR_URL = floorUrl;
 export const WALL_URL = wallUrl;
+export const BASEBOARD_URL = baseboardUrl;
 
 export const FURNITURE_URLS = {
-  deskFront: deskFrontUrl,
-  pcFrontOff: pcFrontOffUrl,
-  pcFrontOn: [pcFrontOn1Url, pcFrontOn2Url, pcFrontOn3Url] as readonly string[],
-  bookshelf: bookshelfUrl,
+  deskOff: deskOffUrl,
+  deskOn: [deskOnAUrl, deskOnBUrl] as readonly string[],
+  waterCooler: waterCoolerUrl,
+  door: doorUrl,
+  bookshelfA: bookshelfAUrl,
+  bookshelfB: bookshelfBUrl,
   whiteboard: whiteboardUrl,
+  plantBig: plantBigUrl,
+  plantSmall: plantSmallUrl,
   coffee: coffeeUrl,
   clock: clockUrl,
-  plant: plantUrl,
+  signboard: signboardUrl,
 } as const;
 
 /** Every URL this module owns, for one batched `Assets.load()` call. */
@@ -56,12 +76,17 @@ export const ALL_SPRITE_URLS: readonly string[] = [
   ...CHARACTER_SHEET_URLS,
   FLOOR_URL,
   WALL_URL,
-  FURNITURE_URLS.deskFront,
-  FURNITURE_URLS.pcFrontOff,
-  ...FURNITURE_URLS.pcFrontOn,
-  FURNITURE_URLS.bookshelf,
+  BASEBOARD_URL,
+  FURNITURE_URLS.deskOff,
+  ...FURNITURE_URLS.deskOn,
+  FURNITURE_URLS.waterCooler,
+  FURNITURE_URLS.door,
+  FURNITURE_URLS.bookshelfA,
+  FURNITURE_URLS.bookshelfB,
   FURNITURE_URLS.whiteboard,
+  FURNITURE_URLS.plantBig,
+  FURNITURE_URLS.plantSmall,
   FURNITURE_URLS.coffee,
   FURNITURE_URLS.clock,
-  FURNITURE_URLS.plant,
+  FURNITURE_URLS.signboard,
 ];

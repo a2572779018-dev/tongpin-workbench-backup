@@ -60,6 +60,11 @@ export function AgentOfficePanel({ snapshot, height }: AgentOfficePanelProps) {
       {expanded ? (
         <div id={bodyId} className="tp-ai-office-panel__body">
           <AgentOfficeView snapshot={snapshot} height={height} />
+          {/* LimeZu's "Modern Interiors" license requires visible credit —
+           *  see THIRD_PARTY_NOTICES.md — shown here so it appears in both
+           *  the canvas scene and the no-WebGL list fallback, which share
+           *  this body wrapper. */}
+          <p className="tp-ai-office-panel__credit">办公室像素美术：LimeZu · limezu.itch.io</p>
         </div>
       ) : null}
     </section>

@@ -10,7 +10,7 @@ function frameTexture(textures: CharacterTextureSet, frame: CharacterFrame): Tex
     case CharacterFrame.TYPE_2: return textures.typing[1];
     case CharacterFrame.READ_1: return textures.reading[0];
     case CharacterFrame.READ_2: return textures.reading[1];
-    default: return textures.idle; // WALK_2 (the resting frame) and any other frame
+    default: return textures.idle; // IDLE (the resting frame) and any other frame
   }
 }
 

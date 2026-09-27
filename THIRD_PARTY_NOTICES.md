@@ -1175,13 +1175,16 @@ One thing from the same upstream directory was deliberately **not** used, for
 reasons unrelated to code license: the LimeZu tileset and map assets under
 upstream's `src/renderer/src/assets/` are covered by a separate,
 non-transferable asset license (`LICENSE-ASSETS` upstream) and were never
-copied. Tongpin's office floor, walls, furniture and characters instead use
-real pixel-art assets from Pixel Agents and MetroCity — see the next two
-sections — rendered as sliced Pixi sprites rather than drawn procedurally.
-(An earlier version of this scene drew every employee as a procedural,
-pixel-buffer bust with originally-composed recipes; that code
-(`portraitEngine.ts`) has been removed now that real character sprites cover
-the same need.)
+copied — that restriction is specific to Munder Difflin's own copy of those
+files, not to LimeZu art in general. Tongpin's office floor, walls, furniture
+and characters instead render sliced Pixi sprites cropped from a LimeZu
+"Modern Interiors" pack the app's owner separately purchased and licenses in
+their own name — see "LimeZu Modern Interiors" below — never Munder Difflin's
+copy. (An earlier revision of this scene first used real character/furniture
+art from Pixel Agents and MetroCity, then a still-earlier one drew every
+employee as a procedural, pixel-buffer bust (`portraitEngine.ts`); both have
+been fully replaced and removed — see "Pixel Agents" below for the one
+remaining code-only trace.)
 
 The ported/adapted files above are covered by upstream's MIT License:
 
@@ -1207,40 +1210,22 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Pixel Agents (office floor/wall/furniture art + sprite-sheet code)
+## Pixel Agents (code reference only — art no longer used)
 
-`src/features/tongpin-ai/agentOffice/` renders its floor, walls, desks,
-monitors and decor with art and sprite-slicing logic from Pixel Agents, an
-open-source AI-employee-office visualizer, commit
+An earlier revision of `src/features/tongpin-ai/agentOffice/` rendered its
+floor, walls, desks and characters with art and sprite-slicing logic from
+Pixel Agents, an open-source AI-employee-office visualizer, commit
 `3537e140c2094761beae748592aeb92ece8edfdd` (v1.4.1), available at
-https://github.com/pixel-agents-hq/pixel-agents.
+https://github.com/pixel-agents-hq/pixel-agents. That art (and the MetroCity
+CC0 character sheets it redistributed) has since been fully replaced by the
+LimeZu assets below and removed from the repository, including its
+`wallAutoTile.ts` wall-bitmask module, which no longer applies to LimeZu's
+single flat wall tile and was deleted rather than adapted.
 
-- Art copied byte-for-byte from `webview-ui/public/assets/` into
-  `src/features/tongpin-ai/agentOffice/assets/`: one floor tile
-  (`floors/floor_5.png`), one wall auto-tile sheet (`walls/wall_0.png`), and
-  furniture (`furniture/DESK/DESK_FRONT.png`; `furniture/PC/PC_FRONT_OFF.png`
-  and `PC_FRONT_ON_1/2/3.png`; `furniture/BOOKSHELF/BOOKSHELF.png`;
-  `furniture/WHITEBOARD/WHITEBOARD.png`; `furniture/COFFEE/COFFEE.png`;
-  `furniture/CLOCK/CLOCK.png`; `furniture/PLANT/PLANT.png`), each with its
-  upstream `manifest.json` for reference. Only the pieces this office actually
-  draws were copied — upstream's pack also has more floor/wall variants,
-  carpets, a second desk/bookshelf style and separate chair sprites that this
-  scene doesn't use.
-- Code ported (reimplemented in TypeScript as pure, unit-tested functions, not
-  copied verbatim) from `webview-ui/src/office/wallTiles.ts` (`buildWallMask`,
-  the 4-bit N/E/S/W auto-tile bitmask) and `core/src/assets/pngDecoder.ts` /
-  `core/src/assets/constants.ts` (the character-sheet and wall-sheet
-  pixel-rect slicing geometry) — see `wallAutoTile.ts` and
-  `spriteFrameMath.ts`. The two-frame typing/reading toggle timing in
-  `animationMapping.ts` (`FRAME_TOGGLE_DURATION_SEC`) matches upstream's
-  `webview-ui/src/constants.ts` (`TYPE_FRAME_DURATION_SEC`).
-- Floor tiles ship uncolored upstream (its own in-app layout editor recolors
-  them per project via an HSL "Colorize" step); Tongpin has no such editor, so
-  `sceneDraw.ts` applies one fixed warm Pixi `tint` instead of porting that
-  step. Every other asset above already ships fully colored and is drawn
-  untinted.
-
-The copied art and ported code above are covered by upstream's MIT License:
+One timing constant survives from that revision: the two-frame typing/reading
+toggle in `animationMapping.ts` (`FRAME_TOGGLE_DURATION_SEC = 0.3`) still
+matches upstream's `webview-ui/src/constants.ts` (`TYPE_FRAME_DURATION_SEC`).
+That single value is covered by upstream's MIT License:
 
 MIT License
 
@@ -1264,20 +1249,172 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## MetroCity character pack (office employee sprites)
+## LimeZu Modern Interiors (office floor/wall/furniture/character art)
 
-- Source: https://jik-a-4.itch.io/metrocity-free-topdown-character-pack, by
-  JIK-A-4.
-- License: CC0 1.0 Universal (public-domain dedication) — no attribution is
-  legally required; credited here as a courtesy, the same way Pixel Agents'
-  own README credits it ("These are based on the amazing work of JIK-A-4,
-  Metro City").
-- Use in Tongpin: six character sprite sheets
-  (`src/features/tongpin-ai/agentOffice/assets/characters/char_0.png` through
-  `char_5.png`), copied byte-for-byte from Pixel Agents'
-  `webview-ui/public/assets/characters/` (which redistributes them under the
-  same CC0 terms). Each employee — the coordinator and up to five workers — is
-  assigned one of the six sheets by a deterministic hash of its id (see
-  `roster.ts`), reserving one sheet exclusively for the coordinator. Only the
-  down-facing row of each sheet is ever shown, since this office's employees
-  stay seated and never walk or turn.
+`src/features/tongpin-ai/agentOffice/` renders its floor, walls, baseboard,
+furniture, animated props and character sprites from small crops of LimeZu's
+"Modern Interiors - RPG Tileset [16X16]", https://limezu.itch.io/moderninteriors.
+Tongpin's owner purchased the full version of this pack for their own use and
+licenses it in their own name (full-version license dated 2026-09-27; no
+purchase, payment or personal identity details are recorded here or anywhere
+in this repository — only the license terms themselves). The pack's own
+`LICENSE.txt` states:
+
+```text
+MODERN INTERIORS FULL VERSION LICENSE
+-
+YOU CAN:
+-Edit and use the asset in any commercial  or non commercial project
+-Use the asset in any commercial  or non commercial project
+-
+YOU CAN'T:
+- Resell or distribute the asset to others
+- Edit and resell the asset to others
+-
+- Credits required (limezu.itch.io)
+```
+
+Because the license permits editing/using the art but not redistributing the
+asset itself, **only the small crops this scene actually draws are committed
+— never the master sheets or full character sheets**, and the pack itself
+lives outside the repository (the owner's own local copy). Every crop is
+produced by the reproducible `scripts/agent-office/extract-limezu.py`, which
+is the source of truth for exactly what was cropped from where; re-running it
+regenerates the same output files from the same source rects. What it
+produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
+
+- `limezu/floor.png` / `limezu/wall.png` — 32×32 tileable swatches cropped
+  from `Room_Builder_subfiles/Room_Builder_Floors_16x16.png` and
+  `Room_Builder_Walls_16x16.png`. This office is one fixed rectangular room,
+  not LimeZu's full modular corner/window auto-tile system, so a single clean
+  material swatch per surface (tiled with a Pixi `TilingSprite`) stands in for
+  that system — see the feature's report for this scope note.
+- `limezu/baseboard.png` — a 16×7 trim strip cropped from
+  `Room_Builder_subfiles/Room_Builder_Baseboards_16x16.png`, tiled along the
+  wall/floor seam.
+- `limezu/desk_off.png`, `desk_on_a.png`, `desk_on_b.png` — a worker desk with
+  monitor, from `Theme_Sorter_Singles/13_Conference_Hall_Singles/
+  Conference_Hall_Singles_31.png` (blank screen, monitor off) and `_29.png` /
+  `_30.png` (blue screen, alternated on a timer while the monitor is "on" —
+  see `Desk.ts`).
+- `limezu/water_cooler.png` — `Conference_Hall_Singles_45.png`.
+- `limezu/door.png` — `Conference_Hall_Singles_63.png`.
+- `limezu/bookshelf_a.png` / `bookshelf_b.png` — `Theme_Sorter_Singles/
+  5_Classroom_and_Library_Singles/Classroom_and_Library_Singles_46.png` and
+  `_58.png`.
+- `limezu/whiteboard.png` — `Classroom_and_Library_Singles_39.png`, LimeZu's
+  standing chalkboard used here as the office's presentation board (the pack
+  has no plain white board; this reads as the same kind of object).
+- `limezu/plant_big.png` / `plant_small.png` — `Theme_Sorter_Singles/
+  2_Living_Room_Singles/Living_Room_Singles_18.png` and `_15.png`.
+- `limezu/coffee.png` / `limezu/clock.png` — the first 4 of 6 frames of
+  `3_Animated_objects/16x16/spritesheets/animated_coffee.png`, and the first 4
+  of 10 frames of `animated_cuckoo_clock.png`.
+- `limezu/characters/char_1.png` through `char_7.png` — one compact 80×16
+  strip per character, each 5 frames (idle / working ×2 / phone ×2) re-packed
+  from fixed 16×16 rects inside `2_Characters/Character_Generator/
+  0_Premade_Characters/16x16/Premade_Character_01.png` through `_07.png`
+  (LimeZu's own generic premade characters — not the Munder Difflin TV-cast
+  recolors). The pack ships no documentation naming these rows, so "working"
+  and "phone" are this office's own reading of an inherently generic top-down
+  RPG character sheet, chosen by visual inspection; see the feature's report.
+  Sheets 1–6 are assigned to workers by a deterministic hash of each worker's
+  id (see `roster.ts`); sheet 7 is reserved exclusively for the coordinator.
+- `portraits/portrait_1.png` through `portrait_7.png` — just the idle frame of
+  each character sheet above, kept in the eager main bundle (not the lazy
+  office chunk) so the DOM/no-WebGL fallback (`AgentOfficeFallback.tsx`) can
+  show a tiny portrait per employee without ever loading Pixi.
+
+Per the license's "Credits required" term, Tongpin credits LimeZu visibly in
+the office panel itself (not only here): "办公室像素美术：LimeZu · limezu.itch.io".
+
+## MisekiBitmap pixel font (office signboard text)
+
+The office's wall signboard ("同频有限无责任公司" / "作者Sam") is a small PNG
+rasterized ahead of time by `scripts/agent-office/render-signboard.py` using
+MisekiBitmap (美績點陣體), an 8px Simplified-Chinese pixel font by Mark Li
+(https://github.com/ItMarki/MisekiBitmap), obtained as vendored under the same
+license inside the Fusion Pixel Font project
+(https://github.com/TakWolf/fusion-pixel-font,
+`assets/fonts/miseki-bitmap/MisekiBitmap.ttf`, tag `2026.09.25`) — one of
+several upstream fonts that project's own README credits and licenses this
+way; Fusion Pixel Font's own build output was suggested as an example in the
+original task but its finished builds are release-only assets this
+environment's GitHub access couldn't reach, so this directly-fetchable
+upstream component font was used instead, unmodified. Only the font's
+rasterized *output* (`assets/limezu/signboard.png`) is committed — the font
+file itself is never bundled into the app, per the task's instruction.
+
+License: SIL Open Font License, Version 1.1.
+
+```text
+Copyright (c) 2023-2024 Mark Li (itmarkibfb@gmail.com)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any Modified
+Version, except to acknowledge the contribution(s) of the Copyright
+Holder(s) and the Author(s) or with their explicit written permission.
+
+5) The Font Software, modified or unmodified, in part or in whole, must be
+distributed entirely under this license, and must not be distributed under
+any other license. The requirement for fonts to remain under this license
+does not apply to any document created using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL,
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO
+USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
+```

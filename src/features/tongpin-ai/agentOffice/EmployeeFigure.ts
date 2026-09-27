@@ -14,13 +14,18 @@ const CHARACTER_SCALE = { worker: DESK_SCALE, coordinator: HEAD_DESK_SCALE } as 
 const BOB_AMPLITUDE = 1.4;
 const BOB_SPEED = 5.5;
 const FLOURISH_DURATION = 0.7;
-/** How far down the desk's height the character's feet-line sits: enough
- *  overlap that the desk + monitor (drawn in front, see Desk.ts) reads as
- *  covering the seated lower body, while the head and shoulders stay above
- *  it. Untunable-by-formula without a rendered screenshot to check against —
- *  see this feature's README/report for a note to eyeball it in the running
- *  app and adjust here if it needs it. */
-const SEAT_ANCHOR_FRACTION = 0.58;
+/** How far down the desk's height the character's feet-line sits. Unlike the
+ *  previous (Pixel Agents) desk — a wide, short desk with a narrow monitor
+ *  perched on top, leaving transparent art around it for the character's
+ *  shoulders to show through — LimeZu's desk+monitor is one fused, mostly
+ *  opaque sprite (see Desk.ts), so this office instead seats the character
+ *  *behind* it: a low fraction puts most of the character's height above the
+ *  desk's top edge (reading as "sitting behind the monitor, facing the
+ *  viewer"), with only its legs' worth of overlap behind the desk's own
+ *  height. Untunable-by-formula without a rendered screenshot to check
+ *  against — see this feature's report for a note to eyeball it in the
+ *  running app and adjust here if it needs it. */
+const SEAT_ANCHOR_FRACTION = 0.35;
 
 export interface EmployeeFigureOptions {
   id: string;

@@ -1,6 +1,6 @@
-// Loads every Pixel Agents / MetroCity PNG this scene uses and slices each
-// sheet into the individual Pixi Textures the rest of the scene draws with
-// (see THIRD_PARTY_NOTICES.md for provenance). This is the one Pixi-dependent
+// Loads every LimeZu PNG this scene uses and slices each sheet into the
+// individual Pixi Textures the rest of the scene draws with (see
+// THIRD_PARTY_NOTICES.md for provenance). This is the one Pixi-dependent
 // module between the pure asset-URL list (spriteAssets.ts) and pure slicing
 // math (spriteFrameMath.ts) — it has no display objects of its own, only
 // Textures, so it stays simple enough to not need its own test double: every
@@ -20,21 +20,15 @@ import {
   CHARACTER_SHEET_URLS,
   FLOOR_URL,
   FURNITURE_URLS,
+  BASEBOARD_URL,
   WALL_URL,
 } from "./spriteAssets";
-import {
-  CharacterFrame,
-  CharacterRow,
-  characterFrameRect,
-  type Rect,
-  WALL_BITMASK_COUNT,
-  wallPieceRect,
-} from "./spriteFrameMath";
+import { CharacterFrame, characterFrameRect, type Rect } from "./spriteFrameMath";
 import { CHARACTER_COUNT } from "./roster";
 
 export interface CharacterTextureSet {
-  /** Resting frame (WALK_2) — shown whenever animationMapping.ts has no
-   *  animated pair for the current pose (idle/done/failed/cancelled). */
+  /** Resting frame — shown whenever animationMapping.ts has no animated pair
+   *  for the current pose (idle/done/failed/cancelled). */
   idle: Texture;
   typing: readonly [Texture, Texture];
   reading: readonly [Texture, Texture];
@@ -43,17 +37,22 @@ export interface CharacterTextureSet {
 export interface OfficeTextures {
   /** Indexed by CharacterIndex (see roster.ts) — always CHARACTER_COUNT long. */
   characters: readonly CharacterTextureSet[];
-  /** Indexed by wall bitmask (see wallAutoTile.ts), always 16 long. */
-  wallByMask: readonly Texture[];
   floor: Texture;
-  deskFront: Texture;
-  pcOff: Texture;
-  pcOn: readonly [Texture, Texture, Texture];
-  bookshelf: Texture;
+  wall: Texture;
+  baseboard: Texture;
+  deskOff: Texture;
+  /** Alternated on a timer while a desk's monitor is "on" — see Desk.ts. */
+  deskOn: readonly [Texture, Texture];
+  waterCooler: Texture;
+  door: Texture;
+  bookshelfA: Texture;
+  bookshelfB: Texture;
   whiteboard: Texture;
-  coffee: Texture;
-  clock: Texture;
-  plant: Texture;
+  plantBig: Texture;
+  plantSmall: Texture;
+  coffee: readonly Texture[];
+  clock: readonly Texture[];
+  signboard: Texture;
 }
 
 /** A new Texture cropped to `rect` of `sheet` — shares `sheet`'s GPU source
@@ -71,13 +70,21 @@ function nearest(texture: Texture): Texture {
   return texture;
 }
 
+/** Slices a left-to-right frame strip (every animated prop here ships as one
+ *  row of same-size frames) into its individual textures. */
+function framesOf(sheet: Texture, frameCount: number, frameW: number, frameH: number): Texture[] {
+  const frames: Texture[] = [];
+  for (let i = 0; i < frameCount; i++) frames.push(sub(sheet, { x: i * frameW, y: 0, w: frameW, h: frameH }));
+  return frames;
+}
+
 let cache: OfficeTextures | null = null;
 let loading: Promise<OfficeTextures> | null = null;
 
 function buildCharacterSet(sheet: Texture): CharacterTextureSet {
-  const frame = (f: CharacterFrame) => sub(sheet, characterFrameRect(CharacterRow.DOWN, f));
+  const frame = (f: CharacterFrame) => sub(sheet, characterFrameRect(f));
   return {
-    idle: frame(CharacterFrame.WALK_2),
+    idle: frame(CharacterFrame.IDLE),
     typing: [frame(CharacterFrame.TYPE_1), frame(CharacterFrame.TYPE_2)],
     reading: [frame(CharacterFrame.READ_1), frame(CharacterFrame.READ_2)],
   };
@@ -97,24 +104,28 @@ export function loadOfficeTextures(): Promise<OfficeTextures> {
     }
     const characters = characterSheets.map(buildCharacterSet);
 
-    const wallSheet = nearest(loaded[WALL_URL]);
-    const wallByMask: Texture[] = [];
-    for (let mask = 0; mask < WALL_BITMASK_COUNT; mask++) wallByMask.push(sub(wallSheet, wallPieceRect(mask)));
-
-    const pcOn = FURNITURE_URLS.pcFrontOn.map((url) => nearest(loaded[url])) as [Texture, Texture, Texture];
+    const deskOn = FURNITURE_URLS.deskOn.map((url) => nearest(loaded[url])) as [Texture, Texture];
+    const coffeeSheet = nearest(loaded[FURNITURE_URLS.coffee]);
+    const clockSheet = nearest(loaded[FURNITURE_URLS.clock]);
 
     const textures: OfficeTextures = {
       characters,
-      wallByMask,
       floor: nearest(loaded[FLOOR_URL]),
-      deskFront: nearest(loaded[FURNITURE_URLS.deskFront]),
-      pcOff: nearest(loaded[FURNITURE_URLS.pcFrontOff]),
-      pcOn,
-      bookshelf: nearest(loaded[FURNITURE_URLS.bookshelf]),
+      wall: nearest(loaded[WALL_URL]),
+      baseboard: nearest(loaded[BASEBOARD_URL]),
+      deskOff: nearest(loaded[FURNITURE_URLS.deskOff]),
+      deskOn,
+      waterCooler: nearest(loaded[FURNITURE_URLS.waterCooler]),
+      door: nearest(loaded[FURNITURE_URLS.door]),
+      bookshelfA: nearest(loaded[FURNITURE_URLS.bookshelfA]),
+      bookshelfB: nearest(loaded[FURNITURE_URLS.bookshelfB]),
       whiteboard: nearest(loaded[FURNITURE_URLS.whiteboard]),
-      coffee: nearest(loaded[FURNITURE_URLS.coffee]),
-      clock: nearest(loaded[FURNITURE_URLS.clock]),
-      plant: nearest(loaded[FURNITURE_URLS.plant]),
+      plantBig: nearest(loaded[FURNITURE_URLS.plantBig]),
+      plantSmall: nearest(loaded[FURNITURE_URLS.plantSmall]),
+      // Both strips are 4 frames of 16×32 — see extract-limezu.py.
+      coffee: framesOf(coffeeSheet, 4, 16, 32),
+      clock: framesOf(clockSheet, 4, 16, 32),
+      signboard: nearest(loaded[FURNITURE_URLS.signboard]),
     };
     cache = textures;
     return textures;

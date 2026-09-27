@@ -1,22 +1,22 @@
-// Assigns each worker one of the office's 6 CC0 character sprites (see
-// spriteSheets.ts), independent of the Chinese role label the run data
-// supplies. The assignment is a pure hash of the worker id, so the same
-// worker keeps the same look across re-renders and snapshot updates without
-// the office needing to remember anything.
+// Assigns each worker one of the office's 7 LimeZu premade character sprites
+// (see spriteSheets.ts / THIRD_PARTY_NOTICES.md), independent of the Chinese
+// role label the run data supplies. The assignment is a pure hash of the
+// worker id, so the same worker keeps the same look across re-renders and
+// snapshot updates without the office needing to remember anything.
 //
 // The coordinator gets its own, exclusive character — never handed to a
 // worker — the same way the previous procedural-portrait roster reserved a
 // distinct "coordinator" recipe outside the worker set (see
-// THIRD_PARTY_NOTICES.md's Munder Difflin entry for that history). With only
-// 6 sprites total, "its own" means one is set aside for the coordinator and
-// workers hash across the remaining 5.
+// THIRD_PARTY_NOTICES.md's Munder Difflin entry for that history). With 7
+// sprites total, "its own" means one is set aside for the coordinator and
+// workers hash across the remaining 6.
 
-export type CharacterIndex = 0 | 1 | 2 | 3 | 4 | 5;
-export const CHARACTER_COUNT = 6;
+export type CharacterIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+export const CHARACTER_COUNT = 7;
 
-/** Character sprites available to workers — index 5 is reserved for the coordinator. */
-export const WORKER_CHARACTER_INDICES: readonly CharacterIndex[] = [0, 1, 2, 3, 4];
-export const COORDINATOR_CHARACTER_INDEX: CharacterIndex = 5;
+/** Character sprites available to workers — index 6 is reserved for the coordinator. */
+export const WORKER_CHARACTER_INDICES: readonly CharacterIndex[] = [0, 1, 2, 3, 4, 5];
+export const COORDINATOR_CHARACTER_INDEX: CharacterIndex = 6;
 
 export const COORDINATOR_RECIPE_KEY = "coordinator" as const;
 export type RecipeKey = CharacterIndex | typeof COORDINATOR_RECIPE_KEY;
