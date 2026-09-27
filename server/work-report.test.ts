@@ -93,6 +93,79 @@ describe("boss work report", () => {
     });
   });
 
+  it("rates the plan: tasks dated in the period plus those moved out of it, never later-dated new tasks", () => {
+    const at = "2026-08-15T02:00:00.000Z";
+    const done = (id: string) => task(id, "self", at, "2026-08-15T08:00:00.000Z");
+    const open = (id: string, date: string) => ({ ...task(id, "self", at), date });
+    // 6 done on the day; 2 moved from the day to the next day (改期);
+    // 3 created that day for later days (当天至本周日 copies); 2 deleted.
+    const tasks = [
+      ...["d1", "d2", "d3", "d4", "d5", "d6"].map(done),
+      open("moved-1", "2026-08-16"),
+      open("moved-2", "2026-08-16"),
+      open("later-1", "2026-08-16"),
+      open("later-2", "2026-08-17"),
+      open("later-3", "2026-08-18"),
+    ];
+    const moved = (taskId: string): TaskAuditEvent => ({
+      id: `audit-${taskId}`,
+      taskId,
+      userId: member.id,
+      actorId: member.id,
+      action: "updated",
+      changes: [{ field: "date", before: "2026-08-15", after: "2026-08-16" }],
+      snapshot: tasks.find((item) => item.id === taskId)!,
+      createdAt: "2026-08-15T12:00:00.000Z",
+    });
+    const deleted = (taskId: string): TaskAuditEvent => ({
+      id: `audit-${taskId}`,
+      taskId,
+      userId: member.id,
+      actorId: member.id,
+      action: "deleted",
+      changes: [],
+      snapshot: { ...task(taskId, "self", at), date: "2026-08-15" },
+      createdAt: "2026-08-15T13:00:00.000Z",
+    });
+    const report = buildBossWorkReport({
+      now: new Date("2026-08-16T01:00:00.000Z"),
+      reportDate: "2026-08-16",
+      status: null,
+      users: [member],
+      tasks,
+      audits: [moved("moved-1"), moved("moved-2"), deleted("gone-1"), deleted("gone-2")],
+    });
+    expect(report.daily.members[0]).toMatchObject({
+      selfCreated: 11,
+      completed: 6,
+      scheduled: 6,
+      scheduledDone: 6,
+      postponed: 2,
+      planned: 8,
+      createdForLater: 3,
+      completionRate: 75,
+    });
+    expect(report.daily.summary).toMatchObject({ planned: 8, scheduledDone: 6, postponed: 2, createdForLater: 3, completionRate: 75 });
+  });
+
+  it("does not count a task moved into the period and back out as postponed twice", () => {
+    const at = "2026-08-15T02:00:00.000Z";
+    const tasks = [{ ...task("t1", "self", at), date: "2026-08-17" }];
+    const change = (id: string, before: string, after: string): TaskAuditEvent => ({
+      id, taskId: "t1", userId: member.id, actorId: member.id, action: "updated",
+      changes: [{ field: "date", before, after }], snapshot: tasks[0], createdAt: "2026-08-15T12:00:00.000Z",
+    });
+    const report = buildBossWorkReport({
+      now: new Date("2026-08-16T01:00:00.000Z"),
+      reportDate: "2026-08-16",
+      status: null,
+      users: [member],
+      tasks,
+      audits: [change("a1", "2026-08-15", "2026-08-16"), change("a2", "2026-08-16", "2026-08-15"), change("a3", "2026-08-15", "2026-08-17")],
+    });
+    expect(report.daily.members[0]).toMatchObject({ scheduled: 0, postponed: 1, planned: 1, completionRate: 0 });
+  });
+
   it("does not include boss or admin accounts in employee totals", () => {
     const report = buildBossWorkReport({
       now: new Date("2026-08-16T01:00:00.000Z"),

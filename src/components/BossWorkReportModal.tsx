@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { BellRing, CheckCheck, X } from "lucide-react";
 import { UserAvatar } from "./UserAvatar";
 import type { BossWorkReportBundle, BossWorkReportSection } from "../types";
@@ -22,6 +21,25 @@ function periodLabel(section: BossWorkReportSection) {
     return fullReadableDate(section.period.startDate);
   }
   return `${readableDate(section.period.startDate)} — ${readableDate(section.period.endDate)}`;
+}
+
+type ReportMember = BossWorkReportSection["members"][number];
+
+/** Tasks planned for the period (an older server sends only `scheduled`). */
+function plannedCount(member: Pick<ReportMember, "planned" | "scheduled">) {
+  return member.planned ?? member.scheduled;
+}
+
+/**
+ * One plain line under a member's plan numbers: what else happened in the
+ * period, so 新建 17 / 完成 7 next to 100% reads without guessing.
+ */
+export function memberActivityNote(member: ReportMember, periodWord: string) {
+  const parts = [`${periodWord}新建 ${member.selfCreated} 项${member.createdForLater ? `（${member.createdForLater} 项排在之后的日期）` : ""}`];
+  if (member.assigned) parts.push(`老板派发 ${member.assigned} 项`);
+  parts.push(`${periodWord}共完成 ${member.completed} 项${member.completed !== member.scheduledDone ? "（含其他日期的任务）" : ""}`);
+  if (member.postponed) parts.push(`改期 ${member.postponed} 项`);
+  return parts.join(" · ");
 }
 
 function Donut({ value, label }: { value: number; label: string }) {
@@ -74,17 +92,8 @@ export function BossWorkReportModal({
   const participation = section.summary.people
     ? Math.round((section.summary.activePeople / section.summary.people) * 100)
     : 0;
-  const maxActivity = useMemo(
-    () =>
-      Math.max(
-        1,
-        ...section.members.map(
-          (member) =>
-            member.selfCreated + member.carriedOver + member.assigned + member.completed,
-        ),
-      ),
-    [section.members],
-  );
+  const periodWord = kind === "daily" ? "昨日" : kind === "weekly" ? "上周" : "上月";
+  const summaryPlanned = plannedCount(section.summary);
 
   return (
     <div className="work-report-layer">
@@ -128,11 +137,16 @@ export function BossWorkReportModal({
               <Donut value={section.summary.completionRate} label="计划完成率" />
               <Donut value={participation} label="员工参与率" />
             </div>
+            <p className="work-report-explain">
+              计划完成率：{periodWord}计划的 {summaryPlanned} 项任务中已完成 {section.summary.scheduledDone} 项。
+              员工参与率：{section.summary.people} 位员工中 {section.summary.activePeople} 位{periodWord}有新建或完成。
+            </p>
           </section>
 
           <section className="work-report-members" aria-label="员工工作明细">
             <div className="work-report-members__head">
               <b>员工工作进度</b>
+              <small>完成率 = {periodWord}计划的任务中已完成的比例</small>
               <span>{section.summary.people} 位员工</span>
             </div>
             {section.members.length === 0 ? (
@@ -140,11 +154,7 @@ export function BossWorkReportModal({
             ) : (
               <div className="work-report-member-list">
                 {section.members.map((member) => {
-                  const activity =
-                    member.selfCreated +
-                    member.carriedOver +
-                    member.assigned +
-                    member.completed;
+                  const planned = plannedCount(member);
                   return (
                     <article key={member.user.id} className="work-report-member">
                       <div className="work-report-member__person">
@@ -152,14 +162,20 @@ export function BossWorkReportModal({
                         <span><b>{member.user.name}</b><small>{member.user.jobTitle || "成员"}</small></span>
                       </div>
                       <div className="work-report-member__numbers">
-                        <span>新建 <b>{member.selfCreated}</b></span>
-                        <span>完成 <b>{member.completed}</b></span>
+                        <span>{periodWord}计划 <b>{planned}</b></span>
+                        <span>已完成 <b>{member.scheduledDone}</b></span>
                         <span>进行中 <b>{member.doing}</b></span>
                       </div>
-                      <div className="work-report-member__bar" aria-hidden="true">
-                        <i style={{ width: `${Math.max(4, (activity / maxActivity) * 100)}%` }} />
+                      <div
+                        className="work-report-member__bar"
+                        role="img"
+                        aria-label={`${periodWord}计划 ${planned} 项，已完成 ${member.scheduledDone} 项`}
+                      >
+                        <i style={{ width: `${planned ? (member.scheduledDone / planned) * 100 : 0}%` }} />
                       </div>
-                      <strong>{member.completionRate}%</strong>
+                      <strong title={`${periodWord}计划 ${planned} 项中已完成 ${member.scheduledDone} 项`}>
+                        {planned ? `${member.completionRate}%` : "—"}
+                      </strong>
                       <button
                         className="work-report-member__nudge"
                         type="button"
@@ -176,6 +192,7 @@ export function BossWorkReportModal({
                             ? "已催办"
                             : "催办"}
                       </button>
+                      <small className="work-report-member__note">{memberActivityNote(member, periodWord)}</small>
                     </article>
                   );
                 })}

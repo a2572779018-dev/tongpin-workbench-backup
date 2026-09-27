@@ -167,6 +167,12 @@ export interface BossWorkReportMember {
   scheduled: number;
   scheduledDone: number;
   doing: number;
+  /** Planned for the period, then moved to another date (older servers omit it). */
+  postponed?: number;
+  /** Planned for the period (older servers omit it: use `scheduled`). */
+  planned?: number;
+  /** Created in the period for a later date (older servers omit it). */
+  createdForLater?: number;
   completionRate: number;
 }
 
@@ -180,6 +186,9 @@ export interface BossWorkReportSummary {
   scheduled: number;
   scheduledDone: number;
   doing: number;
+  postponed?: number;
+  planned?: number;
+  createdForLater?: number;
   completionRate: number;
 }
 

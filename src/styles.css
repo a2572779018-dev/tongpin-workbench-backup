@@ -4694,6 +4694,29 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
   font-size: 1.15rem;
 }
 
+.work-report-members__head small {
+  flex: 1;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.work-report-explain {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.work-report-member__note {
+  grid-column: 2 / 5;
+  margin-top: -0.35rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
 .work-report-members__head span {
   padding: 0.2rem 0.5rem;
   border: 1.5px solid var(--ink);
@@ -4785,6 +4808,7 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
   height: 100%;
   background: var(--yellow);
   border-right: 1.5px solid var(--ink);
+  transition: width 420ms var(--ease, ease-out);
 }
 
 .work-report-member > strong {

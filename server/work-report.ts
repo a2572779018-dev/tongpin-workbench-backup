@@ -23,6 +23,13 @@ export interface BossWorkReportMember {
   scheduled: number;
   scheduledDone: number;
   doing: number;
+  /** Tasks planned for the period whose date was later moved out of it. */
+  postponed: number;
+  /** Tasks planned for the period: dated in it now, plus the postponed ones. */
+  planned: number;
+  /** Tasks created in the period but dated after it (e.g. 当天至本周日 copies). */
+  createdForLater: number;
+  /** scheduledDone / planned, in percent. */
   completionRate: number;
 }
 
@@ -36,6 +43,9 @@ export interface BossWorkReportSummary {
   scheduled: number;
   scheduledDone: number;
   doing: number;
+  postponed: number;
+  planned: number;
+  createdForLater: number;
   completionRate: number;
 }
 
@@ -202,6 +212,35 @@ export function buildWorkReportSection(input: {
         (task) => task.status === "done",
       ).length;
       const doing = scheduledTasks.filter((task) => task.status === "doing").length;
+      // Planned for the period but moved to another date since (改期): still
+      // part of the plan, and not done in it. Deleted tasks left the plan.
+      const postponedIds = new Set(
+        audits
+          .filter(
+            (audit) =>
+              audit.action === "updated" &&
+              audit.changes.some(
+                (change) =>
+                  change.field === "date" &&
+                  typeof change.before === "string" &&
+                  dateInPeriod(change.before, input.period),
+              ),
+          )
+          .map((audit) => audit.taskId)
+          .filter((taskId) => {
+            const task = tasks.find((item) => item.id === taskId);
+            return Boolean(task) && !dateInPeriod(task!.date, input.period);
+          }),
+      );
+      const postponed = postponedIds.size;
+      const planned = scheduledTasks.length + postponed;
+      const createdForLater = tasks.filter(
+        (task) =>
+          task.origin === "self" &&
+          timestampInPeriod(task.createdAt, input.period) &&
+          task.date > input.period.endDate &&
+          !postponedIds.has(task.id),
+      ).length;
       return {
         user,
         selfCreated,
@@ -211,10 +250,11 @@ export function buildWorkReportSection(input: {
         scheduled: scheduledTasks.length,
         scheduledDone,
         doing,
+        postponed,
+        planned,
+        createdForLater,
         completionRate:
-          scheduledTasks.length === 0
-            ? 0
-            : Math.round((scheduledDone / scheduledTasks.length) * 100),
+          planned === 0 ? 0 : Math.round((scheduledDone / planned) * 100),
       };
     })
     .sort(
@@ -244,6 +284,9 @@ export function buildWorkReportSection(input: {
       scheduled: total.scheduled + member.scheduled,
       scheduledDone: total.scheduledDone + member.scheduledDone,
       doing: total.doing + member.doing,
+      postponed: total.postponed + member.postponed,
+      planned: total.planned + member.planned,
+      createdForLater: total.createdForLater + member.createdForLater,
       completionRate: 0,
     }),
     {
@@ -256,13 +299,16 @@ export function buildWorkReportSection(input: {
       scheduled: 0,
       scheduledDone: 0,
       doing: 0,
+      postponed: 0,
+      planned: 0,
+      createdForLater: 0,
       completionRate: 0,
     },
   );
   summary.completionRate =
-    summary.scheduled === 0
+    summary.planned === 0
       ? 0
-      : Math.round((summary.scheduledDone / summary.scheduled) * 100);
+      : Math.round((summary.scheduledDone / summary.planned) * 100);
 
   return { period: input.period, summary, members };
 }
