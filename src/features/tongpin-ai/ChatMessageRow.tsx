@@ -39,6 +39,12 @@ interface ChatMessageRowProps {
   onCancelGeneratedImageSelection?: (artifactId: string) => Promise<void>;
 }
 
+/** "recover" re-reads a task the server may still hold; without a disposition the
+ * record was never saved, so the model was not called and retry just fetches the reply. */
+export function retryButtonLabel(disposition: TongpinAIMessage["retryDisposition"]): string {
+  return disposition === "regenerate" ? "重新生成" : disposition === "recover" ? "查询原任务" : "重新获取回复";
+}
+
 /** Shallow prop equality: with ChatWorkspace's ref-stable callbacks, a
  * streamed delta changes only the in-flight row's `message`, so every settled
  * row bails out. Exported for tests. */
@@ -98,7 +104,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
       </div> : null}
       {message.sources?.length ? <AiSourceList sources={message.sources} /> : null}
       {message.status === "error" && retryable && <div className="tp-ai-message__controls">
-        <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, message.retryDisposition === "regenerate" ? "regenerate" : undefined)}>{message.retryDisposition === "regenerate" ? "重新生成" : "查询原任务"}</button>
+        <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, message.retryDisposition === "regenerate" ? "regenerate" : undefined)}>{retryButtonLabel(message.retryDisposition)}</button>
       </div>}
       {message.completion?.state === "partial" ? <div className="tp-ai-message__controls" role="status"><span>回复尚未完成{message.completion.reason === "output_limit" ? "：达到本次输出上限" : "：连接中断"}</span>{message.completion.canContinue ? <button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, "continue")}>继续生成</button> : null}<button type="button" disabled={retryDisabled} onClick={() => onRetry(message.id, "regenerate")}>重新生成</button></div> : null}
       {message.role === "assistant" && message.content && !["thinking", "typing", "error"].includes(message.status ?? "ready") &&

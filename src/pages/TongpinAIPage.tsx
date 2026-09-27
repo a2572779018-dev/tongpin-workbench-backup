@@ -14,6 +14,7 @@ import { aiVideoReferenceFingerprint } from "../../shared/aiVideoReferences";
 import { ChatPreflightGate, preflightNotice, sameSendContext, withPreparedChatSend } from "../features/tongpin-ai/chatPreflight";
 import type { AiWorkspaceDocument, AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceVideoDraftSettings } from "../../shared/aiWorkspace";
 import { useWorkspacePersistence } from "../features/tongpin-ai/useWorkspacePersistence";
+import { workspaceSaveTimeoutMs } from "../features/tongpin-ai/workspaceSync";
 import { liveConversation, withoutConversation } from "../features/tongpin-ai/conversationOperations";
 import { registerAiLeaveGuard } from "../features/tongpin-ai/workspaceLeaveGuard";
 import { PersonaSetup } from "../features/tongpin-ai/PersonaSetup";
@@ -487,9 +488,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       sidebarCollapsed,
     }), [view, mode, persistentConversations, projects, artifacts, persistentDrafts, draftAttachments, videoDraftSettings,
       composerTool, webSearch, activeConversationId, activeProjectId, enabledSkillIds, sidebarCollapsed]);
-  const writeWorkspace = useCallback((body: AiWorkspaceSaveRequest) => api<AiWorkspaceSnapshot>("/api/ai/workspace", {
-    method: "PUT", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(body),
-  }), [api, user.id]);
+  const writeWorkspace = useCallback((body: AiWorkspaceSaveRequest) => {
+    const payload = JSON.stringify(body);
+    return api<AiWorkspaceSnapshot>("/api/ai/workspace", {
+      method: "PUT", headers: { "X-Tongpin-Account": user.id }, body: payload,
+    }, workspaceSaveTimeoutMs(payload.length));
+  }, [api, user.id]);
   const persistence = useWorkspacePersistence(initialSnapshot, persistentState, writeWorkspace, user.id);
   const persistenceRef = useRef(persistence);
   persistenceRef.current = persistence;
@@ -2252,7 +2256,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     >
       {(capacityNotice || persistence.status === "error" || persistence.status === "conflict") && <div className="tp-ai-workspace-notices">
       {(persistence.status === "error" || persistence.status === "conflict") && <div className="tp-ai-sync-error" role="alert">
-        <span>{persistence.error}</span>
+        <span>{persistence.error}{persistence.status === "error" && persistence.autoRetrying ? "（网络恢复后会自动重试保存）" : ""}</span>
         {persistence.status === "error" && <button type="button" onClick={persistence.retry}>重试保存</button>}
         <button type="button" onClick={exportWorkspace}>导出当前内容</button>
         {persistence.status === "conflict" && <button type="button" onClick={() => {

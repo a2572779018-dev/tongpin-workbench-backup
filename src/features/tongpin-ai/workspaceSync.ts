@@ -39,6 +39,21 @@ export function workspaceStateForServer(state: AiWorkspaceState, features: reado
   return changed ? { ...state, conversations } : state;
 }
 
+/** A full-state save uploads the whole workspace (up to 8 MB). The generic 10 s
+ * request budget aborts a ~1 MB body on a slow uplink, so scale it with size. */
+export function workspaceSaveTimeoutMs(bodyLength: number): number {
+  const megabytes = Math.max(0, bodyLength) / 1_000_000;
+  return Math.min(60_000, Math.round(15_000 + megabytes * 10_000));
+}
+
+/** Background re-attempts after a network failure. The queue replays the same
+ * mutation id and body, which the server acknowledges idempotently. */
+export const WORKSPACE_NETWORK_RETRY_DELAYS_MS: readonly number[] = [3_000, 10_000, 30_000, 60_000, 60_000, 60_000];
+export function workspaceNetworkRetryDelay(attempt: number, code: string | undefined): number | null {
+  if (code !== "NETWORK_UNAVAILABLE") return null;
+  return WORKSPACE_NETWORK_RETRY_DELAYS_MS[attempt] ?? null;
+}
+
 /** Bind background saves to their originating account, independent of the current auth session. */
 export function workspaceSaveOptions(accountId: string, body: AiWorkspaceSaveRequest): RequestInit {
   return { method: "PUT", headers: { "X-Tongpin-Account": accountId }, body: JSON.stringify(body) };

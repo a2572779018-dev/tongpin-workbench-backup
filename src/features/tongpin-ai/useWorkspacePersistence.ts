@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceState, AiWorkspaceStorageUsage } from "../../../shared/aiWorkspace";
-import { WorkspaceSaveQueue, workspaceStateForServer, type WorkspaceSyncStatus } from "./workspaceSync";
+import { WorkspaceSaveQueue, workspaceNetworkRetryDelay, workspaceStateForServer, type WorkspaceSyncStatus } from "./workspaceSync";
 import { notifyAiWorkspaceSaved, registerAiLeaveGuard } from "./workspaceLeaveGuard";
 import { estimateWorkspaceStorage, workspaceStorageFrom } from "./workspaceStorage";
 
@@ -30,6 +30,19 @@ export function useWorkspacePersistence(
     if (active.current) { setStatus(next); setError(message); setErrorCode(next === "error" || next === "conflict" ? code : undefined); }
   }));
   useEffect(() => registerAiLeaveGuard(accountId, () => queue.flushSaved()), [accountId, queue]);
+  // A dropped connection heals on its own: replay the same pending save in the
+  // background (bounded backoff) instead of waiting for「重试保存」. Conflicts and
+  // definitive rejections are never retried here.
+  const networkRetries = useRef(0);
+  const [autoRetrying, setAutoRetrying] = useState(false);
+  useEffect(() => {
+    if (status === "saved") networkRetries.current = 0;
+    const delay = status === "error" ? workspaceNetworkRetryDelay(networkRetries.current, errorCode) : null;
+    setAutoRetrying(delay !== null);
+    if (delay === null) return;
+    const timer = window.setTimeout(() => { networkRetries.current += 1; void queue.flush(); }, delay);
+    return () => window.clearTimeout(timer);
+  }, [errorCode, queue, status]);
   useEffect(() => {
     active.current = true;
     const guard = (event: BeforeUnloadEvent) => {
@@ -52,7 +65,7 @@ export function useWorkspacePersistence(
     const timer = window.setTimeout(() => void queue.flush(), 300);
     return () => window.clearTimeout(timer);
   }, [forServer, queue, state]);
-  return { status, error, errorCode, storage, retry: () => void queue.flush(), flush: () => queue.flush(),
+  return { status, error, errorCode, storage, autoRetrying, retry: () => void queue.flush(), flush: () => queue.flush(),
     flushSaved: () => queue.flushSaved(),
     saveNow: (next: AiWorkspaceState) => queue.saveNow(forServer(next)),
   };

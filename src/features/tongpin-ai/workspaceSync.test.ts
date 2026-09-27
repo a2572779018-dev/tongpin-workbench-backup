@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AiWorkspaceSaveRequest, AiWorkspaceSnapshot, AiWorkspaceState } from "../../../shared/aiWorkspace";
 import { ApiRequestError } from "../../lib/api";
-import { WorkspaceSaveQueue, workspaceSaveOptions } from "./workspaceSync";
+import { WORKSPACE_NETWORK_RETRY_DELAYS_MS, WorkspaceSaveQueue, workspaceNetworkRetryDelay, workspaceSaveOptions, workspaceSaveTimeoutMs } from "./workspaceSync";
 
 function state(title = "项目"): AiWorkspaceState {
   return { view: "project", mode: "quick", projects: [{ id: "project-a", title, timeLabel: "刚刚" }], conversations: [], artifacts: [], drafts: {}, activeProjectId: "project-a", activeConversationId: null, enabledSkillIds: [] };
@@ -157,5 +157,35 @@ describe("workspace serialized save queue", () => {
     expect(new Headers(options.headers).get("X-Tongpin-Account")).toBe("member-origin");
     expect(JSON.parse(String(options.body)).state.projects[0].title).toBe("项目");
     expect(new Headers(options.headers).has("Authorization")).toBe(false);
+  });
+});
+
+describe("workspace save transport budget", () => {
+  it("gives a large full-state upload more than the generic 10 s request budget", () => {
+    expect(workspaceSaveTimeoutMs(0)).toBe(15_000);
+    expect(workspaceSaveTimeoutMs(1_100_000)).toBe(26_000);
+    expect(workspaceSaveTimeoutMs(8_000_000)).toBe(60_000);
+    expect(workspaceSaveTimeoutMs(-5)).toBe(15_000);
+  });
+  it("retries only network failures in the background, with a bounded backoff", () => {
+    expect(WORKSPACE_NETWORK_RETRY_DELAYS_MS.map((_, attempt) => workspaceNetworkRetryDelay(attempt, "NETWORK_UNAVAILABLE"))).toEqual([...WORKSPACE_NETWORK_RETRY_DELAYS_MS]);
+    expect(workspaceNetworkRetryDelay(WORKSPACE_NETWORK_RETRY_DELAYS_MS.length, "NETWORK_UNAVAILABLE")).toBeNull();
+    for (const code of [undefined, "AI_WORKSPACE_CONFLICT", "AI_WORKSPACE_TOO_LARGE", "INVALID_RESPONSE", "REQUEST_FAILED"]) {
+      expect(workspaceNetworkRetryDelay(0, code)).toBeNull();
+    }
+  });
+  it("a background replay after a dropped connection reuses the exact pending request", async () => {
+    const write = vi.fn<(body: AiWorkspaceSaveRequest) => Promise<AiWorkspaceSnapshot>>()
+      .mockRejectedValueOnce(new ApiRequestError(0, "NETWORK_UNAVAILABLE", "连接不上公司服务器，请检查网络后重试"))
+      .mockImplementation(async body => acknowledge(body));
+    const changed = vi.fn();
+    const queue = new WorkspaceSaveQueue(initial(), write, changed);
+    expect(await queue.saveNow(state("断网时的发送"))).toBe(false);
+    expect(changed).toHaveBeenLastCalledWith("error", "连接不上公司服务器，请检查网络后重试", "NETWORK_UNAVAILABLE");
+    // What the persistence hook's timer does once the delay elapses.
+    await queue.flush();
+    expect(write.mock.calls[1][0]).toBe(write.mock.calls[0][0]);
+    expect(changed).toHaveBeenLastCalledWith("saved");
+    expect(queue.isDirty()).toBe(false);
   });
 });
