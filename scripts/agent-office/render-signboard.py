@@ -19,15 +19,19 @@ from PIL import Image, ImageDraw, ImageFont
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 
-# The owner's local copy of MisekiBitmap (美績點陣體), an OFL-1.1 8px
+# The owner's local copy of Cubic 11 (ACh-K/Cubic-11), an OFL-1.1 12px
 # Simplified-Chinese pixel font vendored (under the same license) by the
-# Fusion Pixel Font project. Not committed to the repo — see
+# Fusion Pixel Font project. Chosen over the earlier 8px MisekiBitmap because
+# 8px is too coarse a grid to render multi-stroke Simplified Chinese glyphs
+# (责/频/etc.) legibly at any threshold — 12px is the smallest native pixel
+# size that keeps every glyph in LINE_1/LINE_2 clean (see this feature's
+# report for the glyph-coverage check). Not committed to the repo — see
 # THIRD_PARTY_NOTICES.md for the license text and provenance.
 FONT_PATH = os.environ.get(
     "SIGNBOARD_FONT_PATH",
-    "/home/claude/tp/research/fonts/MisekiBitmap.ttf",
+    "/home/claude/tp/research/fonts/cubic-11/Cubic_11.ttf",
 )
-FONT_SIZE = 8
+FONT_SIZE = 12
 
 OUT_PATH = os.path.join(
     REPO_ROOT, "src", "features", "tongpin-ai", "agentOffice", "assets", "limezu", "signboard.png",

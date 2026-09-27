@@ -36,6 +36,7 @@ import baseboardUrl from "./assets/limezu/baseboard.png?url&no-inline";
 import deskOffUrl from "./assets/limezu/desk_off.png?url&no-inline";
 import deskOnAUrl from "./assets/limezu/desk_on_a.png?url&no-inline";
 import deskOnBUrl from "./assets/limezu/desk_on_b.png?url&no-inline";
+import chairUrl from "./assets/limezu/chair.png?url&no-inline";
 import waterCoolerUrl from "./assets/limezu/water_cooler.png?url&no-inline";
 import doorUrl from "./assets/limezu/door.png?url&no-inline";
 import bookshelfAUrl from "./assets/limezu/bookshelf_a.png?url&no-inline";
@@ -59,6 +60,7 @@ export const BASEBOARD_URL = baseboardUrl;
 export const FURNITURE_URLS = {
   deskOff: deskOffUrl,
   deskOn: [deskOnAUrl, deskOnBUrl] as readonly string[],
+  chair: chairUrl,
   waterCooler: waterCoolerUrl,
   door: doorUrl,
   bookshelfA: bookshelfAUrl,
@@ -79,6 +81,7 @@ export const ALL_SPRITE_URLS: readonly string[] = [
   BASEBOARD_URL,
   FURNITURE_URLS.deskOff,
   ...FURNITURE_URLS.deskOn,
+  FURNITURE_URLS.chair,
   FURNITURE_URLS.waterCooler,
   FURNITURE_URLS.door,
   FURNITURE_URLS.bookshelfA,

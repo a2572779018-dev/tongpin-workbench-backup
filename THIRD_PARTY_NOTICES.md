@@ -1283,12 +1283,17 @@ is the source of truth for exactly what was cropped from where; re-running it
 regenerates the same output files from the same source rects. What it
 produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
 
-- `limezu/floor.png` / `limezu/wall.png` — 32×32 tileable swatches cropped
-  from `Room_Builder_subfiles/Room_Builder_Floors_16x16.png` and
-  `Room_Builder_Walls_16x16.png`. This office is one fixed rectangular room,
-  not LimeZu's full modular corner/window auto-tile system, so a single clean
-  material swatch per surface (tiled with a Pixi `TilingSprite`) stands in for
-  that system — see the feature's report for this scope note.
+- `limezu/floor.png` — a 32×32 tileable swatch cropped from
+  `Room_Builder_subfiles/Room_Builder_Floors_16x16.png`: a plain warm
+  honey-wood plank band, chosen over the sheet's busier checker/medallion
+  materials (an earlier revision used one of those) for a calmer floor per
+  the feature's report.
+- `limezu/wall.png` — a 32×32 tileable swatch cropped from
+  `Room_Builder_subfiles/Room_Builder_Walls_16x16.png`. This office is one
+  fixed rectangular room, not LimeZu's full modular corner/window auto-tile
+  system, so a single clean material swatch per surface (tiled with a Pixi
+  `TilingSprite`) stands in for that system — see the feature's report for
+  this scope note.
 - `limezu/baseboard.png` — a 16×7 trim strip cropped from
   `Room_Builder_subfiles/Room_Builder_Baseboards_16x16.png`, tiled along the
   wall/floor seam.
@@ -1297,6 +1302,9 @@ produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
   Conference_Hall_Singles_31.png` (blank screen, monitor off) and `_29.png` /
   `_30.png` (blue screen, alternated on a timer while the monitor is "on" —
   see `Desk.ts`).
+- `limezu/chair.png` — a rolling office chair, `Conference_Hall_Singles_37.png`,
+  drawn behind each seated character (see `EmployeeFigure.ts`) so its legs/base
+  peek out below them.
 - `limezu/water_cooler.png` — `Conference_Hall_Singles_45.png`.
 - `limezu/door.png` — `Conference_Hall_Singles_63.png`.
 - `limezu/bookshelf_a.png` / `bookshelf_b.png` — `Theme_Sorter_Singles/
@@ -1313,48 +1321,77 @@ produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
   backdrop decor (see `sceneDraw.ts`), so the remaining in-between frames of
   either sheet are never cropped, loaded or committed.
 - `limezu/characters/char_1.png` through `char_7.png` — one compact 80×16
-  strip per character, each 5 frames (idle / working ×2 / phone ×2) re-packed
-  from fixed 16×16 rects inside `2_Characters/Character_Generator/
+  strip per character, re-packed from `2_Characters/Character_Generator/
   0_Premade_Characters/16x16/Premade_Character_01.png` through `_07.png`
   (LimeZu's own generic premade characters — not the Munder Difflin TV-cast
-  recolors). The pack ships no documentation naming these rows, so "working"
-  and "phone" are this office's own reading of an inherently generic top-down
-  RPG character sheet, chosen by visual inspection; see the feature's report.
-  Sheets 1–6 are assigned to workers by a deterministic hash of each worker's
-  id (see `roster.ts`); sheet 7 is reserved exclusively for the coordinator.
-- `portraits/portrait_1.png` through `portrait_7.png` — just the idle frame of
-  each character sheet above, kept in the eager main bundle (not the lazy
-  office chunk) so the DOM/no-WebGL fallback (`AgentOfficeFallback.tsx`) can
-  show a tiny portrait per employee without ever loading Pixi.
+  recolors). Each sheet is a modular character-generator template: every pose
+  is 16 wide × 32 tall (head/hair in the top 16px, collar/body/legs in the
+  bottom 16px), laid out as 4 facing-direction columns repeated down the sheet
+  as a walk cycle — direct visual inspection of all 4 columns' full 32px-tall
+  poses (see the feature's report) identified column 1 as the one clean
+  back-of-head pose (no face ever visible, in any row); this office crops only
+  that column's top 16px and repeats it for all 5 named frame slots, since the
+  desk art needs every employee facing away from the camera (see `Desk.ts`)
+  and there is no second distinct back-of-head-only frame at that crop height
+  to pair it with for an animated toggle. Sheets 1–6 are assigned to workers by
+  a deterministic hash of each worker's id (see `roster.ts`); sheet 7 is
+  reserved exclusively for the coordinator.
+- `portraits/portrait_1.png` through `portrait_7.png` — a *different* crop of
+  each character sheet above (column 3's bottom 16px, the one crop that shows
+  a full face) for the DOM/no-WebGL fallback (`AgentOfficeFallback.tsx`),
+  which shows a recognizable face per employee rather than the back of their
+  head — the canvas scene and this fallback are allowed to differ here since
+  the fallback has none of the desk-occlusion problem the canvas composition
+  works around. Kept in the eager main bundle (not the lazy office chunk) so
+  the fallback can render without ever loading Pixi.
 
 Per the license's "Credits required" term, Tongpin credits LimeZu visibly in
 the office panel itself (not only here): "办公室像素美术：LimeZu · limezu.itch.io".
 
-## MisekiBitmap pixel font (office signboard text)
+## Cubic 11 pixel font (office signboard text)
 
 The office's wall signboard ("同频有限无责任公司" / "作者Sam") is a small PNG
 rasterized ahead of time by `scripts/agent-office/render-signboard.py` using
-MisekiBitmap (美績點陣體), an 8px Simplified-Chinese pixel font by Mark Li
-(https://github.com/ItMarki/MisekiBitmap), obtained as vendored under the same
+Cubic 11 by ACh-K (https://github.com/ACh-K/Cubic-11), a 12px
+Simplified/Traditional-Chinese pixel font, obtained as vendored under the same
 license inside the Fusion Pixel Font project
 (https://github.com/TakWolf/fusion-pixel-font,
-`assets/fonts/miseki-bitmap/MisekiBitmap.ttf`, tag `2026.09.25`) — one of
-several upstream fonts that project's own README credits and licenses this
-way; Fusion Pixel Font's own build output was suggested as an example in the
-original task but its finished builds are release-only assets this
-environment's GitHub access couldn't reach, so this directly-fetchable
-upstream component font was used instead, unmodified. Only the font's
-rasterized *output* (`assets/limezu/signboard.png`) is committed — the font
-file itself is never bundled into the app, per the task's instruction.
+`assets/fonts/cubic-11/Cubic_11.woff2`, tag `2026.09.25`) — one of several
+upstream fonts that project's own README credits and licenses this way; the
+WOFF2 was converted locally to a plain TTF with `fontTools` purely so Pillow
+could rasterize it (`tt.flavor = None; tt.save(...)`, a lossless container
+change, no glyph data touched) — the font, in either form, is never bundled
+into the app; only the rasterized *output* (`assets/limezu/signboard.png`) is
+committed, per the task's instruction. An earlier revision of this signboard
+used MisekiBitmap at 8px; that size proved too coarse a pixel grid to render
+multi-stroke Simplified Chinese glyphs (责/频/etc.) legibly at any threshold,
+so this larger, cleaner-at-small-sizes font replaced it — see the feature's
+report for the legibility comparison.
 
-License: SIL Open Font License, Version 1.1.
+License: SIL Open Font License, Version 1.1 (Cubic 11 itself, plus two fonts
+it was built on top of, per its own `OFL.txt`).
 
 ```text
-Copyright (c) 2023-2024 Mark Li (itmarkibfb@gmail.com)
+[Cubic 11]
+These fonts are free software.
+Unlimited permission is granted to use, copy, and distribute them, with or without modification, either commercially or noncommercially.
+THESE FONTS ARE PROVIDED "AS IS" WITHOUT WARRANTY.
+此字型是免費的。
+無論您是否進行對本字型進行商業或非商業性修改，均可無限制地使用，複製和分發它們。
+本字型的衍生品之授權必須與此字型相同，且不作任何擔保。
+[JF Dot M+H 12]
+Copyright(c) 2005 M+ FONTS PROJECT
+[M+ BITMAP FONTS]
+Copyright (C) 2002-2004 COZ
+These fonts are free software.
+Unlimited permission is granted to use, copy, and distribute it, with or without modification, either commercially and noncommercially.
+THESE FONTS ARE PROVIDED "AS IS" WITHOUT WARRANTY.
+これらのフォントはフリー（自由な）ソフトウエアです。
+あらゆる改変の有無に関わらず、また商業的な利用であっても、自由にご利用、複製、再配布することができますが、全て無保証とさせていただきます。
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
-http://scripts.sil.org/OFL
+https://scripts.sil.org/OFL
 
 -----------------------------------------------------------
 SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007

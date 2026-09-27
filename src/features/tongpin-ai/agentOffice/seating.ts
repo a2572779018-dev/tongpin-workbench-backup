@@ -16,7 +16,14 @@
 
 export const TILE = 16;
 export const WORLD_WIDTH = 640; // 40 tiles
-export const WORLD_HEIGHT = 352; // 22 tiles
+// Taller than the first LimeZu pass (352): each employee's visible footprint
+// grew once the character moved to sit fully in front of (not hidden behind)
+// its desk — see EmployeeFigure.ts — and MAX_PER_ROW dropping from 4 to 3
+// means 6 workers now always wraps to two rows. Chosen so two worker rows
+// plus the coordinator's row all clear each other's bubble/label space with
+// room to spare — see this feature's report for a note to re-check this
+// against a rendered screenshot if the row constants below ever change.
+export const WORLD_HEIGHT = 550;
 
 /** Shared local scale for every worker-side sprite (desk, character, decor)
  *  — LimeZu's furniture and characters are native 16px-tile art, small enough
@@ -50,12 +57,21 @@ export const DESK_H = DESK_NATIVE_H * UI_SCALE;
 export const HEAD_DESK_W = DESK_NATIVE_W * HEAD_UI_SCALE;
 export const HEAD_DESK_H = DESK_NATIVE_H * HEAD_UI_SCALE;
 
-const ROW_GAP = 40;
-const HEAD_Y = 80;
-const WORKER_ROW_Y = 196;
-const WORKER_ROW_Y_2 = 272;
-/** Workers beyond this many wrap onto a second row so 6 desks stay readable. */
-const MAX_PER_ROW = 4;
+const ROW_GAP = 48;
+// Row Y's give each row's *desk top*; the character/chair/label group that
+// now hangs off each desk (see EmployeeFigure.ts) extends well past the old
+// desk-only footprint, so these are spaced by a full row "pitch" (~130-140px)
+// rather than the old desk-height-sized gap — tuned against a rendered
+// screenshot (see this feature's report) so a row's activity bubble never
+// overlaps the row above it, and the coordinator's bubble clears the
+// signboard.
+const HEAD_Y = 104;
+const WORKER_ROW_Y = 270;
+const WORKER_ROW_Y_2 = 410;
+/** Workers beyond this many wrap onto a second row. Dropped from 4 to 3 (two
+ *  rows of up to 3) so a full 6-worker room reads as a "neat grid" instead of
+ *  a single cramped row of 4 plus a lonely row of 2. */
+const MAX_PER_ROW = 3;
 
 export interface DeskRect {
   x: number;
@@ -75,6 +91,18 @@ function rowOf(count: number, index: number): { row: number; col: number; cols: 
   const firstRow = Math.ceil(count / 2);
   if (index < firstRow) return { row: 0, col: index, cols: firstRow };
   return { row: 1, col: index - firstRow, cols: count - firstRow };
+}
+
+/** Row Y for a given (row, totalRows) pair. 1-3 workers only ever use "row
+ *  0", but pinning that lone row to the same Y the *first* of two rows would
+ *  use leaves the whole lower half of the floor empty — the exact "floats in
+ *  the middle, empty floor below" complaint this office's report calls out.
+ *  So a single row instead sits at the vertical midpoint between the two
+ *  configured row slots, splitting the difference between "close to the
+ *  coordinator" and "using the floor space a second row would have". */
+function rowY(row: number, totalRows: number): number {
+  if (totalRows <= 1) return (WORKER_ROW_Y + WORKER_ROW_Y_2) / 2;
+  return row === 0 ? WORKER_ROW_Y : WORKER_ROW_Y_2;
 }
 
 /** Desk position for `index` of `cols` desks centered in the world, on `y`. */
@@ -98,11 +126,11 @@ export function computeLayout(workerIds: readonly string[]): SeatLayout {
     w: HEAD_DESK_W,
     h: HEAD_DESK_H,
   };
+  const totalRows = count <= MAX_PER_ROW ? 1 : 2;
   const workers = new Map<string, DeskRect>();
   for (let i = 0; i < count; i++) {
     const { row, col, cols } = rowOf(count, i);
-    const y = row === 0 ? WORKER_ROW_Y : WORKER_ROW_Y_2;
-    workers.set(workerIds[i], deskAt(col, cols, y));
+    workers.set(workerIds[i], deskAt(col, cols, rowY(row, totalRows)));
   }
   return { coordinator, workers };
 }
@@ -129,12 +157,17 @@ export function fitWorld(viewW: number, viewH: number): { scale: number; x: numb
 // in the scene lives in one place. Each is the sprite's top-left in world px,
 // sized at its own native px × UI_SCALE (sceneDraw.ts draws them at that
 // scale — see spriteSheets.ts for native sizes). Composition constants below
-// (signboard/clock/door placement especially) were chosen from the cropped
-// art alone, without a rendered screenshot to check spacing against — see
-// this feature's report for a note to eyeball them in the running app.
+// (signboard/clock/door placement especially) were re-checked against the
+// `.preview/` harness's rendered screenshots at 1/3/6 workers across every
+// phase (see the feature's report for those paths) — clock/door/bookshelf/
+// plant/water-cooler positions read fine there and were left as originally
+// hand-chosen from the cropped art; only the row Y's, MAX_PER_ROW and the
+// signboard's native size changed for this pass (see below).
 
-const SIGNBOARD_NATIVE_W = 83;
-const SIGNBOARD_NATIVE_H = 31;
+// Matches render-signboard.py's current output exactly (regenerate both
+// together if the font/text ever changes — see that script's own comments).
+const SIGNBOARD_NATIVE_W = 126;
+const SIGNBOARD_NATIVE_H = 39;
 const BOOKSHELF_NATIVE_W = 32;
 const PLANT_BIG_NATIVE_W = 32;
 const PLANT_BIG_NATIVE_H = 48;
@@ -155,9 +188,9 @@ export const DECOR_LAYOUT = {
   /** Low bookshelf against the wall, near the left edge. */
   bookshelf: { x: 16, y: WALL_ROW_HEIGHT },
   /** Second low bookshelf, right of the coordinator's head desk (which spans
-   *  roughly x=248-392 at this desk count) and left of the water cooler
-   *  (x>=500) — kept clear of both so it reads as its own spot along the
-   *  back wall rather than overlapping either. */
+   *  roughly x=296-344, independent of worker count) and left of the water
+   *  cooler (x>=500) — kept clear of both so it reads as its own spot along
+   *  the back wall rather than overlapping either. */
   bookshelf2: { x: 420, y: WALL_ROW_HEIGHT },
   /** Floor plants flanking the room. */
   plantLeft: { x: 16, y: WORLD_HEIGHT - PLANT_BIG_NATIVE_H * UI_SCALE },

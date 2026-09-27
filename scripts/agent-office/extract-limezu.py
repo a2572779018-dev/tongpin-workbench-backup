@@ -77,11 +77,12 @@ def build_room_shell() -> None:
     subfiles = os.path.join(INTERIORS, "Room_Builder_subfiles")
 
     floors = load(os.path.join(subfiles, "Room_Builder_Floors_16x16.png"))
-    # Column 2 (of the sheet's 4 material columns, each 48px/3 tiles wide,
-    # starting at x=0/64/128/192), a plain cream checked-tile band. Sampled
-    # 32x32 (2x2 tiles) well inside the column/band so no neighboring
-    # material or the sheet's own row separators leak into the tile.
-    save(crop(floors, 64, 32, 32, 32), "floor.png")
+    # Column 1 (of the sheet's 4 material columns), the warm honey wood-plank
+    # band at y=192 — a plain horizontal wood-grain texture (no busy
+    # checker/medallion repeat) that reads as a calm "cozy office" floor at a
+    # glance, per visual review of the full sheet (see the office's report).
+    # Sampled 32x32 (2x2 tiles).
+    save(crop(floors, 0, 192, 32, 32), "floor.png")
 
     walls = load(os.path.join(subfiles, "Room_Builder_Walls_16x16.png"))
     # Left sub-column of the sheet's first (cream/white) material group, one
@@ -106,10 +107,12 @@ def singles(theme_dir: str, prefix: str, index: int) -> str:
 
 FURNITURE_SINGLES = {
     # Conference_Hall theme: desk+monitor combos (blank/blue-screen pair used
-    # for the monitor-off / monitor-on states), a water dispenser, a door.
+    # for the monitor-off / monitor-on states), a rolling office chair, a
+    # water dispenser, a door.
     "desk_off.png": singles("13_Conference_Hall_Singles", "Conference_Hall_Singles", 31),
     "desk_on_a.png": singles("13_Conference_Hall_Singles", "Conference_Hall_Singles", 29),
     "desk_on_b.png": singles("13_Conference_Hall_Singles", "Conference_Hall_Singles", 30),
+    "chair.png": singles("13_Conference_Hall_Singles", "Conference_Hall_Singles", 37),
     "water_cooler.png": singles("13_Conference_Hall_Singles", "Conference_Hall_Singles", 45),
     "door.png": singles("13_Conference_Hall_Singles", "Conference_Hall_Singles", 63),
     # Classroom_and_Library theme: bookshelves + a standing chalkboard used as
@@ -148,27 +151,46 @@ def build_animated_props() -> None:
 
 # ── Characters: 6 workers + 1 coordinator-exclusive, from LimeZu's own      ─
 # Premade_Character sheets (NOT the Munder Difflin TV-cast recolors). Each
-# sheet is 896x656 with tightly packed 16x16 pose frames; the rows used here
-# were identified by visual inspection (see the office's report), not from
-# any bundled documentation (none ships with the pack). Every character's 5
-# frames are re-packed into one small 80x16 strip in frame order
-# [idle, working_1, working_2, phone_1, phone_2].
-
+# sheet is 896x656, a modular character-generator template: every *pose* is
+# 16 wide x 32 tall (head+hair in the top 16px, collar/body/legs in the
+# bottom 16px), laid out as 4 facing-direction columns (0=left profile,
+# 1=back/away, 2=right profile, 3=front, each showing a partial or full face
+# except column 1) repeated down the sheet as a walk cycle — confirmed by
+# direct visual inspection of all 4 columns' full 32px-tall poses side by
+# side (see the office's report for that comparison), which is what caught
+# an earlier version of this script reading column 0's *bottom* half and
+# unintentionally showing a side-profile eye instead of a clean back-of-head.
+#
+# The in-scene strip crops only the TOP 16px of column 1 (pure hair/collar,
+# identical across every walk-cycle row since only the legs move below the
+# crop) — this office seats every employee facing their monitor (away from
+# the camera) with the desk behind them and the screen visible above their
+# head, see Desk.ts / EmployeeFigure.ts's doc comments for why a
+# front-facing character can't work with this pack's desk art (the monitor
+# fills the sprite's entire top half, leaving no gap for a face to show
+# through). There is no second distinct back-of-head-only frame to pair it
+# with for a typing/reading toggle (every column looks identical at this
+# crop height until the collar line), so all 5 named slots below
+# deliberately point at the same source rect rather than inventing a
+# distinct pose that doesn't exist.
 CHAR_SHEET_IDS = [1, 2, 3, 4, 5, 6, 7]  # 1..6 = workers, 7 = coordinator (exclusive)
 FRAME_W = 16
 FRAME_H = 16
 # (x, y) top-left of each 16x16 frame within a Premade_Character_NN.png sheet.
+_BACK_BUST = (16, 0)  # column 1 (back-facing), top 16px (hair/collar only)
 CHAR_FRAME_SOURCES = [
-    (0, 16),   # idle: first frame of the standing/idle-facing row
-    (0, 272),  # working_1: first frame of the desk-leaning "working" row
-    (16, 272), # working_2: second frame of the same row
-    (0, 240),  # phone_1: first frame of the phone-holding row
-    (16, 240), # phone_2: second frame of the same row
+    _BACK_BUST,  # idle
+    _BACK_BUST,  # typing_1
+    _BACK_BUST,  # typing_2
+    _BACK_BUST,  # reading_1
+    _BACK_BUST,  # reading_2
 ]
-# No usable distinct "happy/done" frame exists on this sheet (the one
-# candidate frame turned out to be a non-character prop, not a pose), so
-# done/failed/cancelled/idle all reuse `idle` — the same way the previous
-# Pixel Agents rig reused one resting frame for every non-animated pose.
+# Column 3 (front-facing), bottom 16px — the one crop that actually shows a
+# full face, used ONLY for the DOM-fallback portrait (a recognizable face
+# rather than the back of someone's head). The canvas scene and the fallback
+# are allowed to differ here since the fallback has none of the desk-
+# occlusion problem the canvas composition works around.
+PORTRAIT_FRAME_SOURCE = (48, 16)
 
 
 def build_characters() -> None:
@@ -181,12 +203,9 @@ def build_characters() -> None:
             strip.paste(frame, (i * FRAME_W, 0), frame)
         save(strip, "characters", f"char_{sheet_id}.png")
 
-        # Eager DOM-fallback portrait: just the idle frame, tiny on its own —
-        # this one *is* meant to sit in the main bundle (see portraits.ts),
-        # since the fallback list must render without ever loading the lazy
-        # Pixi/office chunk that the rest of these crops live in.
-        idle = crop(sheet, *CHAR_FRAME_SOURCES[0], FRAME_W, FRAME_H)
-        save_portrait(idle, f"portrait_{sheet_id}.png")
+        # Eager DOM-fallback portrait — see PORTRAIT_FRAME_SOURCE above.
+        portrait = crop(sheet, *PORTRAIT_FRAME_SOURCE, FRAME_W, FRAME_H)
+        save_portrait(portrait, f"portrait_{sheet_id}.png")
 
 
 def main() -> None:

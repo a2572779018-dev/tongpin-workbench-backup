@@ -35,9 +35,15 @@ describe("computeLayout", () => {
     }
   });
 
-  it("wraps onto a second row once past 4 workers, keeping every desk on-screen", () => {
-    const five = computeLayout(["a", "b", "c", "d", "e"]);
-    const rows = new Set([...five.workers.values()].map((r) => r.y));
+  it("keeps up to 3 workers on a single row", () => {
+    const three = computeLayout(["a", "b", "c"]);
+    const rows = new Set([...three.workers.values()].map((r) => r.y));
+    expect(rows.size).toBe(1);
+  });
+
+  it("wraps onto a second row once past 3 workers, keeping every desk on-screen", () => {
+    const four = computeLayout(["a", "b", "c", "d"]);
+    const rows = new Set([...four.workers.values()].map((r) => r.y));
     expect(rows.size).toBe(2);
   });
 

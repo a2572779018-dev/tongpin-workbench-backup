@@ -43,6 +43,8 @@ export interface OfficeTextures {
   deskOff: Texture;
   /** Alternated on a timer while a desk's monitor is "on" — see Desk.ts. */
   deskOn: readonly [Texture, Texture];
+  /** Rolling office chair, drawn behind the character — see EmployeeFigure.ts. */
+  chair: Texture;
   waterCooler: Texture;
   door: Texture;
   bookshelfA: Texture;
@@ -109,6 +111,7 @@ export function loadOfficeTextures(): Promise<OfficeTextures> {
       baseboard: nearest(loaded[BASEBOARD_URL]),
       deskOff: nearest(loaded[FURNITURE_URLS.deskOff]),
       deskOn,
+      chair: nearest(loaded[FURNITURE_URLS.chair]),
       waterCooler: nearest(loaded[FURNITURE_URLS.waterCooler]),
       door: nearest(loaded[FURNITURE_URLS.door]),
       bookshelfA: nearest(loaded[FURNITURE_URLS.bookshelfA]),
