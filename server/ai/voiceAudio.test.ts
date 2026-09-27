@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AI_VOICE_LIMITS, voiceSpeechPoints, voiceTranscriptionPoints } from "../../shared/aiVoice";
 import { AiError } from "./security";
 import {
-  audioDurationMs, declaredAudioContainer, encodeMultipartForm, parseTranscriptionUpload,
+  audioBase64, audioDurationMs, declaredAudioContainer, encodeMultipartForm, parseTranscriptionUpload,
   sniffAudioContainer, validatedLanguageCode, webmDurationMs,
 } from "./voiceAudio";
 import {
@@ -129,5 +129,18 @@ describe("voice multipart", () => {
     expect(validatedLanguageCode("zh_Hans")).toBeUndefined();
     expect(validatedLanguageCode("../../x")).toBeUndefined();
     expect(validatedLanguageCode(undefined)).toBeUndefined();
+  });
+
+  it("base64-encodes a recording as-is for Workers AI, across chunk boundaries and byte views", () => {
+    for (const size of [0, 1, 2, 3, 0x7fff, 0x8000, 0x8001, 3 * 0x8000 + 5, 250_003]) {
+      const bytes = Uint8Array.from({ length: size }, (_, index) => (index * 131 + 7) & 0xff);
+      expect(audioBase64(bytes), `${size} bytes`).toBe(Buffer.from(bytes).toString("base64"));
+    }
+    const webm = chromeLikeWebm({ durationMs: 1500 });
+    const view = webm.subarray(5, webm.length - 3);
+    expect(audioBase64(view)).toBe(Buffer.from(view).toString("base64"));
+    // A ten-megabyte upload stays within String.fromCharCode's argument limits.
+    const largest = new Uint8Array(AI_VOICE_LIMITS.maxAudioBytes).fill(0xa5);
+    expect(audioBase64(largest)).toBe(Buffer.from(largest).toString("base64"));
   });
 });

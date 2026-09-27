@@ -4,6 +4,8 @@ import { AiError, createSecretBox, isPublicIp, safeBaseUrl } from "../../../serv
 import { object, readBoundedJson, type AiTransport } from "../../../server/ai/provider";
 import type { AiBackgroundPrincipalCheck } from "../../../server/ai/service";
 import { wireRunGuidance } from "../../../server/ai/runGuidanceWiring";
+import type { AiWhisperRunner } from "../../../server/ai/voice";
+import { AI_VOICE_WHISPER_MODEL } from "../../../shared/aiVoice";
 
 const DEFAULT_AI_HOSTS = ["api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com", "api.moonshot.cn", "api.siliconflow.cn", "open.bigmodel.cn", "api.typesafe.ai"] as const;
 /** Exact deployment-owned domains close the DNS-rebinding gap: Worker fetch cannot pin IPs.
@@ -37,7 +39,16 @@ export function createWorkerAiTransport(allowedHosts?: string | readonly string[
 }
 export const workerAiTransport: AiTransport = createWorkerAiTransport();
 
-export function createWorkerAi(storage: DurableObjectStorage, secret: () => string, allowedHosts?: string | readonly string[], videoKey?: () => string, isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
+/** OpenAI's open-source Whisper on Cloudflare Workers AI through the Worker's
+ * `AI` binding: no provider key, and nothing billed through a provider
+ * connection. Without the binding there is no runner, and voice input reports
+ * Whisper unavailable instead of falling back to a paid provider. */
+export function workersAiWhisperRunner(ai: Ai | undefined): AiWhisperRunner | undefined {
+  if (!ai) return undefined;
+  return (input, signal) => ai.run(AI_VOICE_WHISPER_MODEL, input, { signal });
+}
+
+export function createWorkerAi(storage: DurableObjectStorage, secret: () => string, allowedHosts?: string | readonly string[], videoKey?: () => string, isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false, ai?: Ai) {
   const sql: AiSql = {
     exec(query, ...bindings) { storage.sql.exec(query, ...bindings); },
     all<T>(query: string, ...bindings: Array<string | number | null>): T[] {
@@ -46,7 +57,7 @@ export function createWorkerAi(storage: DurableObjectStorage, secret: () => stri
     transaction<T>(action: () => T): T { return storage.transactionSync(action); },
   };
   const store = new AiStore(sql);
-  const service = new AiService(store, () => createSecretBox(secret()), createWorkerAiTransport(allowedHosts), videoKey, isBackgroundPrincipalActive);
+  const service = new AiService(store, () => createSecretBox(secret()), createWorkerAiTransport(allowedHosts), videoKey, isBackgroundPrincipalActive, workersAiWhisperRunner(ai));
   // Mid-run guidance (steer) for multi-agent and computer runs; same wiring as Express.
   wireRunGuidance(store);
   return { store, service };

@@ -81,6 +81,8 @@ export async function transcribeRecording(api: VoiceApi, accountId: string, reco
   const form = new FormData();
   form.append("requestId", newVoiceRequestId());
   form.append("durationMs", String(Math.max(1, Math.min(AI_VOICE_LIMITS.maxAudioMs, Math.round(recording.durationMs)))));
+  // Mandarin hint for either transcription engine (Whisper also defaults to it).
+  form.append("language", "zh");
   form.append("audio", recording.blob, recording.fileName);
   // Serialize once: the multipart boundary must be in the header the API helper sends.
   const encoded = new Response(form);

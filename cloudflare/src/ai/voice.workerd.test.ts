@@ -103,7 +103,7 @@ describe.sequential("voice routes in the production Worker and Durable Object", 
   it("saves voice settings through the admin API without exposing the provider key", async () => {
     await api("/api/admin/ai/voice", member, { inputEnabled: false }, "PUT", 403);
     const saved = await api<{ settings: unknown; readiness: { input: { ready: boolean } } }>("/api/admin/ai/voice", admin, {
-      inputEnabled: true, sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 60,
+      inputEnabled: true, sttEngine: "provider", sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 60,
       ttsEngine: "external", ttsProviderId: "primary", ttsModelId: "tts-1", ttsVoice: "alloy", ttsPointsPer1kChars: 10,
     }, "PUT");
     expect(saved.readiness.input.ready).toBe(true);

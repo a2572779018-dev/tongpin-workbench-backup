@@ -28,6 +28,8 @@ describe("voice API client", () => {
     const form = await new Request("https://test.local", { method: "POST", headers: { "content-type": headers["Content-Type"] }, body: init.body as Blob }).formData();
     expect(form.get("requestId")).toMatch(/^voice-[0-9a-f-]{36}$/);
     expect(form.get("durationMs")).toBe("60000");
+    // Mandarin hint for the server's transcription engine.
+    expect(form.get("language")).toBe("zh");
     const file = form.get("audio") as File;
     expect([file.name, file.type, file.size]).toEqual(["voice.webm", "audio/webm;codecs=opus", 7]);
     expect(newVoiceRequestId()).not.toBe(newVoiceRequestId());

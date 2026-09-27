@@ -1,11 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiHarnessInput } from "../../shared/ai";
-import type { AiVoiceSettingsInput } from "../../shared/aiVoice";
+import { AI_VOICE_WHISPER_MODEL, type AiVoiceSettingsInput } from "../../shared/aiVoice";
 import type { AiTransport, AiTransportInit } from "./provider";
 import { AiError, createSecretBox } from "./security";
 import { AiService } from "./service";
 import { AiStore, type AiSql } from "./storage";
+import { isWhisperHallucination, type AiWhisperRunner } from "./voice";
 import type { VoiceTranscriptionUpload } from "./voiceAudio";
 import { bytesFromBase64, chromeLikeWebm, FFMPEG_LIVE_WEBM_1200MS, MP3_BYTES, pcmWav } from "../testSupport/voiceFixtures";
 
@@ -22,9 +23,12 @@ function harnessInput(): AiHarnessInput {
 }
 
 const VOICE: AiVoiceSettingsInput = {
-  inputEnabled: true, sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 60,
+  inputEnabled: true, sttEngine: "provider", sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 60,
   ttsEngine: "external", ttsProviderId: "primary", ttsModelId: "tts-1", ttsVoice: "alloy", ttsPointsPer1kChars: 20,
 };
+
+const WHISPER_VOICE = { inputEnabled: true, sttEngine: "whisper", sttPointsPerMinute: 60, ttsEngine: "browser" } as const;
+const MANDARIN_PROMPT = "以下是普通话的句子，使用简体中文。";
 
 describe("AI voice service", () => {
   let database: DatabaseSync;
@@ -272,5 +276,262 @@ describe("AI voice service", () => {
     expect((await failure(beta.voice.transcribe("member", upload))).code).toBe("AI_VOICE_INPUT_DISABLED");
     expect(alpha.store.quota("member").usedTokens).toBe(3);
     expect(beta.store.quota("member").usedTokens).toBe(0);
+  });
+
+  describe("Whisper engine (Workers AI)", () => {
+    let whisperOutput: unknown;
+    let whisperError: unknown;
+    const whisperRun = vi.fn<AiWhisperRunner>();
+    /** The Worker's service: same store, plus the env.AI runner. */
+    const withWhisper = () => new AiService(store, () => createSecretBox("voice-service-test-secret-with-32-bytes"), transport, undefined, undefined, whisperRun);
+    const lastInput = () => whisperRun.mock.calls.at(-1)![0];
+    const requestRecord = (requestId: unknown) => JSON.parse((database.prepare("SELECT data FROM ai_voice_requests WHERE request_id=?").get(String(requestId)) as { data: string }).data) as Record<string, unknown>;
+    const thrown = (action: () => void) => { try { action(); } catch (error) { return error as AiError; } throw new Error("expected a failure"); };
+
+    beforeEach(() => {
+      whisperOutput = { text: " 你好，同频。", word_count: 2, segments: [], vtt: "WEBVTT", transcription_info: { language: "zh", language_probability: 0.98, duration: 2.4, duration_after_vad: 2.1 }, usage: {} };
+      whisperError = undefined;
+      whisperRun.mockReset();
+      whisperRun.mockImplementation(async () => {
+        if (whisperError !== undefined) throw whisperError;
+        return whisperOutput;
+      });
+    });
+
+    it("is the default, also for settings saved before the engine choice existed", async () => {
+      const whisper = withWhisper();
+      expect(whisper.voice.settings()).toMatchObject({ inputEnabled: false, sttEngine: "whisper" });
+      // A row written by the previous release: provider fields, no engine.
+      database.prepare("INSERT INTO ai_settings(id,tenant_id,data) VALUES('voice','default',?)").run(JSON.stringify({
+        inputEnabled: true, sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 60,
+        ttsEngine: "browser", ttsProviderId: "", ttsModelId: "", ttsVoice: "", ttsPointsPer1kChars: 0, updatedAt: "2026-09-26T00:00:00.000Z",
+      }));
+      expect(whisper.voice.settings()).toMatchObject({ sttEngine: "whisper", sttProviderId: "primary", sttModelId: "whisper-1" });
+      expect(whisper.voice.readiness().input).toEqual({ ready: true, message: expect.stringContaining("Whisper") });
+      expect(whisper.voice.memberSettings().input).toMatchObject({ enabled: true, pointsPerMinute: 60 });
+      await whisper.voice.transcribe("member", recording());
+      expect(whisperRun).toHaveBeenCalledTimes(1);
+      expect(providerPosts()).toHaveLength(0);
+      // Anything unknown is read as Whisper as well.
+      database.prepare("UPDATE ai_settings SET data=json_set(data,'$.sttEngine','cloud') WHERE id='voice'").run();
+      expect(whisper.voice.settings().sttEngine).toBe("whisper");
+    });
+
+    it("needs no service connection, keeps a saved one for switching back, and keeps the engine for older admin clients", async () => {
+      const whisper = withWhisper();
+      expect(await whisper.voice.configure(WHISPER_VOICE)).toMatchObject({ inputEnabled: true, sttEngine: "whisper", sttProviderId: "", sttModelId: "", sttPointsPerMinute: 60 });
+      expect((await failure(whisper.voice.configure({ ...WHISPER_VOICE, sttPointsPerMinute: 0 }))).code).toBe("AI_VOICE_PRICE_REQUIRED");
+      expect((await failure(whisper.voice.configure({ ...WHISPER_VOICE, sttEngine: "cloud" }))).code).toBe("AI_VOICE_SETTINGS_INVALID");
+      // A saved connection that has since been removed neither blocks Whisper nor is dropped.
+      const kept = await whisper.voice.configure({ ...WHISPER_VOICE, sttProviderId: "retired", sttModelId: "whisper-1" });
+      expect(kept).toMatchObject({ sttEngine: "whisper", sttProviderId: "retired", sttModelId: "whisper-1" });
+      expect(whisper.voice.readiness().input.ready).toBe(true);
+      expect((await failure(whisper.voice.configure({ ...kept, sttEngine: "provider" }))).code).toBe("AI_VOICE_PROVIDER_MISSING");
+      await whisper.voice.configure(VOICE);
+      const { sttEngine: _omitted, ...legacyClient } = VOICE;
+      expect((await whisper.voice.configure(legacyClient)).sttEngine).toBe("provider");
+      await whisper.voice.configure(WHISPER_VOICE);
+      expect((await whisper.voice.configure({ ...legacyClient, sttProviderId: "", sttModelId: "" })).sttEngine).toBe("whisper");
+    });
+
+    it("sends the upload as-is with the exact Whisper inputs, bills by duration and records the model", async () => {
+      const whisper = withWhisper();
+      await whisper.voice.configure(WHISPER_VOICE);
+      const upload = recording();
+      const result = await whisper.voice.transcribe("member", upload);
+      expect(result).toMatchObject({
+        requestId: upload.requestId, text: "你好，同频。", durationMs: 2400,
+        usage: { totalTokens: 3, convertedTokens: 3, estimated: false, billingKind: "speech_to_text_conversion" }, quota: { usedTokens: 3, reservedTokens: 0 },
+      });
+      expect(whisperRun).toHaveBeenCalledTimes(1);
+      const [input, signal] = whisperRun.mock.calls[0];
+      expect(input).toEqual({
+        audio: Buffer.from(upload.audio).toString("base64"), task: "transcribe", language: "zh",
+        vad_filter: true, initial_prompt: MANDARIN_PROMPT, condition_on_previous_text: false,
+      });
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal.aborted).toBe(false);
+      // No provider connection is contacted (nor its key decrypted for a request).
+      expect(calls).toHaveLength(0);
+
+      const ledger = store.usage("member").find(entry => entry.requestId === upload.requestId)!;
+      expect(ledger).toMatchObject({ kind: "voice", status: "completed", model: AI_VOICE_WHISPER_MODEL, totalTokens: 3, billingKind: "speech_to_text_conversion" });
+      expect(ledger.reason).toContain("Whisper");
+      expect(JSON.stringify(ledger)).not.toContain("你好");
+      expect(requestRecord(upload.requestId)).toMatchObject({ status: "completed", model: AI_VOICE_WHISPER_MODEL, providerId: "workers-ai", chargedPoints: 3 });
+      expect(service.memberUsage("member").find(entry => entry.requestId === upload.requestId)?.model).toBe("语音输入");
+
+      // The same request id replays without another run or charge.
+      expect((await whisper.voice.transcribe("member", upload)).text).toBe("你好，同频。");
+      expect(whisperRun).toHaveBeenCalledTimes(1);
+      expect(store.quota("member")).toMatchObject({ usedTokens: 3, reservedTokens: 0 });
+      // Other containers are passed through unconverted too.
+      const wav = recording({ durationMs: "1500", audio: pcmWav({ durationMs: 1500 }), declaredType: "audio/wav" });
+      await whisper.voice.transcribe("member", wav);
+      expect(lastInput().audio).toBe(Buffer.from(wav.audio).toString("base64"));
+    });
+
+    it("uses a valid client language and otherwise asks for Mandarin", async () => {
+      const whisper = withWhisper();
+      await whisper.voice.configure(WHISPER_VOICE);
+      await whisper.voice.transcribe("member", recording({ language: undefined }));
+      expect(lastInput()).toMatchObject({ language: "zh", initial_prompt: MANDARIN_PROMPT, vad_filter: true, condition_on_previous_text: false });
+      await whisper.voice.transcribe("member", recording({ language: "中文" }));
+      expect(lastInput().language).toBe("zh");
+      await whisper.voice.transcribe("member", recording({ language: "en-US" }));
+      // The Mandarin prompt would mislead Whisper about another language.
+      expect(lastInput()).toEqual({ audio: expect.any(String), task: "transcribe", language: "en", vad_filter: true, condition_on_previous_text: false });
+    });
+
+    it("returns no text for stock captions and runaway loops, billed like any empty result", async () => {
+      const whisper = withWhisper();
+      await whisper.voice.configure(WHISPER_VOICE);
+      const heard: string[] = [];
+      for (const text of ["字幕志愿者 杨茜茜", "感谢观看", "", "谢谢谢谢谢谢谢谢谢谢谢谢谢谢谢谢", "今天感谢观看直播的朋友们"]) {
+        whisperOutput = { text };
+        const result = await whisper.voice.transcribe("member", recording());
+        expect(result.usage.totalTokens).toBe(3);
+        heard.push(result.text);
+      }
+      expect(heard).toEqual(["", "", "", "", "今天感谢观看直播的朋友们"]);
+      expect(store.quota("member")).toMatchObject({ usedTokens: 15, reservedTokens: 0 });
+      const entries = store.usage("member").filter(entry => entry.kind === "voice");
+      expect(entries.filter(entry => entry.reason.includes("未识别到清晰语音"))).toHaveLength(4);
+      expect(JSON.stringify(entries)).not.toMatch(/杨茜茜|感谢观看/);
+    });
+
+    it("releases the reservation and returns a fixed message when Workers AI fails", async () => {
+      const whisper = withWhisper();
+      await whisper.voice.configure(WHISPER_VOICE);
+      whisperError = new Error("3010: Invalid or incomplete input for the model: audio 'GkXfo59Ch' secret-upstream-detail");
+      const upload = recording();
+      const failed = await failure(whisper.voice.transcribe("member", upload));
+      expect([failed.status, failed.code, failed.message]).toEqual([502, "AI_PROVIDER_UNAVAILABLE", "语音转写暂时不可用，请稍后重试"]);
+      expect(store.quota("member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
+      expect(store.usage("member")[0]).toMatchObject({ kind: "voice", status: "failed", totalTokens: 0, model: AI_VOICE_WHISPER_MODEL });
+      expect(requestRecord(upload.requestId)).toMatchObject({ status: "failed", chargedPoints: 0, providerId: "workers-ai" });
+      expect(JSON.stringify([store.usage("member"), requestRecord(upload.requestId)])).not.toMatch(/secret-upstream-detail|GkXfo59Ch/);
+      // The same id replays the stored failure; it is not run again.
+      expect((await failure(whisper.voice.transcribe("member", upload))).code).toBe("AI_PROVIDER_UNAVAILABLE");
+      expect(whisperRun).toHaveBeenCalledTimes(1);
+
+      whisperError = new Error("4006: you have used up your daily free allocation of 10,000 neurons, please upgrade to Cloudflare's Workers Paid plan if you would like to continue usage.");
+      const daily = await failure(whisper.voice.transcribe("member", recording()));
+      expect([daily.code, daily.message]).toEqual(["AI_PROVIDER_LIMIT", "今天的免费语音转写额度已用完，请明天再试或联系管理员"]);
+      whisperError = new Error("3040: Capacity temporarily exceeded, please try again.");
+      expect((await failure(whisper.voice.transcribe("member", recording()))).message).toBe("语音转写服务繁忙，请稍后重试");
+      whisperRun.mockImplementationOnce(() => { throw new TypeError("binding exploded synchronously"); });
+      expect((await failure(whisper.voice.transcribe("member", recording()))).code).toBe("AI_PROVIDER_UNAVAILABLE");
+
+      whisperError = undefined;
+      whisperOutput = { response: "not a transcription" };
+      expect((await failure(whisper.voice.transcribe("member", recording()))).code).toBe("AI_VOICE_TRANSCRIPT_INVALID");
+      whisperOutput = { text: Array.from({ length: 20_001 }, (_, index) => String.fromCharCode(0x4e00 + index % 4000)).join("") };
+      expect((await failure(whisper.voice.transcribe("member", recording()))).message).toContain("过长");
+      expect(store.quota("member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
+      expect(store.usage("member").filter(entry => entry.kind === "voice").map(entry => [entry.status, entry.totalTokens]))
+        .toEqual(Array.from({ length: 6 }, () => ["failed", 0]));
+    });
+
+    it("stops waiting at the transcription timeout even if the run ignores the abort, and releases the reservation", async () => {
+      const whisper = withWhisper();
+      await whisper.voice.configure(WHISPER_VOICE);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        let ignored: AbortSignal | undefined;
+        whisperRun.mockImplementationOnce((_input, signal) => { ignored = signal; return new Promise(() => undefined); });
+        const hanging = failure(whisper.voice.transcribe("member", recording()));
+        await vi.waitFor(() => expect(ignored).toBeDefined());
+        expect(store.quota("member").reservedTokens).toBe(3);
+        await vi.advanceTimersByTimeAsync(89_000);
+        expect(ignored!.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const timedOut = await hanging;
+        expect([timedOut.status, timedOut.code, timedOut.message]).toEqual([502, "AI_CONNECTION_FAILED", "语音转写超时，请稍后重试"]);
+        expect(ignored!.aborted).toBe(true);
+        expect(store.quota("member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
+
+        // A run that honours the signal ends the same way.
+        let honoured: AbortSignal | undefined;
+        whisperRun.mockImplementationOnce((_input, signal) => new Promise((_resolve, reject) => {
+          honoured = signal;
+          signal.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+        }));
+        const aborted = failure(whisper.voice.transcribe("member", recording()));
+        await vi.waitFor(() => expect(honoured).toBeDefined());
+        await vi.advanceTimersByTimeAsync(90_000);
+        expect((await aborted).code).toBe("AI_CONNECTION_FAILED");
+        expect(store.quota("member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
+        expect(store.usage("member").slice(0, 2).map(entry => [entry.status, entry.totalTokens])).toEqual([["failed", 0], ["failed", 0]]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("fails closed without Workers AI (the Node server) and never falls back to the paid provider", async () => {
+      // `service` has no Whisper runner, while the provider route is fully configured and verified.
+      await service.voice.configure({ ...VOICE, sttEngine: "whisper" });
+      expect(service.voice.readiness().input).toEqual({ ready: false, message: "Whisper 语音转写只能在云端服务使用，请在管理后台改用接口转写" });
+      expect(service.voice.memberSettings().input).toMatchObject({ enabled: false, pointsPerMinute: 0 });
+      const early = thrown(() => service.voice.assertInputAvailable("member"));
+      expect([early.status, early.code]).toEqual([503, "AI_VOICE_NOT_CONFIGURED"]);
+      const refused = await failure(service.voice.transcribe("member", recording()));
+      expect([refused.status, refused.code]).toEqual([503, "AI_VOICE_NOT_CONFIGURED"]);
+      expect(refused.message).toContain("只能在云端服务使用");
+      expect(calls).toHaveLength(0);
+      expect(store.quota("member")).toMatchObject({ usedTokens: 0, reservedTokens: 0 });
+      // 接口转写 works on this server once chosen.
+      await service.voice.configure(VOICE);
+      expect(service.voice.readiness().input.ready).toBe(true);
+      expect((await service.voice.transcribe("member", recording())).text).toBe("你好，同频");
+    });
+
+    it("keeps the provider engine on its own path even where Workers AI exists", async () => {
+      const whisper = withWhisper();
+      await whisper.voice.configure(VOICE);
+      expect(whisper.voice.readiness().input).toEqual({ ready: true, message: "成员可以使用语音输入" });
+      expect((await whisper.voice.transcribe("member", recording())).text).toBe("你好，同频");
+      expect(whisperRun).not.toHaveBeenCalled();
+      expect(providerPosts()).toHaveLength(1);
+      expect(store.usage("member")[0]).toMatchObject({ model: "whisper-1", status: "completed" });
+    });
+
+    it("carries the runner into every tenant's service", async () => {
+      const alpha = withWhisper().forTenant("tenant-alpha");
+      await alpha.voice.configure(WHISPER_VOICE);
+      alpha.setQuota("member", "admin", { limitTokens: 100 });
+      expect(alpha.voice.readiness().input.ready).toBe(true);
+      expect((await alpha.voice.transcribe("member", recording())).usage.totalTokens).toBe(3);
+      expect(whisperRun).toHaveBeenCalledTimes(1);
+      expect(alpha.store.quota("member").usedTokens).toBe(3);
+      expect(service.voice.settings().inputEnabled).toBe(false);
+    });
+  });
+});
+
+describe("Whisper hallucination guard", () => {
+  it("recognizes Whisper's stock captions, alone or repeated, in either script", () => {
+    for (const text of [
+      "字幕志愿者 杨茜茜", "字幕志愿者：李宗盛", "字幕志愿者", "感谢观看", "谢谢观看。", "谢谢大家！", "欢迎订阅", "明镜与点点",
+      "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目", "字幕由Amara.org社区提供", "优优独播剧场——YoYo Television Series Exclusive",
+      "优优独播剧场 —— ＹｏＹｏ Television Series Exclusive", "谢谢观看 谢谢观看", "感謝觀看", "字幕志願者 楊茜茜", "Thank you for watching!",
+    ]) expect(isWhisperHallucination(text), text).toBe(true);
+  });
+
+  it("treats a punctuation-only result as no speech", () => {
+    for (const text of ["……", "。", " ... ", "？！"]) expect(isWhisperHallucination(text), text).toBe(true);
+  });
+
+  it("recognizes a runaway repetition of a short unit", () => {
+    for (const text of ["我我我我我我我我", "谢谢谢谢谢谢谢谢谢谢谢谢谢谢谢谢", "嗯，嗯，嗯，嗯，嗯，嗯，嗯，嗯", "你好你好你好你好你好你好你好你好", "ha ha ha ha ha ha ha ha", "今天开会啊啊啊啊啊啊啊啊啊"]) {
+      expect(isWhisperHallucination(text), text).toBe(true);
+    }
+  });
+
+  it("keeps real speech, including sentences that merely contain a stock phrase, numbers and short repeats", () => {
+    for (const text of [
+      "", "你好，同频。", "谢谢", "今天感谢观看直播的朋友们", "字幕志愿者招募的事情我们明天再讨论一下", "对对对，就是这样",
+      "我的电话是13800000000", "预算一共100000000元", "哈哈哈哈哈哈哈", "Thank you", "Hello, how are you?", "……好的",
+    ]) expect(isWhisperHallucination(text), text).toBe(false);
   });
 });

@@ -1,12 +1,14 @@
 import type { AiQuota, AiUsage } from "../../shared/ai";
 import {
   AI_VOICE_LIMITS,
+  AI_VOICE_WHISPER_MODEL,
   countSpeechCharacters,
   voiceSpeechPoints,
   voiceTranscriptionPoints,
   type AiTranscriptionResponse,
   type AiVoiceMemberSettings,
   type AiVoiceSettings,
+  type AiVoiceSttEngine,
   type AiVoiceTtsEngine,
 } from "../../shared/aiVoice";
 import { legacyHarnessDraft } from "./harnessMigration";
@@ -16,6 +18,7 @@ import type { AiSql, AiStore } from "./storage";
 import { tenantStorageKey } from "./tenant";
 import {
   AUDIO_CONTAINER_FORMATS,
+  audioBase64,
   audioDurationMs,
   audioMimeEssence,
   declaredAudioContainer,
@@ -26,12 +29,15 @@ import {
 } from "./voiceAudio";
 
 /**
- * Speech-to-text and external text-to-speech through an administrator-chosen
- * OpenAI-compatible provider connection of the AI harness. Adapted from
- * LibreChat v0.8.7 `api/server/services/Files/Audio/STTService.js`
+ * Speech-to-text and external text-to-speech. Transcription runs either on
+ * OpenAI's open-source Whisper model (https://github.com/openai/whisper,
+ * `@cf/openai/whisper-large-v3-turbo`) through the Worker's Cloudflare Workers
+ * AI binding — no provider key — or through an administrator-chosen
+ * OpenAI-compatible provider connection of the AI harness. The provider path
+ * is adapted from LibreChat v0.8.7 `api/server/services/Files/Audio/STTService.js`
  * (`openAIProvider`, `sttRequest`) and `TTSService.js` (`openAIProvider`,
- * `ttsRequest`), with Tongpin's tenant scope, one-time request ids, quota
- * reservation/settlement and sanitized provider diagnostics. Audio and text
+ * `ttsRequest`). Both engines share Tongpin's tenant scope, one-time request
+ * ids, quota reservation/settlement and sanitized diagnostics. Audio and text
  * are never persisted or logged; only the transcript is kept for an
  * idempotent replay of the same request id.
  */
@@ -48,11 +54,126 @@ const SPEECH_TIMEOUT_MS = 60_000;
 const UNVERIFIED_AUDIO_MAX_BYTES = 1_500_000;
 const RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Recorded as the request's provider for Whisper transcriptions. */
+const WHISPER_PROVIDER_ID = "workers-ai";
+/** Steers Whisper to Simplified Chinese with punctuation for Mandarin speech. */
+const WHISPER_MANDARIN_PROMPT = "以下是普通话的句子，使用简体中文。";
+const WHISPER_UNAVAILABLE = "Whisper 语音转写只能在云端服务使用，请在管理后台改用接口转写";
+
 const DEFAULT_SETTINGS: AiVoiceSettings = {
-  inputEnabled: false, sttProviderId: "", sttModelId: "", sttPointsPerMinute: 0,
+  inputEnabled: false, sttEngine: "whisper", sttProviderId: "", sttModelId: "", sttPointsPerMinute: 0,
   ttsEngine: "browser", ttsProviderId: "", ttsModelId: "", ttsVoice: "", ttsPointsPer1kChars: 0,
   updatedAt: null,
 };
+
+/** Workers AI `@cf/openai/whisper-large-v3-turbo` input for one recording. */
+export interface AiWhisperInput {
+  /** Base64 of the uploaded recording as-is (WebM/Opus, Ogg, WAV or M4A). */
+  audio: string;
+  task: "transcribe";
+  language: string;
+  vad_filter: boolean;
+  initial_prompt?: string;
+  condition_on_previous_text: boolean;
+}
+
+/** Runs Whisper once. Only the Worker supplies one (from `env.AI`); the Node
+ * server has none, so Whisper there is reported unavailable and never falls
+ * back to a paid provider. The signal aborts the run at the timeout. */
+export type AiWhisperRunner = (input: AiWhisperInput, signal: AbortSignal) => Promise<unknown>;
+
+function whisperInput(audio: Uint8Array, language: string | undefined): AiWhisperInput {
+  const code = language ?? "zh";
+  return {
+    audio: audioBase64(audio), task: "transcribe", language: code,
+    // Voice activity detection keeps silence and noise from becoming stock
+    // captions ("字幕志愿者 …", "感谢观看"). The Mandarin prompt only fits zh.
+    vad_filter: true, ...(code === "zh" ? { initial_prompt: WHISPER_MANDARIN_PROMPT } : {}), condition_on_previous_text: false,
+  };
+}
+
+/**
+ * Whisper's stock phrases for silence or noise: subtitle credits and video
+ * outros learned from web video, in both Simplified and Traditional forms.
+ */
+const WHISPER_STOCK_PHRASES = [
+  "感谢观看", "谢谢观看", "感谢收看", "谢谢收看", "谢谢大家", "欢迎订阅", "明镜与点点",
+  "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目", "字幕由Amara.org社区提供", "优优独播剧场——YoYo Television Series Exclusive",
+  "感謝觀看", "謝謝觀看", "感謝收看", "謝謝收看", "謝謝大家", "歡迎訂閱", "明鏡與點點",
+  "請不吝點贊 訂閱 轉發 打賞支持明鏡與點點欄目", "字幕由Amara.org社區提供", "優優獨播劇場——YoYo Television Series Exclusive",
+  "Thank you for watching", "Thanks for watching",
+];
+/** "字幕志愿者 杨茜茜": the volunteer credit followed by at most a short name. */
+const WHISPER_CREDIT_PREFIXES = ["字幕志愿者", "字幕志願者"];
+const WHISPER_CREDIT_NAME_MAX = 6;
+/** One 1–4 character unit repeated at least 8 times in a row (a decoding loop). */
+const WHISPER_RUNAWAY_REPEAT = /([^]{1,4}?)\1{7,}/gu;
+
+/** Letters and digits only: punctuation, symbols, spaces and control
+ * characters removed, full-width forms folded, case ignored. */
+function comparableTranscript(text: string): string {
+  return text.normalize("NFKC").replace(/[\p{P}\p{S}\p{Z}\p{Cc}\p{Cf}]+/gu, "").toLowerCase();
+}
+const WHISPER_STOCK = [...new Set(WHISPER_STOCK_PHRASES.map(comparableTranscript))];
+const WHISPER_CREDITS = WHISPER_CREDIT_PREFIXES.map(comparableTranscript);
+
+/**
+ * True when a Whisper transcript is not speech but a known hallucination: the
+ * whole text (ignoring punctuation, whitespace, width and case) is a stock
+ * phrase, possibly repeated, or a subtitle-volunteer credit, or it is only
+ * punctuation ("……"); or it contains a runaway repetition of one 1–4
+ * character unit with a letter in it (digits alone, like "13800000000", are
+ * never a loop).
+ */
+export function isWhisperHallucination(transcript: string): boolean {
+  const text = comparableTranscript(transcript);
+  if (!text) return transcript.trim().length > 0;
+  if (WHISPER_STOCK.some(phrase => text.length % phrase.length === 0 && phrase.repeat(text.length / phrase.length) === text)) return true;
+  if (WHISPER_CREDITS.some(prefix => text.startsWith(prefix) && [...text.slice(prefix.length)].length <= WHISPER_CREDIT_NAME_MAX)) return true;
+  for (const match of text.matchAll(WHISPER_RUNAWAY_REPEAT)) if (/\p{L}/u.test(match[1])) return true;
+  return false;
+}
+
+/** The transcript of a Workers AI Whisper answer; "" when there was no clear speech. */
+function whisperTranscript(output: unknown): string {
+  const value = output && typeof output === "object" && !Array.isArray(output) ? (output as { text?: unknown }).text : undefined;
+  if (typeof value !== "string") throw new AiError(502, "AI_VOICE_TRANSCRIPT_INVALID", "语音转写没有返回可用文字，请稍后重试");
+  const text = value.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
+  if (isWhisperHallucination(text)) return "";
+  if (text.length > AI_VOICE_LIMITS.maxTranscriptCharacters) throw new AiError(502, "AI_VOICE_TRANSCRIPT_INVALID", "语音转写返回的文字过长，请分段录制后重试");
+  return text;
+}
+
+/** A fixed member-safe error; Workers AI's own message is never kept or returned. */
+function whisperFailure(error: unknown): AiError {
+  if (error instanceof AiError) return error;
+  const name = error instanceof Error ? error.name : "";
+  const message = error instanceof Error ? error.message : "";
+  if (name === "TimeoutError" || name === "AbortError") return new AiError(502, "AI_CONNECTION_FAILED", "语音转写超时，请稍后重试");
+  // Workers AI prefixes errors with a numeric code, e.g. "4006: you have used up your daily free allocation …".
+  const code = /^\s*(\d{4})\s*:/.exec(message)?.[1];
+  if (code === "4006" || /daily free allocation/i.test(message)) return new AiError(502, "AI_PROVIDER_LIMIT", "今天的免费语音转写额度已用完，请明天再试或联系管理员");
+  if (code === "3040" || /capacity/i.test(message)) return new AiError(502, "AI_PROVIDER_LIMIT", "语音转写服务繁忙，请稍后重试");
+  return new AiError(502, "AI_PROVIDER_UNAVAILABLE", "语音转写暂时不可用，请稍后重试");
+}
+
+/** Whisper with the transcription timeout enforced even if the runner ignores the signal. */
+async function runWhisper(run: AiWhisperRunner, input: AiWhisperInput): Promise<unknown> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const timeout = new AiError(502, "AI_CONNECTION_FAILED", "语音转写超时，请稍后重试");
+      reject(timeout);
+      controller.abort(timeout);
+    }, TRANSCRIPTION_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => run(input, controller.signal)), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const VOICE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_voice_requests (tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant_id,user_id,request_id));
@@ -151,7 +272,7 @@ async function readAudioBody(response: Response, limit: number): Promise<Uint8Ar
 }
 
 export class AiVoiceService {
-  constructor(private readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport) {}
+  constructor(private readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly whisper?: AiWhisperRunner) {}
 
   private settingKey(): string { return tenantStorageKey(this.store.tenantId, "voice"); }
   private userKey(userId: string): string { return tenantStorageKey(this.store.tenantId, userId); }
@@ -165,8 +286,17 @@ export class AiVoiceService {
   settings(): AiVoiceSettings {
     const row = this.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE tenant_id=? AND id=?", this.store.tenantId, this.settingKey())[0];
     if (!row) return { ...DEFAULT_SETTINGS };
-    try { return { ...DEFAULT_SETTINGS, ...JSON.parse(row.data) as Partial<AiVoiceSettings> }; }
-    catch { return { ...DEFAULT_SETTINGS }; }
+    try {
+      const stored = { ...DEFAULT_SETTINGS, ...JSON.parse(row.data) as Partial<AiVoiceSettings> };
+      // Settings saved before the engine choice existed (or anything unknown) mean Whisper.
+      return { ...stored, sttEngine: stored.sttEngine === "provider" ? "provider" : "whisper" };
+    } catch { return { ...DEFAULT_SETTINGS }; }
+  }
+
+  /** The Whisper runner, or a fail-closed error where this server has none. */
+  private whisperRunner(): AiWhisperRunner {
+    if (!this.whisper) throw new AiError(503, "AI_VOICE_NOT_CONFIGURED", "语音服务暂不可用：Whisper 语音转写只能在云端服务使用，请管理员在管理后台改用接口转写", true);
+    return this.whisper;
   }
 
   private providers() {
@@ -194,12 +324,14 @@ export class AiVoiceService {
 
   readiness(): { input: AiVoiceReadiness; speech: AiVoiceReadiness } {
     const settings = this.settings();
-    const inputIssue = !settings.inputEnabled ? "未开启" : settings.sttPointsPerMinute < 1 ? "尚未设置每分钟折算的同频点" : this.routeIssue(settings.sttProviderId, settings.sttModelId);
+    const whisper = settings.sttEngine === "whisper";
+    const inputIssue = !settings.inputEnabled ? "未开启" : settings.sttPointsPerMinute < 1 ? "尚未设置每分钟折算的同频点"
+      : whisper ? (this.whisper ? null : WHISPER_UNAVAILABLE) : this.routeIssue(settings.sttProviderId, settings.sttModelId);
     const speechIssue = settings.ttsEngine === "browser" ? null
       : settings.ttsPointsPer1kChars < 1 ? "尚未设置每千字折算的同频点"
         : !settings.ttsVoice ? "尚未填写音色" : this.routeIssue(settings.ttsProviderId, settings.ttsModelId);
     return {
-      input: { ready: !inputIssue, message: inputIssue ?? "成员可以使用语音输入" },
+      input: { ready: !inputIssue, message: inputIssue ?? (whisper ? "成员可以使用语音输入（Whisper 开源模型，Cloudflare 运行）" : "成员可以使用语音输入") },
       speech: { ready: !speechIssue, message: settings.ttsEngine === "browser" ? "使用成员电脑的系统语音朗读，免费" : speechIssue ? `${speechIssue}；成员端暂时改用系统语音朗读` : "成员朗读使用外部语音服务" },
     };
   }
@@ -217,10 +349,14 @@ export class AiVoiceService {
   async configure(value: unknown): Promise<AiVoiceSettings> {
     const input = object(value);
     if (typeof input.inputEnabled !== "boolean") invalid("请选择是否开启语音输入");
+    // An administrator client that predates the engine choice keeps the saved engine.
+    const sttEngine = input.sttEngine ?? this.settings().sttEngine;
+    if (sttEngine !== "whisper" && sttEngine !== "provider") invalid("请选择语音转写引擎");
     const ttsEngine = input.ttsEngine ?? "browser";
     if (ttsEngine !== "browser" && ttsEngine !== "external") invalid("请选择朗读方式");
     const next: AiVoiceSettings = {
       inputEnabled: input.inputEnabled,
+      sttEngine: sttEngine as AiVoiceSttEngine,
       sttProviderId: providerIdField(input.sttProviderId, "语音转文字服务"),
       sttModelId: textField(input.sttModelId, "语音转文字模型", 160),
       sttPointsPerMinute: pointsField(input.sttPointsPerMinute, "每分钟折算同频点"),
@@ -234,8 +370,11 @@ export class AiVoiceService {
     if (next.ttsVoice && !VOICE_ID.test(next.ttsVoice)) invalid("音色只能包含字母、数字和 _ . : / -");
     const providerIds = new Set(this.providers().map(provider => provider.id));
     if (next.inputEnabled) {
-      if (!next.sttProviderId || !providerIds.has(next.sttProviderId)) throw new AiError(400, "AI_VOICE_PROVIDER_MISSING", "请选择一个已接入的服务连接用于语音转文字");
-      if (!next.sttModelId) throw new AiError(400, "AI_VOICE_MODEL_REQUIRED", "请选择语音转文字模型");
+      // Whisper needs no service connection; a saved one is kept for switching back.
+      if (next.sttEngine === "provider") {
+        if (!next.sttProviderId || !providerIds.has(next.sttProviderId)) throw new AiError(400, "AI_VOICE_PROVIDER_MISSING", "请选择一个已接入的服务连接用于语音转文字");
+        if (!next.sttModelId) throw new AiError(400, "AI_VOICE_MODEL_REQUIRED", "请选择语音转文字模型");
+      }
       if (next.sttPointsPerMinute < 1) throw new AiError(400, "AI_VOICE_PRICE_REQUIRED", "开启语音输入前，请设置每分钟折算的同频点（1 到 1000 万）");
     }
     if (next.ttsEngine === "external") {
@@ -347,7 +486,49 @@ export class AiVoiceService {
   /** Cheap checks that run before a (possibly 10 MB) upload body is read. */
   assertInputAvailable(userId: string): void {
     this.store.assertAccess(userId);
-    if (!this.settings().inputEnabled) throw new AiError(403, "AI_VOICE_INPUT_DISABLED", "管理员尚未开启语音输入", true);
+    const settings = this.settings();
+    if (!settings.inputEnabled) throw new AiError(403, "AI_VOICE_INPUT_DISABLED", "管理员尚未开启语音输入", true);
+    if (settings.sttEngine === "whisper") this.whisperRunner();
+  }
+
+  /** Settles a delivered transcript once; a request that recovery already
+   * settled conservatively gets its late transcript without a second charge. */
+  private deliverTranscript(userId: string, pending: StoredVoiceRequest, result: { text: string; durationMs: number }, hash: string, reason: string): AiTranscriptionResponse {
+    const settled = this.store.sql.transaction(() => this.settle(pending, "completed", pending.reservedPoints, reason, { result }));
+    if (!settled) {
+      const late = this.store.sql.transaction(() => {
+        const stored = this.readRequest(userId, pending.requestId)!;
+        if (stored.status === "uncertain" && !stored.result) this.writeRequest({ ...stored, result });
+        return this.readRequest(userId, pending.requestId)!;
+      });
+      return this.replay(userId, late, hash);
+    }
+    return { requestId: pending.requestId, text: result.text, durationMs: result.durationMs, usage: settled, quota: this.store.quota(userId) };
+  }
+
+  /** Workers AI Whisper: the uploaded bytes as-is, Mandarin by default. Every
+   * failure releases the reservation — nothing reached the member and no
+   * provider account needs reconciling. */
+  private async transcribeWithWhisper(run: AiWhisperRunner, userId: string, request: {
+    requestId: string; hash: string; audio: Uint8Array; language: string | undefined; durationMs: number; points: number; pointsPerMinute: number;
+  }): Promise<AiTranscriptionResponse> {
+    const { requestId, hash, durationMs, points } = request;
+    const input = whisperInput(request.audio, request.language);
+    const now = Date.now();
+    const pending = this.reserve(userId, {
+      requestId, userId, kind: "transcription", hash, createdAt: new Date(now).toISOString(), expiresAt: now + TRANSCRIPTION_TIMEOUT_MS + 30_000,
+      reservedPoints: points, model: AI_VOICE_WHISPER_MODEL, providerId: WHISPER_PROVIDER_ID, durationMs,
+    });
+    let text: string;
+    try {
+      text = whisperTranscript(await runWhisper(run, input));
+    } catch (error) {
+      const safe = whisperFailure(error);
+      this.store.sql.transaction(() => this.settle(pending, "failed", 0, `Whisper 语音转文字失败：${safe.message}；预留同频点已释放`, { error: safe }));
+      throw safe;
+    }
+    return this.deliverTranscript(userId, pending, { text, durationMs }, hash,
+      `Whisper 语音转文字 ${Math.ceil(durationMs / 1000)} 秒${text ? "" : "（未识别到清晰语音）"}，按管理员设定每分钟 ${request.pointsPerMinute} 同频点折算（按秒向上取整）`);
   }
 
   async transcribe(userId: string, upload: VoiceTranscriptionUpload): Promise<AiTranscriptionResponse> {
@@ -358,7 +539,10 @@ export class AiVoiceService {
     const settings = this.settings();
     if (!settings.inputEnabled) throw new AiError(403, "AI_VOICE_INPUT_DISABLED", "管理员尚未开启语音输入", true);
     if (settings.sttPointsPerMinute < 1) throw new AiError(503, "AI_VOICE_NOT_CONFIGURED", "管理员尚未设置语音输入的折算同频点", true);
-    const route = this.route(settings.sttProviderId, settings.sttModelId);
+    // Whisper fails closed where there is no runner; it never falls back to a paid provider.
+    const engine = settings.sttEngine === "whisper"
+      ? { kind: "whisper" as const, run: this.whisperRunner() }
+      : { kind: "provider" as const, route: this.route(settings.sttProviderId, settings.sttModelId) };
 
     const declared = Number(upload.durationMs);
     if (!Number.isFinite(declared) || declared <= 0) throw new AiError(400, "AI_VOICE_DURATION_INVALID", "录音时长无效，请重新录制");
@@ -383,7 +567,11 @@ export class AiVoiceService {
     const hash = await sha256(JSON.stringify({ version: 1, kind: "transcription", audio: await sha256(bytes), declared, language: language ?? null }));
     const prior = this.readRequest(userId, requestId);
     if (prior) return this.replay(userId, prior, hash);
+    if (engine.kind === "whisper") {
+      return this.transcribeWithWhisper(engine.run, userId, { requestId, hash, audio: bytes, language, durationMs, points, pointsPerMinute: settings.sttPointsPerMinute });
+    }
 
+    const { route } = engine;
     const key = await (await this.box()).decrypt(route.encryptedKey);
     const idempotencyKey = await this.idempotencyKey(userId, requestId, "transcription");
     const format = AUDIO_CONTAINER_FORMATS[container];
@@ -405,20 +593,8 @@ export class AiVoiceService {
       });
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "audio"); }
       const text = transcriptText(object(await readBoundedJson(response, 256_000)).text);
-      const result = { text, durationMs };
-      const settled = this.store.sql.transaction(() => this.settle(pending, "completed", points,
-        `语音转文字 ${Math.ceil(durationMs / 1000)} 秒，按管理员设定每分钟 ${settings.sttPointsPerMinute} 同频点折算（按秒向上取整）`, { result }));
-      if (!settled) {
-        // Recovery already settled this request conservatively: deliver the late
-        // transcript without billing it a second time.
-        const late = this.store.sql.transaction(() => {
-          const stored = this.readRequest(userId, requestId)!;
-          if (stored.status === "uncertain" && !stored.result) this.writeRequest({ ...stored, result });
-          return this.readRequest(userId, requestId)!;
-        });
-        return this.replay(userId, late, hash);
-      }
-      return { requestId, text, durationMs, usage: settled, quota: this.store.quota(userId) };
+      return this.deliverTranscript(userId, pending, { text, durationMs }, hash,
+        `语音转文字 ${Math.ceil(durationMs / 1000)} 秒，按管理员设定每分钟 ${settings.sttPointsPerMinute} 同频点折算（按秒向上取整）`);
     } catch (error) {
       const safe = error instanceof AiError ? error : new AiError(502, "AI_CONNECTION_FAILED", "语音服务连接失败或超时；用量待管理员核对，请稍后重新录制");
       knownRejection ||= safe.definitelyNotSent;

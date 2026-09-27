@@ -7,9 +7,10 @@ import type { AiTransport } from "../../../server/ai/provider";
 import { chromeLikeWebm } from "../../../server/testSupport/voiceFixtures";
 import type { UserRow } from "../platform";
 import { handleAiRequest } from "./routes";
+import { workersAiWhisperRunner } from "./runtime";
 
 const VOICE = {
-  inputEnabled: true, sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 30,
+  inputEnabled: true, sttEngine: "provider", sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 30,
   ttsEngine: "external", ttsProviderId: "primary", ttsModelId: "tts-1", ttsVoice: "alloy", ttsPointsPer1kChars: 10,
 };
 
@@ -89,5 +90,28 @@ describe("Worker voice routes on the shared service", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("audio/mpeg");
     expect((await response.arrayBuffer()).byteLength).toBe(12);
+  });
+
+  it("transcribes through the Workers AI binding with Whisper, with no service connection involved", async () => {
+    expect(workersAiWhisperRunner(undefined)).toBeUndefined();
+    const run = vi.fn(async (_model: string, _input: unknown, _options?: { signal?: AbortSignal }) => ({ text: "Workers AI 转写。", transcription_info: { language: "zh", duration: 3 } }));
+    const store = service.store;
+    service = new AiService(store, () => createSecretBox("worker-voice-route-secret-with-32-bytes"), transport, undefined, undefined, workersAiWhisperRunner({ run } as unknown as Ai));
+    const [body, headers] = jsonBody({ inputEnabled: true, sttEngine: "whisper", sttPointsPerMinute: 30, ttsEngine: "browser" });
+    const saved = await invoke("/api/admin/ai/voice", "PUT", admin, body, headers);
+    expect(await saved.json()).toMatchObject({ settings: { sttEngine: "whisper" }, readiness: { input: { ready: true } } });
+    expect(await (await invoke("/api/ai/voice", "GET", member)).json()).toMatchObject({ settings: { input: { enabled: true, pointsPerMinute: 30 } } });
+    const requestId = `voice-${crypto.randomUUID()}`;
+    const audio = chromeLikeWebm({ durationMs: 3000 });
+    const upload = await multipart({ requestId, durationMs: "3000", language: "zh" }, audio);
+    const response = await invoke("/api/ai/audio/transcriptions", "POST", member, upload.body, upload.headers);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ requestId, text: "Workers AI 转写。", durationMs: 3000, usage: { totalTokens: 2 }, quota: { usedTokens: 2 } });
+    expect(run).toHaveBeenCalledTimes(1);
+    const [model, input, options] = run.mock.calls[0];
+    expect(model).toBe("@cf/openai/whisper-large-v3-turbo");
+    expect(input).toEqual({ audio: Buffer.from(audio).toString("base64"), task: "transcribe", language: "zh", vad_filter: true, initial_prompt: "以下是普通话的句子，使用简体中文。", condition_on_previous_text: false });
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
+    expect(transport).not.toHaveBeenCalled();
   });
 });

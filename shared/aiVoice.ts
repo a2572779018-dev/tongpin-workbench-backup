@@ -29,10 +29,21 @@ export const AI_VOICE_SPEECH_PATH = "/api/ai/audio/speech";
  * "external" = an administrator-selected OpenAI-compatible /audio/speech model. */
 export type AiVoiceTtsEngine = "browser" | "external";
 
+/** "whisper" = OpenAI's open-source Whisper model run by Cloudflare Workers AI
+ * through the Worker's AI binding (no provider key; only the cloud Worker has
+ * it); "provider" = an administrator-selected OpenAI-compatible
+ * /audio/transcriptions model. Stored settings without the field mean "whisper". */
+export type AiVoiceSttEngine = "whisper" | "provider";
+
+/** Workers AI model id of the Whisper engine (recorded on each request). */
+export const AI_VOICE_WHISPER_MODEL = "@cf/openai/whisper-large-v3-turbo";
+
 export interface AiVoiceSettingsInput {
   /** Speech-to-text (microphone) for members. */
   inputEnabled: boolean;
-  /** Harness provider connection id reused for /audio/transcriptions. */
+  sttEngine: AiVoiceSttEngine;
+  /** Harness provider connection id reused for /audio/transcriptions (provider
+   * engine only; kept while Whisper is selected so switching back is one step). */
   sttProviderId: string;
   sttModelId: string;
   /** 同频点 per minute of audio, billed per started second. */

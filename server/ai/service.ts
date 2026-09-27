@@ -28,7 +28,7 @@ import { createAiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 import { describeAiRichContent } from "../../shared/aiRichContent";
 import { citationsForContent } from "./citations";
 import { withPendingGuidance } from "./runGuidance";
-import { AiVoiceService } from "./voice";
+import { AiVoiceService, type AiWhisperRunner } from "./voice";
 import { AiMemberMemoryService } from "./memberMemoryService";
 import { cancelMultiAgentRun as cancelActiveMultiAgentRun, multiAgentPreflight, runMultiAgentChat, type MultiAgentHost } from "./multiAgentRun";
 import { parseComputerTaskOutput } from "./computerTask";
@@ -238,17 +238,18 @@ export class AiService {
   /** Unified computer executor (task spec, Jev decisions, results). */
   readonly computer: AiComputerService;
   private readonly availabilityProbe: AvailabilityProbe;
-  constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "", private readonly isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false) {
+  /** `whisper` is Workers AI Whisper for voice input; only the Worker has one. */
+  constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "", private readonly isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false, private readonly whisper?: AiWhisperRunner) {
     this.harness = new AiHarness(store, box, transport);
     this.video = new AiVideoService(store, box, transport, videoKey, this.harness);
-    this.voice = new AiVoiceService(store, box, transport);
+    this.voice = new AiVoiceService(store, box, transport, whisper);
     this.availabilityProbe = new AvailabilityProbe(transport, box);
     this.memberMemory = new AiMemberMemoryService({ store, harness: this.harness, box, transport, isPrincipalActive: isBackgroundPrincipalActive });
     this.computer = new AiComputerService(store, box, transport, this);
   }
   forTenant(tenantId: string): AiService {
     const scoped = this.store.forTenant(tenantId);
-    return scoped === this.store ? this : new AiService(scoped, this.box, this.transport, this.videoKey, this.isBackgroundPrincipalActive);
+    return scoped === this.store ? this : new AiService(scoped, this.box, this.transport, this.videoKey, this.isBackgroundPrincipalActive, this.whisper);
   }
   /** Compatibility pricing/settings for a harness-only installation. Reading
    * this draft never writes settings or changes the authoritative tier routes. */

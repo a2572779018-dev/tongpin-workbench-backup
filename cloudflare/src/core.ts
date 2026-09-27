@@ -599,6 +599,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         tenantId,
         userId,
       ).toArray().length === 1,
+      // Workers AI binding: Whisper voice transcription (absent → unavailable, never a paid fallback).
+      env.AI,
     );
     this.aiWorkspace = new AiWorkspaceRepository(this.ai.store.sql);
     this.aiWorkspaceV2 = new AiWorkspaceV2Store(this.ai.store.sql, this.aiWorkspace);

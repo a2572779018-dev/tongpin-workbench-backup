@@ -32,6 +32,9 @@
       "bucket_name": "tongpin-workbench-releases"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
   "vars": {
     "BOOTSTRAP_ADMIN_EMAIL": "a2427572758@outlook.com",
     "DEV_EMAIL_PREVIEW": "false",

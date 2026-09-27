@@ -1,9 +1,10 @@
 import type { AiHarnessConfig } from "../../../shared/ai";
-import type { AiVoiceSettings, AiVoiceSettingsInput, AiVoiceTtsEngine } from "../../../shared/aiVoice";
+import type { AiVoiceSettings, AiVoiceSettingsInput, AiVoiceSttEngine, AiVoiceTtsEngine } from "../../../shared/aiVoice";
 
 /** Administrator form for AI 管理 → 生成与搜索 → 语音. Prices are edited as text. */
 export interface AiVoiceSettingsDraft {
   inputEnabled: boolean;
+  sttEngine: AiVoiceSttEngine;
   sttProviderId: string;
   sttModelId: string;
   sttPointsPerMinute: string;
@@ -19,6 +20,9 @@ export const OPENAI_TTS_VOICES = ["alloy", "ash", "coral", "echo", "fable", "nov
 export function voiceDraftFromSettings(settings: AiVoiceSettings | null): AiVoiceSettingsDraft {
   return {
     inputEnabled: settings?.inputEnabled ?? false,
+    // Whisper is the default; a server whose settings lack the field predates
+    // it and can only transcribe through a provider connection.
+    sttEngine: settings && settings.sttEngine !== "whisper" ? "provider" : "whisper",
     sttProviderId: settings?.sttProviderId ?? "",
     sttModelId: settings?.sttModelId ?? "",
     sttPointsPerMinute: settings?.sttPointsPerMinute ? String(settings.sttPointsPerMinute) : "",
@@ -44,8 +48,11 @@ export function voiceInputFromDraft(draft: AiVoiceSettingsDraft, providerIds: Re
   const ttsPointsPer1kChars = points(draft.ttsPointsPer1kChars);
   if (sttPointsPerMinute === null || ttsPointsPer1kChars === null) return { input: null, error: "同频点折算需填写 0 到 10,000,000 之间的整数。" };
   if (draft.inputEnabled) {
-    if (!draft.sttProviderId || !providerIds.has(draft.sttProviderId)) return { input: null, error: "请选择用于语音转文字的服务连接。" };
-    if (!draft.sttModelId.trim()) return { input: null, error: "请选择语音转文字模型。" };
+    // Whisper needs no service connection; the saved one is sent back unchanged for switching back.
+    if (draft.sttEngine === "provider") {
+      if (!draft.sttProviderId || !providerIds.has(draft.sttProviderId)) return { input: null, error: "请选择用于语音转文字的服务连接。" };
+      if (!draft.sttModelId.trim()) return { input: null, error: "请选择语音转文字模型。" };
+    }
     if (sttPointsPerMinute < 1) return { input: null, error: "开启语音输入前，请设置每分钟折算的同频点。" };
   }
   if (draft.ttsEngine === "external") {
@@ -56,7 +63,7 @@ export function voiceInputFromDraft(draft: AiVoiceSettingsDraft, providerIds: Re
   }
   return {
     input: {
-      inputEnabled: draft.inputEnabled, sttProviderId: draft.sttProviderId, sttModelId: draft.sttModelId.trim(), sttPointsPerMinute,
+      inputEnabled: draft.inputEnabled, sttEngine: draft.sttEngine, sttProviderId: draft.sttProviderId, sttModelId: draft.sttModelId.trim(), sttPointsPerMinute,
       ttsEngine: draft.ttsEngine, ttsProviderId: draft.ttsProviderId, ttsModelId: draft.ttsModelId.trim(), ttsVoice: draft.ttsVoice.trim(), ttsPointsPer1kChars,
     },
     error: "",

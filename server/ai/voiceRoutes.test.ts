@@ -15,7 +15,7 @@ import { closeServer, listenLoopback } from "../testSupport/loopbackServer";
 import { chromeLikeWebm } from "../testSupport/voiceFixtures";
 
 const VOICE = {
-  inputEnabled: true, sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 60,
+  inputEnabled: true, sttEngine: "provider", sttProviderId: "primary", sttModelId: "whisper-1", sttPointsPerMinute: 60,
   ttsEngine: "external", ttsProviderId: "primary", ttsModelId: "tts-1", ttsVoice: "alloy", ttsPointsPer1kChars: 20,
 };
 const MP3_AUDIO = Buffer.from([0x49, 0x44, 0x33, 0x04, 0, 0, 0, 0, 0, 0, 0xff, 0xfb, 0x90, 0x64]);
@@ -106,6 +106,23 @@ describe("Node voice routes", () => {
       .attach("audio", Buffer.alloc(AI_VOICE_LIMITS.uploadBytes + 1024), { filename: "big.webm", contentType: "audio/webm" }).expect(413);
     expect(huge.body.error.code).toBe("AI_VOICE_AUDIO_TOO_LARGE");
     expect(posts()).toHaveLength(0);
+  });
+
+  it("reports Whisper unavailable on the Node server and refuses uploads without touching the provider", async () => {
+    const saved = await request(http!).put("/api/admin/ai/voice").set(as("admin")).send({ inputEnabled: true, sttEngine: "whisper", sttPointsPerMinute: 60, ttsEngine: "browser" }).expect(200);
+    expect(saved.body).toMatchObject({
+      settings: { inputEnabled: true, sttEngine: "whisper", sttProviderId: "", sttModelId: "" },
+      readiness: { input: { ready: false, message: "Whisper 语音转写只能在云端服务使用，请在管理后台改用接口转写" } },
+    });
+    expect((await request(http!).get("/api/ai/voice").set(as("member")).expect(200)).body.settings.input).toMatchObject({ enabled: false, pointsPerMinute: 0 });
+    const refused = await request(http!).post("/api/ai/audio/transcriptions").set(as("member"))
+      .field("requestId", `voice-${crypto.randomUUID()}`).field("durationMs", "1000").field("language", "zh")
+      .attach("audio", Buffer.from(chromeLikeWebm({ durationMs: 1000 })), { filename: "a.webm", contentType: "audio/webm" }).expect(503);
+    expect(refused.body.error.code).toBe("AI_VOICE_NOT_CONFIGURED");
+    expect(posts()).toHaveLength(0);
+    // Switching the engine to 接口转写 restores voice input here.
+    await request(http!).put("/api/admin/ai/voice").set(as("admin")).send(VOICE).expect(200);
+    expect((await request(http!).get("/api/ai/voice").set(as("member")).expect(200)).body.settings.input.enabled).toBe(true);
   });
 
   it("returns synthesized audio bytes with no-store caching", async () => {

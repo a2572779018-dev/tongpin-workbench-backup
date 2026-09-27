@@ -71,28 +71,39 @@ export function AdminAiVoiceSettings({ harnessConfig = null }: { harnessConfig?:
     {providers.map(provider => <option key={provider.id} value={provider.id} disabled={!provider.enabled}>{provider.name}{provider.enabled ? "" : "（已停用）"}</option>)}
   </>;
   const modelsFor = (providerId: string) => providers.find(provider => provider.id === providerId)?.availableModels ?? [];
-  const sttWarning = draft.inputEnabled ? voiceModelWarning(harnessConfig, draft.sttProviderId, draft.sttModelId) : "";
+  const providerStt = draft.inputEnabled && draft.sttEngine === "provider";
+  const sttWarning = providerStt ? voiceModelWarning(harnessConfig, draft.sttProviderId, draft.sttModelId) : "";
   const ttsWarning = draft.ttsEngine === "external" ? voiceModelWarning(harnessConfig, draft.ttsProviderId, draft.ttsModelId) : "";
 
   return <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`}>
     <header className="tp-ai-admin-heading"><div>
       <h2 id={`${id}-title`}><Mic size={20} aria-hidden="true" />语音</h2>
-      <p>成员可在输入框旁用麦克风说话（转写成文字），并朗读 AI 回复。服务连接和模型列表来自「服务与模型」。</p>
+      <p>成员可在输入框旁用麦克风说话（转写成文字），并朗读 AI 回复。接口转写和外部朗读使用「服务与模型」里的服务连接和模型列表。</p>
     </div></header>
     {!view ? <p role={loadError ? "alert" : "status"} className={loadError ? "tp-ai-admin-error" : undefined}>{loadError || "读取语音配置中…"}</p> : <form onSubmit={save}>
       <fieldset className="tp-ai-admin-fields" disabled={busy}>
         <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.inputEnabled} onChange={event => change({ inputEnabled: event.target.checked })} />开启语音输入（语音转文字）</label>
         {draft.inputEnabled ? <>
-          <label className="tp-ai-admin-field" htmlFor={`${id}-stt-provider`}>语音转文字服务
-            <select id={`${id}-stt-provider`} value={draft.sttProviderId} onChange={event => change({ sttProviderId: event.target.value, sttModelId: "" })}>{providerOptions}</select>
+          <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-stt-engine`}>语音转写引擎
+            <select id={`${id}-stt-engine`} value={draft.sttEngine} onChange={event => change({ sttEngine: event.target.value === "provider" ? "provider" : "whisper" })}>
+              <option value="whisper">Whisper（开源模型，Cloudflare 运行，无需密钥）</option>
+              <option value="provider">接口转写（OpenAI 兼容接口）</option>
+            </select>
           </label>
-          <AdminAiModelSelect label="语音转文字模型" value={draft.sttModelId} models={preferredModels(modelsFor(draft.sttProviderId), STT_MODEL)} allowCustom
-            emptyMessage="先选择服务连接，并在「服务与模型」读取模型列表" onChange={model => change({ sttModelId: model })} />
+          {providerStt ? <>
+            <label className="tp-ai-admin-field" htmlFor={`${id}-stt-provider`}>语音转文字服务
+              <select id={`${id}-stt-provider`} value={draft.sttProviderId} onChange={event => change({ sttProviderId: event.target.value, sttModelId: "" })}>{providerOptions}</select>
+            </label>
+            <AdminAiModelSelect label="语音转文字模型" value={draft.sttModelId} models={preferredModels(modelsFor(draft.sttProviderId), STT_MODEL)} allowCustom
+              emptyMessage="先选择服务连接，并在「服务与模型」读取模型列表" onChange={model => change({ sttModelId: model })} />
+          </> : null}
           <label className="tp-ai-admin-field" htmlFor={`${id}-stt-points`}>每分钟录音折算 · 同频点
             <input id={`${id}-stt-points`} type="text" inputMode="numeric" maxLength={8} placeholder="例如 60" value={draft.sttPointsPerMinute} onChange={event => change({ sttPointsPerMinute: event.target.value })} />
           </label>
           {sttWarning ? <p className="tp-ai-admin-hint is-wide" role="note">{sttWarning}</p> : null}
-          <p className="tp-ai-admin-hint is-wide">按秒计费、向上取整；单次最长 {AI_VOICE_LIMITS.maxAudioMs / 1000} 秒、{AI_VOICE_LIMITS.maxAudioBytes / 1024 / 1024} MB。调用服务商的 /audio/transcriptions 接口（如 whisper-1、gpt-4o-transcribe）。</p>
+          <p className="tp-ai-admin-hint is-wide">按秒计费、向上取整；单次最长 {AI_VOICE_LIMITS.maxAudioMs / 1000} 秒、{AI_VOICE_LIMITS.maxAudioBytes / 1024 / 1024} MB。{providerStt
+            ? "调用服务商的 /audio/transcriptions 接口（如 whisper-1、gpt-4o-transcribe）。"
+            : "使用 OpenAI 开源的 Whisper 模型（whisper-large-v3-turbo），由同频的 Cloudflare 云端服务运行，不需要服务商 API 密钥；默认按普通话识别并输出简体中文，没有清晰说话时不生成文字。"}</p>
         </> : null}
         <label className="tp-ai-admin-field is-wide" htmlFor={`${id}-tts-engine`}>朗读方式
           <select id={`${id}-tts-engine`} value={draft.ttsEngine} onChange={event => change({ ttsEngine: event.target.value === "external" ? "external" : "browser" })}>
@@ -117,7 +128,7 @@ export function AdminAiVoiceSettings({ harnessConfig = null }: { harnessConfig?:
           <p className="tp-ai-admin-hint is-wide">朗读前会去掉代码、公式、链接和引用角标；长回复按句分段请求，每段单独计费（向上取整）。调用服务商的 /audio/speech 接口（如 tts-1、gpt-4o-mini-tts）。</p>
         </> : null}
       </fieldset>
-      {!providers.length ? <p className="tp-ai-admin-hint">还没有服务连接：请先在「服务与模型」接入服务并读取模型列表。</p> : null}
+      {!providers.length && (providerStt || draft.ttsEngine === "external") ? <p className="tp-ai-admin-hint">还没有服务连接：请先在「服务与模型」接入服务并读取模型列表。</p> : null}
       <p className="tp-ai-admin-hint">折算值是成员额度，不是人民币或服务商账单；转写或朗读前先预留，完成后结算，结果不明时按预留保守计入。</p>
       <p className="tp-ai-admin-hint" role="status">语音输入：{view.readiness.input.message}；朗读：{view.readiness.speech.message}</p>
       {error ? <p className="tp-ai-admin-error" role="alert">{error}</p> : null}

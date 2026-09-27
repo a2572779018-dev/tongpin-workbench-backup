@@ -388,6 +388,15 @@ export async function parseTranscriptionUpload(request: Request): Promise<VoiceT
   };
 }
 
+/** Standard base64 of the recording exactly as uploaded, with Web APIs only
+ * (no Node Buffer): the form Workers AI Whisper takes its audio in. Chunked so
+ * String.fromCharCode never receives more than 32 Ki arguments at once. */
+export function audioBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  return btoa(binary);
+}
+
 /** ISO-639-1 code from "zh", "zh-CN" or "en-US"; anything else is ignored. */
 export function validatedLanguageCode(value: unknown): string | undefined {
   if (typeof value !== "string" || !/^[a-z]{2}(?:-[a-z]{2})?$/i.test(value.trim())) return undefined;
