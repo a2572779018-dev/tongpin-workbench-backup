@@ -321,7 +321,9 @@ function emptyTracker() {
     // searchMoved: ↓/↑ moved the highlighted search result after typing.
     // searchByKeys: the search text arrived as keystrokes, so keyboard focus
     // was in the search box (an accessibility write proves no focus).
-    focus: "none", searchText: null, searchMoved: false, searchByKeys: false, composerText: null, conversationTarget: null, conversationVia: null,
+    // searchSeen: the search literal whose keystrokes made matching results
+    // appear (set by the executor's landing check).
+    focus: "none", searchText: null, searchMoved: false, searchByKeys: false, searchSeen: null, composerText: null, conversationTarget: null, conversationVia: null,
     sendCount: 0, irreversibleCounts: Object.freeze({}), typed: Object.freeze([]),
     delivery: "background", backgroundSuspect: false,
     // Element identities whose background click/type was refused or had no
@@ -469,7 +471,10 @@ function buildCandidates(context) {
     // an accessibility write does not). Otherwise keyboard focus is uncertain
     // and Return could send a draft, so it stays a risky submit.
     const searchConfirmed = tracker.focus === "search" && Boolean(tracker.searchText) && tracker.searchByKeys === true &&
-      elements.some((element) => element.searchLike && normalizeName(element.value) === normalizeName(tracker.searchText));
+      (elements.some((element) => element.searchLike && normalizeName(element.value) === normalizeName(tracker.searchText)) ||
+        // WeChat shows neither the search text nor a value: results naming
+        // the literal that appeared right after the keystrokes are the proof.
+        tracker.searchSeen === tracker.searchText);
     if (searchConfirmed && tracker.searchMoved) {
       returnRisk = "none";
       returnDescription = "Press Return to open the search result that is highlighted now (the arrow keys moved the highlight, so it may not be the first match).";
@@ -496,8 +501,8 @@ function buildCandidates(context) {
     }
     add({ id: "key_escape", kind: "key", key: "escape", risk: "none", delivery: tracker.delivery, description: "Press Escape to close the current menu, popover, dialog or search.", label: "按 Esc 关闭弹出内容", expect: "The menu, dialog or search is closed.", focusAfter: "none" });
     add({ id: "key_tab", kind: "key", key: "tab", risk: "none", delivery: tracker.delivery, description: "Press Tab to move keyboard focus to the next control.", label: "按 Tab 切换焦点", expect: "Keyboard focus moved to the next control." });
-    add({ id: "key_down", kind: "key", key: "down", risk: "none", delivery: tracker.delivery, description: "Press the Down arrow key to move the selection down, for example to the next search result.", label: "按 ↓ 选择下一项", expect: "The selection moved down by one item." });
-    add({ id: "key_up", kind: "key", key: "up", risk: "none", delivery: tracker.delivery, description: "Press the Up arrow key to move the selection up.", label: "按 ↑ 选择上一项", expect: "The selection moved up by one item." });
+    add({ id: "key_down", kind: "key", key: "down", risk: "none", delivery: tracker.delivery, description: "Press the Down arrow key to move the highlight to the next item. In a list of search results the first match is already highlighted: do not press this before Return unless the first result is visibly not the one the task needs.", label: "按 ↓ 选择下一项", expect: "The selection moved down by one item." });
+    add({ id: "key_up", kind: "key", key: "up", risk: "none", delivery: tracker.delivery, description: "Press the Up arrow key to move the highlight to the previous item.", label: "按 ↑ 选择上一项", expect: "The selection moved up by one item." });
     if (tracker.focus !== "none" && (tracker.searchText || tracker.composerText)) {
       add({ id: "key_backspace", kind: "key", key: "backspace", risk: "none", delivery: tracker.delivery, description: "Press Backspace once to delete the character before the cursor in the focused input box.", label: "按退格删除一个字", expect: "One character was removed from the focused input." });
     }
@@ -671,10 +676,15 @@ function sentTextCount(elements, content) {
  */
 function typedTextSpots(elements, text) {
   const target = normalizeName(text);
-  const spots = { search: 0, message: 0, other: 0 };
+  const spots = { search: 0, message: 0, other: 0, results: 0 };
   if (!target) return spots;
   for (const element of Array.isArray(elements) ? elements : []) {
-    if (!element.editable || element.secure || !normalizeName(element.value).includes(target)) continue;
+    // Non-editable items naming the literal: search results, when they grow.
+    if (!element.editable) {
+      if (normalizeName(element.text).includes(target)) spots.results += 1;
+      continue;
+    }
+    if (element.secure || !normalizeName(element.value).includes(target)) continue;
     if (element.searchLike) spots.search += 1;
     else if (element.messageBox) spots.message += 1;
     else spots.other += 1;
@@ -693,7 +703,11 @@ function typedLanding(check, elements) {
   if (!check || !check.before) return "unknown";
   const after = typedTextSpots(elements, check.text);
   const gained = (kind) => after[kind] > (check.before[kind] || 0);
-  if (check.field === "search") return gained("search") ? "expected" : gained("message") ? "elsewhere" : "unknown";
+  // A search box that shows no value (WeChat) still proves itself by new
+  // results naming the literal. Text stuck in a message box adds at most one
+  // such item (a chat list's draft preview), so it takes at least two.
+  const results = after.results - (check.before.results || 0);
+  if (check.field === "search") return gained("search") ? "expected" : gained("message") ? "elsewhere" : results >= 2 ? "expected" : "unknown";
   if (check.field === "message") return gained("message") || gained("other") ? "expected" : gained("search") ? "elsewhere" : "unknown";
   return gained("search") || gained("message") || gained("other") ? "expected" : "unknown";
 }
@@ -825,7 +839,7 @@ function nextTracker(tracker, candidate, status, { task }) {
       break;
     case "hotkey":
       // Re-opening search allows the search literal to be typed again.
-      Object.assign(next, { focus: "search", searchText: null, searchMoved: false, typed: next.typed.filter((entry) => entry.field !== "focus:search") });
+      Object.assign(next, { focus: "search", searchText: null, searchMoved: false, searchSeen: null, typed: next.typed.filter((entry) => entry.field !== "focus:search") });
       break;
     case "type": {
       next.typed.push({ field: candidate.elementIdentity || `focus:${candidate.field}`, text: candidate.text });
@@ -834,7 +848,7 @@ function nextTracker(tracker, candidate, status, { task }) {
       const focusAfter = candidate.elementIdentity ? tracker.focus : null;
       // A second landed literal may have been appended to the first: the
       // application no longer knows the exact field content.
-      if (candidate.field === "search") Object.assign(next, { focus: focusAfter ?? "search", searchText: tracker.searchText ? null : candidate.text, searchMoved: false, searchByKeys: !candidate.elementIdentity });
+      if (candidate.field === "search") Object.assign(next, { focus: focusAfter ?? "search", searchText: tracker.searchText ? null : candidate.text, searchMoved: false, searchByKeys: !candidate.elementIdentity, searchSeen: null });
       else if (candidate.field === "message") Object.assign(next, { focus: focusAfter ?? (tracker.focus === "field" ? "field" : "conversation"), composerText: tracker.composerText ? null : candidate.text });
       else Object.assign(next, { focus: focusAfter ?? "field", composerText: tracker.composerText ? null : candidate.text });
       break;

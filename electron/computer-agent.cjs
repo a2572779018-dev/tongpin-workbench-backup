@@ -729,6 +729,9 @@ function createComputerAgentController({
         if (landing.landed !== "unknown" || check.looks >= TYPE_CHECK_LOOKS) state.typeCheck = null;
         if (landing.landed === "elsewhere") {
           state.tracker = Object.freeze({ ...state.tracker, misdirected: true, focus: "none", searchText: null, composerText: null });
+        } else if (landing.landed === "expected" && check.field === "search" && state.tracker.focus === "search" && state.tracker.searchText === check.text) {
+          // The keystrokes reached the search box: Return may open its result.
+          state.tracker = Object.freeze({ ...state.tracker, searchSeen: check.text });
         }
       }
       const treeTexts = snapshot ? policy.extractTreeTexts(snapshot.treeMarkdown) : [];
