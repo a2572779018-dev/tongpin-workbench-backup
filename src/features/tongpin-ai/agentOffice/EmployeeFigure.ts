@@ -1,7 +1,8 @@
-import { Container, Graphics, Sprite, Text } from "pixi.js";
+import { Container, Graphics, Sprite } from "pixi.js";
 import { palette } from "./palette";
 import { CharacterSprite } from "./CharacterSprite";
 import { Desk } from "./Desk";
+import { NameTag } from "./NameTag";
 import { ThoughtBubble } from "./ThoughtBubble";
 import { ToolBubble, type BubbleKind } from "./ToolBubble";
 import { characterIndexForRecipe, type RecipeKey } from "./roster";
@@ -14,12 +15,20 @@ const CHARACTER_SCALE = { worker: DESK_SCALE, coordinator: HEAD_DESK_SCALE } as 
 const BOB_AMPLITUDE = 1.4;
 const BOB_SPEED = 5.5;
 const FLOURISH_DURATION = 0.7;
-/** Gap below the desk/chair group before the role label starts. Chair.png's
- *  own art (see extract-limezu.py) extends a few native px of legs/base below
- *  the character's own frame height, so this is a flat pad generous enough to
- *  clear that overhang at the *coordinator's* larger HEAD_UI_SCALE, not just
- *  the worker one. */
-const LABEL_GAP = 16;
+/** Gap between the name tag's tail tip and the top of the character's hair. */
+const NAME_TAG_GAP = 3;
+/** NameTag's own rendered height (world units, at counter-scale 1) — an
+ *  estimate (its exact pixel height depends on Pixi's own text-metrics, which
+ *  this module has no reason to import), generous enough that the activity
+ *  bubble above it never overlaps even for a two-character role label. */
+const NAME_TAG_APPROX_H = 18;
+/** Extra clearance, on top of the name tag's own height, between it and
+ *  whatever activity bubble (ThoughtBubble/ToolBubble) sits above it. */
+const BUBBLE_GAP_ABOVE_NAME_TAG = 4;
+/** How far (native px) the chair sprite drops below the character's own top
+ *  — see the constructor's own comment for why this is needed now that both
+ *  sprites share the same native height. */
+const CHAIR_DROP_NATIVE = 6;
 /** Caps how far update()'s counter-scale (see below) can grow past 1. At the
  *  default camera scale (1) counter is exactly 1 (a no-op) — this only
  *  affects the narrow-panel fallback (camera scale 0.5, counter would
@@ -54,7 +63,7 @@ export class EmployeeFigure {
   private readonly character: CharacterSprite;
   private readonly overlay: Graphics;
   private readonly hit: Graphics;
-  private readonly label: Text;
+  private readonly nameTag: NameTag;
   private readonly thoughtBubble?: ThoughtBubble;
   private readonly toolBubble?: ToolBubble;
   private readonly anchorX: number;
@@ -93,22 +102,30 @@ export class EmployeeFigure {
     this.character = new CharacterSprite(getOfficeTextures().characters[characterIndex]);
     this.character.sprite.scale.set(scale);
     this.anchorX = opts.rect.x + opts.rect.w / 2;
-    // The character's feet-line sits exactly on the desk's own bottom edge —
-    // since the character's native frame height equals the desk sprite's
-    // native *body* half (16px each), this puts the character's head right
-    // at the screen/body seam, covering the desk's front panel and legs
-    // without ever touching the (fully opaque, see Desk.ts) screen above it.
-    this.anchorY = opts.rect.y + opts.rect.h;
+    // The character is now a full head-to-feet frame (see spriteFrameMath.ts
+    // / extract-limezu.py — this pack's 16x32 pose, not just its top 16px
+    // "bust"), so unlike the office's previous revision, its feet no longer
+    // sit at the desk's own bottom edge — that would push a body this tall
+    // up into the (opaque, see Desk.ts) monitor screen above. Instead its
+    // HEAD starts at the desk's screen/body seam (exactly rect.h/2 down from
+    // the desk's top, since desk_on/off's own screen is precisely the top
+    // native half of that sprite — see spriteAssets.ts) and extends downward
+    // from there by its own full height, past the desk's bottom edge and
+    // into the chair — see the report's derivation.
+    this.anchorY = opts.rect.y + opts.rect.h / 2 + this.displayH;
     this.character.sprite.x = this.anchorX;
     this.character.sprite.y = this.anchorY;
     this.character.sprite.zIndex = 2;
 
-    // Chair: same top-left as the character (both are 16px-native wide), so
-    // it reads as "under" the character — its own art is a few native px
-    // taller than a character frame, so its base peeks out below the seat.
+    // Chair: same width/left edge as the character (both 16px-native wide),
+    // dropped a small flat pad below the character's own top so its base
+    // peeks out below the seat (both sprites are now the same native
+    // height, so without this offset the chair would sit exactly behind the
+    // character with nothing showing at all).
+    const chairDropWorld = CHAIR_DROP_NATIVE * scale;
     this.chairSprite = new Sprite(getOfficeTextures().chair);
     this.chairSprite.scale.set(scale);
-    this.chairSprite.position.set(this.anchorX - (CHAR_FRAME_W * scale) / 2, this.anchorY - this.displayH);
+    this.chairSprite.position.set(this.anchorX - (CHAR_FRAME_W * scale) / 2, this.anchorY - this.displayH + chairDropWorld);
     this.chairSprite.zIndex = 1;
 
     this.overlay = new Graphics();
@@ -120,20 +137,12 @@ export class EmployeeFigure {
     this.badgeX = opts.rect.x + opts.rect.w - 2;
     this.badgeY = opts.rect.y - 2;
 
-    this.label = new Text({
-      text: opts.label,
-      // fontSize 12 matches the "≥12 CSS px, crisp" bar for screen-space text
-      // — see update()'s counter-scale below, which keeps this rendered size
-      // constant regardless of the camera's own zoom.
-      style: { fontSize: 12, fontWeight: "600", fill: "#3f4038", fontFamily: "sans-serif", align: "center" },
-    });
-    this.label.anchor.set(0.5, 0);
-    this.label.x = this.anchorX;
-    this.label.y = this.anchorY + LABEL_GAP;
-    this.label.zIndex = 10;
+    this.nameTag = new NameTag();
+    this.nameTag.setText(opts.label);
 
     this.hit = new Graphics();
-    this.hit.rect(opts.rect.x - 4, opts.rect.y - 44, opts.rect.w + 8, opts.rect.h + 44 + LABEL_GAP + 16)
+    const headTopY = this.anchorY - this.displayH;
+    this.hit.rect(opts.rect.x - 4, headTopY - 40, opts.rect.w + 8, this.anchorY - headTopY + 40 + 16)
       .fill({ color: 0xffffff, alpha: 0.001 });
     this.hit.eventMode = "static";
     this.hit.cursor = "pointer";
@@ -142,7 +151,14 @@ export class EmployeeFigure {
     this.hit.on("pointerout", () => opts.onHover?.(null));
     this.hit.on("pointertap", (e) => { e.stopPropagation(); opts.onSelect?.(this.id); });
 
-    this.container.addChild(this.desk.container, this.chairSprite, this.character.sprite, this.overlay, this.label, this.hit);
+    this.container.addChild(
+      this.desk.container,
+      this.chairSprite,
+      this.character.sprite,
+      this.overlay,
+      this.nameTag.container,
+      this.hit,
+    );
 
     if (opts.kind === "coordinator") {
       this.thoughtBubble = new ThoughtBubble();
@@ -160,7 +176,7 @@ export class EmployeeFigure {
   }
 
   setLabel(text: string): void {
-    if (this.label.text !== text) this.label.text = text;
+    this.nameTag.setText(text);
   }
 
   /** Coordinator only: the phase caption ("正在拆解任务…" / null to hide). */
@@ -222,8 +238,15 @@ export class EmployeeFigure {
     // character, status badge) stays world-scaled on purpose, since those are
     // art, not text that needs to stay legible at any zoom.
     const counter = cameraScale > 0 ? Math.min(1 / cameraScale, MAX_LABEL_COUNTER_SCALE) : 1;
-    this.label.scale.set(counter);
-    const bubbleY = this.anchorY - this.displayH;
+    const headTopY = this.anchorY - this.displayH;
+    const nameTagY = headTopY - NAME_TAG_GAP;
+    this.nameTag.setPosition(this.anchorX, nameTagY, counter);
+    // Fixed world anchor, exactly like nameTagY/headTopY above — the bubble's
+    // own OFFSET_Y*scale (see ThoughtBubble/ToolBubble) is what grows this
+    // gap proportionally at the narrow-panel counter-scale fallback, the
+    // same relationship anchorY/displayH already had to bubbleY before the
+    // name tag existed.
+    const bubbleY = nameTagY - (NAME_TAG_APPROX_H + BUBBLE_GAP_ABOVE_NAME_TAG);
     this.thoughtBubble?.setPosition(this.anchorX, bubbleY, counter);
     this.toolBubble?.setPosition(this.anchorX, bubbleY, counter);
 
@@ -253,6 +276,7 @@ export class EmployeeFigure {
     this.character.destroy();
     this.overlay.destroy();
     this.hit.destroy();
+    this.nameTag.destroy();
     this.thoughtBubble?.destroy();
     this.toolBubble?.destroy();
     this.container.destroy({ children: true });

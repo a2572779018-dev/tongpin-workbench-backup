@@ -127,12 +127,12 @@ describe("computeWorldWidth", () => {
 });
 
 describe("buildDecorLayout", () => {
-  it("centers the signboard and insets the rug from both walls at any world width", () => {
+  it("centers the signboard and keeps the window clear of it at any world width", () => {
     for (const width of [400, WORLD_WIDTH, 760]) {
       const decor = buildDecorLayout(width);
-      expect(decor.rug.x).toBeGreaterThan(0);
-      expect(decor.rug.x + decor.rug.w).toBeLessThan(width);
       expect(decor.signboard.x * 2).toBeCloseTo(width - 126 * 2, -1); // roughly centered
+      expect(decor.window.x).toBeGreaterThanOrEqual(0);
+      expect(decor.window.x).toBeLessThan(decor.signboard.x); // left of the sign, never overlapping
     }
   });
 

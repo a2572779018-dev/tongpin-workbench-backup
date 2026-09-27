@@ -36,6 +36,7 @@ import baseboardUrl from "./assets/limezu/baseboard.png?url&no-inline";
 import deskOffUrl from "./assets/limezu/desk_off.png?url&no-inline";
 import deskOnAUrl from "./assets/limezu/desk_on_a.png?url&no-inline";
 import deskOnBUrl from "./assets/limezu/desk_on_b.png?url&no-inline";
+import deskSideUrl from "./assets/limezu/desk_side.png?url&no-inline";
 import chairUrl from "./assets/limezu/chair.png?url&no-inline";
 import waterCoolerUrl from "./assets/limezu/water_cooler.png?url&no-inline";
 import doorUrl from "./assets/limezu/door.png?url&no-inline";
@@ -44,7 +45,7 @@ import bookshelfBUrl from "./assets/limezu/bookshelf_b.png?url&no-inline";
 import whiteboardUrl from "./assets/limezu/whiteboard.png?url&no-inline";
 import plantBigUrl from "./assets/limezu/plant_big.png?url&no-inline";
 import plantSmallUrl from "./assets/limezu/plant_small.png?url&no-inline";
-import rugUrl from "./assets/limezu/rug.png?url&no-inline";
+import windowUrl from "./assets/limezu/window.png?url&no-inline";
 import coffeeUrl from "./assets/limezu/coffee.png?url&no-inline";
 import clockUrl from "./assets/limezu/clock.png?url&no-inline";
 import signboardUrl from "./assets/limezu/signboard.png?url&no-inline";
@@ -61,6 +62,7 @@ export const BASEBOARD_URL = baseboardUrl;
 export const FURNITURE_URLS = {
   deskOff: deskOffUrl,
   deskOn: [deskOnAUrl, deskOnBUrl] as readonly string[],
+  deskSide: deskSideUrl,
   chair: chairUrl,
   waterCooler: waterCoolerUrl,
   door: doorUrl,
@@ -69,7 +71,7 @@ export const FURNITURE_URLS = {
   whiteboard: whiteboardUrl,
   plantBig: plantBigUrl,
   plantSmall: plantSmallUrl,
-  rug: rugUrl,
+  window: windowUrl,
   coffee: coffeeUrl,
   clock: clockUrl,
   signboard: signboardUrl,
@@ -83,6 +85,7 @@ export const ALL_SPRITE_URLS: readonly string[] = [
   BASEBOARD_URL,
   FURNITURE_URLS.deskOff,
   ...FURNITURE_URLS.deskOn,
+  FURNITURE_URLS.deskSide,
   FURNITURE_URLS.chair,
   FURNITURE_URLS.waterCooler,
   FURNITURE_URLS.door,
@@ -91,7 +94,7 @@ export const ALL_SPRITE_URLS: readonly string[] = [
   FURNITURE_URLS.whiteboard,
   FURNITURE_URLS.plantBig,
   FURNITURE_URLS.plantSmall,
-  FURNITURE_URLS.rug,
+  FURNITURE_URLS.window,
   FURNITURE_URLS.coffee,
   FURNITURE_URLS.clock,
   FURNITURE_URLS.signboard,

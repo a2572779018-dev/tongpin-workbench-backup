@@ -1284,10 +1284,14 @@ regenerates the same output files from the same source rects. What it
 produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
 
 - `limezu/floor.png` — a 32×32 tileable swatch cropped from
-  `Room_Builder_subfiles/Room_Builder_Floors_16x16.png`: a plain warm
-  honey-wood plank band, chosen over the sheet's busier checker/medallion
-  materials (an earlier revision used one of those) for a calmer floor per
-  the feature's report.
+  `Room_Builder_subfiles/Room_Builder_Floors_16x16.png` (column 4, y=32): a
+  calm sage grey-green carpet with a subtle mottled texture, matching the
+  reference office's floor far better than the previous warm honey-wood plank
+  crop (column 1, y=192 — simply replaced outright, not kept for anything else
+  in this scene) — see the feature's report for the full-sheet visual survey
+  that found it. The separate diamond-motif rug overlay that a still-earlier
+  revision tiled on top of this floor has been removed entirely, rather than
+  re-matched to the new floor tone — see the report.
 - `limezu/wall.png` — a 32×32 tileable swatch cropped from
   `Room_Builder_subfiles/Room_Builder_Walls_16x16.png`. This office is one
   fixed rectangular room, not LimeZu's full modular corner/window auto-tile
@@ -1302,6 +1306,12 @@ produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
   Conference_Hall_Singles_31.png` (blank screen, monitor off) and `_29.png` /
   `_30.png` (blue screen, alternated on a timer while the monitor is "on" —
   see `Desk.ts`).
+- `limezu/desk_side.png` — an 8×32 slice (the visually-safe middle 8 of 16) of
+  `Conference_Hall_Singles_26.png`, a plain desk surface with no monitor from
+  the same furniture set; a flat, no-left-right-detail texture (confirmed by
+  direct pixel inspection), so this slice tiles seamlessly. `Desk.ts` flanks
+  the monitor module with two copies of it so the whole desk reads as ~2 tiles
+  wide, like the reference office, without a second whole furniture sprite.
 - `limezu/chair.png` — a rolling office chair, `Conference_Hall_Singles_37.png`,
   drawn behind each seated character (see `EmployeeFigure.ts`) so its legs/base
   peek out below them.
@@ -1315,30 +1325,47 @@ produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
   has no plain white board; this reads as the same kind of object).
 - `limezu/plant_big.png` / `plant_small.png` — `Theme_Sorter_Singles/
   2_Living_Room_Singles/Living_Room_Singles_18.png` and `_15.png`.
-- `limezu/rug.png` — a small diamond-motif floor accent, `Theme_Sorter_Singles/
-  2_Living_Room_Singles/Living_Room_Singles_28.png`, tiled (Pixi `TilingSprite`)
-  under the worker desk clusters — see `seating.ts`'s `buildDecorLayout().rug`.
+- `limezu/window.png` — a light-wood, 2-pane window, cropped (128, 688, 32×32)
+  from `Theme_Sorter/1_Generic_16x16.png` — one of the *composed* per-theme
+  sheets rather than a pre-cut Singles file (no window sprite exists in any of
+  the 4 Theme_Sorter_Singles categories the owner purchased pre-cut), but part
+  of the same purchased full-version pack (Theme_Sorter has every theme,
+  Theme_Sorter_Singles only the ones split into individual files) — found by
+  contact-sheeting the sheet, replacing this scene's earlier procedurally-
+  painted window entirely. See the feature's report.
 - `limezu/coffee.png` / `limezu/clock.png` — the first (16×32) frame only of
   `3_Animated_objects/16x16/spritesheets/animated_coffee.png` (of 6) and of
   `animated_cuckoo_clock.png` (of 10). This office never animates its
   backdrop decor (see `sceneDraw.ts`), so the remaining in-between frames of
   either sheet are never cropped, loaded or committed.
-- `limezu/characters/char_1.png` through `char_7.png` — one compact 80×16
-  strip per character, re-packed from `2_Characters/Character_Generator/
-  0_Premade_Characters/16x16/Premade_Character_01.png` through `_07.png`
-  (LimeZu's own generic premade characters — not the Munder Difflin TV-cast
-  recolors). Each sheet is a modular character-generator template: every pose
-  is 16 wide × 32 tall (head/hair in the top 16px, collar/body/legs in the
-  bottom 16px), laid out as 4 facing-direction columns repeated down the sheet
-  as a walk cycle — direct visual inspection of all 4 columns' full 32px-tall
-  poses (see the feature's report) identified column 1 as the one clean
-  back-of-head pose (no face ever visible, in any row); this office crops only
-  that column's top 16px and repeats it for all 5 named frame slots, since the
-  desk art needs every employee facing away from the camera (see `Desk.ts`)
-  and there is no second distinct back-of-head-only frame at that crop height
-  to pair it with for an animated toggle. Sheets 1–6 are assigned to workers by
-  a deterministic hash of each worker's id (see `roster.ts`); sheet 7 is
-  reserved exclusively for the coordinator.
+- `limezu/characters/char_1.png` through `char_7.png` — one compact 80×32
+  strip per character (5 frames of 16×32 each), re-packed from
+  `2_Characters/Character_Generator/0_Premade_Characters/16x16/
+  Premade_Character_01.png` through `_07.png` (LimeZu's own generic premade
+  characters — not the Munder Difflin TV-cast recolors). Each sheet is a
+  modular character-generator template: every pose is 16 wide × 32 tall (head
+  in the top half, body/legs in the bottom half — a full head-to-feet frame,
+  not a bust), laid out as 4 facing-direction columns (0=left profile, 1=back/
+  away, 2=right profile, 3=front) repeated down the sheet as a walk cycle —
+  direct visual inspection of all 4 columns' full 32px-tall poses (see the
+  feature's report) identified column 1 as the one clean back-of-head pose (no
+  face ever visible, in any row), which every named frame slot below reads at
+  a different walk-cycle row (y=0/0/32/64/128), since the desk art needs every
+  employee facing away from the camera (see `Desk.ts`). This pack's premade
+  characters have no dedicated "sit and type" / "phone call" animation
+  (confirmed by surveying the sheet's full height): those 4 rows are its own
+  ordinary walk-cycle frames, genuinely different source pixels but not a true
+  distinct "action" pose — what actually reads as busy to the person watching
+  is `EmployeeFigure.ts`'s own bob animation, the desk's monitor-flicker, and
+  the activity bubble's own text/icon. Row 96 is deliberately skipped: it's a
+  shorter, differently-proportioned bust-only strip (a distinct emote/
+  reaction row, not a walk frame), confirmed by the same visual survey. An
+  earlier revision of this script cropped only column 1's *top* 16 rows,
+  discarding the body/legs entirely — producing a "floating head behind a
+  chair" bug this revision fixes by cropping the full 32-tall column instead;
+  see the feature's report. Sheets 1–6 are assigned to workers by a
+  deterministic hash of each worker's id (see `roster.ts`); sheet 7 is reserved
+  exclusively for the coordinator.
 - `portraits/portrait_1.png` through `portrait_7.png` — a *different* crop of
   each character sheet above (column 3's bottom 16px, the one crop that shows
   a full face) for the DOM/no-WebGL fallback (`AgentOfficeFallback.tsx`),

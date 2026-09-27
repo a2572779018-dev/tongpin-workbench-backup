@@ -33,6 +33,12 @@ PACK_ROOT = os.environ.get(
 )
 INTERIORS = os.path.join(PACK_ROOT, "1_Interiors", "16x16")
 SINGLES = os.path.join(INTERIORS, "Theme_Sorter_Singles")
+# The *composed* per-theme sheets (as opposed to Theme_Sorter_Singles' one-
+# file-per-sprite cutouts) — every purchased theme, including ones with no
+# Singles folder of their own (e.g. "1_Generic", used below for the window),
+# since Singles only exists for a handful of themes but every theme is part
+# of the same purchased pack (see PACK_ROOT's own comment).
+THEME_SORTER = os.path.join(INTERIORS, "Theme_Sorter")
 CHARACTERS = os.path.join(PACK_ROOT, "2_Characters", "Character_Generator", "0_Premade_Characters", "16x16")
 ANIMATED = os.path.join(PACK_ROOT, "3_Animated_objects", "16x16", "spritesheets")
 
@@ -77,12 +83,15 @@ def build_room_shell() -> None:
     subfiles = os.path.join(INTERIORS, "Room_Builder_subfiles")
 
     floors = load(os.path.join(subfiles, "Room_Builder_Floors_16x16.png"))
-    # Column 1 (of the sheet's 4 material columns), the warm honey wood-plank
-    # band at y=192 — a plain horizontal wood-grain texture (no busy
-    # checker/medallion repeat) that reads as a calm "cozy office" floor at a
-    # glance, per visual review of the full sheet (see the office's report).
-    # Sampled 32x32 (2x2 tiles).
-    save(crop(floors, 0, 192, 32, 32), "floor.png")
+    # Column 4 (of the sheet's 4 material columns) at y=32 — a calm sage
+    # grey-green carpet with a very subtle mottled texture (no hard checker
+    # contrast), matching the reference office's floor tone far better than
+    # the previous warm wood-plank crop (column 1 @ y=192, still used for
+    # deskless areas nowhere in this scene, so simply replaced outright) —
+    # see the office's report for the full-sheet visual survey that found it.
+    # Sampled 32x32 (2x2 tiles), tileable by design (that's what this sheet
+    # is for).
+    save(crop(floors, 192, 32, 32, 32), "floor.png")
 
     walls = load(os.path.join(subfiles, "Room_Builder_Walls_16x16.png"))
     # Left sub-column of the sheet's first (cream/white) material group, one
@@ -120,12 +129,9 @@ FURNITURE_SINGLES = {
     "bookshelf_a.png": singles("5_Classroom_and_Library_Singles", "Classroom_and_Library_Singles", 46),
     "bookshelf_b.png": singles("5_Classroom_and_Library_Singles", "Classroom_and_Library_Singles", 58),
     "whiteboard.png": singles("5_Classroom_and_Library_Singles", "Classroom_and_Library_Singles", 39),
-    # Living_Room theme: potted plants + a small diamond-motif rug tile (used
-    # tiled, under the worker desk clusters — see seating.ts's DECOR_LAYOUT.rug
-    # and sceneDraw.ts).
+    # Living_Room theme: potted plants.
     "plant_big.png": singles("2_Living_Room_Singles", "Living_Room_Singles", 18),
     "plant_small.png": singles("2_Living_Room_Singles", "Living_Room_Singles", 15),
-    "rug.png": singles("2_Living_Room_Singles", "Living_Room_Singles", 28),
 }
 
 
@@ -133,6 +139,39 @@ def build_furniture() -> None:
     for out_name, src_path in FURNITURE_SINGLES.items():
         im = load(src_path)
         save(im, out_name)
+
+
+# desk_off/desk_on_{a,b}.png (above) are a single 16-native-wide "monitor
+# module"; Desk.ts flanks it with two copies of this narrower slice to read
+# as a ~2-tile-wide desk (per visual review against the reference office —
+# see the feature's report), without needing a second whole furniture sprite.
+# Conference_Hall_Singles_26.png is a plain desk surface with no monitor,
+# same wood tones as desk_off/on (same furniture set) and, per direct pixel
+# inspection, a flat horizontal color band with no left-right detail — so an
+# 8px-wide slice of it (this crop, taking the visually-safe middle 8 of its
+# 16, clear of its own left/right edge pixels) reads identically to the full
+# sprite when placed beside the monitor module, tiled or not.
+DESK_SIDE_SOURCE = os.path.join(SINGLES, "13_Conference_Hall_Singles", "Conference_Hall_Singles_26.png")
+
+
+def build_desk_side() -> None:
+    im = load(DESK_SIDE_SOURCE)
+    save(crop(im, 4, 0, 8, 32), "desk_side.png")
+
+
+# No window sprite exists in any of the 4 Theme_Sorter_Singles categories the
+# owner purchased pre-cut (see the character/furniture sections' own PACK_ROOT
+# comment) — but the *composed* "1_Generic" theme sheet (part of the same
+# purchased pack, just never split into Singles files — see THEME_SORTER's own
+# comment) turns out to have several, found by contact-sheeting it (see the
+# feature's report). This one (a light-wood, 2-pane frame) reads well against
+# this office's cream wall.
+WINDOW_SOURCE = os.path.join(THEME_SORTER, "1_Generic_16x16.png")
+
+
+def build_window() -> None:
+    im = load(WINDOW_SOURCE)
+    save(crop(im, 128, 688, 32, 32), "window.png")
 
 
 # ── Static props: single frame from 3_Animated_objects ────────────────────
@@ -155,45 +194,56 @@ def build_animated_props() -> None:
 # ── Characters: 6 workers + 1 coordinator-exclusive, from LimeZu's own      ─
 # Premade_Character sheets (NOT the Munder Difflin TV-cast recolors). Each
 # sheet is 896x656, a modular character-generator template: every *pose* is
-# 16 wide x 32 tall (head+hair in the top 16px, collar/body/legs in the
-# bottom 16px), laid out as 4 facing-direction columns (0=left profile,
+# 16 wide x 32 tall (head+hair in the top ~half, collar/body/legs in the
+# bottom half), laid out as 4 facing-direction columns (0=left profile,
 # 1=back/away, 2=right profile, 3=front, each showing a partial or full face
 # except column 1) repeated down the sheet as a walk cycle — confirmed by
-# direct visual inspection of all 4 columns' full 32px-tall poses side by
-# side (see the office's report for that comparison), which is what caught
-# an earlier version of this script reading column 0's *bottom* half and
-# unintentionally showing a side-profile eye instead of a clean back-of-head.
+# direct pixel-precise measurement (a labeled, gridded contact sheet zoomed
+# until individual frame edges were unambiguous — see the feature's report),
+# which is also what caught this script's own previous revision: it had
+# (correctly) identified column 1 as face-free but then cropped only that
+# 16-wide column's TOP 16 rows, discarding the bottom 16 (body/legs) —
+# producing the "floating head behind a chair" bug the office's report
+# describes. The fix is simply cropping the FULL 32-tall column instead.
 #
-# The in-scene strip crops only the TOP 16px of column 1 (pure hair/collar,
-# identical across every walk-cycle row since only the legs move below the
-# crop) — this office seats every employee facing their monitor (away from
-# the camera) with the desk behind them and the screen visible above their
-# head, see Desk.ts / EmployeeFigure.ts's doc comments for why a
-# front-facing character can't work with this pack's desk art (the monitor
-# fills the sprite's entire top half, leaving no gap for a face to show
-# through). There is no second distinct back-of-head-only frame to pair it
-# with for a typing/reading toggle (every column looks identical at this
-# crop height until the collar line), so all 5 named slots below
-# deliberately point at the same source rect rather than inventing a
-# distinct pose that doesn't exist.
+# This office seats every employee facing their monitor (away from the
+# camera) with the desk behind them and the screen visible above their head
+# — see Desk.ts / EmployeeFigure.ts's doc comments for why a front-facing
+# character can't work with this pack's desk art (the monitor fills the
+# sprite's entire top half, leaving no gap for a face to show through) — so
+# every named slot below reads column 1 (back-facing) at a different walk-
+# cycle row, never a different column. This pack's premade characters have no
+# dedicated "sit and type" / "phone call" animation (confirmed by surveying
+# the sheet's full height — see the report): rows 0/32/64/128 are its own
+# ordinary walk-cycle frames, differing only in subtle arm/leg position
+# (mostly hidden behind the desk once seated) — genuinely different source
+# pixels for typing_2/reading_1/reading_2 rather than duplicates of idle, but
+# not a true distinct "action" pose. What actually reads as "busy" to the
+# person watching is EmployeeFigure's own bob animation, the desk's monitor-
+# flicker, and the activity bubble's own text/icon (search vs. result) — see
+# those modules' doc comments. Row 96 is deliberately skipped: it's a
+# shorter, differently-proportioned bust-only strip (a distinct emote/
+# reaction row, not a walk frame), confirmed by the same visual survey.
 CHAR_SHEET_IDS = [1, 2, 3, 4, 5, 6, 7]  # 1..6 = workers, 7 = coordinator (exclusive)
 FRAME_W = 16
-FRAME_H = 16
-# (x, y) top-left of each 16x16 frame within a Premade_Character_NN.png sheet.
-_BACK_BUST = (16, 0)  # column 1 (back-facing), top 16px (hair/collar only)
+FRAME_H = 32
+_BACK_X = 16  # column 1 (back-facing) — see the comment above.
 CHAR_FRAME_SOURCES = [
-    _BACK_BUST,  # idle
-    _BACK_BUST,  # typing_1
-    _BACK_BUST,  # typing_2
-    _BACK_BUST,  # reading_1
-    _BACK_BUST,  # reading_2
+    (_BACK_X, 0),  # idle
+    (_BACK_X, 0),  # typing_1
+    (_BACK_X, 32),  # typing_2
+    (_BACK_X, 64),  # reading_1
+    (_BACK_X, 128),  # reading_2
 ]
 # Column 3 (front-facing), bottom 16px — the one crop that actually shows a
 # full face, used ONLY for the DOM-fallback portrait (a recognizable face
 # rather than the back of someone's head). The canvas scene and the fallback
 # are allowed to differ here since the fallback has none of the desk-
-# occlusion problem the canvas composition works around.
+# occlusion problem the canvas composition works around. Always 16x16 (its
+# own fixed size, deliberately NOT FRAME_W/FRAME_H — those size the in-scene
+# strip's full-body frame, a different crop entirely).
 PORTRAIT_FRAME_SOURCE = (48, 16)
+PORTRAIT_FRAME_SIZE = 16
 
 
 def build_characters() -> None:
@@ -207,13 +257,15 @@ def build_characters() -> None:
         save(strip, "characters", f"char_{sheet_id}.png")
 
         # Eager DOM-fallback portrait — see PORTRAIT_FRAME_SOURCE above.
-        portrait = crop(sheet, *PORTRAIT_FRAME_SOURCE, FRAME_W, FRAME_H)
+        portrait = crop(sheet, *PORTRAIT_FRAME_SOURCE, PORTRAIT_FRAME_SIZE, PORTRAIT_FRAME_SIZE)
         save_portrait(portrait, f"portrait_{sheet_id}.png")
 
 
 def main() -> None:
     build_room_shell()
     build_furniture()
+    build_desk_side()
+    build_window()
     build_animated_props()
     build_characters()
     print("\nDone. Commit only these small crops — never the source pack.")

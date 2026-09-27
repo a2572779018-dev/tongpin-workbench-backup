@@ -23,9 +23,10 @@ function frameTexture(textures: CharacterTextureSet, frame: CharacterFrame): Tex
  * down row is ever shown (see spriteFrameMath.ts's doc comment).
  *
  * Anchor is bottom-center (0.5, 1), so callers position it by its "feet"
- * line — see EmployeeFigure.ts, which seats that line partway down the desk
- * rect so the desk's own sprite (drawn after, in front) covers the lower
- * body while the head and shoulders show above it.
+ * line — see EmployeeFigure.ts, which seats that line below the desk rect
+ * entirely (this is now a full head-to-feet frame, not a bust), with the
+ * desk drawn *first* (furthest back) so its monitor screen stays fully
+ * unobstructed and the character sits in front of and below it instead.
  */
 export class CharacterSprite {
   readonly sprite: Sprite;

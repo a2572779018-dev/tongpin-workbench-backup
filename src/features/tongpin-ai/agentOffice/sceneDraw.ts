@@ -1,5 +1,4 @@
-import { Container, Graphics, Sprite, TilingSprite, type Texture } from "pixi.js";
-import { palette } from "./palette";
+import { Container, Sprite, TilingSprite, type Texture } from "pixi.js";
 import { buildDecorLayout, UI_SCALE, WALL_ROW_HEIGHT, WORLD_HEIGHT, WORLD_WIDTH } from "./seating";
 import { getOfficeTextures } from "./spriteSheets";
 
@@ -27,21 +26,6 @@ function placeSprite(container: Container, texture: Texture, x: number, y: numbe
   return sprite;
 }
 
-/** Warm cross-mullioned window, painted rather than cropped from a LimeZu
- *  sheet — see seating.ts's DecorLayout.window doc comment for why (no window
- *  art in the owner's purchased theme categories). Kept to the scene's own
- *  palette so it reads as part of the same room instead of a mismatched
- *  add-on. */
-function drawWindow(container: Container, x: number, y: number, w: number, h: number): void {
-  const g = new Graphics();
-  g.roundRect(0, 0, w, h, 3).fill({ color: palette.blue, alpha: 0.55 }).stroke({ color: palette.ink, width: 2 });
-  g.rect(w / 2 - 1, 2, 2, h - 4).fill({ color: palette.ink, alpha: 0.7 });
-  g.rect(2, h / 2 - 1, w - 4, 2).fill({ color: palette.ink, alpha: 0.7 });
-  g.position.set(x, y);
-  g.scale.set(UI_SCALE);
-  container.addChild(g);
-}
-
 export function buildOfficeBackdrop(worldWidth: number = WORLD_WIDTH): Container {
   const textures = getOfficeTextures();
   const decor = buildDecorLayout(worldWidth);
@@ -56,14 +40,6 @@ export function buildOfficeBackdrop(worldWidth: number = WORLD_WIDTH): Container
   floor.position.set(0, WALL_ROW_HEIGHT);
   root.addChild(floor);
 
-  if (decor.rug.w > 0 && decor.rug.h > 0) {
-    const rug = new TilingSprite({ texture: textures.rug, width: decor.rug.w, height: decor.rug.h });
-    rug.tileScale.set(UI_SCALE);
-    rug.position.set(decor.rug.x, decor.rug.y);
-    rug.alpha = 0.9;
-    root.addChild(rug);
-  }
-
   const wall = new TilingSprite({ texture: textures.wall, width: worldWidth, height: WALL_ROW_HEIGHT });
   wall.tileScale.set(UI_SCALE);
   root.addChild(wall);
@@ -74,7 +50,7 @@ export function buildOfficeBackdrop(worldWidth: number = WORLD_WIDTH): Container
   baseboard.position.set(0, WALL_ROW_HEIGHT - baseboardH / 2);
   root.addChild(baseboard);
 
-  drawWindow(root, decor.window.x, decor.window.y, decor.window.w, decor.window.h);
+  placeSprite(root, textures.window, decor.window.x, decor.window.y);
   placeSprite(root, textures.door, decor.door.x, decor.door.y);
   placeSprite(root, textures.clock, decor.clock.x, decor.clock.y);
   placeSprite(root, textures.signboard, decor.signboard.x, decor.signboard.y);

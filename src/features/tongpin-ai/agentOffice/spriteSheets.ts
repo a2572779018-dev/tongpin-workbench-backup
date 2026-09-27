@@ -43,6 +43,9 @@ export interface OfficeTextures {
   deskOff: Texture;
   /** Alternated on a timer while a desk's monitor is "on" — see Desk.ts. */
   deskOn: readonly [Texture, Texture];
+  /** Narrow plain-desk-surface slice, flanking the monitor module on both
+   *  sides so the whole desk reads as ~2 tiles wide — see Desk.ts. */
+  deskSide: Texture;
   /** Rolling office chair, drawn behind the character — see EmployeeFigure.ts. */
   chair: Texture;
   waterCooler: Texture;
@@ -52,9 +55,8 @@ export interface OfficeTextures {
   whiteboard: Texture;
   plantBig: Texture;
   plantSmall: Texture;
-  /** Small diamond-motif tile, tiled by sceneDraw.ts into a rug under the
-   *  worker desk clusters — see seating.ts's DECOR_LAYOUT.rug. */
-  rug: Texture;
+  /** Wall window — see sceneDraw.ts. */
+  window: Texture;
   /** Single static frame — see extract-limezu.py: this office never
    *  animates backdrop decor, so only one frame of the source spritesheet is
    *  ever cropped or loaded. */
@@ -114,6 +116,7 @@ export function loadOfficeTextures(): Promise<OfficeTextures> {
       baseboard: nearest(loaded[BASEBOARD_URL]),
       deskOff: nearest(loaded[FURNITURE_URLS.deskOff]),
       deskOn,
+      deskSide: nearest(loaded[FURNITURE_URLS.deskSide]),
       chair: nearest(loaded[FURNITURE_URLS.chair]),
       waterCooler: nearest(loaded[FURNITURE_URLS.waterCooler]),
       door: nearest(loaded[FURNITURE_URLS.door]),
@@ -122,7 +125,7 @@ export function loadOfficeTextures(): Promise<OfficeTextures> {
       whiteboard: nearest(loaded[FURNITURE_URLS.whiteboard]),
       plantBig: nearest(loaded[FURNITURE_URLS.plantBig]),
       plantSmall: nearest(loaded[FURNITURE_URLS.plantSmall]),
-      rug: nearest(loaded[FURNITURE_URLS.rug]),
+      window: nearest(loaded[FURNITURE_URLS.window]),
       coffee: nearest(loaded[FURNITURE_URLS.coffee]),
       clock: nearest(loaded[FURNITURE_URLS.clock]),
       signboard: nearest(loaded[FURNITURE_URLS.signboard]),

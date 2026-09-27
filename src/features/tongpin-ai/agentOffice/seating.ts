@@ -38,7 +38,19 @@ export const WORLD_WIDTH = 640;
 // screen-space-constant 12px text size (see EmployeeFigure.ts/ThoughtBubble.ts/
 // ToolBubble.ts) above the row below it — re-check against a rendered
 // screenshot before shrinking this further.
-export const WORLD_HEIGHT = 510;
+//
+// Bumped again (510→550) for the full-body (16×32) character pass: the name
+// tag/bubble geometry above each desk is untouched (EmployeeFigure's
+// headTopY is the same rect.y + rect.h/2 either way — the character's HEAD
+// still starts at the desk's screen/body seam, just as the old bust-only
+// crop's top did), so only the *bottom* of each row grew — by exactly
+// CHAIR_DROP_NATIVE*scale (the chair's own small re-added peek, now that it
+// and the character share one native height — see EmployeeFigure.ts), i.e.
+// 12 world units for a worker row and 18 for the coordinator's. The extra
+// margin here is headroom for that plus the last row's clearance above the
+// floor plants, not a full re-tuning — re-check against a rendered
+// screenshot if it ever needs to change again.
+export const WORLD_HEIGHT = 550;
 /** Smallest/largest world width computeWorldWidth() will ever produce, so an
  *  extreme viewport still gets a room shaped like an office — not a sliver
  *  too narrow for the coordinator's own desk, or a runway so wide it reads as
@@ -106,13 +118,23 @@ export const WALL_ROW_HEIGHT = WALL_NATIVE_H * UI_SCALE;
 
 // desk_off/desk_on_{a,b}.png are all 16×32 native (see spriteAssets.ts); the
 // head desk is the same art at HEAD_UI_SCALE so the coordinator visibly
-// anchors the room without needing separate art.
+// anchors the room without needing separate art. DeskRect/DESK_W stay this
+// "monitor module" width — the character centers on it, so this is still the
+// right value for that math — but Desk.ts visually flanks it with two
+// DESK_SIDE_NATIVE_W-wide plain-desk slices (desk_side.png) on top, purely
+// cosmetic, so the whole desk reads as ~2 tiles wide like the reference
+// office (see the feature's report) without moving anyone's anchor point.
 const DESK_NATIVE_W = 16;
 const DESK_NATIVE_H = 32;
 export const DESK_W = DESK_NATIVE_W * UI_SCALE;
 export const DESK_H = DESK_NATIVE_H * UI_SCALE;
 export const HEAD_DESK_W = DESK_NATIVE_W * HEAD_UI_SCALE;
 export const HEAD_DESK_H = DESK_NATIVE_H * HEAD_UI_SCALE;
+/** Native width of each of the two plain-desk-surface slices Desk.ts draws
+ *  flanking the monitor module — see DESK_W's own comment. Cropped from a
+ *  visually-uniform (no left-right detail) source sprite, so any width here
+ *  tiles/reads seamlessly beside the monitor — see extract-limezu.py. */
+export const DESK_SIDE_NATIVE_W = 8;
 
 const ROW_GAP = 48;
 // Row Y's give each row's *desk top*; the character/chair/label group that
@@ -228,16 +250,6 @@ const SIGNBOARD_NATIVE_H = 39;
 const BOOKSHELF_NATIVE_W = 32;
 const PLANT_BIG_NATIVE_W = 32;
 const PLANT_BIG_NATIVE_H = 48;
-const RUG_MARGIN = 64;
-const RUG_TOP = WALL_ROW_HEIGHT + 28;
-const RUG_BOTTOM = WORLD_HEIGHT - 26;
-/** No window sprite exists in the owner's purchased LimeZu categories
- *  (Conference_Hall / Living_Room / Classroom_and_Library / Television_and_
- *  Film_Studio — see extract-limezu.py's PACK_ROOT comment); sceneDraw.ts
- *  paints this one procedurally instead, in the same palette as everything
- *  else, rather than pull in an unrelated theme's art. */
-const WINDOW_W = 44;
-const WINDOW_H = 34;
 
 export interface DecorLayout {
   signboard: { x: number; y: number };
@@ -250,8 +262,7 @@ export interface DecorLayout {
   plantRight: { x: number; y: number };
   waterCooler: { x: number; y: number };
   coffee: { x: number; y: number };
-  window: { x: number; y: number; w: number; h: number };
-  rug: { x: number; y: number; w: number; h: number };
+  window: { x: number; y: number };
 }
 
 /** Decor anchors for the given world width — a function (not a static
@@ -292,18 +303,8 @@ export function buildDecorLayout(worldWidth: number = WORLD_WIDTH): DecorLayout 
     /** Break-area water cooler + coffee maker, floor-level near the right wall. */
     waterCooler: { x: worldWidth - 140, y: WALL_ROW_HEIGHT },
     coffee: { x: worldWidth - 140 + BOOKSHELF_NATIVE_W * UI_SCALE + 8, y: WALL_ROW_HEIGHT + 12 },
-    /** Procedural "window light" on the back wall near the left edge, clear
-     *  of the clock (see WINDOW_W above) — see this interface's own doc
-     *  comment for why it's painted rather than a LimeZu sprite. */
-    window: { x: Math.round(worldWidth * 0.045), y: 8, w: WINDOW_W, h: WINDOW_H },
-    /** Rug under the worker desk clusters — see this interface's own doc
-     *  comment for its LimeZu source (a small diamond-motif floor accent,
-     *  tiled). Margins keep it inset from both side walls at any world width. */
-    rug: {
-      x: RUG_MARGIN,
-      y: RUG_TOP,
-      w: Math.max(0, worldWidth - RUG_MARGIN * 2),
-      h: Math.max(0, RUG_BOTTOM - RUG_TOP),
-    },
+    /** Wall window near the left edge, clear of the clock — a real LimeZu
+     *  sprite (see extract-limezu.py's WINDOW_SOURCE), not painted. */
+    window: { x: Math.round(worldWidth * 0.045), y: 8 },
   };
 }
