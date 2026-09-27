@@ -48,6 +48,9 @@ export function mediaArtifactAwaitsTask(artifact: { kind: string; data?: { [key:
   if (typeof data?.mediaTaskRequestId !== "string" || data.mediaTaskSubmitError) return false;
   const status = String(data.mediaTaskStatus);
   if (status === "failed" || status === "cancelled") return false;
+  // An image run marked unknown is final on the server (no scheduler pass and
+  // no read advances it); an unknown video is re-queried by the read itself.
+  if (status === "unknown" && artifact.kind === "图片") return false;
   if (status !== "completed") return true;
   if (artifact.kind === "图片") return !Array.isArray(data.images);
   if (artifact.kind === "视频") return !data.mediaTaskServiceRequestId;

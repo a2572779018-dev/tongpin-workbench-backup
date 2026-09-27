@@ -262,6 +262,20 @@ function parameterMatch(text, parameters) {
   return null;
 }
 
+/** A text literal that is a whole calculation ("128×36", "12.5 + 7="). */
+const ARITHMETIC_LITERAL = /^\s*\d[\d.,，．]*(?:\s*[+\-−＋－×xX*＊÷/／]\s*\d[\d.,，．]*)+\s*[=＝]?\s*$/u;
+/** …in a task that says it is a calculation (a date or a phone number is not). */
+const CALCULATION_WORDS = /(?:计算|算一下|算出|算算|等于|乘以|除以|加上|减去|calculat|comput)/iu;
+const OPERATOR_BETWEEN_DIGITS = /\d\s*([+\-−＋－×xX*＊÷/／])\s*(?=\d)/gu;
+const KEYPAD_OPERATORS = Object.freeze([
+  { symbols: /^[+＋]$/u, labels: /^(?:\+|＋|加|加号|plus|add)$/iu },
+  { symbols: /^[-−－]$/u, labels: /^(?:-|−|－|减|减号|minus|subtract)$/iu },
+  { symbols: /^[×xX*＊]$/u, labels: /^(?:×|\*|乘|乘号|multiply|times)$/iu },
+  { symbols: /^[÷/／]$/u, labels: /^(?:÷|\/|除|除号|divide)$/iu },
+]);
+const KEYPAD_EQUALS = /^(?:=|＝|等于|等号|equals?)$/iu;
+const KEYPAD_DECIMAL = /^(?:\.|．|小数点|decimal|point)$/iu;
+
 /**
  * Keypad buttons for a calculation the task spells out ("计算 128×36"). All
  * keypad buttons score alike (plain buttons), so the digits, the operator and
@@ -269,26 +283,21 @@ function parameterMatch(text, parameters) {
  * macOS Calculator: "=" (等于) was never a candidate, so after clicking
  * 1 2 8 × 3 6 Jev could only consider Return with unknown focus and stopped
  * to ask twice. Only the ranking changes; risk and authorization do not.
+ * Only a task without an irreversible step, that says it calculates, and a
+ * text literal that is a whole calculation count: a message holding a date,
+ * a phone number or "1920x1080" ranks exactly as before.
  */
-const ARITHMETIC_EXPRESSION = /\d\s*[+\-−＋－×xX*＊÷/／]\s*\d/u;
-const KEYPAD_OPERATORS = Object.freeze([
-  { symbols: /[+＋]/u, labels: /^(?:\+|＋|加|加号|plus|add)$/iu },
-  { symbols: /\d\s*[-−－]/u, labels: /^(?:-|−|－|减|减号|minus|subtract)$/iu },
-  { symbols: /[×xX*＊]/u, labels: /^(?:×|\*|x|乘|乘号|multiply|times)$/iu },
-  { symbols: /[÷/／]/u, labels: /^(?:÷|\/|除|除号|divide)$/iu },
-]);
-const KEYPAD_EQUALS = /^(?:=|＝|等于|等号|equals?)$/iu;
-const KEYPAD_DECIMAL = /^(?:\.|．|小数点|decimal|point)$/iu;
-
 function keypadRelevance(element, task) {
   const label = normalizeName(element.text);
-  if (!label || [...label].length > 8 || element.editable) return 0;
-  const expressions = task.parameters.map((parameter) => parameter.value).filter((value) => ARITHMETIC_EXPRESSION.test(value));
+  if (!label || [...label].length > 8 || element.editable || task.irreversible) return 0;
+  if (!CALCULATION_WORDS.test(task.goal || "")) return 0;
+  const expressions = task.parameters.filter((parameter) => parameter.role === "text" && ARITHMETIC_LITERAL.test(parameter.value)).map((parameter) => parameter.value);
   if (!expressions.length) return 0;
   if (KEYPAD_EQUALS.test(label)) return 70;
   if (/^\d$/u.test(label)) return expressions.some((value) => value.includes(label)) ? 50 : 0;
   if (KEYPAD_DECIMAL.test(label)) return expressions.some((value) => /\d[.．]\d/u.test(value)) ? 50 : 0;
-  return KEYPAD_OPERATORS.some((operator) => operator.labels.test(label) && expressions.some((value) => operator.symbols.test(value))) ? 50 : 0;
+  const operators = expressions.flatMap((value) => [...value.matchAll(OPERATOR_BETWEEN_DIGITS)].map((match) => match[1]));
+  return KEYPAD_OPERATORS.some((operator) => operator.labels.test(label) && operators.some((symbol) => operator.symbols.test(symbol))) ? 50 : 0;
 }
 
 function relevance(element, task) {

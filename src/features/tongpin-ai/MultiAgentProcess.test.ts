@@ -270,8 +270,10 @@ describe("停止 for a 多 Agent 协作 reply", () => {
 describe("多 Agent card styles", () => {
   it("are defined only by multi-agent.css (no other sheet lays out .tp-ai-agent)", async () => {
     const { readdirSync, readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const root = new URL("../../", import.meta.url).pathname;
+    const { join, relative, sep } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    // fileURLToPath decodes the path (the Mac checkout lives under "个人/").
+    const root = fileURLToPath(new URL("../../", import.meta.url));
     const sheets: string[] = [];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -284,7 +286,7 @@ describe("多 Agent card styles", () => {
     // `.tp-ai-agent` or `.tp-ai-agent__…`, not `.tp-ai-agents`.
     const selector = /\.tp-ai-agent(?![s\w-])|\.tp-ai-agent__/;
     const rules = (path: string) => readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-    const owners = sheets.filter(path => selector.test(rules(path))).map(path => path.slice(root.length));
+    const owners = sheets.filter(path => selector.test(rules(path))).map(path => relative(root, path).split(sep).join("/"));
     expect(owners).toEqual(["features/tongpin-ai/multi-agent.css"]);
   });
 });

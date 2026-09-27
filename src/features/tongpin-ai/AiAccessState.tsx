@@ -6,14 +6,16 @@ import { LoaderCircle, LockKeyhole, RefreshCw } from "lucide-react";
  * reads as "opening", waits a moment before it fades in so a quick load never
  * flashes it (ai-refinements.css), and keeps the lock for a real lock.
  */
-export function AiAccessState({ name, loading, error, locked, onRetry }: {
+export function AiAccessState({ name, loading, error, locked, retried, onRetry }: {
   name: string;
   loading: boolean;
   error?: string;
   locked?: boolean;
+  /** A retry the member asked for: show the loading card at once, not after a pause. */
+  retried?: boolean;
   onRetry: () => void;
 }) {
-  return <section className={`tp-ai-entry${loading ? " is-loading" : ""}`} aria-label="同频 AI 开通状态" aria-busy={loading}>
+  return <section className={`tp-ai-entry${loading ? " is-loading" : ""}${loading && retried ? " is-retry" : ""}`} aria-label="同频 AI 开通状态" aria-busy={loading}>
     <div className="tp-ai-entry__card">
       <span className="tp-ai-entry__icon">{loading
         ? <LoaderCircle className="tp-ai-entry__spinner" size={26} aria-hidden="true" />

@@ -117,6 +117,9 @@ describe("opening the AI page", () => {
     expect(loading).toContain("正在打开同频 AI");
     expect(loading).toContain("tp-ai-entry__spinner");
     expect(loading).not.toContain("<button");
+    // After "重新尝试" the card shows at once (no blank pause).
+    const retry = renderToStaticMarkup(createElement(AiAccessState, { name: "小秋", loading: true, retried: true, onRetry: () => undefined }));
+    expect(retry).toContain('class="tp-ai-entry is-loading is-retry"');
     const locked = renderToStaticMarkup(createElement(AiAccessState, { name: "小秋", loading: false, locked: true, onRetry: () => undefined }));
     expect(locked).toContain('class="tp-ai-entry"');
     expect(locked).toContain("你的 AI 还未开通");
@@ -126,6 +129,7 @@ describe("opening the AI page", () => {
   it("delays the loading card, eases the workspace in with opacity only, and stays still under reduced motion", () => {
     const css = readFileSync(new URL("./ai-refinements.css", import.meta.url), "utf8");
     expect(css).toMatch(/\.tp-ai-entry\.is-loading \.tp-ai-entry__card,\n\.tp-ai-entry\.is-loading \.tp-ai-entry__account \{ animation: tp-ai-entry-wait 220ms ease 320ms backwards; \}/);
+    expect(css).toContain(".tp-ai-entry.is-loading.is-retry .tp-ai-entry__card,\n.tp-ai-entry.is-loading.is-retry .tp-ai-entry__account { animation: none; }");
     expect(css).toContain(".tp-ai-page { animation: tp-ai-page-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }");
     expect(css).toContain("@keyframes tp-ai-page-in { from { opacity: 0; } }");
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\n  \.tp-ai-entry\.is-loading \.tp-ai-entry__card,\n  \.tp-ai-entry\.is-loading \.tp-ai-entry__account,\n  \.tp-ai-entry__spinner,\n  \.tp-ai-page \{ animation: none; \}\n\}/);

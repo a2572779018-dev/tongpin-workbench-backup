@@ -67,9 +67,13 @@ describe("page-level reads of saved media tasks", () => {
   const video = (data: Record<string, unknown>) => ({ kind: "视频", data: { mediaTaskRequestId: "request-2", ...data } });
 
   it("keeps reading a task that is still running, or completed without its results on the artifact yet", () => {
-    for (const status of ["queued", "planning", "awaiting_input", "awaiting_authorization", "running", "partial", "unknown", undefined]) {
+    for (const status of ["queued", "planning", "awaiting_input", "awaiting_authorization", "running", "partial", undefined]) {
       expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: status }))).toBe(true);
+      expect(mediaArtifactAwaitsTask(video({ mediaTaskStatus: status }))).toBe(true);
     }
+    // The read re-queries an unknown video's provider task; nothing advances an unknown image.
+    expect(mediaArtifactAwaitsTask(video({ mediaTaskStatus: "unknown" }))).toBe(true);
+    expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: "unknown" }))).toBe(false);
     expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: "completed" }))).toBe(true);
     expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: "completed", images: [{ assetId: "a" }] }))).toBe(false);
     expect(mediaArtifactAwaitsTask(video({ mediaTaskStatus: "completed" }))).toBe(true);

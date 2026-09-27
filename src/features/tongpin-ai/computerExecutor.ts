@@ -168,40 +168,94 @@ function verifiedSummary(task: ComputerTaskSpec, app: string, readout: readonly 
 }
 
 /** A task that asks to read something off the screen and report it. */
-const READ_BACK_TASK = /(?:读取|读出|读一下|读给|告诉我|告诉用户|显示的?(?:结果|数字|数值|金额|数)|结果是|是多少|多少钱|查看|查一下)/u;
+const READ_BACK_TASK = /(?:读取|读出|读一下|读给|告诉我|告诉用户|显示的?(?:结果|数字|数值|金额|数)|结果是|是多少|等于多少|得多少|多少钱)/u;
 /**
  * Plain values only (numbers, amounts, percentages): words never leave the
  * screen this way, so screen text cannot bring instructions into the chat.
+ * At most 12 digits: card, account and ID numbers are longer.
  */
 const SCREEN_VALUE = /^[-−+]?[¥$€£]?\d[\d,，.．\s]*(?:[%％]|元)?$/u;
-const CONTROL_ROLE = /^(?:button|menu_button|pop_up_button|radio_button|check_box|menu_item|menu_bar_item|link|tab|incrementor|disclosure_triangle)$/;
+const MAX_VALUE_DIGITS = 12;
+/** Controls and inputs, by role word (a keypad's digits are buttons, a page number is a link). */
+const CONTROL_ROLE_WORDS = new Set(["button", "menu", "link", "hyperlink", "tab", "slider", "scroll", "indicator", "check", "radio",
+  "incrementor", "stepper", "spin", "combo", "pop", "disclosure", "toolbar", "field", "area", "search", "edit"]);
+const isControlRole = (role: string): boolean => role.toLowerCase().split(/[_\s-]+/).some(word => CONTROL_ROLE_WORDS.has(word));
 
-/** Plain values the target window shows, outside its controls (a keypad's digits are buttons). */
+/** Plain values shown in the target window's text (not its controls or inputs). */
 export function screenValues(observation: ComputerObserveResult["observation"]): string[] {
   const values = new Set<string>();
   const add = (text: string | undefined) => {
     const value = (text ?? "").replace(/\s+/g, " ").trim();
-    if (value && [...value].length <= 24 && SCREEN_VALUE.test(value)) values.add(value);
+    if (!value || [...value].length > 24 || !SCREEN_VALUE.test(value)) return;
+    if ((value.match(/\d/g)?.length ?? 0) > MAX_VALUE_DIGITS) return;
+    values.add(value);
   };
   for (const element of observation.elements) {
-    if (element.editable || element.secure || CONTROL_ROLE.test(element.role)) continue;
+    if (element.editable || element.secure || element.searchBox || element.messageBox || isControlRole(element.role)) continue;
     add(element.value);
     add(element.label);
   }
-  for (const text of observation.texts) add(text);
   return [...values];
 }
 
+/** A text literal that is a whole calculation ("128×36"); same shape as the Electron policy's. */
+const CALCULATION_LITERAL = /^\s*\d[\d.,，．]*(?:\s*[+\-−＋－×xX*＊÷/／]\s*\d[\d.,，．]*)+\s*[=＝]?\s*$/u;
+
+function numberOf(text: string): number | null {
+  const value = Number(text.replace(/[¥$€£%％元\s,，]/g, "").replace(/．/g, ".").replace(/^−/, "-"));
+  return Number.isFinite(value) ? value : null;
+}
+
+/** The result of the task's calculation literal (× ÷ before + −), or null. */
+export function calculationResult(task: ComputerTaskSpec): number | null {
+  const literal = task.parameters.find(parameter => parameter.role === "text" && CALCULATION_LITERAL.test(parameter.value))?.value;
+  if (!literal) return null;
+  const tokens = literal.replace(/[=＝\s]/g, "").match(/\d[\d.,，．]*|[+\-−＋－×xX*＊÷/／]/gu) ?? [];
+  const terms: number[] = [];
+  let sign = 1;
+  let product: number | null = null;
+  let pending: "×" | "÷" | null = null;
+  for (const token of tokens) {
+    if (/^\d/u.test(token)) {
+      const value = numberOf(token);
+      if (value === null) return null;
+      product = product === null ? value : pending === "÷" ? product / value : product * value;
+      pending = null;
+    } else if (/[×xX*＊]/u.test(token)) pending = "×";
+    else if (/[÷/／]/u.test(token)) pending = "÷";
+    else {
+      if (product === null) return null;
+      terms.push(sign * product);
+      sign = /[+＋]/u.test(token) ? 1 : -1;
+      product = null;
+    }
+  }
+  if (product === null) return null;
+  const result = terms.reduce((sum, term) => sum + term, sign * product);
+  return Number.isFinite(result) ? result : null;
+}
+
 /**
- * For a read-back task ("读取计算器显示的结果并告诉我"): the plain values on
- * screen now that were not there when the last action ran — the result that
- * action produced (Calculator: "4,608" after "="). At most three; none when
- * the task does not ask to read anything or nothing new appeared.
+ * For a read-back task ("读取计算器显示的结果并告诉我"): for a calculation, the
+ * shown value that equals its result (10 − 5 shows 5 before "=" too);
+ * otherwise the plain values on screen now that were not there in the view
+ * the last action was chosen on — the result that action produced
+ * (Calculator: "4,608" after "="). At most three; none when the task does not
+ * ask to read anything.
  */
 export function readBackValues(task: ComputerTaskSpec, beforeLastAction: ReadonlySet<string>, observation: ComputerObserveResult["observation"]): string[] {
   if (!READ_BACK_TASK.test(`${task.goal} ${task.successCheck}`)) return [];
   const literals = new Set(task.parameters.map(parameter => parameter.value.replace(/\s+/g, "")));
-  return screenValues(observation).filter(value => !beforeLastAction.has(value) && !literals.has(value.replace(/\s+/g, ""))).slice(0, 3);
+  const shown = screenValues(observation).filter(value => !literals.has(value.replace(/\s+/g, "")));
+  const expected = calculationResult(task);
+  if (expected !== null) {
+    const match = shown.find(value => {
+      const number = numberOf(value);
+      return number !== null && Math.abs(number - expected) <= 1e-9 * Math.max(1, Math.abs(expected));
+    });
+    if (match) return [match];
+  }
+  return shown.filter(value => !beforeLastAction.has(value)).slice(0, 3);
 }
 
 const REASON_TEXT: Record<ComputerRunReason, string> = {
@@ -307,9 +361,8 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
     const guidance: string[] = [];
     let lastAction: ComputerDecisionRequest["lastAction"];
     let lowConfidenceStreak = 0, reobserveStreak = 0, failureStreak = 0, backgroundMisses = 0, blockedStreak = 0, prematureDone = 0, observeFailures = 0, sendStuckSeen = 0;
-    // Plain values seen on screen so far, and those seen when the last action
-    // ran: what is new at "done" is the result a read-back task reports.
-    const seenValues = new Set<string>();
+    // Plain values in the view the last action was chosen on: what is new at
+    // "done" is the result a read-back task reports.
     let valuesBeforeAction: ReadonlySet<string> = new Set<string>();
     // The member checked the app and confirmed the recipient and the text of
     // the send Jev chose; it holds until the next executed action.
@@ -336,7 +389,6 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       const view = observed.value;
       if (view.display.app) appName = view.display.app;
       const readout = readBackValues(spec, valuesBeforeAction, view.observation);
-      for (const value of screenValues(view.observation)) seenValues.add(value);
       // Typed text showed up in the wrong kind of input box: keyboard focus was
       // not where the run believed. Stop before any Return could send it.
       const landing = view.facts.typedLanding;
@@ -494,7 +546,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       }
       const outcome = executed.value;
       memberConfirmedSend = false;
-      if (outcome.status !== "blocked") { actions += 1; valuesBeforeAction = new Set(seenValues); }
+      if (outcome.status !== "blocked") { actions += 1; valuesBeforeAction = new Set(screenValues(view.observation)); }
       if (choice.risk !== "none" && outcome.status !== "blocked" && outcome.status !== "failed") irreversibleAttempted = true;
       callbacks.onStep?.({ step, phase: outcome.status === "blocked" ? "authorize" : "verify", authorization: outcome.authorization, execution: { status: outcome.status, message: outcome.message, ...(outcome.delivery ? { delivery: outcome.delivery } : {}) } });
       history.push({ step, action: choice.description, result: outcome.status });

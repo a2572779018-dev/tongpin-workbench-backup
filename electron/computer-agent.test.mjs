@@ -1813,6 +1813,23 @@ describe("computer agent keypad tasks (macOS Calculator)", () => {
     expect(policy.keypadRelevance({ text: "1" }, task)).toBe(0);
     const before = clickLabels(task, KEYPAD);
     expect(before).not.toContain("等于");
+    // A message holding a date, a phone number or a resolution: a send task
+    // never gets keypad boosts (unread badges "2" "8" must not crowd out 发送).
+    for (const content of ["明天 2026-09-28 下午见", "+86 138-1234-5678", "1920x1080"]) {
+      const send = policy.validateTaskSpec({ ...TASK, parameters: [TASK.parameters[0], { ...TASK.parameters[1], value: content }], irreversible: { ...TASK.irreversible, content, summary: `发送消息给「姐姐」：${content}` } }).task;
+      for (const label of ["2", "8", "+", "×", "减", "等于"]) expect(policy.keypadRelevance({ text: label }, send)).toBe(0);
+    }
+    // A date typed into a calendar is not a calculation either.
+    const calendar = policy.validateTaskSpec({ ...CALC_TASK, goal: "在日历里新建 2026-09-28 的事件", parameters: [{ id: "p1", role: "text", label: "日期", value: "2026-09-28" }] }).task;
+    expect(policy.keypadRelevance({ text: "9" }, calendar)).toBe(0);
+    expect(policy.keypadRelevance({ text: "减" }, calendar)).toBe(0);
+    // Only the operators between the numbers count; a close button "X" is not "×".
+    const calc = policy.validateTaskSpec(CALC_TASK).task;
+    expect(policy.keypadRelevance({ text: "减" }, calc)).toBe(0);
+    expect(policy.keypadRelevance({ text: "X" }, calc)).toBe(0);
+    const subtract = policy.validateTaskSpec({ ...CALC_TASK, goal: "计算 10-5", parameters: [{ id: "p1", role: "text", label: "算式", value: "10-5" }] }).task;
+    expect(policy.keypadRelevance({ text: "减" }, subtract)).toBe(50);
+    expect(policy.keypadRelevance({ text: "乘" }, subtract)).toBe(0);
   });
 });
 

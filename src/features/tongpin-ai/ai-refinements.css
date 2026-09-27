@@ -75,6 +75,8 @@
    dialogs while the animation runs. */
 .tp-ai-entry.is-loading .tp-ai-entry__card,
 .tp-ai-entry.is-loading .tp-ai-entry__account { animation: tp-ai-entry-wait 220ms ease 320ms backwards; }
+.tp-ai-entry.is-loading.is-retry .tp-ai-entry__card,
+.tp-ai-entry.is-loading.is-retry .tp-ai-entry__account { animation: none; }
 .tp-ai-entry__spinner { animation: tp-ai-entry-spin .9s linear infinite; }
 .tp-ai-page { animation: tp-ai-page-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
 @keyframes tp-ai-entry-wait { from { opacity: 0; } }

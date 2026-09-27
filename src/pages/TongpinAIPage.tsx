@@ -131,7 +131,7 @@ function WorkspaceLoader({ user }: { user: User }) {
       .catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "工作台暂时无法加载"); });
     return () => controller.abort();
   }, [api, user.id, attempt]);
-  if (!entry || entry.kind === "locked") return <AiAccessState name={user.name} loading={!entry && !error} error={error} locked={entry?.kind === "locked"} onRetry={() => setAttempt(value => value + 1)} />;
+  if (!entry || entry.kind === "locked") return <AiAccessState name={user.name} loading={!entry && !error} error={error} locked={entry?.kind === "locked"} retried={attempt > 0} onRetry={() => setAttempt(value => value + 1)} />;
   // Do not initialize hidden GPU effects, chat hydration or autosaving behind setup.
   if (entry.kind === "onboarding") return <section className="tp-ai-entry tp-ai-entry--setup"><PersonaSetup
     key={entry.persona.revision} snapshot={entry.persona} accountId={user.id}
