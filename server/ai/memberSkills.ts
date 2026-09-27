@@ -32,11 +32,13 @@ function codePointLength(value: string): number { return Array.from(value).lengt
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const GENERIC_TRIGGERS = new Set(["帮我", "一下", "请问", "你好", "谢谢", "问题", "内容", "东西", "什么", "怎么", "这个", "那个", "可以", "需要", "我们", "你们", "help", "please", "the"]);
 
-function line(value: string): string { return value.normalize("NFKC").replace(CONTROL, "").replace(/\s+/g, " ").trim(); }
+// Display text keeps the member's own characters (full-width punctuation included).
+function line(value: string): string { return value.replace(CONTROL, "").replace(/\s+/g, " ").trim(); }
 function paragraph(value: string): string {
-  return value.normalize("NFKC").replace(/\r\n?/g, "\n").replace(CONTROL, "").split("\n").map(item => item.replace(/[ \t 　]+/g, " ").trim()).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return value.replace(/\r\n?/g, "\n").replace(CONTROL, "").split("\n").map(item => item.replace(/[ \t\u00a0\u3000]+/g, " ").trim()).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
-function triggerText(value: string): string { return line(value).toLowerCase().replace(/^[#@]+/, ""); }
+/** Triggers are matched against NFKC-normalized, lowercased messages. */
+function triggerText(value: string): string { return line(value.normalize("NFKC")).toLowerCase().replace(/^[#@]+/, ""); }
 
 export type SkillValidation = { ok: true; skill: AiMemorySkillInput } | { ok: false; code: "AI_MEMORY_SKILL_INVALID" | "AI_MEMORY_SECRET" | "AI_MEMORY_UNSAFE"; message: string };
 
@@ -79,14 +81,18 @@ function characterBigrams(value: string): Set<string> {
   if (chars.length === 1) result.add(chars[0]);
   return result;
 }
-/** Same kind of task: equal names, most triggers shared, or near-identical names. */
+/**
+ * Same kind of task: equal names, half the triggers shared, or near-identical
+ * names. Short names that only share a suffix ("周报格式" / "日报格式") differ.
+ */
 export function similarMemberSkills(a: Pick<AiMemorySkillInput, "name" | "triggers">, b: Pick<AiMemorySkillInput, "name" | "triggers">): boolean {
-  if (line(a.name).toLowerCase() === line(b.name).toLowerCase()) return true;
+  const left = a.name.normalize("NFKC"), right = b.name.normalize("NFKC");
+  if (line(left).toLowerCase() === line(right).toLowerCase()) return true;
   const shared = a.triggers.filter(trigger => b.triggers.includes(trigger)).length;
   if (shared && shared / Math.min(a.triggers.length, b.triggers.length) >= 0.5) return true;
-  const left = characterBigrams(a.name), right = characterBigrams(b.name);
-  const overlap = [...left].filter(item => right.has(item)).length;
-  return left.size + right.size > 0 && (2 * overlap) / (left.size + right.size) >= 0.6;
+  const leftBigrams = characterBigrams(left), rightBigrams = characterBigrams(right);
+  const overlap = [...leftBigrams].filter(item => rightBigrams.has(item)).length;
+  return leftBigrams.size + rightBigrams.size > 0 && (2 * overlap) / (leftBigrams.size + rightBigrams.size) >= 0.8;
 }
 
 function newSkillId(): string {

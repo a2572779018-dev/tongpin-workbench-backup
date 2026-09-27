@@ -24,9 +24,28 @@ export interface MemberRecall {
   snippets: MemberRecallSnippet[];
 }
 
-/** Topic phrases worth treating as named entities (not grammar or generic words). */
-function entityTerms(query: HistoryQuery): string[] {
-  return query.segments.filter(segment => Array.from(segment).length >= 3);
+const LATIN_TOKEN = /^[a-z0-9][a-z0-9._-]*$/;
+
+/**
+ * "Names an entity that appears in memory/history", kept conservative: a
+ * 3+ character topic phrase shared with the member's memory (either
+ * direction), or a Latin/number name (LORA, Q3, v2) that titles another
+ * conversation. Generic Chinese task words in titles ("写邮件") do not count.
+ */
+function knownEntities(index: AiMemberHistoryIndex, userId: string, message: string, query: HistoryQuery, memoryText: string, conversationId?: string): string[] {
+  const lowerMessage = message.normalize("NFKC").toLowerCase();
+  const memory = memoryText.normalize("NFKC").toLowerCase();
+  const known = new Set<string>();
+  const long = query.segments.filter(segment => Array.from(segment).length >= 3);
+  for (const segment of long) if (memory.includes(segment)) known.add(segment);
+  if (memory) {
+    for (const entry of memoryText.split("\n").slice(0, 40)) {
+      for (const segment of historyQuery(entry).segments) if (Array.from(segment).length >= 3 && lowerMessage.includes(segment)) known.add(segment);
+    }
+  }
+  const names = long.filter(segment => LATIN_TOKEN.test(segment));
+  for (const name of index.titleMentions(userId, names, conversationId)) known.add(name);
+  return [...known];
 }
 
 /**
@@ -42,15 +61,10 @@ export function recallMemberHistory(index: AiMemberHistoryIndex, userId: string,
   let trigger: AiMemoryRecallTrigger;
   if (cue) trigger = cue;
   else {
-    // "Names an entity that appears in memory/history": a distinctive topic
-    // phrase found in the member's memory or in another conversation's title.
-    const entities = entityTerms(query);
-    if (!entities.length) return null;
-    const memory = (input.memoryText ?? "").normalize("NFKC").toLowerCase();
-    const known = new Set([...entities.filter(term => memory.includes(term)), ...index.titleMentions(userId, entities, input.conversationId)]);
-    if (!known.size) return null;
+    const known = knownEntities(index, userId, input.message, query, input.memoryText ?? "", input.conversationId);
+    if (!known.length) return null;
     trigger = "entity";
-    query = historyQuery([...known].join(" "));
+    query = historyQuery(known.join(" "));
     if (!query.units.length) return null;
   }
   const candidates = index.candidates(userId, query, { excludeConversationId: input.conversationId });

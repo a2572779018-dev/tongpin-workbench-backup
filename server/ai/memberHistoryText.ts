@@ -62,7 +62,8 @@ function trimTokenEdge(value: string, edge: "start" | "end"): string {
  * spans are redacted with the member-memory filter; the result is bounded.
  */
 export function historyIndexText(content: string): string {
-  let text = content.normalize("NFKC")
+  // Original characters are kept for display; matching normalizes on its own.
+  let text = content
     .replace(/```(?:chart|cards|followups)[^\n]*\n[\s\S]*?```/gi, " ")
     .replace(/<tool_request>[\s\S]*?<\/tool_request>/gi, " ")
     .replace(/<analysis_summary>[\s\S]*?<\/analysis_summary>/gi, " ")
@@ -80,7 +81,7 @@ export function historyIndexText(content: string): string {
     text = `${head} … ${tail}`;
   }
   return redactMemorySecrets(text)
-    .replace(/[ \t 　]+/g, " ")
+    .replace(/[ \t\u00a0\u3000]+/g, " ")
     .replace(/ ?\n[ \n]*/g, "\n")
     .trim();
 }
@@ -117,7 +118,7 @@ export type HistoryRecallCue = "explicit" | "reference";
 /** "查一下我之前问过的 XX", "翻翻历史对话里…": the member asks to search. */
 const EXPLICIT_CUE = /(?:查一下|查查|查找|搜一下|搜索一下|搜搜|搜索|找一下|找找|翻一下|翻翻|回忆一下|帮我回忆)[^。！？!?\n]{0,12}(?:之前|以前|上次|过去|历史|聊过|问过|说过|讨论过|提过|写过|对话|聊天记录)|(?:历史对话|聊天记录|对话记录|以前的对话|之前的对话)|\b(?:search|look up|find)\b[^.!?\n]{0,30}\b(?:previous|earlier|past|old)\s+(?:chats?|conversations?)\b/i;
 /** The message plausibly refers to an earlier conversation. */
-const REFERENCE_CUE = /(?:上次|上回|上一次|前几天|前阵子|前两天|(?:我们|咱们|我|你)(?:之前|以前|先前)|(?:之前|以前|先前)(?:说|聊|提|问|讨论|写|发|做|给|定|用|的|那)|(?:^|[，,。！？!?\s])(?:之前|以前|先前)|(?:聊|谈|讨论|说|提|问|写|发)过|还记得|记不记得|记得吗|继续上次|接着上次|(?:跟|和|像|同|照|按)上次|老样子|照旧|\blast time\b|\bpreviously\b|\bas before\b|\bwe discussed\b|\byou (?:said|mentioned)\b|\bremember (?:when|what|the|our)\b)/i;
+const REFERENCE_CUE = /(?:上次|上回|上一次|前几天|前阵子|前两天|(?:我们|咱们|我|你)(?:之前|以前|先前)|(?:之前|以前|先前)(?:说|聊|提到|提过|问过|讨论)|(?:^|[，,。！？!?\s])(?:之前|以前|先前)|(?:聊|谈|讨论|说|提|问|写|发)过|还记得|记不记得|记得吗|继续上次|接着上次|(?:跟|和|像|同|照|按)上次|老样子|照旧|\blast time\b|\bpreviously\b|\bas before\b|\bwe discussed\b|\byou (?:said|mentioned)\b|\bremember (?:when|what|the|our)\b)/i;
 
 export function detectHistoryRecallCue(message: string): HistoryRecallCue | null {
   const text = message.normalize("NFKC");
@@ -136,7 +137,9 @@ const FILLER_PHRASES = [
   "提到过", "提过的", "提过", "问过的", "问过", "写过的", "写过", "发过", "请帮我", "帮我", "请你", "麻烦你", "麻烦", "查一下", "查查", "查找", "搜一下",
   "搜搜", "搜索", "找一下", "找找", "翻一下", "翻翻", "看一下", "看看", "发一下", "发给我", "发我", "给我", "再发", "一下", "那个", "这个", "那份", "这份",
   "那篇", "那次", "那些", "这些", "哪个", "哪些", "什么", "怎么", "如何", "我们", "咱们", "我的", "你的", "关于", "有关", "一样", "照着", "按照", "继续",
-  "接着", "老样子", "照旧", "现在", "能不能", "可不可以", "可以吗", "好吗", "谢谢",
+  "接着", "老样子", "照旧", "现在", "能不能", "可不可以", "可以吗", "好吗", "谢谢", "你好", "您好", "请问",
+  // Memory wording ("记住：…") says how to treat the message, not what it is about.
+  "记住", "记下", "记一下", "别忘了", "以后", "今后", "下次",
 ].sort((a, b) => b.length - a.length);
 /** Particles that end a phrase: split CJK runs here. */
 const PARTICLE = /[的吗呢吧啊呀嘛哦啦哈]/g;
@@ -173,7 +176,8 @@ const MAX_FTS_TERMS = 24;
 
 /** Turn a member message into search terms; empty when nothing searchable remains. */
 export function historyQuery(message: string): HistoryQuery {
-  let text = message.normalize("NFKC").toLowerCase().replace(CONTROL, " ").slice(0, 600);
+  // Grammar pairs first ("再发我" → "我"), then recall wording, then particles.
+  let text = message.normalize("NFKC").toLowerCase().replace(CONTROL, " ").slice(0, 600).replace(GRAMMAR_PAIRS, " ");
   for (const phrase of FILLER_PHRASES) text = text.split(phrase).join(" ");
   text = text.replace(PARTICLE, " ").replace(GRAMMAR_PAIRS, " ");
   const segments: string[] = [];

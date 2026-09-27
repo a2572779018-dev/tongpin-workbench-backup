@@ -105,10 +105,17 @@ export function historyConversationFingerprint(title: string, messages: readonly
   return historyFingerprint(title, messages.map(message => `${message.id}:${message.fingerprint}`).join(","));
 }
 
+export type MemberHistoryCaps = Pick<typeof MEMBER_HISTORY_LIMITS, "memberCharacters" | "memberChunks" | "conversationCharacters">;
+
 /** Tenant-scoped repository. Member methods take the authenticated account id. */
 export class AiMemberHistoryIndex {
   readonly tenantId: string;
-  constructor(readonly sql: AiSql, tenantId: string = DEFAULT_AI_TENANT_ID) { this.tenantId = normalizeAiTenantId(tenantId); }
+  private readonly caps: { memberCharacters: number; memberChunks: number; conversationCharacters: number };
+  /** `caps` exists for tests; production always uses MEMBER_HISTORY_LIMITS. */
+  constructor(readonly sql: AiSql, tenantId: string = DEFAULT_AI_TENANT_ID, caps: Partial<MemberHistoryCaps> = {}) {
+    this.tenantId = normalizeAiTenantId(tenantId);
+    this.caps = { memberCharacters: caps.memberCharacters ?? MEMBER_HISTORY_LIMITS.memberCharacters, memberChunks: caps.memberChunks ?? MEMBER_HISTORY_LIMITS.memberChunks, conversationCharacters: caps.conversationCharacters ?? MEMBER_HISTORY_LIMITS.conversationCharacters };
+  }
   userKey(userId: string): string { return tenantStorageKey(this.tenantId, userId); }
   private fts(): boolean { return memberHistoryFtsAvailable(this.sql); }
 
@@ -247,7 +254,7 @@ export class AiMemberHistoryIndex {
         for (const message of [...messages].reverse()) {
           const existing = stored.get(message.id);
           if (existing) {
-            if (existing[2] > 0 && conversationChars + existing[5] > MEMBER_HISTORY_LIMITS.conversationCharacters) {
+            if (existing[2] > 0 && conversationChars + existing[5] > this.caps.conversationCharacters) {
               this.deleteChunks(user, conversation.id, message.id);
               state.indexed_chunks -= existing[2]; state.indexed_chars -= existing[5]; state.indexed_messages -= 1;
               next.set(message.id, [existing[0], existing[1], CAPPED, existing[3], existing[4], 0]);
@@ -263,7 +270,7 @@ export class AiMemberHistoryIndex {
           if (overBudget()) { truncated = true; complete = false; continue; }
           const text = historyIndexText(message.content);
           const chars = Array.from(text).length;
-          if (conversationChars + chars > MEMBER_HISTORY_LIMITS.conversationCharacters) { next.set(message.id, [message.id, message.fingerprint, CAPPED, at, role, 0]); continue; }
+          if (conversationChars + chars > this.caps.conversationCharacters) { next.set(message.id, [message.id, message.fingerprint, CAPPED, at, role, 0]); continue; }
           const chunks = text ? this.insertChunks(user, generation, owner, conversation.id, message, at, text) : 0;
           spentMessages += 1; spentChars += chars; indexed += 1;
           if (chunks) { conversationChars += chars; state.indexed_chunks += chunks; state.indexed_chars += chars; state.indexed_messages += 1; }
@@ -342,7 +349,7 @@ export class AiMemberHistoryIndex {
 
   /** Over the member cap: the least recently active conversations stop being searchable. */
   private enforceMemberCaps(user: string, state: StateRow, generation: number, map: Record<string, string>): void {
-    for (let guard = 0; guard < 500 && (state.indexed_chars > MEMBER_HISTORY_LIMITS.memberCharacters || state.indexed_chunks > MEMBER_HISTORY_LIMITS.memberChunks); guard += 1) {
+    for (let guard = 0; guard < 500 && (state.indexed_chars > this.caps.memberCharacters || state.indexed_chunks > this.caps.memberChunks); guard += 1) {
       const victim = this.sql.all<ConversationRow>("SELECT conversation_id,generation,title,fingerprint,source_revision,status,messages,last_at,chars,chunks FROM ai_member_history_conversations WHERE tenant_id=? AND user_id=? AND generation=? AND chunks>0 ORDER BY last_at ASC, updated_at ASC LIMIT 1",
         this.tenantId, user, generation)[0];
       if (!victim) break;
