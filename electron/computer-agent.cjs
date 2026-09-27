@@ -374,6 +374,8 @@ function createComputerAgentController({
   showExtraConsent = async () => false,
   openPrivacyPane = async () => undefined,
   emit = () => undefined,
+  /** Brings 同频 forward again after a run that kept the target app in front. */
+  restoreHost = () => undefined,
   registerStopShortcut = null,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); }),
@@ -588,6 +590,7 @@ function createComputerAgentController({
         tracker: policy.emptyTracker(),
         sendBaseline: null,
         typeCheck: null,
+        frontedTarget: false,
         observation: null,
         apps: [],
         busy: false,
@@ -817,6 +820,16 @@ function createComputerAgentController({
     return { status: "unverified" };
   }
 
+  /** Persistently fronts the target window (Cua bring_to_front); best effort. */
+  async function keepInFront(state, target) {
+    try {
+      const result = await native(state, (driver, _sdk, signal) => driver.callTool("bring_to_front", `{"pid":${target.pid},"window_id":${target.windowId}}`, { signal }));
+      if (result && result.isError !== true) state.frontedTarget = true;
+    } catch {
+      // The action's own foreground rung still fronts the window briefly.
+    }
+  }
+
   async function dispatch(state, candidate, target, elementToken) {
     const sdk = state.sdk;
     const delivery = candidate.delivery === "foreground" ? "foreground" : "background";
@@ -947,6 +960,14 @@ function createComputerAgentController({
     const typeCheck = candidate.kind === "type" && !elementToken
       ? { field: candidate.field, text: candidate.text, before: policy.typedTextSpots(observation.elements, candidate.text), looks: 0 }
       : null;
+    // Cua's foreground rung fronts the window for one action and then gives
+    // the screen back to the previous app. Apps such as WeChat close their
+    // search box when they lose the front, so ⌘F, the typed search and Return
+    // would each land in a fresh window. Foreground steps therefore keep the
+    // target in front for the rest of the run; stop() hands it back.
+    if (delivery === "foreground" && target && ["key", "hotkey", "type", "point"].includes(candidate.kind)) {
+      await keepInFront(state, target);
+    }
     const suspendEsc = candidate.kind === "key" && candidate.key === "escape";
     if (suspendEsc) disarmStopShortcut();
     let result;
@@ -1003,6 +1024,10 @@ function createComputerAgentController({
     current.stopped = true;
     current.observation = null;
     await disposeDriver(current);
+    // The run kept the target app in front; give the screen back to 同频.
+    if (current.frontedTarget) {
+      try { restoreHost(); } catch { /* the member can switch back themselves */ }
+    }
     emit({ type: "stopped", reason: safeReason });
     return success({ stopped: true });
   }

@@ -100,10 +100,20 @@ function fakeSdk(app, options = {}) {
     bounds: { x: 100, y: 50, width: 1000, height: 800 },
     isOnScreen: !app.hidden, minimized: app.hidden, layer: 0, zIndex: 5n,
   });
+  // `clearsSearchOnBlur`: like WeChat, a foreground action on a window that
+  // is not kept in front gives the front back afterwards, which closes the
+  // search box and drops its text.
+  const blurAfterForeground = (delivery) => {
+    if (options.clearsSearchOnBlur && delivery === "foreground" && !app.front) {
+      app.search = "";
+      if (app.focus === "search") app.focus = "none";
+    }
+  };
   const applyKey = (key, delivery) => {
     if (app.refuseBackground && delivery === "background") return { isError: true, errorCode: "background_unavailable", text: "", images: [], degraded: false, rawJson: "{}" };
     if (app.ignoresBackground && delivery === "background") return { isError: false, action: { effect: effect.Unverifiable, route: 1 }, text: "", images: [], degraded: false, rawJson: "{}" };
     key();
+    blurAfterForeground(delivery);
     return { isError: false, action: { effect: effect.Unverifiable, route: 1 }, text: "", images: [], degraded: false, rawJson: "{}" };
   };
   const driver = {
@@ -163,7 +173,7 @@ function fakeSdk(app, options = {}) {
       if (options.toolThrows && options.toolThrows(name, argumentsJson)) throw Object.assign(new Error("native_timeout"), { code: "native_timeout" });
       const args = JSON.parse(argumentsJson);
       if (name === "launch_app") { calls.launches += 1; app.running = true; app.hidden = false; return { isError: false, text: "", images: [], degraded: false, rawJson: "{}" }; }
-      if (name === "bring_to_front") { app.hidden = false; return { isError: false, text: "", images: [], degraded: false, rawJson: "{}" }; }
+      if (name === "bring_to_front") { app.hidden = false; app.front = true; return { isError: false, text: "", images: [], degraded: false, rawJson: "{}" }; }
       // `cmdFMissesSearch`: ⌘F does not reach the search box; the chat input keeps focus.
       if (name === "hotkey") return applyKey(() => { app.focus = options.cmdFMissesSearch ? "input" : "search"; }, args.delivery_mode);
       if (name === "press_key") {
@@ -212,6 +222,7 @@ function makeAgent({ app = wechatApp(), sdkOptions = {}, consent = true, extraCo
   let stopShortcut = null;
   const shortcut = { registered: 0, disposed: 0, press: () => stopShortcut?.() };
   let ids = 0;
+  let restored = 0;
   const controller = createComputerAgentController({
     platform: "darwin", arch: "arm64", osVersion: "15.1", hostPid: 1,
     loadSdk: async () => fake.sdk,
@@ -220,6 +231,7 @@ function makeAgent({ app = wechatApp(), sdkOptions = {}, consent = true, extraCo
     showExtraConsent: vi.fn(async (spec) => { dialogs.extra.push(spec); return typeof extraConsent === "function" ? extraConsent(spec) : extraConsent; }),
     openPrivacyPane: vi.fn(async (pane) => { panes.push(pane); if (sdkOptions.grantOnPane) Object.assign(fake.permissions, sdkOptions.grantOnPane(pane) ?? {}); }),
     emit: (event) => events.push(event),
+    restoreHost: () => { restored += 1; },
     registerStopShortcut: (onStop) => { shortcut.registered += 1; stopShortcut = onStop; return () => { shortcut.disposed += 1; stopShortcut = null; }; },
     now: () => clock,
     sleep: async (ms) => { clock += ms; },
@@ -229,7 +241,7 @@ function makeAgent({ app = wechatApp(), sdkOptions = {}, consent = true, extraCo
     timing: { ...TIMING, settleMs: 0, launchSettleMs: 0, openPaneAfterMs: 2_000, screenRecordingGraceMs: 5_000 },
     ...overrides,
   });
-  return { controller, fake, app, events, dialogs, panes, helpers, shortcut, advance: (ms) => { clock += ms; } };
+  return { controller, fake, app, events, dialogs, panes, helpers, shortcut, advance: (ms) => { clock += ms; }, get restored() { return restored; } };
 }
 
 async function started(options) {
@@ -500,8 +512,37 @@ describe("computer agent WeChat keyboard path", () => {
     const send = await step(agent, "key_return_fg");
     expect(send.candidate.risk).toBe("send");
     expect(agent.app.sent).toEqual(["中秋快乐"]);
-    const modes = agent.fake.calls.tools.map((call) => JSON.parse(call.argumentsJson).delivery_mode);
-    expect(modes).toEqual(["background", "foreground", "foreground", "foreground", "foreground", "foreground"]);
+    // Every foreground step first keeps the exact window in front (WeChat
+    // closes its search box when it loses the front between steps).
+    // (The raw JSON keeps the uint64 window id exact; JSON.parse would round it.)
+    expect(agent.fake.calls.tools.map((call) => call.name === "bring_to_front" ? call.argumentsJson : JSON.parse(call.argumentsJson).delivery_mode)).toEqual([
+      "background",
+      ...Array.from({ length: 5 }, () => [`{"pid":4242,"window_id":${WINDOW_ID}}`, "foreground"]).flat(),
+    ]);
+    // Stopping hands the screen back to 同频.
+    expect(agent.restored).toBe(0);
+    await agent.controller.stop("user");
+    expect(agent.restored).toBe(1);
+  });
+
+  it("keeps a WeChat-like window in front so its search survives between foreground steps", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, focusVisible: true }), sdkOptions: { clearsSearchOnBlur: true } });
+    expect((await step(agent, "open_search")).result.status).toBe("failed");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    expect(agent.app.search).toBe("姐姐");
+    const opened = await step(agent, "key_return_fg");
+    expect(opened.view.facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "expected" });
+    expect(opened.candidate.risk).toBe("none");
+    expect(agent.app.chat).toBe("姐姐");
+  });
+
+  it("does not bring 同频 forward after a run that stayed in the background", async () => {
+    const agent = await started({ app: wechatApp({ focusVisible: true }) });
+    await step(agent, "open_search");
+    await agent.controller.stop("user");
+    expect(agent.fake.calls.tools.some((call) => call.name === "bring_to_front")).toBe(false);
+    expect(agent.restored).toBe(0);
   });
 
   it("keeps Return risky while the search box does not visibly hold the search text", async () => {

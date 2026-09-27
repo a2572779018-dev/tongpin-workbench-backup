@@ -23,15 +23,20 @@ function registerComputerAgentIpc({ ipcMain, getMainWindow, assertMainRendererEv
     return window && !window.isDestroyed() ? window : null;
   }
 
-  /** Brings 同频 forward so a confirmation is never hidden behind the target app. */
+  /** Brings 同频 forward (a confirmation or the end of a run in another app). */
+  function bringForward(parent) {
+    if (process.platform === "darwin") app.focus({ steal: true });
+    if (parent.isMinimized()) parent.restore();
+    parent.show();
+    parent.focus();
+  }
+
+  /** A confirmation is never hidden behind the target app. */
   async function confirm(spec, type) {
     const parent = mainWindow();
     if (!parent) return false;
     try {
-      if (process.platform === "darwin") app.focus({ steal: true });
-      if (parent.isMinimized()) parent.restore();
-      parent.show();
-      parent.focus();
+      bringForward(parent);
     } catch {
       // The dialog still opens attached to the window.
     }
@@ -72,6 +77,10 @@ function registerComputerAgentIpc({ ipcMain, getMainWindow, assertMainRendererEv
       emit: (event) => {
         const window = mainWindow();
         if (window) window.webContents.send("computer-agent:event", event);
+      },
+      restoreHost: () => {
+        const window = mainWindow();
+        if (window) bringForward(window);
       },
       registerStopShortcut: (onStop) => {
         if (!globalShortcut.register("Escape", onStop)) return null;

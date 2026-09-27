@@ -921,7 +921,7 @@ function consentDialog(task, limits, { platform, missingPermissions, screenRecor
     task.parameters.length ? `· 只会输入这些文字：${task.parameters.map((parameter) => `「${parameter.value}」`).join("、")}` : "· 不会输入任何文字",
     task.irreversible ? `· 不可逆操作（最多一次）：${task.irreversible.summary}` : "· 不会发送、提交、删除或付款",
     `· 上限：最多 ${limits.maxSteps} 步、${limits.maxMinutes} 分钟；随时可以点同频里的「停止」或按 Esc 立即停止`,
-    "· 执行时目标应用可能会被短暂切到前台",
+    "· 执行时目标应用可能会被切到前台（任务结束后回到同频）",
   ];
   if (platform === "darwin") {
     const names = { accessibility: "辅助功能", screenRecording: "屏幕录制" };
