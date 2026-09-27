@@ -59,6 +59,13 @@ export function popupText(observation: NonNullable<ComputerTimelineStep["observa
   return ` · ${what}${count}${where}`;
 }
 
+/** What the executor read off the window around a send (never the text itself). */
+export function screenTextNote(observation: NonNullable<ComputerTimelineStep["observation"]>): string {
+  const screen = observation.screenText;
+  if (!screen) return "";
+  return ` · 屏幕文字：聊天标题${screen.recipientInTitle ? "✓" : "未核对"}、输入框${screen.composerHoldsText ? "✓" : "未见该文字"}${screen.copies ? `、已见 ${screen.copies} 处` : ""}`;
+}
+
 /**
  * Buttons under a question: the confirmation (only when offered, for a send
  * Jev chose but cannot verify on screen), guidance for Jev, or stop.
@@ -83,7 +90,7 @@ export function latestStepText(steps: readonly ComputerTimelineStep[]): string {
 
 function StepChain({ step }: { step: ComputerTimelineStep & { verifiedEffect?: number } }) {
   const parts: Array<{ key: string; text: string; tone?: "ok" | "warn" | "muted" }> = [];
-  if (step.observation) parts.push({ key: "observe", text: `读取「${step.observation.app ?? "目标应用"}」${step.observation.elementCount ? ` · ${step.observation.elementCount} 个元素` : ""}${popupText(step.observation)}${step.observation.screenshotUsed ? " · 截图定位" : ""}` });
+  if (step.observation) parts.push({ key: "observe", text: `读取「${step.observation.app ?? "目标应用"}」${step.observation.elementCount ? ` · ${step.observation.elementCount} 个元素` : ""}${popupText(step.observation)}${screenTextNote(step.observation)}${step.observation.screenshotUsed ? " · 截图定位" : ""}` });
   else parts.push({ key: "observe", text: "读取界面…", tone: "muted" });
   if (step.candidateCount !== undefined) parts.push({ key: "candidates", text: `候选 ${step.candidateCount} 个` });
   if (step.choice) parts.push({ key: "choice", text: `Jev 选择：${step.choice.label}（置信度 ${percent(step.choice.confidence)}）`, tone: step.choice.risk !== "none" ? "warn" : undefined });

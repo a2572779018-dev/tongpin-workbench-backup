@@ -290,6 +290,33 @@ describe("computer executor loop", () => {
     expect(result).toMatchObject({ outcome: "verified" });
   });
 
+  it("sends without asking the member when the executor read the chat title and the composer off the screen", async () => {
+    const checked = view(4, [candidate("key_return", "按回车发送「中秋快乐」", "send")], {
+      focus: "conversation", conversationOpenedFor: "姐姐", typedIntoMessageBox: "中秋快乐", screenCheck: { recipientInTitle: true, composerHoldsText: true },
+    });
+    const h = harness({
+      views: [checked, view(5, [candidate("key_escape", "按 Esc 关闭弹出内容")], { focus: "conversation", irreversibleDone: true, sendEvidence: { before: 0, after: 1, inputStillHasText: false, screen: true } })],
+      // Jev cannot see WeChat's text and scores the match low; the screen check stands in for the member's look.
+      decisions: [{ id: "key_return", confidence: 0.95, recipientMatch: 0.3, contentMatch: 0.2 }, { id: "done", goalDone: 0.9 }],
+    });
+    const askUser = vi.fn(async (_question: ComputerQuestion): Promise<ComputerAnswer | null> => null);
+    const result = await run(h, {}, { askUser });
+    expect(askUser).not.toHaveBeenCalled();
+    expect(h.calls.execute.map(item => item.candidateId)).toEqual(["key_return"]);
+    expect(result).toMatchObject({ outcome: "verified" });
+  });
+
+  it("still asks when the screen check covers only one of the two", async () => {
+    const half = view(4, [candidate("key_return", "按回车发送「中秋快乐」", "send")], {
+      focus: "conversation", conversationOpenedFor: "姐姐", typedIntoMessageBox: "中秋快乐", screenCheck: { recipientInTitle: true, composerHoldsText: false },
+    });
+    const h = harness({ views: [half], decisions: [{ id: "key_return", confidence: 0.95, contentMatch: 0.2 }, { id: "key_return", confidence: 0.95, contentMatch: 0.2 }] });
+    const askUser = vi.fn(async (_question: ComputerQuestion): Promise<ComputerAnswer | null> => null);
+    await run(h, {}, { askUser });
+    expect(askUser).toHaveBeenCalledTimes(1);
+    expect(h.bridge.execute).not.toHaveBeenCalled();
+  });
+
   it("offers no confirmation when Jev is itself unsure about sending", async () => {
     const h = harness({
       views: [wechatViews[4]],

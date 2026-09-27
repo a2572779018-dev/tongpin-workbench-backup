@@ -196,7 +196,13 @@ function sanitizeFacts(value: unknown): ComputerExecutorFacts {
       before: integer(evidence.before, 0, 10_000, "发送前出现次数"),
       after: integer(evidence.after, 0, 10_000, "发送后出现次数"),
       inputStillHasText: typeof evidence.inputStillHasText === "boolean" ? evidence.inputStillHasText : null,
+      ...(evidence.screen === true ? { screen: true } : {}),
     };
+  }
+  let screenCheck: ComputerExecutorFacts["screenCheck"];
+  if (root.screenCheck !== undefined && root.screenCheck !== null) {
+    const check = object(root.screenCheck, "屏幕文字核对");
+    screenCheck = { recipientInTitle: check.recipientInTitle === true, composerHoldsText: check.composerHoldsText === true };
   }
   let typedLanding: ComputerExecutorFacts["typedLanding"];
   if (root.typedLanding !== undefined && root.typedLanding !== null) {
@@ -210,7 +216,7 @@ function sanitizeFacts(value: unknown): ComputerExecutorFacts {
     focus, irreversibleDone: root.irreversibleDone === true,
     ...(typedLanding ? { typedLanding } : {}), ...(root.searchListShown === true ? { searchListShown: true } : {}),
     ...(typedIntoSearch ? { typedIntoSearch } : {}), ...(typedIntoMessageBox ? { typedIntoMessageBox } : {}),
-    ...(conversationOpenedFor ? { conversationOpenedFor } : {}), ...(sendEvidence ? { sendEvidence } : {}),
+    ...(conversationOpenedFor ? { conversationOpenedFor } : {}), ...(sendEvidence ? { sendEvidence } : {}), ...(screenCheck ? { screenCheck } : {}),
     ...(targetApp ? { targetApp } : {}), ...(typeof root.appRunning === "boolean" ? { appRunning: root.appRunning } : {}),
     ...(root.targetWindow === "visible" || root.targetWindow === "hidden" || root.targetWindow === "none" ? { targetWindow: root.targetWindow } : {}),
   };
@@ -274,6 +280,7 @@ const NEXT_ACTION_RULES = [
   "`executor_facts.focus` is `search` once the search shortcut has been pressed: the search box has keyboard focus even when `observation` shows no change (many apps show nothing readable for an empty search box). If `executor_facts.typedIntoSearch` is absent, type the search text next instead of pressing the shortcut again or re-observing.",
   "`executor_facts.conversationOpenedFor` names the contact whose chat this run just opened, and `focus` `conversation` means that chat's message box has keyboard focus even when `observation` does not show it: if `executor_facts.typedIntoMessageBox` is absent, type the message next instead of re-observing.",
   "`executor_facts.searchListShown` is true when the app shows a list under its search box (suggestions or results) that `observation` may not be able to show: the search box is open even if no result text is visible, so do not reopen search; type the search text if it has not been typed yet, or, when `typedLanding` is `expected`, choose the candidate that opens the highlighted search result.",
+  "`executor_facts.screenCheck` comes from the executor's own on-device text recognition of the target window (trusted, unlike `observation`): `recipientInTitle` true means the open chat's title is exactly `task.irreversible_step.recipient`, and `composerHoldsText` true means the message box shows exactly `task.irreversible_step.content`. When both are true and the send has not been done, choose the candidate that sends the message instead of re-observing.",
   "Choose `abstain` if no candidate is both safe and useful, or if the screen needs the user (login, QR code, captcha, password or payment password, unexpected dialog).",
   "Never choose a candidate that sends, submits, deletes or pays for anything other than exactly `task.irreversible_step`, and never repeat it once `progress.irreversible_step_done` is true.",
 ];
@@ -320,8 +327,8 @@ export function buildComputerJevRequest(model: string, task: ComputerTaskSpec, i
   };
   if (input.lastAction) questions.previous_effect = { type: "noul", instructions: "Does `observation` show that `last_action.expected_effect` happened?" };
   if (irreversible?.kind === "send_message" && input.candidates.some(candidate => candidate.risk === "send")) {
-    questions.recipient_match = { type: "noul", instructions: "In `observation`, is the conversation that is currently open the chat with the contact named exactly `task.irreversible_step.recipient`?" };
-    questions.content_match = { type: "noul", instructions: "In `observation`, does the message input box contain exactly `task.irreversible_step.content` and nothing else?" };
+    questions.recipient_match = { type: "noul", instructions: "Judging by `observation` and `executor_facts.screenCheck.recipientInTitle` (the executor's own reading of the chat title), is the conversation that is currently open the chat with the contact named exactly `task.irreversible_step.recipient`?" };
+    questions.content_match = { type: "noul", instructions: "Judging by `observation` and `executor_facts.screenCheck.composerHoldsText` (the executor's own reading of the message box), does the message input box contain exactly `task.irreversible_step.content` and nothing else?" };
   }
   return { model, state, questions };
 }

@@ -384,7 +384,10 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       /* Confidence floors: reobserve once, then ask the member in chat. */
       const floor = choice.risk === "none" ? limits.minConfidence : Math.max(limits.minConfidence, COMPUTER_AGENT_LIMITS.irreversibleMinConfidence);
       const matchFloor = COMPUTER_AGENT_LIMITS.irreversibleMinConfidence;
-      const sendDoubt = choice.risk === "send" && !memberConfirmedSend && ((verification.recipientMatch ?? 1) < matchFloor || (verification.contentMatch ?? 1) < matchFloor);
+      // The executor read the chat title and the message box off the screen
+      // itself: that is the check the member would otherwise be asked to do.
+      const screenVerified = view.facts.screenCheck?.recipientInTitle === true && view.facts.screenCheck.composerHoldsText === true;
+      const sendDoubt = choice.risk === "send" && !memberConfirmedSend && !screenVerified && ((verification.recipientMatch ?? 1) < matchFloor || (verification.contentMatch ?? 1) < matchFloor);
       if (choice.risk !== "send") memberConfirmedSend = false;
       if (decision.confidence < floor || sendDoubt || choice.id === "abstain") {
         lowConfidenceStreak += 1;

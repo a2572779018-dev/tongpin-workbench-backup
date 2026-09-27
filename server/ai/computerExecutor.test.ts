@@ -192,6 +192,25 @@ describe("computer executor server (task spec, Jev decisions, billing)", () => {
     expect(malformed.state.executor_facts).not.toHaveProperty("searchListShown");
   });
 
+  it("passes the executor's own screen-text check as plain booleans, and the screen flag of the send evidence", async () => {
+    const created = await createTask();
+    if (created.kind !== "run") throw new Error("expected run");
+    await runtime.service.computer.decide("member", created.run.runId, decisionBody({ facts: {
+      focus: "conversation", irreversibleDone: false, conversationOpenedFor: "姐姐", typedIntoMessageBox: "中秋快乐",
+      screenCheck: { recipientInTitle: true, composerHoldsText: "yes" as never, text: "screen text" } as never,
+    } }));
+    const checked = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
+    // Only the two booleans pass; anything else (text, non-booleans) is dropped or false.
+    expect(checked.state.executor_facts).toMatchObject({ screenCheck: { recipientInTitle: true, composerHoldsText: false } });
+    expect(JSON.stringify(checked.state.executor_facts)).not.toContain("screen text");
+    expect(JSON.stringify(checked.questions.next_action.instructions)).toContain("executor_facts.screenCheck");
+    await runtime.service.computer.decide("member", created.run.runId, decisionBody({ step: 2, observationId: "obs_fixture_0002", facts: {
+      focus: "conversation", irreversibleDone: true, sendEvidence: { before: 0, after: 1, inputStillHasText: false, screen: true },
+    } }));
+    const after = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
+    expect(after.state.executor_facts).toMatchObject({ sendEvidence: { before: 0, after: 1, inputStillHasText: false, screen: true } });
+  });
+
   it("asks Jev one closed choice plus verification nouls and bills actual usage at admin prices", async () => {
     const created = await createTask();
     if (created.kind !== "run") throw new Error("expected run");

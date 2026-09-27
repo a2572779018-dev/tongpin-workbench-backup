@@ -176,8 +176,16 @@ export interface ComputerExecutorFacts {
   typedIntoMessageBox?: string;
   conversationOpenedFor?: string;
   irreversibleDone: boolean;
-  /** After an executed send: occurrences of the sent text before/after and whether the input still holds it. */
-  sendEvidence?: { before: number; after: number; inputStillHasText: boolean | null };
+  /** After an executed send: occurrences of the sent text before/after and whether the input still holds it
+   * (`screen`: counted on the window's recognized text, when the app shows neither to accessibility). */
+  sendEvidence?: { before: number; after: number; inputStillHasText: boolean | null; screen?: boolean };
+  /**
+   * Before the send, from the executor's own on-device text recognition of the
+   * target window (application-owned, not screen instructions): whether the
+   * open chat's title is exactly the granted recipient and whether the message
+   * box shows exactly the granted text.
+   */
+  screenCheck?: { recipientInTitle: boolean; composerHoldsText: boolean };
   targetApp?: string;
   appRunning?: boolean;
   /** Whether the granted app has a usable window: "hidden" = minimized, on another Space or no main window. */
@@ -210,6 +218,8 @@ export interface ComputerObserveResult {
   display: {
     app: string | null; title: string | null; elementCount: number; axSparse: boolean; screenshotUsed: boolean;
     popupCount?: number; popupElementCount?: number; searchListShown?: boolean;
+    /** Around a send: what the window's recognized text showed (never the text itself). */
+    screenText?: { recipientInTitle: boolean; composerHoldsText: boolean; copies: number };
     floating?: { popups: Array<{ x: number; y: number; w: number; h: number; list: boolean }>; searchBox: { x: number; y: number; w: number; h: number } | null } | null;
   };
 }

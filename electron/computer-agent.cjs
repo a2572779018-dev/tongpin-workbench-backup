@@ -56,6 +56,11 @@ const CAPTURE = Object.freeze({ maxElements: 1000, maxDepth: 40, maxDimension: 1
 // Same-app windows over the target (WeChat's search list is its own window):
 // read-only extras of each capture, small and few.
 const POPUP_CAPTURE = Object.freeze({ maxWindows: 2, maxElements: 200, maxDepth: 30, maxDimension: 320, maxTexts: 40 });
+// The window's picture read by the system's text recognition around a send
+// (chat title, composer, sent copies). Large enough for 12pt CJK text.
+const SCREEN_TEXT = Object.freeze({ maxDimension: 2000, maxLines: 400, maxLineChars: 120 });
+/** Apps known to take no background input (their accessibility nodes cannot be tied to the window). */
+const FOREGROUND_FIRST_BUNDLES = new Set(["com.tencent.xinwechat"]);
 /** Captures on which focus-typed text is looked for before the check lapses. */
 const TYPE_CHECK_LOOKS = 3;
 
@@ -232,6 +237,23 @@ function parseLayeredWindows(text, pid) {
   return rows.slice(0, 20)
     .filter((row) => Array.isArray(row) && row.length >= 6 && row.slice(0, 6).every(finite) && Number.isInteger(row[0]) && Number.isInteger(row[1]))
     .map(([windowId, layer, x, y, width, height]) => ({ windowId, pid, layer, bounds: { x, y, width, height }, isOnScreen: true, minimized: false, title: "", appName: "" }));
+}
+
+/**
+ * Rows of the text recognizer script (recognizeWindowText in the host):
+ * [text, confidence, x, y, width, height], coordinates normalized to the
+ * picture with Vision's bottom-left origin. Untrusted output: malformed rows
+ * are dropped; null when it is not a list (recognition unavailable).
+ */
+function parseRecognizedText(text) {
+  let rows;
+  try { rows = JSON.parse(String(text ?? "").trim()); } catch { return null; }
+  if (!Array.isArray(rows)) return null;
+  const unit = (value) => finite(value) && value >= -0.01 && value <= 1.01;
+  return rows.slice(0, SCREEN_TEXT.maxLines)
+    .filter((row) => Array.isArray(row) && row.length >= 6 && typeof row[0] === "string" && row[0].length <= 400 &&
+      finite(row[1]) && row.slice(2, 6).every(unit) && row[4] > 0 && row[5] > 0)
+    .map(([text, confidence, x, y, width, height]) => [text, confidence, x, y, width, height]);
 }
 
 /**
@@ -430,6 +452,15 @@ function createComputerAgentController({
    * own window.
    */
   listPopupWindows = async () => null,
+  /**
+   * The system's text recognition over one window picture (base64 image):
+   * [text, confidence, x, y, width, height] rows with coordinates normalized
+   * to the picture (origin at the bottom left, Vision's convention); null
+   * when unavailable. Runs on this machine only; the text never leaves it.
+   */
+  recognizeText = async () => null,
+  /** Bundle ids (lower case) of apps that start on the foreground rung. */
+  foregroundFirstBundles = FOREGROUND_FIRST_BUNDLES,
   registerStopShortcut = null,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); }),
@@ -441,6 +472,8 @@ function createComputerAgentController({
   let sdkPromise = null;
   let run = null;
   let pending = null;
+  // Apps (bundle ids) that refused background input in an earlier run of this session.
+  const learnedForeground = new Set();
   let shortcutDispose = null;
   let screenRecordingAsked = false;
 
@@ -643,6 +676,7 @@ function createComputerAgentController({
         targetIndex: 0,
         tracker: policy.emptyTracker(),
         sendBaseline: null,
+        screenBaseline: null,
         typeCheck: null,
         frontedTarget: false,
         observation: null,
@@ -658,6 +692,10 @@ function createComputerAgentController({
       // Esc or Stop may arrive while the app list is read.
       if (current.stopped) return failure("stopped");
       current.apps = apps;
+      // Apps known (or learned earlier in this session) to take no background
+      // input start on the foreground rung instead of spending steps on misses.
+      const bundle = targetBundle(current);
+      if (bundle && (foregroundFirstBundles.has(bundle) || learnedForeground.has(bundle))) current.tracker = policy.foregroundFirst(current.tracker);
       return success({
         runId: current.runId,
         platform: platform === "darwin" ? "macos" : "windows",
@@ -757,6 +795,51 @@ function createComputerAgentController({
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The target window's visible text, read on this machine by the system's
+   * text recognition, as lines in window-local points (top-left origin).
+   * Null without Screen Recording, without a recognizer or on any failure:
+   * the run then relies on the accessibility tree alone.
+   */
+  async function readScreenText(state, target) {
+    if (!target || state.permissions.screenRecording !== true) return null;
+    try {
+      const output = await native(state, (driver, sdk, signal) => driver.getWindowState(sdk.GetWindowStateInput.new({
+        pid: target.pid,
+        windowId: BigInt(target.windowId),
+        session: state.sessionId,
+        includeAccessibilityTree: false,
+        includeScreenshot: true,
+        maxDimension: SCREEN_TEXT.maxDimension,
+      }), { signal }));
+      if (!output || output.pid !== target.pid || bigString(output.windowId) !== target.windowId) return null;
+      const image = Array.isArray(output.images) && output.images[0] && typeof output.images[0].dataBase64 === "string" ? output.images[0].dataBase64 : "";
+      const bounds = normalizeBounds(output.windowBounds) || target.bounds;
+      if (!image || !bounds || state.stopped) return null;
+      const rows = await recognizeText(image);
+      if (!Array.isArray(rows) || state.stopped) return null;
+      const lines = [];
+      for (const row of rows.slice(0, SCREEN_TEXT.maxLines)) {
+        if (!Array.isArray(row)) continue;
+        const [text, confidence, nx, ny, nw, nh] = row;
+        const clean = safeText(text, SCREEN_TEXT.maxLineChars);
+        if (!clean || ![nx, ny, nw, nh].every(finite) || !(nw > 0 && nh > 0) || (finite(confidence) && confidence < 0.3)) continue;
+        lines.push({ text: clean, x: nx * bounds.width, y: (1 - ny - nh) * bounds.height, w: nw * bounds.width, h: nh * bounds.height });
+      }
+      return { lines, windowBounds: bounds };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Screen facts about the granted send, in the phases where they matter. */
+  async function screenFacts(state, target, composerAt = null) {
+    const irreversible = state.task.irreversible;
+    if (!irreversible || irreversible.kind !== "send_message") return null;
+    const read = await readScreenText(state, target);
+    return read ? policy.screenSendFacts({ task: state.task, screen: read, windowBounds: read.windowBounds, composerAt }) : null;
   }
 
   /**
@@ -956,7 +1039,15 @@ function createComputerAgentController({
         treeTexts: popupTexts.length ? [...treeTexts, ...popupTexts] : treeTexts,
       });
       const targetWindow = target ? "visible" : targetApp && targetApp.running ? "hidden" : "none";
-      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing, searchListShown: searchList.lists.length > 0 });
+      // Around a send the window's text is read on this machine: before it,
+      // whether the open chat and the composer are the granted ones; after
+      // it, whether a new copy appeared and the composer emptied.
+      const tracker = state.tracker;
+      const aroundSend = tracker.sendCount > 0 ? Boolean(state.screenBaseline) : Boolean(tracker.conversationTarget || tracker.composerText);
+      const screen = target && aroundSend ? await screenFacts(state, target, tracker.sendCount > 0 ? state.screenBaseline.composerLine : null) : null;
+      if (state.stopped) return failure("stopped");
+      state.observation.screen = screen;
+      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing, searchListShown: searchList.lists.length > 0, screen, screenBaseline: state.screenBaseline });
       return success({
         observationId,
         observation,
@@ -966,6 +1057,7 @@ function createComputerAgentController({
           app: appName, title: windowTitle, elementCount: elements.length, axSparse, screenshotUsed,
           ...(popups.length ? { popupCount: popups.length, popupElementCount: popupElements.length, floating: policy.floatingGeometry(listBounds, popups, searchList.lists, elements) } : {}),
           ...(searchList.lists.length ? { searchListShown: true } : {}),
+          ...(screen ? { screenText: { recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.composerLine), copies: screen.copies } } : {}),
         },
       });
     } catch {
@@ -1108,7 +1200,7 @@ function createComputerAgentController({
   async function executeCandidate(state, candidate, observation) {
     const task = state.task;
     const delivery = candidate.delivery === "foreground" ? "foreground" : "background";
-    const authObservation = { appAllowed: observation.appAllowed, elements: observation.elements, windowTitle: observation.windowTitle, treeTexts: observation.treeTexts };
+    const authObservation = { appAllowed: observation.appAllowed, elements: observation.elements, windowTitle: observation.windowTitle, treeTexts: observation.treeTexts, screen: observation.screen || null };
     let decision = policy.authorizeCandidate(candidate, { task, tracker: state.tracker, observation: authObservation, grantApps: state.grantApps });
     let authorization = "allowed";
     if (!decision.allowed && decision.extraConsent) {
@@ -1136,17 +1228,25 @@ function createComputerAgentController({
         if (!fresh || state.stopped) return outcome("blocked", { authorization, code: "target_changed", message: "界面已变化，未执行这一步" });
         const freshElements = policy.modelElements(fresh.elements, fresh.windowBounds);
         const freshTexts = policy.extractTreeTexts(fresh.treeMarkdown);
+        // The send is checked against the window's text as it is right now,
+        // which is also the baseline its result is measured against.
+        const freshScreen = candidate.risk === "send" ? await screenFacts(state, target) : null;
+        if (state.stopped) return outcome("blocked", { authorization, code: "stopped", message: SAFE_MESSAGES.stopped });
         if (candidate.elementIdentity) {
           const matches = freshElements.filter((element) => element.identity === candidate.elementIdentity && element.token);
           if (matches.length !== 1) return outcome("blocked", { authorization, code: "target_changed", message: "要操作的控件已变化，未执行这一步" });
           elementToken = matches[0].token;
         }
         if (authorization === "allowed") {
-          const again = policy.authorizeCandidate(candidate, { task, tracker: state.tracker, observation: { appAllowed: true, elements: freshElements, windowTitle: fresh.windowTitle, treeTexts: freshTexts }, grantApps: state.grantApps });
+          const again = policy.authorizeCandidate(candidate, { task, tracker: state.tracker, observation: { appAllowed: true, elements: freshElements, windowTitle: fresh.windowTitle, treeTexts: freshTexts, screen: freshScreen }, grantApps: state.grantApps });
           if (!again.allowed) return outcome("blocked", { authorization: "denied", code: "authorization_changed", message: again.reason || (again.extraConsent && again.extraConsent.reason) || "界面已变化，未执行这一步" });
         }
         const content = task.irreversible && task.irreversible.content;
-        if (candidate.risk === "send" && content) state.sendBaseline = policy.sentTextCount(freshElements, content);
+        if (candidate.risk === "send" && content) {
+          state.sendBaseline = policy.sentTextCount(freshElements, content);
+          // Measured on screen only when the composer line itself was seen.
+          state.screenBaseline = freshScreen && freshScreen.composerLine ? freshScreen : null;
+        }
       }
     }
 
@@ -1253,11 +1353,22 @@ function createComputerAgentController({
     return outcome(status, { authorization, code, delivery, message });
   }
 
+  function targetBundle(state) {
+    const app = (state.apps && state.apps[state.targetIndex]) || null;
+    return String((app && app.bundleId) || (state.grantApps[0] && state.grantApps[0].bundleId) || "").toLowerCase();
+  }
+
   async function stop(reason = "user") {
     const safeReason = ["esc", "user", "limit", "window_closed", "logout"].includes(reason) ? reason : "user";
     if (pending) pending.cancelled = true;
     const current = run;
     run = null;
+    // An app that refused element-addressed background input will refuse it
+    // again: the next run in this session starts in the foreground.
+    if (current && current.tracker && current.tracker.elementsRefused) {
+      const bundle = targetBundle(current);
+      if (bundle) learnedForeground.add(bundle);
+    }
     disarmStopShortcut();
     if (!current) return success({ stopped: true });
     current.stopped = true;
@@ -1289,6 +1400,7 @@ module.exports = {
   attachedWindows,
   chooseWindow,
   parseLayeredWindows,
+  parseRecognizedText,
   classifyError,
   createComputerAgentController,
   isBlockedApp,

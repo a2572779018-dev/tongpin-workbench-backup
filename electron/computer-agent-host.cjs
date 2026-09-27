@@ -7,8 +7,11 @@
  */
 
 const { execFile } = require("node:child_process");
+const { mkdtemp, rm, writeFile } = require("node:fs/promises");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
 const { app, desktopCapturer, dialog, globalShortcut, shell, systemPreferences } = require("electron");
-const { createComputerAgentController, parseLayeredWindows } = require("./computer-agent.cjs");
+const { createComputerAgentController, parseLayeredWindows, parseRecognizedText } = require("./computer-agent.cjs");
 const { computerUseSystemVersion } = require("./computer-use.cjs");
 
 /**
@@ -37,6 +40,55 @@ function listLayeredWindows(pid) {
       resolve(error ? null : parseLayeredWindows(stdout, pid));
     });
   });
+}
+
+/**
+ * The system's text recognition (Vision's VNRecognizeTextRequest, through
+ * JavaScript for Automation) over one window picture. The script is fixed;
+ * its only input is the path of a private temporary copy of the picture,
+ * removed right after. Nothing leaves this machine. Rows as
+ * parseRecognizedText reads them; null when recognition is unavailable.
+ */
+const RECOGNIZE_TEXT_SCRIPT = [
+  "function run(argv) {",
+  "  ObjC.import(\"Foundation\");",
+  "  ObjC.import(\"Vision\");",
+  "  const handler = $.VNImageRequestHandler.alloc.initWithURLOptions($.NSURL.fileURLWithPath(argv[0]), $.NSDictionary.dictionary);",
+  "  const request = $.VNRecognizeTextRequest.alloc.init;",
+  "  request.recognitionLevel = 0;",
+  "  request.usesLanguageCorrection = false;",
+  "  request.recognitionLanguages = $([\"zh-Hans\", \"en-US\"]);",
+  "  if (!handler.performRequestsError($([request]), null)) return \"null\";",
+  "  const results = request.results;",
+  "  const rows = [];",
+  "  for (let i = 0; results && i < results.count && rows.length < 400; i += 1) {",
+  "    const item = results.objectAtIndex(i);",
+  "    const top = item.topCandidates(1);",
+  "    if (!top.count) continue;",
+  "    const box = item.boundingBox;",
+  "    rows.push([top.objectAtIndex(0).string.js, Number(top.objectAtIndex(0).confidence), box.origin.x, box.origin.y, box.size.width, box.size.height]);",
+  "  }",
+  "  return JSON.stringify(rows);",
+  "}",
+].join("\n");
+const MAX_PICTURE_BASE64 = 32 * 1024 * 1024;
+
+async function recognizeWindowText(imageBase64) {
+  if (process.platform !== "darwin" || typeof imageBase64 !== "string" || !imageBase64 || imageBase64.length > MAX_PICTURE_BASE64) return null;
+  let dir = null;
+  try {
+    dir = await mkdtemp(join(tmpdir(), "tongpin-text-"));
+    const file = join(dir, "window.png");
+    await writeFile(file, Buffer.from(imageBase64, "base64"), { mode: 0o600 });
+    const stdout = await new Promise((resolve) => {
+      execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", RECOGNIZE_TEXT_SCRIPT, file], { timeout: 8_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true }, (error, out) => resolve(error ? null : out));
+    });
+    return stdout === null ? null : parseRecognizedText(stdout);
+  } catch {
+    return null;
+  } finally {
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 const PRIVACY_PANES = Object.freeze({
@@ -112,6 +164,7 @@ function registerComputerAgentIpc({ ipcMain, getMainWindow, assertMainRendererEv
         if (window) bringForward(window);
       },
       listPopupWindows: listLayeredWindows,
+      recognizeText: recognizeWindowText,
       registerStopShortcut: (onStop) => {
         if (!globalShortcut.register("Escape", onStop)) return null;
         return () => globalShortcut.unregister("Escape");

@@ -340,8 +340,17 @@ function emptyTracker() {
     // (WeChat's virtual accessibility nodes): every element-addressed
     // background action would be refused the same way, so none is offered.
     elementsRefused: false,
+    // The target app is known to take no background input (WeChat), or it
+    // refused it in an earlier run: start, and after switching apps stay, on
+    // the foreground rung instead of spending steps on background misses.
+    preferForeground: false,
     sendBaseline: null,
   });
+}
+
+/** A tracker that starts on the foreground rung, without element-addressed background actions. */
+function foregroundFirst(tracker) {
+  return Object.freeze({ ...tracker, delivery: "foreground", elementsRefused: true, preferForeground: true });
 }
 
 /** Smallest element side (points) that a position click may target. */
@@ -860,6 +869,74 @@ function withdrawSearch(tracker) {
  * by this run for that recipient (or the window title names it), and the
  * message input holds exactly the granted content.
  */
+/* ------------------------------------------------------------------ */
+/* Screen text (the system's text recognition, run in the main process */
+/* on the target window's picture). Only these derived facts leave it: */
+/* whether the granted recipient's name is the chat title, whether the */
+/* composer holds the granted text, how many copies are visible.       */
+/* ------------------------------------------------------------------ */
+
+/** Chat titles sit in the window's top bar: a line whose middle lies at most
+ * this far (points) below the window's top edge, right of the left pane
+ * (at least this share of the window's width from its left edge). */
+const SCREEN_TITLE_BAND = 56;
+const SCREEN_TITLE_MIN_X = 0.3;
+/** A line is "the same place" as the composer line within this distance (points). */
+const SCREEN_SAME_PLACE = 10;
+const SCREEN_MAX_LINES = 400;
+
+function screenKey(value) {
+  return normalizeName(value).replace(/\s+/gu, "");
+}
+
+/** Recognized lines in window-local points (top-left origin), bounded and validated. */
+function screenLines(screen) {
+  if (!screen || !Array.isArray(screen.lines)) return [];
+  return screen.lines.filter((line) => line && typeof line.text === "string" && line.text.trim() &&
+    [line.x, line.y, line.w, line.h].every(Number.isFinite) && line.w > 0 && line.h > 0).slice(0, SCREEN_MAX_LINES);
+}
+
+function sentCopy(text, content) {
+  // A bubble may carry a short decoration (a time, a read mark): as with the
+  // accessibility count, only short lines that contain the text count.
+  return text === content || ([...content].length >= 2 && text.includes(content) && [...text].length <= [...content].length + 16);
+}
+
+function samePlace(a, b) {
+  return Math.abs(a.x - b.x) <= SCREEN_SAME_PLACE * 2 && Math.abs(a.y + a.h / 2 - (b.y + b.h / 2)) <= SCREEN_SAME_PLACE;
+}
+
+/**
+ * What the window's recognized text says about the granted send.
+ * - recipientInTitle: the recipient's exact name is the chat title (top bar,
+ *   right of the conversation list), as a window title naming it would be.
+ * - composerLine: before a send, the lowest line reading exactly the granted
+ *   text — the composer sits at the bottom, under every sent bubble — so the
+ *   composer holds exactly that text. Null when no such line is seen.
+ * - copies: lines elsewhere reading the text (sent bubbles, the list preview).
+ * `composerAt` (from the baseline taken before the send) keeps measuring the
+ * same place afterwards: still there means the text was not sent.
+ */
+function screenSendFacts({ task, screen, windowBounds, composerAt = null }) {
+  const irreversible = task.irreversible;
+  if (!irreversible || irreversible.kind !== "send_message" || !screen || !windowBounds || !(windowBounds.width > 0)) return null;
+  const lines = screenLines(screen);
+  const recipient = screenKey(irreversible.recipient || "");
+  const content = screenKey(irreversible.content || "");
+  const titleBand = (line) => line.y + line.h / 2 <= SCREEN_TITLE_BAND && line.x >= windowBounds.width * SCREEN_TITLE_MIN_X;
+  const recipientInTitle = Boolean(recipient) && lines.some((line) => titleBand(line) && screenKey(line.text) === recipient);
+  const exact = content ? lines.filter((line) => screenKey(line.text) === content && !titleBand(line)) : [];
+  const composerLine = composerAt
+    ? exact.find((line) => samePlace(line, composerAt)) || null
+    : exact.reduce((lowest, line) => (!lowest || line.y > lowest.y ? line : lowest), null);
+  const copies = content ? lines.filter((line) => !titleBand(line) && sentCopy(screenKey(line.text), content) && !(composerLine && samePlace(line, composerLine))).length : 0;
+  return {
+    recipientInTitle,
+    composerLine: composerLine ? { x: composerLine.x, y: composerLine.y, w: composerLine.w, h: composerLine.h } : null,
+    copies,
+  };
+}
+
 function sendEvidence({ task, tracker, observation }) {
   const irreversible = task.irreversible;
   if (!irreversible || !irreversible.recipient || !irreversible.content) return { ok: false, reason: "未授予发送消息" };
@@ -867,7 +944,10 @@ function sendEvidence({ task, tracker, observation }) {
   const content = normalizeName(irreversible.content);
   const labels = observation.elements.filter((element) => !element.editable);
   const exactRecipient = labels.filter((element) => normalizeName(element.text) === recipient).length;
-  const titleNamesRecipient = normalizeName(observation.windowTitle || "") === recipient;
+  // The recognized chat title counts as the window naming the recipient; the
+  // recognized composer line (exactly the granted text) as the input holding it.
+  const screen = observation.screen || null;
+  const titleNamesRecipient = normalizeName(observation.windowTitle || "") === recipient || Boolean(screen && screen.recipientInTitle);
   const recipientVisible = titleNamesRecipient || exactRecipient > 0 || observation.treeTexts.some((text) => normalizeName(text) === recipient);
   // Opening a chat by clicking the exact contact is strong provenance. Search
   // + Return may open another result (a group, an article), so it also needs
@@ -881,7 +961,8 @@ function sendEvidence({ task, tracker, observation }) {
   const provenance = titleNamesRecipient || selectedRecipient || (openedByRun && exactRecipient >= 2);
   const inputs = observation.elements.filter((element) => element.editable && !element.searchLike);
   const inputHolds = inputs.some((element) => normalizeName(element.value) === content)
-    || (inputs.every((element) => !element.value) && tracker.composerText !== null && normalizeName(tracker.composerText) === content && (tracker.focus === "conversation" || tracker.focus === "field"));
+    || (inputs.every((element) => !element.value) && ((tracker.composerText !== null && normalizeName(tracker.composerText) === content && (tracker.focus === "conversation" || tracker.focus === "field"))
+      || Boolean(screen && screen.composerLine && tracker.focus !== "search")));
   if (!recipientVisible) return { ok: false, reason: `界面上没有看到联系人「${irreversible.recipient}」` };
   if (!provenance) return { ok: false, reason: `无法确认当前打开的聊天就是「${irreversible.recipient}」` };
   if (!inputHolds) return { ok: false, reason: `无法确认输入框里恰好是「${irreversible.content}」` };
@@ -981,7 +1062,7 @@ function nextTracker(tracker, candidate, status, { task }) {
   const recipient = recipientOf(task);
   switch (candidate.kind) {
     case "activate_app":
-      Object.assign(next, { focus: "none", searchText: null, searchMoved: false, composerText: null, conversationTarget: null, conversationVia: null, delivery: "background" });
+      Object.assign(next, { focus: "none", searchText: null, searchMoved: false, composerText: null, conversationTarget: null, conversationVia: null, delivery: tracker.preferForeground ? "foreground" : "background" });
       break;
     case "hotkey":
       // Re-opening search allows the search literal to be typed again.
@@ -1041,17 +1122,28 @@ function nextTracker(tracker, candidate, status, { task }) {
   return Object.freeze(next);
 }
 
-function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow, landing, searchListShown = false }) {
+function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow, landing, searchListShown = false, screen = null, screenBaseline = null }) {
   const content = task.irreversible && task.irreversible.content;
   let sendEvidenceFacts;
   if (tracker.sendCount > 0 && content && sendBaseline !== null && observation) {
     const inputs = observation.elements.filter((element) => element.editable && !element.searchLike);
+    const inputValues = inputs.filter((element) => element.value);
     sendEvidenceFacts = {
       before: sendBaseline,
       after: sentTextCount(observation.elements, content),
-      inputStillHasText: inputs.length ? inputs.some((element) => normalizeName(element.value).includes(normalizeName(content))) : null,
+      inputStillHasText: inputValues.length ? inputValues.some((element) => normalizeName(element.value).includes(normalizeName(content))) : inputs.length ? false : null,
     };
+    // The app shows neither its bubbles nor its composer to accessibility
+    // (WeChat): count the copies read off the screen instead, against the
+    // copies read right before the send, and look at the composer's place.
+    if (screen && screenBaseline && sendEvidenceFacts.before === 0 && sendEvidenceFacts.after === 0 && !inputValues.length) {
+      sendEvidenceFacts = { before: screenBaseline.copies, after: screen.copies, inputStillHasText: Boolean(screen.composerLine), screen: true };
+    }
   }
+  // Before the send: what the screen shows about the chat and the composer.
+  const screenCheck = screen && tracker.sendCount === 0 && (screen.recipientInTitle || screen.composerLine)
+    ? { recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.composerLine) }
+    : null;
   return {
     focus: tracker.focus,
     ...(tracker.searchText ? { typedIntoSearch: tracker.searchText } : {}),
@@ -1059,6 +1151,7 @@ function facts({ tracker, task, observation, sendBaseline, appName, appRunning, 
     ...(tracker.conversationTarget ? { conversationOpenedFor: tracker.conversationTarget } : {}),
     irreversibleDone: tracker.sendCount > 0 || Object.values(tracker.irreversibleCounts).some((count) => count > 0),
     ...(sendEvidenceFacts ? { sendEvidence: sendEvidenceFacts } : {}),
+    ...(screenCheck ? { screenCheck } : {}),
     ...(appName ? { targetApp: appName } : {}),
     appRunning: Boolean(appRunning),
     // "hidden": minimized, on another Space or without a main window, so the
@@ -1099,7 +1192,7 @@ function consentDialog(task, limits, { platform, missingPermissions, screenRecor
         ? "· 系统权限：辅助功能已开启；屏幕录制未开启，本次只读取界面结构，不使用截图坐标"
         : "· 系统权限：辅助功能、屏幕录制已开启");
   }
-  lines.push("", "同频会读取目标应用窗口的界面结构，由 Jev 决策服务逐步选择下一步（不上传截图）。删除、付款等未写在上面的不可逆操作会先停下来再次询问你。");
+  lines.push("", "同频会读取目标应用窗口的界面结构，由 Jev 决策服务逐步选择下一步（不上传截图）；发送前后会在本机识别窗口里的文字，只用来核对聊天对象、要发的内容和是否已发出（识别的文字不上传）。删除、付款等未写在上面的不可逆操作会先停下来再次询问你。");
   return {
     title: "允许同频 AI 操作你的电脑？",
     message: `同频 AI 将使用${apps}完成：${task.goal}`,
@@ -1128,6 +1221,7 @@ module.exports = {
   extraConsentDialog,
   extractTreeTexts,
   facts,
+  foregroundFirst,
   floatingGeometry,
   labelRisk,
   landingView,
@@ -1138,6 +1232,7 @@ module.exports = {
   projectObservation,
   publicCandidate,
   recipientNewlySelected,
+  screenSendFacts,
   searchListReacted,
   searchListState,
   searchProof,
