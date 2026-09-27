@@ -152,7 +152,7 @@ function fakeSdk(app, options = {}) {
       };
       if (input.position.tag === "Element") {
         // WeChat-like: virtual accessibility nodes cannot be pressed in the background.
-        if (options.refuseElementBackground && input.deliveryMode === 0) throw toolError("background_unavailable");
+        if (options.refuseElementBackground && input.deliveryMode === 0) throw toolError(options.refuseElementBackground === "ancestry" ? "element_outside_target_window" : "background_unavailable");
         const element = app.byToken(input.position.inner.elementToken);
         if (!element) throw toolError("stale_element");
         press(element);
@@ -186,7 +186,7 @@ function fakeSdk(app, options = {}) {
       }
       if (name === "type_text") {
         if (args.element_token) {
-          if (options.refuseElementBackground) return { isError: true, errorCode: "background_unavailable", text: "", images: [], degraded: false, rawJson: "{}" };
+          if (options.refuseElementBackground) return { isError: true, errorCode: options.refuseElementBackground === "ancestry" ? "element_outside_target_window" : "background_unavailable", text: "", images: [], degraded: false, rawJson: "{}" };
           const element = app.byToken(args.element_token);
           if (!element) return { isError: true, errorCode: "stale_element", text: "", images: [], degraded: false, rawJson: "{}" };
           if (element.label === "Search") { app.search = args.text; app.focus = "search"; } else { app.input = args.text; app.focus = "input"; }
@@ -705,6 +705,21 @@ describe("computer agent foreground element escalation (WeChat virtual AX nodes)
     expect(later.facts).not.toHaveProperty("typedLanding");
     expect(later.candidates.some((candidate) => candidate.kind === "type")).toBe(false);
     expect(agent.app.sent).toEqual([]);
+  });
+
+  it("stops offering element-addressed background actions once Cua cannot tie an element to the window", async () => {
+    const agent = await started({ app: wechatApp(), sdkOptions: { refuseElementBackground: "ancestry", pointHits: true } });
+    const typed = await step(agent, (candidate) => candidate.kind === "type" && candidate.label === "在搜索框「Search」输入「姐姐」");
+    expect(typed.result).toMatchObject({ status: "failed", code: "element_outside_target_window" });
+    const view = await observe(agent);
+    // No element-addressed background candidate is left: they would all be refused the same way.
+    expect(view.candidates.filter((candidate) => /^(?:click_|type_p\d_e|scroll_)/.test(candidate.id))).toEqual([]);
+    expect(view.candidates.some((candidate) => candidate.id === "open_search_fg")).toBe(true);
+    expect(view.candidates.some((candidate) => candidate.kind === "point" && candidate.label === "点击「姐姐」（前台）")).toBe(true);
+    // A plain background refusal (another code) keeps the other elements available.
+    const other = await started({ app: wechatApp(), sdkOptions: { refuseElementBackground: true } });
+    await step(other, (candidate) => candidate.kind === "type" && candidate.label === "在搜索框「Search」输入「姐姐」");
+    expect((await observe(other)).candidates.some((candidate) => candidate.kind === "click" && candidate.label === "点击「姐姐」")).toBe(true);
   });
 
   it("offers no position clicks without Screen Recording, only foreground keyboard candidates", async () => {

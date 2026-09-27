@@ -330,6 +330,10 @@ function emptyTracker() {
     // Text typed "into focus" was seen in the wrong kind of input box. No
     // further typing or Return is offered; the run is stopped.
     misdirected: false,
+    // Cua could not prove an addressed element belongs to the window
+    // (WeChat's virtual accessibility nodes): every element-addressed
+    // background action would be refused the same way, so none is offered.
+    elementsRefused: false,
     sendBaseline: null,
   });
 }
@@ -512,7 +516,7 @@ function buildCandidates(context) {
           expect: `The ${focusField === "search" ? "search box" : "input box"} contains "${quote(parameter.value)}".` });
       }
     }
-    const fields = elements.filter((element) => element.editable && !element.secure && element.enabled && element.token && !refused.has(element.identity))
+    const fields = elements.filter((element) => !tracker.elementsRefused && element.editable && !element.secure && element.enabled && element.token && !refused.has(element.identity))
       .sort((a, b) => Number(b.searchLike) - Number(a.searchLike) || Number(b.messageLike) - Number(a.messageLike))
       .slice(0, 4);
     let typeCount = 0;
@@ -565,7 +569,7 @@ function buildCandidates(context) {
     }
   }
 
-  if (kinds.has("click")) {
+  if (kinds.has("click") && !tracker.elementsRefused) {
     const clickable = elements
       .filter((element) => element.token && element.enabled && element.clickable && !element.secure && (element.text || element.editable) && !refused.has(element.identity))
       .map((element) => ({ element, score: relevance(element, task) }))
@@ -603,7 +607,7 @@ function buildCandidates(context) {
   }
 
   // 6. Scroll the largest list.
-  if (kinds.has("scroll") && room() > 1) {
+  if (kinds.has("scroll") && room() > 1 && !tracker.elementsRefused) {
     const list = elements.filter((element) => element.scrollable && element.token && element.enabled)
       .sort((a, b) => (b.frame ? b.frame.width * b.frame.height : 0) - (a.frame ? a.frame.width * a.frame.height : 0))[0];
     if (list) {

@@ -1000,6 +1000,11 @@ function createComputerAgentController({
       if (after && policy.recipientNewlySelected(observation.elements, policy.modelElements(after.elements, after.windowBounds), task, candidate.targetFrame)) status = "delivered";
     }
     state.tracker = policy.nextTracker(state.tracker, candidate, status, { task });
+    // Cua refuses every element-addressed background action on an app whose
+    // accessibility nodes it cannot tie to the window; stop offering them.
+    if (status === "failed" && result.code === "element_outside_target_window" && !state.tracker.elementsRefused) {
+      state.tracker = Object.freeze({ ...state.tracker, elementsRefused: true });
+    }
     // Anything but a clean refusal may have typed somewhere: arm the check.
     if (typeCheck && status !== "failed" && status !== "blocked") state.typeCheck = typeCheck;
     const code = result.code || undefined;
