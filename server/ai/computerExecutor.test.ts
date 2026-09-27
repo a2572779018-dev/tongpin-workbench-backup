@@ -164,6 +164,18 @@ describe("computer executor server (task spec, Jev decisions, billing)", () => {
     expect(unknown.state.executor_facts).not.toHaveProperty("targetWindow");
   });
 
+  it("passes where focus-typed text landed and drops a malformed landing", async () => {
+    const created = await createTask();
+    if (created.kind !== "run") throw new Error("expected run");
+    await runtime.service.computer.decide("member", created.run.runId, decisionBody({ facts: { focus: "search", irreversibleDone: false, typedLanding: { field: "search", text: "姐姐", landed: "expected" } } }));
+    const landed = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
+    expect(landed.state.executor_facts).toMatchObject({ typedLanding: { field: "search", text: "姐姐", landed: "expected" } });
+    expect(JSON.stringify(landed.questions.next_action.instructions)).toContain("executor_facts.typedLanding");
+    await runtime.service.computer.decide("member", created.run.runId, decisionBody({ step: 2, observationId: "obs_fixture_0002", facts: { focus: "none", irreversibleDone: false, typedLanding: { field: "clipboard", text: "姐姐", landed: "expected" } as never } }));
+    const malformed = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
+    expect(malformed.state.executor_facts).not.toHaveProperty("typedLanding");
+  });
+
   it("asks Jev one closed choice plus verification nouls and bills actual usage at admin prices", async () => {
     const created = await createTask();
     if (created.kind !== "run") throw new Error("expected run");

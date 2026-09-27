@@ -166,17 +166,52 @@ describe("computer executor loop", () => {
 
   it("gives background refusals their own budget, so an escalation is not read as 'nothing works'", async () => {
     const h = harness({
-      views: [view(0, [candidate("click_e1", "点击「搜索」", "none", "click")]), view(1, [candidate("point_e1_fg", "点击「搜索」（前台）", "none", "point")]), view(2, [candidate("type_p1_focus_fg", "在搜索框输入「姐姐」（前台）", "none", "type")]), view(3, [candidate("key_escape", "按 Esc 关闭弹出内容")])],
-      decisions: [{ id: "click_e1" }, { id: "point_e1_fg" }, { id: "type_p1_focus_fg" }, { id: "abstain", confidence: 0.9 }],
+      views: [view(0, [candidate("click_e1", "点击「搜索」", "none", "click")]), view(1, [candidate("open_search_fg", "按 ⌘F 打开搜索（前台）", "none", "hotkey")]), view(2, [candidate("type_p1_focus_fg", "在搜索框输入「姐姐」（前台）", "none", "type")], { focus: "search" }), view(3, [candidate("key_escape", "按 Esc 关闭弹出内容")])],
+      decisions: [{ id: "click_e1" }, { id: "open_search_fg" }, { id: "type_p1_focus_fg" }, { id: "abstain", confidence: 0.9 }],
       executions: [
         { status: "failed", message: "未能执行（目标应用不接受后台操作），下一步可改用前台操作", delivery: "background" },
-        { status: "delivered", message: "已执行", delivery: "foreground" },
-        { status: "delivered", message: "已执行", delivery: "foreground" },
+        { status: "unverified", message: "已发送输入，等待界面验证", delivery: "foreground" },
+        { status: "unverified", message: "已发送输入，等待界面验证", delivery: "foreground" },
       ],
     });
     const result = await run(h);
     expect(result.reason).not.toBe("repeated_failures");
-    expect(h.calls.execute.map(item => item.candidateId)).toEqual(["click_e1", "point_e1_fg", "type_p1_focus_fg"]);
+    expect(h.calls.execute.map(item => item.candidateId)).toEqual(["click_e1", "open_search_fg", "type_p1_focus_fg"]);
+  });
+
+  it("stops before any Return when typed text showed up in the wrong input box", async () => {
+    const h = harness({
+      views: [
+        view(0, [candidate("open_search_fg", "按 ⌘F 打开搜索（前台）", "none", "hotkey")]),
+        view(1, [candidate("type_p1_focus_fg", "在搜索框输入「姐姐」（前台）", "none", "type")], { focus: "search" }),
+        view(2, [candidate("key_escape", "按 Esc 关闭弹出内容")], { typedLanding: { field: "search", text: "姐姐", landed: "elsewhere" } }),
+      ],
+      decisions: [{ id: "open_search_fg" }, { id: "type_p1_focus_fg" }],
+    });
+    const result = await run(h);
+    expect(result).toMatchObject({ outcome: "abstained", reason: "action_uncertain", actions: 2 });
+    expect(result.summary).toContain("刚才输入的“姐姐”没有进入搜索框");
+    expect(result.summary).toContain("没有按回车；请到「微信」里检查并删除这段文字");
+    expect(result.summary).toContain("没有执行任何发送、提交、删除或付款");
+    // No decision is bought for the observation that showed the mistake.
+    expect(h.calls.decide).toHaveLength(2);
+    expect(h.calls.execute).toHaveLength(2);
+    expect(h.calls.finish[0]).toMatchObject({ outcome: "abstained", reason: "action_uncertain" });
+  });
+
+  it("carries on when typed text was seen where intended or could not be seen", async () => {
+    for (const landed of ["expected", "unknown"] as const) {
+      const h = harness({
+        views: [
+          view(0, [candidate("type_p1_focus_fg", "在搜索框输入「姐姐」（前台）", "none", "type")], { focus: "search" }),
+          view(1, [candidate("key_escape", "按 Esc 关闭弹出内容")], { focus: "search", typedLanding: { field: "search", text: "姐姐", landed } }),
+        ],
+        decisions: [{ id: "type_p1_focus_fg" }, { id: "abstain", confidence: 0.9 }],
+      });
+      const result = await run(h);
+      expect(result.reason).toBe("jev_abstained");
+      expect(h.calls.decide[1].facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed });
+    }
   });
 
   it("stops at a clarification without consent or execution", async () => {

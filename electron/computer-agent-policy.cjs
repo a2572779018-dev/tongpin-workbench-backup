@@ -227,7 +227,10 @@ function modelElements(elements, windowBounds) {
     const searchLike = editable && !secure && (key === "axsearchfield" || key === "searchfield" || key === "searchbox" || SEARCH_WORDS.test(label) || SEARCH_WORDS.test(description));
     const frame = raw.frame && [raw.frame.x, raw.frame.y, raw.frame.width, raw.frame.height].every(Number.isFinite) && raw.frame.width > 0 && raw.frame.height > 0 ? raw.frame : null;
     const lowerHalf = Boolean(frame && windowBounds && frame.y + frame.height / 2 > windowBounds.y + windowBounds.height * 0.55);
-    const messageLike = editable && !secure && !searchLike && (MESSAGE_WORDS.test(label) || MESSAGE_WORDS.test(description) || lowerHalf || key === "axtextarea");
+    // messageBox: stronger evidence (named or placed like a chat composer) than
+    // messageLike, which also takes any unlabelled text area.
+    const messageBox = editable && !secure && !searchLike && (MESSAGE_WORDS.test(label) || MESSAGE_WORDS.test(description) || lowerHalf);
+    const messageLike = messageBox || (editable && !secure && !searchLike && key === "axtextarea");
     const hasPress = Array.isArray(raw.actions) && raw.actions.some((action) => /press|click|invoke|pick|confirm/i.test(String(action)));
     model.push({
       ref: `e${model.length + 1}`,
@@ -239,7 +242,7 @@ function modelElements(elements, windowBounds) {
       text: label || value,
       enabled: raw.enabled !== false,
       selected: raw.selected === true,
-      editable, secure, searchLike, messageLike,
+      editable, secure, searchLike, messageLike, messageBox,
       clickable: CLICKABLE_ROLES.has(key) || hasPress,
       scrollable: SCROLLABLE_ROLES.has(key),
       frame,
@@ -315,20 +318,58 @@ function projectObservation({ app, windowTitle, elements, treeTexts, axSparse, t
 
 function emptyTracker() {
   return Object.freeze({
-    focus: "none", searchText: null, composerText: null, conversationTarget: null, conversationVia: null,
+    // searchMoved: ↓/↑ moved the highlighted search result after typing.
+    // searchByKeys: the search text arrived as keystrokes, so keyboard focus
+    // was in the search box (an accessibility write proves no focus).
+    focus: "none", searchText: null, searchMoved: false, searchByKeys: false, composerText: null, conversationTarget: null, conversationVia: null,
     sendCount: 0, irreversibleCounts: Object.freeze({}), typed: Object.freeze([]),
     delivery: "background", backgroundSuspect: false,
     // Element identities whose background click/type was refused or had no
     // effect. They are offered again only as distinct foreground candidates.
     refused: Object.freeze([]),
+    // Text typed "into focus" was seen in the wrong kind of input box. No
+    // further typing or Return is offered; the run is stopped.
+    misdirected: false,
     sendBaseline: null,
   });
+}
+
+/** Smallest element side (points) that a position click may target. */
+const MIN_POINT_SIDE = 4;
+/** Frames may overhang the window edge by this much (shadows, rounding). */
+const FRAME_SLACK = 2;
+
+function plausibleFrame(frame, bounds) {
+  if (!frame || !bounds) return false;
+  if (!(frame.width >= MIN_POINT_SIDE && frame.height >= MIN_POINT_SIDE)) return false;
+  return frame.x >= bounds.x - FRAME_SLACK && frame.y >= bounds.y - FRAME_SLACK &&
+    frame.x + frame.width <= bounds.x + bounds.width + FRAME_SLACK &&
+    frame.y + frame.height <= bounds.y + bounds.height + FRAME_SLACK;
 }
 
 function recipientOf(task) {
   return task.irreversible && task.irreversible.recipient
     ? task.irreversible.recipient
     : (task.parameters.find((parameter) => parameter.role === "recipient") || {}).value || null;
+}
+
+/**
+ * A click on the granted recipient's row is confirmed when that row — the one
+ * under the click, not a search hit or a header elsewhere — is selected now
+ * and no row with that name was selected before the click.
+ */
+function recipientNewlySelected(before, after, task, targetFrame) {
+  const recipient = normalizeName(recipientOf(task));
+  if (!recipient) return false;
+  const selected = (elements) => (Array.isArray(elements) ? elements : [])
+    .filter((element) => !element.editable && element.selected && normalizeName(element.text) === recipient);
+  if (selected(before).length) return false;
+  const now = selected(after);
+  if (!targetFrame) return false;
+  const cx = targetFrame.x + targetFrame.width / 2, cy = targetFrame.y + targetFrame.height / 2;
+  return now.some((element) => element.frame &&
+    cx >= element.frame.x && cx <= element.frame.x + element.frame.width &&
+    cy >= element.frame.y && cy <= element.frame.y + element.frame.height);
 }
 
 /* ------------------------------------------------------------------ */
@@ -344,7 +385,7 @@ function candidateDescriptions(appName) {
 }
 
 function freezeCandidate(candidate) {
-  return Object.freeze({ ...candidate, ...(candidate.point ? { point: Object.freeze({ ...candidate.point }) } : {}), ...(candidate.keys ? { keys: Object.freeze([...candidate.keys]) } : {}) });
+  return Object.freeze({ ...candidate, ...(candidate.point ? { point: Object.freeze({ ...candidate.point }) } : {}), ...(candidate.targetFrame ? { targetFrame: Object.freeze({ ...candidate.targetFrame }) } : {}), ...(candidate.keys ? { keys: Object.freeze([...candidate.keys]) } : {}) });
 }
 
 function sendClause(task) {
@@ -398,27 +439,39 @@ function buildCandidates(context) {
   const typedAlready = (field, text) => tracker.typed.some((entry) => entry.field === field && entry.text === text);
   const refused = new Set(tracker.refused || []);
   const shot = context.screenshot;
-  const pixelMap = shot && shot.frameValid && context.windowBounds && context.windowBounds.width > 0 ? shot.width / context.windowBounds.width : null;
-  /** Window-screenshot pixel position of an element's centre, or null. */
+  const bounds = context.windowBounds;
+  const pixelMap = shot && shot.frameValid && bounds && bounds.width > 0 ? shot.width / bounds.width : null;
+  /**
+   * Window-screenshot pixel position of an element's centre, or null unless
+   * its frame is a plausible rectangle lying wholly inside the target window:
+   * virtualized rows report 1-pt or off-window frames, and a click there
+   * would land on whatever occupies that point instead.
+   */
   const pixelPoint = (element) => {
-    if (!pixelMap || !element.frame) return null;
-    const x = Math.round((element.frame.x - context.windowBounds.x + element.frame.width / 2) * pixelMap);
-    const y = Math.round((element.frame.y - context.windowBounds.y + element.frame.height / 2) * pixelMap);
+    if (!pixelMap || !plausibleFrame(element.frame, bounds)) return null;
+    const x = Math.round((element.frame.x - bounds.x + element.frame.width / 2) * pixelMap);
+    const y = Math.round((element.frame.y - bounds.y + element.frame.height / 2) * pixelMap);
     return x >= 0 && y >= 0 && x < shot.width && y < shot.height ? { x, y } : null;
   };
 
   // 2. Keyboard allowlist (window-targeted).
   if (kinds.has("key")) {
     add({ id: `open_search${idSuffix}`, kind: "hotkey", risk: "none", keys: [keyMod, "f"], delivery: tracker.delivery, focusAfter: "search",
-      description: `Press ${context.platform === "win32" ? "Ctrl+F" : "Command+F"} in the "${quote(appName)}" window to put keyboard focus in its search box.${deliverySuffix}`,
+      description: `Press ${context.platform === "win32" ? "Ctrl+F" : "Command+F"} in the "${quote(appName)}" window to put keyboard focus in its search box.${deliverySuffix}${fg ? " This is the way to reach the search box now: a click cannot confirm keyboard focus." : ""}`,
       label: `按 ${keyModLabel} 打开搜索${deliveryLabel}`, expect: `A search box in the "${quote(appName)}" window has keyboard focus.` });
     let returnRisk = "submit", returnDescription, returnLabel, returnExpect;
     // Return is harmless only while a search box visibly holds this run's
-    // search text. Otherwise keyboard focus is uncertain and Return could
-    // send a draft, so it stays a risky submit.
-    const searchConfirmed = tracker.focus === "search" && Boolean(tracker.searchText) &&
+    // search text, typed as keystrokes (which proves keyboard focus is there;
+    // an accessibility write does not). Otherwise keyboard focus is uncertain
+    // and Return could send a draft, so it stays a risky submit.
+    const searchConfirmed = tracker.focus === "search" && Boolean(tracker.searchText) && tracker.searchByKeys === true &&
       elements.some((element) => element.searchLike && normalizeName(element.value) === normalizeName(tracker.searchText));
-    if (searchConfirmed) {
+    if (searchConfirmed && tracker.searchMoved) {
+      returnRisk = "none";
+      returnDescription = "Press Return to open the search result that is highlighted now (the arrow keys moved the highlight, so it may not be the first match).";
+      returnLabel = "按回车打开当前选中的搜索结果";
+      returnExpect = "The highlighted search result is open.";
+    } else if (searchConfirmed) {
       returnRisk = "none";
       returnDescription = `Press Return to open the highlighted search result${tracker.searchText ? ` for "${quote(tracker.searchText)}"` : ""}.`;
       returnLabel = `按回车打开搜索结果${tracker.searchText ? `「${quote(tracker.searchText)}」` : ""}`;
@@ -429,11 +482,14 @@ function buildCandidates(context) {
       returnLabel = `按回车发送「${quote(tracker.composerText)}」`;
       returnExpect = `"${quote(tracker.composerText)}" appears as a sent message and the input box is empty.`;
     } else {
-      returnDescription = `Press Return in the "${quote(appName)}" window. If a text box, list or dialog has focus this may open, submit or send it.`;
-      returnLabel = "按回车";
+      returnDescription = `Press Return in the "${quote(appName)}" window. Keyboard focus is not confirmed: if a text box, list or dialog has focus this may open, submit or send whatever it holds.`;
+      // The label reaches the extra-consent dialog: say what Return may do.
+      returnLabel = "按回车（可能发送或提交输入框里的内容）";
       returnExpect = "The focused item is opened or submitted.";
     }
-    add({ id: `key_return${idSuffix}`, kind: "key", key: "return", risk: returnRisk, delivery: tracker.delivery, description: `${returnDescription}${deliverySuffix}`, label: `${returnLabel}${deliveryLabel}`, expect: returnExpect });
+    if (!tracker.misdirected) {
+      add({ id: `key_return${idSuffix}`, kind: "key", key: "return", risk: returnRisk, delivery: tracker.delivery, description: `${returnDescription}${deliverySuffix}`, label: `${returnLabel}${deliveryLabel}`, expect: returnExpect });
+    }
     add({ id: "key_escape", kind: "key", key: "escape", risk: "none", delivery: tracker.delivery, description: "Press Escape to close the current menu, popover, dialog or search.", label: "按 Esc 关闭弹出内容", expect: "The menu, dialog or search is closed.", focusAfter: "none" });
     add({ id: "key_tab", kind: "key", key: "tab", risk: "none", delivery: tracker.delivery, description: "Press Tab to move keyboard focus to the next control.", label: "按 Tab 切换焦点", expect: "Keyboard focus moved to the next control." });
     add({ id: "key_down", kind: "key", key: "down", risk: "none", delivery: tracker.delivery, description: "Press the Down arrow key to move the selection down, for example to the next search result.", label: "按 ↓ 选择下一项", expect: "The selection moved down by one item." });
@@ -444,7 +500,7 @@ function buildCandidates(context) {
   }
 
   // 3. Type task literals: into the focused input (keyboard path) and into editable elements.
-  if (kinds.has("type")) {
+  if (kinds.has("type") && !tracker.misdirected) {
     const focusField = tracker.focus === "search" ? "search" : tracker.focus === "conversation" ? "message" : tracker.focus === "field" ? "field" : null;
     if (focusField && !secureVisible) {
       for (const parameter of task.parameters) {
@@ -481,27 +537,31 @@ function buildCandidates(context) {
   const room = () => LIMITS.maxCandidates - reserved - out.length;
 
   // 4a. After the target refused background input (or showed no effect), offer
-  // distinct foreground clicks at element positions: the element Jev wanted
-  // first, then input boxes and task-relevant items. Never an automatic retry.
+  // distinct foreground clicks at the positions of task-relevant items, the
+  // item Jev wanted first. Never an automatic retry. Input boxes are left
+  // out: a position click cannot prove it moved keyboard focus (a WeChat
+  // search box ignored one while its chat input kept focus), and text typed
+  // "into focus" afterwards would land in whatever field still had it. Input
+  // boxes are reached by keyboard (⌘F, Return on a search result) instead.
   if (kinds.has("click") && fg && pixelMap) {
     const positioned = elements
-      .filter((element) => element.frame && element.enabled && !element.secure && (element.text || element.editable) && (element.clickable || element.editable))
-      .map((element) => ({ element, score: relevance(element, task) + (refused.has(element.identity) ? 200 : 0) + (element.searchLike || element.messageLike ? 30 : 0) }))
-      .filter(({ element, score }) => refused.has(element.identity) || element.editable || score >= 60)
+      .filter((element) => element.frame && element.enabled && !element.secure && !element.editable && element.text && element.clickable)
+      .map((element) => ({ element, score: relevance(element, task) + (refused.has(element.identity) ? 200 : 0) }))
+      .filter(({ element, score }) => refused.has(element.identity) || score >= 60)
       .sort((a, b) => b.score - a.score)
       .slice(0, 6);
     for (const { element } of positioned) {
       const point = pixelPoint(element);
       if (!point) continue;
-      const risk = element.editable ? "none" : labelRisk(element.text);
+      const risk = labelRisk(element.text);
       const matchesRecipient = Boolean(recipient && normalizeName(element.text) === normalizeName(recipient));
-      const what = element.editable ? (element.searchLike ? "search box" : element.messageLike ? "message input box" : "input box") : element.roleShort;
       add({ id: `point_${element.ref}_fg`, kind: "point", risk, point, elementRef: element.ref, delivery: "foreground",
         ...(element.token ? { elementIdentity: element.identity } : {}),
-        editable: element.editable, searchLike: element.searchLike, messageLike: element.messageLike, matchesRecipient, clickedText: element.text,
-        description: `Click the ${what} "${quote(element.text || element.roleShort)}" at its position on screen with foreground delivery ("${quote(appName)}" comes to the front briefly) because background input was refused or had no effect.${risk === "send" ? sendClause(task) : risk !== "none" ? " This may be an irreversible action." : ""}`,
-        label: `点击「${quote(element.text || element.roleShort)}」（前台）`,
-        expect: element.editable ? `The ${what} "${quote(element.text || element.roleShort)}" has keyboard focus.` : matchesRecipient ? `The conversation with "${quote(recipient)}" is open.` : `The "${quote(element.text)}" item reacted.` });
+        editable: false, searchLike: false, messageLike: false, matchesRecipient, clickedText: element.text,
+        ...(matchesRecipient ? { targetFrame: element.frame } : {}),
+        description: `Click the ${element.roleShort} "${quote(element.text)}" at its position on screen with foreground delivery ("${quote(appName)}" comes to the front briefly) because background input was refused or had no effect.${risk === "send" ? sendClause(task) : risk !== "none" ? " This may be an irreversible action." : ""}`,
+        label: `点击「${quote(element.text)}」（前台）`,
+        expect: matchesRecipient ? `The conversation with "${quote(recipient)}" is open.` : `The "${quote(element.text)}" item reacted.` });
     }
   }
 
@@ -516,6 +576,7 @@ function buildCandidates(context) {
       const matchesRecipient = Boolean(recipient && normalizeName(element.text) === normalizeName(recipient));
       add({ id: `click_${element.ref}`, kind: "click", risk, elementToken: element.token, elementIdentity: element.identity, elementRef: element.ref, delivery: "background",
         editable: element.editable, searchLike: element.searchLike, messageLike: element.messageLike, matchesRecipient, clickedText: element.text,
+        ...(matchesRecipient && element.frame ? { targetFrame: element.frame } : {}),
         description: `Click the ${element.roleShort} "${quote(element.text || element.roleShort)}"${element.selected ? " (currently selected)" : ""}.${risk === "send" ? sendClause(task) : risk !== "none" ? " This may be an irreversible action." : ""}`,
         label: `点击「${quote(element.text || element.roleShort)}」`,
         expect: element.editable ? `The field "${quote(element.text || element.roleShort)}" has keyboard focus.` : matchesRecipient ? `The conversation with "${quote(recipient)}" is open.` : `The "${quote(element.text)}" control reacted.` });
@@ -534,6 +595,7 @@ function buildCandidates(context) {
       const risk = labelRisk(element.text);
       const matchesRecipient = Boolean(recipient && normalizeName(element.text) === normalizeName(recipient));
       add({ id: `point_${element.ref}`, kind: "point", risk, point: { x, y }, elementRef: element.ref, delivery: tracker.delivery, matchesRecipient, clickedText: element.text,
+        ...(matchesRecipient ? { targetFrame: element.frame } : {}),
         description: `Click at the screen position of the text "${quote(element.text)}" (it exposes no accessibility action, so the click uses window coordinates).${risk === "send" ? sendClause(task) : ""}${deliverySuffix}`,
         label: `点击文字「${quote(element.text)}」所在位置${deliveryLabel}`,
         expect: matchesRecipient ? `The conversation with "${quote(recipient)}" is open.` : `The "${quote(element.text)}" item reacted.` });
@@ -598,6 +660,41 @@ function sentTextCount(elements, content) {
 }
 
 /**
+ * Visible input boxes whose value holds `text`, split into search boxes,
+ * message boxes (named or placed like a chat composer) and other inputs — an
+ * unlabelled box might be either, so it never counts as the wrong kind.
+ * Secure fields are never read.
+ */
+function typedTextSpots(elements, text) {
+  const target = normalizeName(text);
+  const spots = { search: 0, message: 0, other: 0 };
+  if (!target) return spots;
+  for (const element of Array.isArray(elements) ? elements : []) {
+    if (!element.editable || element.secure || !normalizeName(element.value).includes(target)) continue;
+    if (element.searchLike) spots.search += 1;
+    else if (element.messageBox) spots.message += 1;
+    else spots.other += 1;
+  }
+  return spots;
+}
+
+/**
+ * Where text typed "into focus" went, judged against the input boxes that
+ * already held it before typing: "expected" (the intended kind of box),
+ * "elsewhere" (only a box of the other kind gained it — a search literal in a
+ * chat's message box, or a message in a search box) or "unknown" (the app
+ * exposes no values, nothing changed yet, or an unlabelled box gained it).
+ */
+function typedLanding(check, elements) {
+  if (!check || !check.before) return "unknown";
+  const after = typedTextSpots(elements, check.text);
+  const gained = (kind) => after[kind] > (check.before[kind] || 0);
+  if (check.field === "search") return gained("search") ? "expected" : gained("message") ? "elsewhere" : "unknown";
+  if (check.field === "message") return gained("message") || gained("other") ? "expected" : gained("search") ? "elsewhere" : "unknown";
+  return gained("search") || gained("message") || gained("other") ? "expected" : "unknown";
+}
+
+/**
  * Evidence that a send reaches the granted recipient with the granted text.
  * All three must hold: the recipient is visible, the conversation was opened
  * by this run for that recipient (or the window title names it), and the
@@ -618,9 +715,10 @@ function sendEvidence({ task, tracker, observation }) {
   // or the window title.
   const openedByRun = tracker.conversationTarget !== null && normalizeName(tracker.conversationTarget) === recipient;
   const selectedRecipient = labels.some((element) => element.selected && normalizeName(element.text) === recipient);
-  const provenance = titleNamesRecipient || selectedRecipient ||
-    (openedByRun && tracker.conversationVia === "click" && exactRecipient >= 1) ||
-    (openedByRun && exactRecipient >= 2);
+  // The recipient's own list row is always visible, whichever chat is open,
+  // so a chat this run opened (by a confirmed click or by search) also needs
+  // the name a second time (the chat header), a selected row or the title.
+  const provenance = titleNamesRecipient || selectedRecipient || (openedByRun && exactRecipient >= 2);
   const inputs = observation.elements.filter((element) => element.editable && !element.searchLike);
   const inputHolds = inputs.some((element) => normalizeName(element.value) === content)
     || (inputs.every((element) => !element.value) && tracker.composerText !== null && normalizeName(tracker.composerText) === content && (tracker.focus === "conversation" || tracker.focus === "field"));
@@ -649,6 +747,9 @@ function authorizeCandidate(candidate, { task, tracker, observation, grantApps }
     return typeof candidate.appIndex === "number" && grantApps[candidate.appIndex] ? { allowed: true } : { allowed: false, reason: "目标应用不在本次授权范围内" };
   }
   if (!observation.appAllowed) return { allowed: false, reason: "当前窗口不属于本次授权的应用" };
+  if (tracker.misdirected && (candidate.kind === "type" || (candidate.kind === "key" && candidate.key === "return") || candidate.risk !== "none")) {
+    return { allowed: false, reason: "刚才输入的文字落到了别的输入框，不再继续输入、按回车或发送" };
+  }
   if (candidate.kind === "type") {
     if (!task.parameters.some((parameter) => parameter.id === candidate.parameterId && parameter.value === candidate.text)) return { allowed: false, reason: "只能输入本次授权的文字" };
     if (candidate.elementToken && observation.elements.some((element) => element.token === candidate.elementToken && element.secure)) return { allowed: false, reason: "不会向密码或验证码输入框输入内容" };
@@ -681,12 +782,29 @@ function authorizeCandidate(candidate, { task, tracker, observation, grantApps }
  */
 function nextTracker(tracker, candidate, status, { task }) {
   const landed = status === "delivered" || status === "unverified";
+  // Anything but a clean refusal may have reached the app.
+  const attempted = status !== "failed" && status !== "blocked";
   const next = { ...tracker, typed: [...tracker.typed], irreversibleCounts: { ...tracker.irreversibleCounts }, refused: [...(tracker.refused || [])] };
   const backgroundMiss = (status === "failed" || status === "no_effect") && candidate.delivery === "background";
-  if (backgroundMiss && ["key", "hotkey", "type", "point", "click"].includes(candidate.kind)) next.delivery = "foreground";
+  if (backgroundMiss && ["key", "hotkey", "type", "point", "click"].includes(candidate.kind)) {
+    // Focus believed from background input may be wrong (those keys may have
+    // gone nowhere): the foreground rung starts from unknown focus.
+    Object.assign(next, { delivery: "foreground", focus: "none", searchText: null, searchMoved: false });
+  }
   // The same element is not offered again in the background; a foreground
   // position click for it becomes a distinct candidate instead.
   if (backgroundMiss && candidate.elementIdentity && !next.refused.includes(candidate.elementIdentity)) next.refused = [...next.refused, candidate.elementIdentity].slice(-24);
+  // Only a confirmed click (Cua read the selection back, or the clicked row
+  // newly shows as selected) tells where keyboard focus and the open
+  // conversation are. After any other click that may have happened —
+  // unverifiable, no visible effect, unknown, or a risky button — neither is
+  // known, so nothing is typed "into focus" until a keyboard route sets it.
+  // Only an element-addressed click on an input box cannot switch the chat.
+  if ((candidate.kind === "click" || candidate.kind === "point") && attempted && status !== "delivered") {
+    Object.assign(next, candidate.editable && candidate.kind === "click"
+      ? { focus: "none", searchMoved: false }
+      : { focus: "none", searchText: null, searchMoved: false, conversationTarget: null, conversationVia: null, composerText: null });
+  }
   if (candidate.risk && candidate.risk !== "none" && candidate.kind !== "reserved" && ["delivered", "unverified", "no_effect", "unknown"].includes(status)) {
     next.irreversibleCounts[candidate.risk] = (next.irreversibleCounts[candidate.risk] || 0) + 1;
     if (candidate.risk === "send") next.sendCount += 1;
@@ -699,36 +817,51 @@ function nextTracker(tracker, candidate, status, { task }) {
   const recipient = recipientOf(task);
   switch (candidate.kind) {
     case "activate_app":
-      Object.assign(next, { focus: "none", searchText: null, composerText: null, conversationTarget: null, conversationVia: null, delivery: "background" });
+      Object.assign(next, { focus: "none", searchText: null, searchMoved: false, composerText: null, conversationTarget: null, conversationVia: null, delivery: "background" });
       break;
     case "hotkey":
       // Re-opening search allows the search literal to be typed again.
-      Object.assign(next, { focus: "search", searchText: null, typed: next.typed.filter((entry) => entry.field !== "focus:search") });
+      Object.assign(next, { focus: "search", searchText: null, searchMoved: false, typed: next.typed.filter((entry) => entry.field !== "focus:search") });
       break;
     case "type": {
       next.typed.push({ field: candidate.elementIdentity || `focus:${candidate.field}`, text: candidate.text });
+      // An element-addressed (accessibility) write does not move keyboard
+      // focus: it tells what the box holds, never where Return will go.
+      const focusAfter = candidate.elementIdentity ? tracker.focus : null;
       // A second landed literal may have been appended to the first: the
       // application no longer knows the exact field content.
-      if (candidate.field === "search") Object.assign(next, { focus: "search", searchText: tracker.searchText ? null : candidate.text });
-      else if (candidate.field === "message") Object.assign(next, { focus: tracker.focus === "field" ? "field" : "conversation", composerText: tracker.composerText ? null : candidate.text });
-      else Object.assign(next, { focus: "field", composerText: tracker.composerText ? null : candidate.text });
+      if (candidate.field === "search") Object.assign(next, { focus: focusAfter ?? "search", searchText: tracker.searchText ? null : candidate.text, searchMoved: false, searchByKeys: !candidate.elementIdentity });
+      else if (candidate.field === "message") Object.assign(next, { focus: focusAfter ?? (tracker.focus === "field" ? "field" : "conversation"), composerText: tracker.composerText ? null : candidate.text });
+      else Object.assign(next, { focus: focusAfter ?? "field", composerText: tracker.composerText ? null : candidate.text });
       break;
     }
     case "key":
       if (candidate.key === "return") {
         if (tracker.focus === "search" && candidate.risk === "none") {
-          const opened = tracker.searchText && recipient && normalizeName(tracker.searchText) === normalizeName(recipient) ? tracker.searchText : null;
-          Object.assign(next, { focus: "conversation", conversationTarget: opened, conversationVia: opened ? "search" : null, composerText: null, searchText: null, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
+          // After ↓/↑ another result may be highlighted: the chat is opened,
+          // but not known to be the searched one.
+          const opened = !tracker.searchMoved && tracker.searchText && recipient && normalizeName(tracker.searchText) === normalizeName(recipient) ? tracker.searchText : null;
+          Object.assign(next, { focus: "conversation", conversationTarget: opened, conversationVia: opened ? "search" : null, composerText: null, searchText: null, searchMoved: false, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
         }
       } else if (candidate.key === "escape") {
-        Object.assign(next, { focus: tracker.focus === "search" ? "none" : tracker.focus, searchText: null });
+        Object.assign(next, { focus: tracker.focus === "search" ? "none" : tracker.focus, searchText: null, searchMoved: false });
       } else if (candidate.key === "backspace") {
         // The exact remaining text is unknown after a deletion.
         Object.assign(next, { searchText: null, composerText: null, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
+      } else if (candidate.key === "tab") {
+        // Focus moved to a control the run cannot see.
+        Object.assign(next, { focus: "none", searchText: null, searchMoved: false });
+      } else if (candidate.key === "down" || candidate.key === "up") {
+        // In a search the highlighted result moved; anywhere else an arrow key
+        // may have moved a list selection and switched the open conversation.
+        if (tracker.focus === "search") next.searchMoved = true;
+        else Object.assign(next, { focus: "none", conversationTarget: null, conversationVia: null, composerText: null });
       }
       break;
     case "click":
     case "point":
+      // Unconfirmed clicks were handled above.
+      if (status !== "delivered") break;
       if (candidate.editable) {
         Object.assign(next, { focus: candidate.searchLike ? "search" : candidate.messageLike ? (tracker.conversationTarget ? "conversation" : "field") : "field" });
       } else if (candidate.matchesRecipient) {
@@ -744,7 +877,7 @@ function nextTracker(tracker, candidate, status, { task }) {
   return Object.freeze(next);
 }
 
-function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow }) {
+function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow, landing }) {
   const content = task.irreversible && task.irreversible.content;
   let sendEvidenceFacts;
   if (tracker.sendCount > 0 && content && sendBaseline !== null && observation) {
@@ -767,6 +900,8 @@ function facts({ tracker, task, observation, sendBaseline, appName, appRunning, 
     // "hidden": minimized, on another Space or without a main window, so the
     // observation is empty until the app is brought to the front.
     ...(targetWindow === "visible" || targetWindow === "hidden" || targetWindow === "none" ? { targetWindow } : {}),
+    // Only on the first observation after text was typed "into focus".
+    ...(landing ? { typedLanding: { field: landing.field, text: landing.text, landed: landing.landed } } : {}),
   };
 }
 
@@ -831,8 +966,11 @@ module.exports = {
   occurrences,
   projectObservation,
   publicCandidate,
+  recipientNewlySelected,
   sendEvidence,
   sentTextCount,
+  typedLanding,
+  typedTextSpots,
   validateLimits,
   validateTaskSpec,
 };

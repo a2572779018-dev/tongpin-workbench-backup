@@ -182,6 +182,12 @@ export interface ComputerExecutorFacts {
   appRunning?: boolean;
   /** Whether the granted app has a usable window: "hidden" = minimized, on another Space or no main window. */
   targetWindow?: "visible" | "hidden" | "none";
+  /**
+   * Only on the first observation after text was typed "into focus": where it
+   * was seen. "elsewhere" = only an input box of the other kind gained it (a
+   * search literal in a chat's message box); the run stops without Return.
+   */
+  typedLanding?: { field: "search" | "message" | "field"; text: string; landed: "expected" | "elsewhere" | "unknown" };
 }
 export interface ComputerObserveResult {
   observationId: string;

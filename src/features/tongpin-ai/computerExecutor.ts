@@ -279,6 +279,14 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       observeFailures = 0;
       const view = observed.value;
       if (view.display.app) appName = view.display.app;
+      // Typed text showed up in the wrong kind of input box: keyboard focus was
+      // not where the run believed. Stop before any Return could send it.
+      const landing = view.facts.typedLanding;
+      if (landing?.landed === "elsewhere") {
+        const intended = landing.field === "search" ? "搜索框" : landing.field === "message" ? "消息输入框" : "输入框";
+        const app = appName || spec.apps[0].name;
+        throw new RunStop(irreversibleAttempted ? "unknown" : "abstained", "action_uncertain", `刚才输入的“${landing.text}”没有进入${intended}，而是出现在「${app}」的另一个输入框里。为避免误发已停止，没有按回车；请到「${app}」里检查并删除这段文字`);
+      }
       // The granted send was attempted once but the input still holds the text
       // and no new copy appeared: give the app a moment, then stop honestly
       // instead of sending again.

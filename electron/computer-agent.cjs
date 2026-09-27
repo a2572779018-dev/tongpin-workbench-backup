@@ -53,6 +53,8 @@ const TIMING = Object.freeze({
 // Chat apps list many conversations and messages before the input box, so the
 // walk is generous; only a ranked, bounded projection ever leaves this process.
 const CAPTURE = Object.freeze({ maxElements: 1000, maxDepth: 40, maxDimension: 1280, maxTreeChars: 128 * 1024, sparseBelow: 6 });
+/** Captures on which focus-typed text is looked for before the check lapses. */
+const TYPE_CHECK_LOOKS = 3;
 
 const SAFE_MESSAGES = Object.freeze({
   busy: "上一个电脑操作步骤还在进行，请稍候",
@@ -585,6 +587,7 @@ function createComputerAgentController({
         targetIndex: 0,
         tracker: policy.emptyTracker(),
         sendBaseline: null,
+        typeCheck: null,
         observation: null,
         apps: [],
         busy: false,
@@ -711,6 +714,20 @@ function createComputerAgentController({
       const axSparse = snapshot ? isSparse(snapshot.elements) : false;
       const windowBounds = snapshot ? snapshot.windowBounds : null;
       const elements = snapshot ? policy.modelElements(snapshot.elements, windowBounds) : [];
+      // Text typed "into focus" is checked on each capture until it is seen
+      // (at most TYPE_CHECK_LOOKS captures; a slow app may render it late).
+      // Seen only in the wrong kind of input box means focus was not where the
+      // run believed: no further typing, Return or send is offered.
+      let landing = null;
+      if (state.typeCheck && snapshot) {
+        const check = state.typeCheck;
+        check.looks += 1;
+        landing = { field: check.field, text: check.text, landed: policy.typedLanding(check, elements) };
+        if (landing.landed !== "unknown" || check.looks >= TYPE_CHECK_LOOKS) state.typeCheck = null;
+        if (landing.landed === "elsewhere") {
+          state.tracker = Object.freeze({ ...state.tracker, misdirected: true, focus: "none", searchText: null, composerText: null });
+        }
+      }
       const treeTexts = snapshot ? policy.extractTreeTexts(snapshot.treeMarkdown) : [];
       const windowTitle = snapshot ? snapshot.windowTitle : null;
       const appName = targetApp ? targetApp.name : state.grantApps[0].name;
@@ -745,7 +762,7 @@ function createComputerAgentController({
       };
       const observation = policy.projectObservation({ app: appName, windowTitle, elements, treeTexts, axSparse, task: state.task });
       const targetWindow = target ? "visible" : targetApp && targetApp.running ? "hidden" : "none";
-      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow });
+      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing });
       return success({
         observationId,
         observation,
@@ -925,6 +942,11 @@ function createComputerAgentController({
       }
     }
 
+    // Typing "into focus" is checked on later captures against the input
+    // boxes that already held the literal (see policy.typedLanding).
+    const typeCheck = candidate.kind === "type" && !elementToken
+      ? { field: candidate.field, text: candidate.text, before: policy.typedTextSpots(observation.elements, candidate.text), looks: 0 }
+      : null;
     const suspendEsc = candidate.kind === "key" && candidate.key === "escape";
     if (suspendEsc) disarmStopShortcut();
     let result;
@@ -950,7 +972,15 @@ function createComputerAgentController({
       const after = await capture(state, target, false).catch(() => null);
       if (after && semanticFingerprint(after) === observation.fingerprint) status = "no_effect";
     }
+    // A click on the granted recipient is confirmed only when the clicked row
+    // newly shows as selected; otherwise the open conversation stays unknown.
+    if (status === "unverified" && candidate.matchesRecipient && (candidate.kind === "click" || candidate.kind === "point") && target && !state.stopped) {
+      const after = await capture(state, target, false).catch(() => null);
+      if (after && policy.recipientNewlySelected(observation.elements, policy.modelElements(after.elements, after.windowBounds), task, candidate.targetFrame)) status = "delivered";
+    }
     state.tracker = policy.nextTracker(state.tracker, candidate, status, { task });
+    // Anything but a clean refusal may have typed somewhere: arm the check.
+    if (typeCheck && status !== "failed" && status !== "blocked") state.typeCheck = typeCheck;
     const code = result.code || undefined;
     const escalates = delivery === "background" && candidate.risk === "none" && candidate.kind !== "activate_app";
     const message = code === "background_unavailable"

@@ -198,8 +198,17 @@ function sanitizeFacts(value: unknown): ComputerExecutorFacts {
       inputStillHasText: typeof evidence.inputStillHasText === "boolean" ? evidence.inputStillHasText : null,
     };
   }
+  let typedLanding: ComputerExecutorFacts["typedLanding"];
+  if (root.typedLanding !== undefined && root.typedLanding !== null) {
+    const item = object(root.typedLanding, "输入落点");
+    const field = item.field === "search" || item.field === "message" || item.field === "field" ? item.field : null;
+    const landed = item.landed === "expected" || item.landed === "elsewhere" || item.landed === "unknown" ? item.landed : null;
+    const text = optionalLine(item.text, COMPUTER_AGENT_LIMITS.maxParameterChars);
+    if (field && landed && text) typedLanding = { field, text, landed };
+  }
   return {
     focus, irreversibleDone: root.irreversibleDone === true,
+    ...(typedLanding ? { typedLanding } : {}),
     ...(typedIntoSearch ? { typedIntoSearch } : {}), ...(typedIntoMessageBox ? { typedIntoMessageBox } : {}),
     ...(conversationOpenedFor ? { conversationOpenedFor } : {}), ...(sendEvidence ? { sendEvidence } : {}),
     ...(targetApp ? { targetApp } : {}), ...(typeof root.appRunning === "boolean" ? { appRunning: root.appRunning } : {}),
@@ -261,6 +270,7 @@ const NEXT_ACTION_RULES = [
   "Choose `done` only if `observation` clearly shows that `task.success_check` is satisfied.",
   "Choose `reobserve` if the screen still seems to be loading or changing.",
   "If `executor_facts.targetWindow` is `hidden` or `none`, the app's window is minimized, on another desktop or not open, so `observation` is empty for that reason and re-observing will not change it: choose the candidate that opens the app or brings its window to the front.",
+  "`executor_facts.focus` is `none` when keyboard focus is unknown (for example after a click the app could not confirm). To type into a search box then, first choose the keyboard shortcut candidate that opens search. `executor_facts.typedLanding` (right after typing) says whether the text was seen in the intended box (`expected`) or could not be seen (`unknown`).",
   "Choose `abstain` if no candidate is both safe and useful, or if the screen needs the user (login, QR code, captcha, password or payment password, unexpected dialog).",
   "Never choose a candidate that sends, submits, deletes or pays for anything other than exactly `task.irreversible_step`, and never repeat it once `progress.irreversible_step_done` is true.",
 ];
