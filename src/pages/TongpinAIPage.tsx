@@ -1235,13 +1235,16 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       const originalMissing = typeof request === "string" && error instanceof ApiRequestError && error.status === 404;
       const recoverable = !originalMissing && canRecoverChatRequest(error instanceof ApiRequestError ? error.code : undefined, interrupted);
       const stoppedProcess = settledProcess(interrupted ? "stopped" : "failed");
-      updateReply(conversationId, messageId, { ...(stoppedProcess ? { process: stoppedProcess } : {}), status: "error", taskPhase: recoverable ? "unknown" : "failed", retryDisposition: originalMissing ? undefined : recoverable ? "recover" : "regenerate", content: originalMissing
-        ? "原请求没有服务端记录或已过期，本次未自动重新发送。请重新输入任务后再发送。"
-        : liveContent || (interrupted
+      const failureText = interrupted
         ? "已停止等待。请求可能仍在处理，实际扣额请查看 Token 使用详情。"
         : error instanceof ApiRequestError && error.code === "NETWORK_UNAVAILABLE"
           ? "连接中断，暂时没有收到完整回复。可重新获取同一请求，避免重复发送。"
-          : error instanceof Error ? error.message : "暂时无法获取回复，请稍后重试。") });
+          : error instanceof Error ? error.message : "暂时无法获取回复，请稍后重试。";
+      // A reply cut off mid-stream keeps what arrived, and says why it stops there.
+      const content = originalMissing
+        ? "原请求没有服务端记录或已过期，本次未自动重新发送。请重新输入任务后再发送。"
+        : liveContent ? (interrupted ? liveContent : `${liveContent}\n\n（回复中断：${failureText}）`) : failureText;
+      updateReply(conversationId, messageId, { ...(stoppedProcess ? { process: stoppedProcess } : {}), status: "error", taskPhase: recoverable ? "unknown" : "failed", retryDisposition: originalMissing ? undefined : recoverable ? "recover" : "regenerate", content });
       clearReplyActivity(conversationId, messageId);
     } finally {
       clearTimeout(deltaTimer);
