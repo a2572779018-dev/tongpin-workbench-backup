@@ -105,12 +105,12 @@ export function historyConversationFingerprint(title: string, messages: readonly
   return historyFingerprint(title, messages.map(message => `${message.id}:${message.fingerprint}`).join(","));
 }
 
-export type MemberHistoryCaps = Pick<typeof MEMBER_HISTORY_LIMITS, "memberCharacters" | "memberChunks" | "conversationCharacters">;
+export interface MemberHistoryCaps { memberCharacters: number; memberChunks: number; conversationCharacters: number }
 
 /** Tenant-scoped repository. Member methods take the authenticated account id. */
 export class AiMemberHistoryIndex {
   readonly tenantId: string;
-  private readonly caps: { memberCharacters: number; memberChunks: number; conversationCharacters: number };
+  private readonly caps: MemberHistoryCaps;
   /** `caps` exists for tests; production always uses MEMBER_HISTORY_LIMITS. */
   constructor(readonly sql: AiSql, tenantId: string = DEFAULT_AI_TENANT_ID, caps: Partial<MemberHistoryCaps> = {}) {
     this.tenantId = normalizeAiTenantId(tenantId);

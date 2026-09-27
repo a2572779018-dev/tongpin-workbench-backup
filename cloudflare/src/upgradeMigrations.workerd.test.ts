@@ -54,13 +54,19 @@ describe.sequential("Worker schema upgrade: fresh and existing Durable Object da
   const login = (email: string) => api<Session>("/api/auth/login", undefined, { email, password: PASSWORD });
   const sql = async <T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(query: string): Promise<T[]> =>
     (await mf!.unsafeGetDurableObjectStorage(WORKER, "TongpinCore", { name: "primary" })).exec<T>(query);
-  const tables = async () => (await sql<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'relationship_graph%' OR name LIKE 'ai_member_memor%' OR name='ai_schema_migrations') ORDER BY name")).map(row => row.name);
+  const tables = async () => (await sql<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'relationship_graph%' OR name LIKE 'ai_member_%' OR name='ai_schema_migrations') ORDER BY name")).map(row => row.name);
   const schemaState = async () => ({
     tables: await tables(),
     core: (await sql<{ id: number }>("SELECT id FROM _sql_schema_migrations ORDER BY id")).map(row => row.id),
     ai: await sql<{ module: string; version: number }>("SELECT module, version FROM ai_schema_migrations ORDER BY module, version"),
   });
-  const EXPECTED_TABLES = ["ai_member_memories", "ai_member_memory_reviews", "ai_member_memory_snapshots", "ai_schema_migrations", "relationship_graph_snapshot_chunks", "relationship_graph_snapshots"];
+  // member_memory v2 (history recall, incl. the trigram FTS5 table and its shadow tables) and v3 (personal skills, activity).
+  const EXPECTED_TABLES = [
+    "ai_member_activity", "ai_member_history_chunks", "ai_member_history_conversations", "ai_member_history_fts", "ai_member_history_fts_config", "ai_member_history_fts_data",
+    "ai_member_history_fts_docsize", "ai_member_history_fts_idx", "ai_member_history_purges", "ai_member_history_queue", "ai_member_history_state",
+    "ai_member_memories", "ai_member_memory_reviews", "ai_member_memory_snapshots", "ai_member_skills", "ai_schema_migrations", "relationship_graph_snapshot_chunks", "relationship_graph_snapshots",
+  ];
+  const EXPECTED_AI_LEDGER = [1, 2, 3].map(version => ({ module: "member_memory", version }));
 
   beforeAll(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "tongpin-upgrade-migrations-"));
@@ -76,7 +82,7 @@ describe.sequential("Worker schema upgrade: fresh and existing Durable Object da
     const state = await schemaState();
     expect(state.tables).toEqual(EXPECTED_TABLES);
     expect(state.core).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    expect(state.ai).toEqual([{ module: "member_memory", version: 1 }]);
+    expect(state.ai).toEqual(EXPECTED_AI_LEDGER);
   }, 30_000);
 
   it("adds them to an existing database that predates them and keeps its rows", async () => {
@@ -85,7 +91,8 @@ describe.sequential("Worker schema upgrade: fresh and existing Durable Object da
     const member = users.users.find(user => user.email === "member@upgrade.example.com")!;
     await api(`/api/admin/users/${member.id}/access`, admin, { status: "active" }, "PATCH");
     // Roll this database back to the shape of an installation from before these branches.
-    for (const table of ["relationship_graph_snapshot_chunks", "relationship_graph_snapshots", "ai_member_memory_snapshots", "ai_member_memory_reviews", "ai_member_memories", "ai_schema_migrations"]) await sql(`DROP TABLE ${table}`);
+    for (const table of ["relationship_graph_snapshot_chunks", "relationship_graph_snapshots", "ai_member_memory_snapshots", "ai_member_memory_reviews", "ai_member_memories", "ai_schema_migrations",
+      "ai_member_history_fts", "ai_member_history_chunks", "ai_member_history_conversations", "ai_member_history_state", "ai_member_history_queue", "ai_member_history_purges", "ai_member_skills", "ai_member_activity"]) await sql(`DROP TABLE ${table}`);
     await sql("DELETE FROM _sql_schema_migrations WHERE id = 7");
     expect(await tables()).toEqual([]);
     const userCount = (await sql<{ count: number }>("SELECT COUNT(*) AS count FROM users"))[0].count;
@@ -96,7 +103,7 @@ describe.sequential("Worker schema upgrade: fresh and existing Durable Object da
     const state = await schemaState();
     expect(state.tables).toEqual(EXPECTED_TABLES);
     expect(state.core).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    expect(state.ai).toEqual([{ module: "member_memory", version: 1 }]);
+    expect(state.ai).toEqual(EXPECTED_AI_LEDGER);
     expect((await sql<{ count: number }>("SELECT COUNT(*) AS count FROM users"))[0].count).toBe(userCount);
 
     // Existing accounts keep working and both features answer on the upgraded database.
