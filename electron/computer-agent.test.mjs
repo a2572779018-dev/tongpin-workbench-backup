@@ -7,6 +7,8 @@ const { TIMING, createComputerAgentController, supportsRequiredTools, toolJson, 
 const policy = require("./computer-agent-policy.cjs");
 
 const WINDOW_ID = 9_007_199_254_740_993n; // > 2^53: must never be rounded
+const POPUP_ID = 9_007_199_254_741_011n;
+const SUGGEST_ID = 9_007_199_254_741_023n;
 const RUN_ID = `cr_${"a".repeat(32)}`;
 const TASK = Object.freeze({
   goal: "在微信里给姐姐发送中秋快乐",
@@ -83,12 +85,20 @@ function wechatApp(options = {}) {
       push({ role: "AXStaticText", label: app.chat, frame: { x: 400, y: 60, w: 200, h: 30 } });
       app.sent.forEach((text, index) => push({ role: "AXStaticText", label: options.bubblePrefix ? `${options.bubblePrefix}${text}` : text, frame: { x: 700, y: 200 + index * 40, w: 120, h: 30 } }));
       if (options.deleteButton) push({ role: "AXButton", label: "删除聊天记录", frame: { x: 900, y: 60, w: 100, h: 30 } });
-      push({ role: "AXTextArea", label: "", value: app.input, frame: { x: 380, y: 640, w: 560, h: 90 } });
+      // `hideInputValue`: the message box does not expose its text either.
+      push({ role: "AXTextArea", label: "", value: options.hideInputValue ? "" : app.input, frame: { x: 380, y: 640, w: 560, h: 90 } });
       push({ role: "AXButton", label: "发送", frame: { x: 950, y: 740, w: 60, h: 30 } });
     }
     app.elements = list;
     return list;
   };
+  // `popupList`: like WeChat, the search list is a window of its own under the
+  // search box while search is open — "ax" exposes its rows, "opaque" exposes
+  // nothing readable (only its picture changes).
+  app.popupOpen = () => Boolean(options.popupList) && app.focus === "search";
+  app.popupRows = () => (app.search
+    ? [...contacts.filter((name) => name.includes(app.search)), `搜索网络结果：${app.search}`]
+    : ["最近在搜", ...(options.recentSearches ?? [])]);
   app.byToken = (token) => app.elements.find((element) => element.elementToken === token) || null;
   app.openChat = (name) => { app.chat = name; app.focus = "input"; app.search = ""; app.input = ""; };
   app.options = options;
@@ -105,6 +115,24 @@ function fakeSdk(app, options = {}) {
     windowId: WINDOW_ID, pid: 4242, appName: "WeChat", title: "微信",
     bounds: { x: 100, y: 50, width: 1000, height: 800 },
     isOnScreen: !app.hidden, minimized: app.hidden, layer: 0, zIndex: 5n,
+  });
+  // `inputSuggestions`: a readable suggestion popup floats just above the
+  // message box while it holds text (like sticker suggestions), naming it twice.
+  const suggestionWindow = () => ({
+    windowId: SUGGEST_ID, pid: 4242, appName: "", title: "",
+    bounds: { x: 380, y: 560, width: 300, height: 70 }, isOnScreen: true, minimized: false, layer: 3,
+  });
+  const floating = () => [
+    ...(app.popupOpen() ? [popupWindow()] : []),
+    ...(options.inputSuggestions && app.input ? [suggestionWindow()] : []),
+  ];
+  // The search list as the host's window-list script reports it (layer 3).
+  const popupWindow = () => ({
+    // `popupReopens`: the app shows results in a new window (a new id).
+    windowId: options.popupReopens && app.search ? POPUP_ID + 1n : POPUP_ID, pid: 4242, appName: "", title: "",
+    // Under the search box (x 110, y 70, 180×24) unless `popupBounds` moves it.
+    bounds: options.popupBounds ?? { x: 105, y: 90, width: 260, height: 420 },
+    isOnScreen: true, minimized: false, layer: 3,
   });
   // `clearsSearchOnBlur`: like WeChat, a foreground action on a window that
   // is not kept in front gives the front back afterwards, which closes the
@@ -134,10 +162,39 @@ function fakeSdk(app, options = {}) {
       { pid: 77, name: "Terminal", bundleId: "com.apple.Terminal", running: true, active: false },
       { pid: options.hostPid ?? 1, name: "同频", bundleId: "com.tongpin.desktop", running: true, active: true },
     ] })),
+    // Like Cua Driver: layer-0 windows only (the search list is not among them).
     listWindows: vi.fn(async (input) => ({ windows: app.running && input.pid === 4242 ? [window()] : [] })),
     getWindowState: vi.fn(async (input) => {
       calls.states.push(input);
       if (options.failCapture) throw toolError("window_state_failed");
+      if (input.windowId === SUGGEST_ID) {
+        if (!(options.inputSuggestions && app.input)) throw toolError("window_id_not_found");
+        const rows = [app.input, app.input].map((label, index) => ({ role: "AXStaticText", label, elementIndex: BigInt(index + 1), depth: 1, parentIndex: 0n, enabled: true, actions: [], elementToken: `s${index + 1}`, frame: { x: 390 + index * 120, y: 570, w: 100, h: 50 } }));
+        return {
+          pid: input.pid, windowId: input.windowId, appName: "WeChat", windowTitle: "",
+          treeMarkdown: rows.map((row) => `- AXStaticText "${row.label}"`).join("\n"), elements: rows,
+          windowBounds: suggestionWindow().bounds, images: [],
+        };
+      }
+      if (input.windowId === POPUP_ID || input.windowId === POPUP_ID + 1n) {
+        calls.popupReads = (calls.popupReads ?? 0) + 1;
+        // `popupReadFails(n)`: the n-th read of the list window fails.
+        if (options.popupReadFails && options.popupReadFails(calls.popupReads)) throw toolError("window_state_failed");
+        if (!app.popupOpen() || input.windowId !== popupWindow().windowId) throw toolError("window_id_not_found");
+        const rows = app.options.popupList === "ax"
+          ? app.popupRows().map((label, index) => ({ role: "AXStaticText", label, elementIndex: BigInt(index + 1), depth: 1, parentIndex: 0n, enabled: true, actions: [], elementToken: `p${index + 1}`, frame: { x: 110, y: 100 + index * 30, w: 240, h: 28 } }))
+          : [];
+        // The list's picture: it changes with what the list shows, unless `popupFrozen`.
+        const picture = Buffer.from(`popup:${options.popupFrozen ? "" : app.search}`).toString("base64");
+        return {
+          pid: input.pid, windowId: input.windowId, appName: "WeChat", windowTitle: "",
+          treeMarkdown: rows.map((row) => `- AXStaticText "${row.label}"`).join("\n"), elements: rows,
+          ...(rows.length ? {} : { degraded: true, degradedReason: "ax_window_unresolved" }),
+          windowBounds: popupWindow().bounds,
+          ...(input.includeScreenshot ? { screenshotWidth: 520, screenshotHeight: 840, screenshotFrameValid: true } : {}),
+          images: input.includeScreenshot ? [{ mimeType: "image/png", dataBase64: picture }] : [],
+        };
+      }
       const elements = app.render();
       return {
         pid: input.pid, windowId: input.windowId, snapshotId: `s0000000${app.version % 10}`, appName: "WeChat", windowTitle: options.windowTitle ?? "微信",
@@ -198,7 +255,8 @@ function fakeSdk(app, options = {}) {
           if (element.label === "Search") { app.search = args.text; app.focus = "search"; } else { app.input = args.text; app.focus = "input"; }
           return { isError: false, action: { effect: effect.Confirmed, route: 0 }, text: "", images: [], degraded: false, rawJson: "{}" };
         }
-        return applyKey(() => { if (app.focus === "search") app.search += args.text; else if (app.focus === "input") app.input += args.text; }, args.delivery_mode);
+        // `dropsTyping`: the keystrokes reach no input box at all.
+        return applyKey(() => { if (options.dropsTyping) return; if (app.focus === "search") app.search += args.text; else if (app.focus === "input") app.input += args.text; }, args.delivery_mode);
       }
       return { isError: true, errorCode: "unsupported", text: "", images: [], degraded: false, rawJson: "{}" };
     }),
@@ -215,7 +273,7 @@ function fakeSdk(app, options = {}) {
     ActionEffect: effect,
     currentMacOsPermissionStatus: vi.fn(() => ({ ...permissions })),
   };
-  return { sdk, driver, calls, permissions };
+  return { sdk, driver, calls, permissions, floating };
 }
 
 function makeAgent({ app = wechatApp(), sdkOptions = {}, consent = true, extraConsent = false, ...overrides } = {}) {
@@ -229,6 +287,8 @@ function makeAgent({ app = wechatApp(), sdkOptions = {}, consent = true, extraCo
   const shortcut = { registered: 0, disposed: 0, press: () => stopShortcut?.() };
   let ids = 0;
   let restored = 0;
+  // The host's window-list script: the search list while search is open.
+  const listPopupWindows = vi.fn(async (pid) => (pid === 4242 ? fake.floating() : []));
   const controller = createComputerAgentController({
     platform: "darwin", arch: "arm64", osVersion: "15.1", hostPid: 1,
     loadSdk: async () => fake.sdk,
@@ -238,6 +298,7 @@ function makeAgent({ app = wechatApp(), sdkOptions = {}, consent = true, extraCo
     openPrivacyPane: vi.fn(async (pane) => { panes.push(pane); if (sdkOptions.grantOnPane) Object.assign(fake.permissions, sdkOptions.grantOnPane(pane) ?? {}); }),
     emit: (event) => events.push(event),
     restoreHost: () => { restored += 1; },
+    listPopupWindows,
     registerStopShortcut: (onStop) => { shortcut.registered += 1; stopShortcut = onStop; return () => { shortcut.disposed += 1; stopShortcut = null; }; },
     now: () => clock,
     sleep: async (ms) => { clock += ms; },
@@ -247,7 +308,7 @@ function makeAgent({ app = wechatApp(), sdkOptions = {}, consent = true, extraCo
     timing: { ...TIMING, settleMs: 0, launchSettleMs: 0, openPaneAfterMs: 2_000, screenRecordingGraceMs: 5_000 },
     ...overrides,
   });
-  return { controller, fake, app, events, dialogs, panes, helpers, shortcut, advance: (ms) => { clock += ms; }, get restored() { return restored; } };
+  return { controller, fake, app, events, dialogs, panes, helpers, shortcut, listPopupWindows, advance: (ms) => { clock += ms; }, get restored() { return restored; } };
 }
 
 async function started(options) {
@@ -566,6 +627,287 @@ describe("computer agent WeChat keyboard path", () => {
     await step(agent, "type_p1_focus_fg");
     const view = await observe(agent);
     expect(view.facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "unknown" });
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+  });
+
+  it("reads WeChat's search list window with the target and proves the search by its rows", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "ax", recentSearches: ["妈妈"] }), sdkOptions: { clearsSearchOnBlur: true, popupFrozen: true } });
+    await step(agent, "open_search");
+    const opened = await step(agent, "open_search_fg");
+    expect(opened.view.display.popupCount).toBeUndefined();
+    const searching = await observe(agent);
+    // The list is its own window: read with the target, counted apart from it.
+    expect(searching.display).toMatchObject({ popupCount: 1, popupElementCount: 2 });
+    expect(searching.observation.elements.some((element) => element.label === "最近在搜")).toBe(true);
+    await agent.controller.execute({ observationId: searching.observationId, candidateId: "type_p1_focus_fg" });
+    const view = await observe(agent);
+    expect(view.facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "expected" });
+    // Jev sees the results; nothing is ever offered on the list's rows.
+    expect(view.observation.elements.some((element) => element.label === "搜索网络结果：姐姐")).toBe(true);
+    expect(view.candidates.some((candidate) => candidate.label.includes("搜索网络结果"))).toBe(false);
+    const enter = view.candidates.find((candidate) => candidate.id === "key_return_fg");
+    expect(enter).toMatchObject({ risk: "none", label: "按回车打开搜索结果「姐姐」（前台）" });
+    await agent.controller.execute({ observationId: view.observationId, candidateId: enter.id });
+    expect(agent.app.chat).toBe("姐姐");
+    // The window-list script ran only while the search was open: the capture
+    // after ⌘F, right before the keystrokes, the capture after them and right
+    // before Return.
+    const listed = agent.listPopupWindows.mock.calls.length;
+    expect(listed).toBe(4);
+    const chat = await observe(agent);
+    expect(chat.facts).toMatchObject({ focus: "conversation", conversationOpenedFor: "姐姐" });
+    expect(chat.display.popupCount).toBeUndefined();
+    expect(agent.listPopupWindows.mock.calls.length).toBe(listed);
+    expect(agent.listPopupWindows.mock.calls.every(([pid]) => pid === 4242)).toBe(true);
+    expect(agent.dialogs.extra).toHaveLength(0);
+  });
+
+  it("proves the search when an unreadable list under the box redraws after the keystrokes", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    const typed = await step(agent, "type_p1_focus_fg");
+    expect(typed.view.display).toMatchObject({ popupCount: 1, popupElementCount: 0 });
+    // Jev is told the search is open although it cannot read the list.
+    expect(typed.view.facts.searchListShown).toBe(true);
+    const view = await observe(agent);
+    expect(view.facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "expected" });
+    expect(view.facts.searchListShown).toBe(true);
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg")).toMatchObject({ risk: "none" });
+    // The window's own capture asked Cua for a small picture of the list only.
+    const popupCaptures = agent.fake.calls.states.filter((input) => input.windowId === POPUP_ID);
+    expect(popupCaptures.length).toBeGreaterThan(0);
+    expect(popupCaptures.every((input) => input.maxDimension === 320 && input.maxElements === 200)).toBe(true);
+  });
+
+  it("keeps Return risky when the list under the box does not react to the keystrokes", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, dropsTyping: true } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(view.facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "unknown" });
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+  });
+
+  it("keeps Return risky when the list stays the same picture after typing", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, popupFrozen: true } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    expect(agent.app.search).toBe("姐姐");
+    const view = await observe(agent);
+    expect(view.facts.typedLanding.landed).toBe("unknown");
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+  });
+
+  it("ignores other apps' and layer-0 windows in the window-list script's answer", async () => {
+    const foreign = { windowId: 4_000_001, pid: 77, layer: 3, bounds: { x: 105, y: 90, width: 260, height: 420 }, isOnScreen: true, minimized: false, title: "", appName: "" };
+    const flat = { ...foreign, windowId: 4_000_002, pid: 4242, layer: 0 };
+    const agent = await started({
+      app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }),
+      sdkOptions: { clearsSearchOnBlur: true },
+      listPopupWindows: async () => [foreign, flat],
+    });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(view.display.popupCount).toBeUndefined();
+    expect(view.facts.typedLanding.landed).toBe("unknown");
+    expect(agent.fake.calls.states.every((input) => input.pid === 4242 && input.windowId === WINDOW_ID)).toBe(true);
+  });
+
+  it("never counts a popup that is not the search list, even when it names the literal twice", async () => {
+    // ⌘F misses the search box, the message box hides its text, and a
+    // suggestion popup over the message box shows the typed text twice.
+    const agent = await started({
+      app: wechatApp({ chat: "妈妈", refuseBackground: true, hideSearchValue: true, hideInputValue: true }),
+      sdkOptions: { cmdFMissesSearch: true, inputSuggestions: true },
+    });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    expect(agent.app.input).toBe("姐姐");
+    const view = await observe(agent);
+    expect(view.display).toMatchObject({ popupCount: 1, popupElementCount: 2 });
+    expect(view.display.searchListShown).toBeUndefined();
+    expect(view.facts.typedLanding.landed).toBe("unknown");
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+    expect(agent.app.sent).toEqual([]);
+  });
+
+  it("does not take \"could not look\" before typing for \"there was no list\"", async () => {
+    let calls = 0;
+    const app = wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" });
+    const agent = await started({
+      app, sdkOptions: { clearsSearchOnBlur: true, dropsTyping: true },
+      // The window list fails for the capture after ⌘F and right before typing.
+      listPopupWindows: async (pid) => { calls += 1; return calls <= 2 ? null : (pid === 4242 && app.popupOpen() ? [{ windowId: POPUP_ID, pid: 4242, layer: 3, bounds: { x: 105, y: 90, width: 260, height: 420 }, isOnScreen: true, minimized: false }] : []); },
+    });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(calls).toBe(3);
+    expect(view.facts.searchListShown).toBe(true);
+    expect(view.facts.typedLanding.landed).toBe("unknown");
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+  });
+
+  it("still sees a list whose read failed right before typing, and takes no redraw from it", async () => {
+    // The list is read after ⌘F (1st), right before typing (2nd, fails) and after typing (3rd).
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, popupReadFails: (n) => n === 2 } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(agent.fake.calls.popupReads).toBe(3);
+    expect(view.facts.typedLanding.landed).toBe("unknown");
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+  });
+
+  it("does not count recent searches naming the text when the look before typing failed", async () => {
+    let calls = 0;
+    const app = wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "ax", recentSearches: ["姐姐", "姐姐们"] });
+    const record = { windowId: POPUP_ID, pid: 4242, layer: 3, bounds: { x: 105, y: 90, width: 260, height: 420 }, isOnScreen: true, minimized: false };
+    const agent = await started({
+      app, sdkOptions: { clearsSearchOnBlur: true, dropsTyping: true },
+      // The listing right before the keystrokes fails; the keystrokes are lost.
+      listPopupWindows: async (pid) => { calls += 1; return calls === 2 ? null : (pid === 4242 && app.popupOpen() ? [record] : []); },
+    });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(calls).toBe(3);
+    expect(view.observation.elements.filter((element) => element.label && element.label.includes("姐姐")).length).toBeGreaterThanOrEqual(3);
+    expect(view.facts.typedLanding.landed).toBe("unknown");
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+  });
+
+  it("keeps a list proof through a failed read of the list and still opens the result", async () => {
+    // Reads of the list window: after ⌘F, before typing, after typing; then they fail.
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "ax" }), sdkOptions: { clearsSearchOnBlur: true, popupFrozen: true, popupReadFails: (n) => n >= 4 } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    expect((await observe(agent)).facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "expected" });
+    const again = await observe(agent);
+    expect(again.display).toMatchObject({ popupCount: 1, popupElementCount: 0, searchListShown: true });
+    expect(again.facts.focus).toBe("search");
+    expect(again.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("none");
+    const executed = await agent.controller.execute({ observationId: again.observationId, candidateId: "key_return_fg" });
+    expect(executed.value.status).not.toBe("blocked");
+    expect(agent.app.chat).toBe("姐姐");
+  });
+
+  it("keeps the search through a failed window listing but offers no safe Return until it can look again", async () => {
+    let calls = 0;
+    const app = wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" });
+    const record = () => ({ windowId: POPUP_ID, pid: 4242, layer: 3, bounds: { x: 105, y: 90, width: 260, height: 420 }, isOnScreen: true, minimized: false });
+    const agent = await started({ app, sdkOptions: { clearsSearchOnBlur: true }, listPopupWindows: async () => { calls += 1; return calls === 4 ? null : (app.popupOpen() ? [record()] : []); } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    expect((await observe(agent)).facts.typedLanding.landed).toBe("expected");
+    const blind = await observe(agent);
+    expect(calls).toBe(4);
+    expect(blind.facts.focus).toBe("search");
+    expect(blind.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+    const seeing = await observe(agent);
+    expect(seeing.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("none");
+  });
+
+  it("accepts a list the app reopened as a new window once the old one is gone", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, popupReopens: true, popupFrozen: true } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(view.facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "expected" });
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("none");
+  });
+
+  it("withdraws the search proof when the list closes and Return goes back to risky", async () => {
+    const app = wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" });
+    const agent = await started({ app, sdkOptions: { clearsSearchOnBlur: true } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const proven = await observe(agent);
+    expect(proven.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("none");
+    // The member clicks another chat: WeChat closes the search, and the chat's
+    // message box (holding a draft) has keyboard focus now.
+    Object.assign(app, { focus: "input", search: "", chat: "妈妈", input: "草稿" });
+    const closed = await observe(agent);
+    expect(closed.facts.focus).toBe("none");
+    expect(closed.facts).not.toHaveProperty("searchListShown");
+    const enter = closed.candidates.find((candidate) => candidate.id === "key_return_fg");
+    expect(enter.risk).toBe("submit");
+    expect(enter.label).toContain("按回车（可能发送或提交输入框里的内容）");
+    expect(agent.app.sent).toEqual([]);
+  });
+
+  it("does not press Return when the search closed while Jev was deciding", async () => {
+    const app = wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" });
+    const agent = await started({ app, sdkOptions: { clearsSearchOnBlur: true } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("none");
+    Object.assign(app, { focus: "input", search: "", chat: "妈妈", input: "草稿" });
+    const executed = await agent.controller.execute({ observationId: view.observationId, candidateId: "key_return_fg" });
+    expect(executed).toMatchObject({ ok: true, value: { status: "blocked", code: "search_closed" } });
+    expect(agent.fake.calls.tools.some((call) => call.name === "press_key")).toBe(false);
+    expect(app.sent).toEqual([]);
+    expect(app.input).toBe("草稿");
+    expect((await observe(agent)).facts.focus).toBe("none");
+  });
+
+  it("without Screen Recording an open list that cannot be pictured proves nothing", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, screenRecording: false } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(view.facts.searchListShown).toBe(true);
+    expect(view.facts.typedLanding.landed).toBe("unknown");
+    expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
+    expect(agent.fake.calls.states.filter((input) => input.windowId === POPUP_ID).every((input) => input.includeScreenshot === false)).toBe(true);
+  });
+
+  it("keeps list rows out of candidates, authorization and send evidence", async () => {
+    const spies = ["authorizeCandidate", "buildCandidates", "facts", "sendEvidence", "recipientNewlySelected", "sentTextCount"].map((name) => vi.spyOn(policy, name));
+    try {
+      const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "ax" }), sdkOptions: { clearsSearchOnBlur: true } });
+      await step(agent, "open_search");
+      await step(agent, "open_search_fg");
+      await step(agent, "type_p1_focus_fg");
+      await step(agent, "key_return_fg");
+      await step(agent, "type_p2_focus_fg");
+      await step(agent, "key_return_fg");
+      expect(agent.app.sent).toEqual(["中秋快乐"]);
+      const seen = spies.flatMap((spy) => spy.mock.calls.flat());
+      const elementsIn = (value) => (value && typeof value === "object" ? [value.elements, value.observation && value.observation.elements].filter(Array.isArray).flat() : []);
+      const all = seen.flatMap((arg) => (Array.isArray(arg) ? arg : elementsIn(arg)));
+      expect(all.length).toBeGreaterThan(0);
+      expect(all.some((element) => element && element.popup)).toBe(false);
+    } finally {
+      spies.forEach((spy) => spy.mockRestore());
+    }
+  });
+
+  it("does not take a same-app window away from the search box as the search list", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, popupBounds: { x: 600, y: 500, width: 300, height: 200 } } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(view.display.popupCount).toBe(1);
+    expect(view.facts).not.toHaveProperty("searchListShown");
+    expect(view.facts.typedLanding.landed).toBe("unknown");
     expect(view.candidates.find((candidate) => candidate.id === "key_return_fg").risk).toBe("submit");
   });
 
@@ -1060,12 +1402,137 @@ describe("computer agent policy units", () => {
     expect(policy.typedLanding(check("message", [search(""), message("")]), [search("姐姐"), message("")])).toBe("elsewhere");
     expect(policy.typedLanding(check("message", [message("")]), [message("你好姐姐")])).toBe("expected");
     // Secure fields are never read.
-    expect(policy.typedTextSpots([box({ secure: true, value: "姐姐" })], "姐姐")).toEqual({ search: 0, message: 0, other: 0, results: 0 });
+    expect(policy.typedTextSpots([box({ secure: true, value: "姐姐" })], "姐姐")).toEqual({ search: 0, message: 0, other: 0, results: 0, listResults: 0 });
     // Results naming the literal prove a search box that shows no value, but
     // one new item (a chat list's draft preview) is not enough.
     const item = (text) => ({ editable: false, secure: false, searchLike: false, messageBox: false, text, value: "" });
     expect(policy.typedLanding(check("search", [search(""), item("姐姐")]), [search(""), item("姐姐"), item("姐姐"), item("搜索网络结果：姐姐")])).toBe("expected");
     expect(policy.typedLanding(check("search", [search(""), item("姐姐")]), [search(""), item("姐姐"), item("[草稿] 姐姐")])).toBe("unknown");
+  });
+
+  it("takes a same-app window as the search list only when it hangs from a visible search box", () => {
+    const box = { searchLike: true, frame: { x: 110, y: 70, width: 180, height: 24 } };
+    const lists = (bounds, hash = "h1") => policy.anchoredSearchLists([box], [{ windowId: 77, bounds, hash }]);
+    expect(lists({ x: 105, y: 90, width: 260, height: 420 })).toEqual([{ windowId: "77", hash: "h1", read: true }]);
+    // A window that also covers the box (its shadow starts just above it).
+    expect(lists({ x: 100, y: 58, width: 260, height: 420 })).toHaveLength(1);
+    expect(lists({ x: 100, y: 57, width: 260, height: 420 })).toEqual([]);
+    // Up to 48 points below the box's bottom edge (70 + 24 + 48 = 142).
+    expect(lists({ x: 105, y: 142, width: 260, height: 420 })).toHaveLength(1);
+    expect(lists({ x: 105, y: 143, width: 260, height: 420 })).toEqual([]);
+    // Too short or too narrow for a list (a tooltip), or beside the box.
+    expect(lists({ x: 105, y: 90, width: 260, height: 59 })).toEqual([]);
+    expect(lists({ x: 110, y: 90, width: 143, height: 300 })).toEqual([]);
+    expect(lists({ x: 110, y: 90, width: 144, height: 300 })).toHaveLength(1);
+    expect(lists({ x: 201, y: 90, width: 260, height: 300 })).toEqual([]);
+    expect(lists({ x: 200, y: 90, width: 260, height: 300 })).toHaveLength(1);
+    // Only a search box anchors it; no picture means no hash.
+    expect(policy.anchoredSearchLists([{ ...box, searchLike: false }], [{ windowId: 77, bounds: { x: 105, y: 90, width: 260, height: 420 }, hash: "h" }])).toEqual([]);
+    expect(lists({ x: 105, y: 90, width: 260, height: 420 }, null)).toEqual([{ windowId: "77", hash: null, read: true }]);
+    // A window whose own read failed still hangs there, marked unread.
+    expect(policy.anchoredSearchLists([box], [{ windowId: 77, bounds: { x: 105, y: 90, width: 260, height: 420 }, hash: null, read: false }])).toEqual([{ windowId: "77", hash: null, read: false }]);
+    // "Looked" needs both a listing and a search box to hang a list from.
+    const popups = [{ windowId: 77, bounds: { x: 105, y: 90, width: 260, height: 420 }, hash: "h" }];
+    expect(policy.searchListState({ looked: true, elements: [box], popups })).toEqual({ looked: true, lists: [{ windowId: "77", hash: "h", read: true }], ids: ["77"] });
+    expect(policy.searchListState({ looked: false, elements: [box], popups }).looked).toBe(false);
+    expect(policy.searchListState({ looked: true, elements: [{ ...box, frame: null }], popups })).toEqual({ looked: false, lists: [], ids: ["77"] });
+  });
+
+  it("proves search typing by a search list that appeared or redrew, never by an unchanged one", () => {
+    const search = { editable: true, secure: false, searchLike: true, messageBox: false, value: "" };
+    const state = (lists, ids = lists.map((list) => list.windowId), looked = true) => ({ looked, lists, ids });
+    const list = (hash, windowId = "77") => ({ windowId, hash });
+    const check = (beforeList) => ({ field: "search", text: "姐姐", before: policy.typedTextSpots([search], "姐姐"), beforeList });
+    const landed = (beforeList, now) => policy.typedLandingDetail(check(beforeList), [search], now);
+    expect(landed(state([list("a")]), state([list("b")]))).toEqual({ landed: "expected", by: "list" });
+    // Looked right before typing and there was none: it appeared.
+    expect(landed(state([]), state([list("b")]))).toEqual({ landed: "expected", by: "list" });
+    // The old list is gone and another hangs under the box: reopened.
+    expect(landed(state([list("a")]), state([list("a", "78")]))).toEqual({ landed: "expected", by: "list" });
+    // …but not while the old one is still there (merely no longer anchored).
+    expect(landed(state([list("a")]), state([list("a", "78")], ["77", "78"])).landed).toBe("unknown");
+    expect(landed(state([list("a")]), state([list("a")])).landed).toBe("unknown");
+    // A failed look is never "there was none"; a missing picture never "it redrew".
+    expect(landed(null, state([list("b")])).landed).toBe("unknown");
+    expect(landed(state([], [], false), state([list("b")])).landed).toBe("unknown");
+    expect(landed(state([list(null)]), state([list(null)])).landed).toBe("unknown");
+    expect(landed(state([list("a")]), state([list("b")], ["77"], false)).landed).toBe("unknown");
+    expect(landed(state([list("a")]), state([])).landed).toBe("unknown");
+    // Text seen in a message box still wins: the run stops.
+    const draft = { editable: true, secure: false, searchLike: false, messageBox: true, value: "姐姐" };
+    expect(policy.typedLanding({ ...check(state([list("a")])), before: policy.typedTextSpots([search, { ...draft, value: "" }], "姐姐") }, [search, draft], state([list("b")]))).toBe("elsewhere");
+    // A list proves nothing about message typing.
+    expect(policy.typedLanding({ ...check(state([list("a")])), field: "message" }, [search], state([list("b")]))).toBe("unknown");
+    // Rows of the list count only against rows read right before typing.
+    const listRow = (text) => ({ editable: false, text, value: "", popup: true });
+    const rowsBefore = [search, listRow("姐姐"), listRow("姐姐们")];
+    const rowsAfter = [search, listRow("姐姐"), listRow("姐姐们"), listRow("姐姐"), listRow("搜索网络结果：姐姐")];
+    const rowCheck = (rowsRead, before) => ({ field: "search", text: "姐姐", before: policy.typedTextSpots(before, "姐姐"), beforeList: null, rowsRead });
+    expect(policy.typedLandingDetail(rowCheck(true, rowsBefore), rowsAfter, null)).toEqual({ landed: "expected", by: "list" });
+    expect(policy.typedLandingDetail(rowCheck(true, rowsBefore), [search, listRow("姐姐"), listRow("姐姐们")], null).landed).toBe("unknown");
+    // The look before typing failed: old recent searches naming 姐姐 twice prove nothing.
+    expect(policy.typedLandingDetail(rowCheck(false, [search]), [search, listRow("姐姐"), listRow("姐姐们")], null).landed).toBe("unknown");
+    expect(policy.typedLandingDetail(rowCheck(false, [search]), rowsAfter, null).landed).toBe("unknown");
+    // Results in the target window itself are a separate proof.
+    const item = (text) => ({ editable: false, text, value: "" });
+    expect(policy.typedLandingDetail(rowCheck(false, [search]), [search, item("姐姐"), item("姐姐群")], null)).toEqual({ landed: "expected", by: "results" });
+    // A list's own input boxes are never read as landing spots.
+    const popupBox = { editable: true, secure: false, searchLike: false, messageBox: true, value: "姐姐", popup: true };
+    const row = { editable: false, text: "姐姐", value: "", popup: true };
+    expect(policy.landingView([search], [popupBox, row])).toEqual([search, row]);
+  });
+
+  it("re-checks a search proof on every capture and withdraws it when it is gone", () => {
+    const task = policy.validateTaskSpec(TASK).task;
+    const tracker = (by, extra = {}) => ({ ...policy.emptyTracker(), focus: "search", searchText: "姐姐", searchByKeys: true, searchSeen: "姐姐", searchSeenBy: by, ...extra });
+    const listNow = (lists, looked = true) => ({ looked, lists, ids: lists.map((list) => list.windowId) });
+    expect(policy.searchProof(tracker("list"), [], listNow([{ windowId: "77", hash: "h" }]))).toBe("holds");
+    expect(policy.searchProof(tracker("list"), [], listNow([]))).toBe("gone");
+    expect(policy.searchProof(tracker("list"), [], listNow([], false))).toBe("unknown");
+    expect(policy.searchProof(tracker("list"), [], null)).toBe("unknown");
+    const row = (text) => ({ editable: false, text, value: "" });
+    expect(policy.searchProof(tracker("results", { searchResultsBase: 1 }), [row("姐姐"), row("姐姐"), row("搜索网络结果：姐姐")], null)).toBe("holds");
+    expect(policy.searchProof(tracker("results", { searchResultsBase: 1 }), [row("姐姐"), row("[草稿] 姐姐")], null)).toBe("gone");
+    const box = (value) => ({ editable: true, searchLike: true, value });
+    expect(policy.searchProof(tracker("value"), [box("姐姐")], null)).toBe("holds");
+    expect(policy.searchProof(tracker("value"), [box("")], null)).toBe("gone");
+    // No proof for the current text: nothing to re-check.
+    expect(policy.searchProof({ ...tracker("list"), searchText: null }, [], listNow([]))).toBe("none");
+    expect(policy.searchProof(policy.emptyTracker(), [], listNow([]))).toBe("none");
+    // Withdrawn: the search box closed, focus is unknown, Return is risky again.
+    const withdrawn = policy.withdrawSearch(tracker("list"));
+    expect(withdrawn).toMatchObject({ focus: "none", searchText: null, searchSeen: null, searchSeenBy: null, searchResultsBase: null });
+    const enter = (context) => policy.buildCandidates({ platform: "darwin", task, target: { app: "微信", pid: 1, windowId: "1", title: "微信", running: true, minimized: false }, appStates: [{ name: "微信", running: true, hasWindow: true }], elements: [], tracker: tracker("list"), canLaunch: true, ...context }).find((candidate) => candidate.id === "key_return");
+    expect(enter({ searchProof: "holds" }).risk).toBe("none");
+    for (const searchProof of ["unknown", "gone", "none", undefined]) expect(enter({ searchProof }).risk).toBe("submit");
+    expect(enter({ searchProof: "holds", tracker: withdrawn }).risk).toBe("submit");
+  });
+
+  it("parses the window-list script's rows and drops malformed ones", async () => {
+    const { parseLayeredWindows } = await import("./computer-agent.cjs");
+    expect(parseLayeredWindows("[[68876,3,120,113,368,922]]\n", 55)).toEqual([
+      { windowId: 68876, pid: 55, layer: 3, bounds: { x: 120, y: 113, width: 368, height: 922 }, isOnScreen: true, minimized: false, title: "", appName: "" },
+    ]);
+    expect(parseLayeredWindows("[[1.5,3,0,0,10,10],[2,\"3\",0,0,10,10],[3,3,0,0,10],\"x\",null,[4,3,0,0,10,10]]", 55).map((window) => window.windowId)).toEqual([4]);
+    // Not a list at all: the windows could not be listed (not "there are none").
+    for (const text of ["", "not json", "{}", "null", undefined]) expect(parseLayeredWindows(text, 55)).toBeNull();
+    expect(parseLayeredWindows("[]", 55)).toEqual([]);
+    expect(parseLayeredWindows("[[4,3,0,0,10,10]]", 0)).toBeNull();
+    expect(parseLayeredWindows(JSON.stringify(Array.from({ length: 30 }, (_, index) => [index + 1, 3, 0, 0, 10, 10])), 55)).toHaveLength(20);
+  });
+
+  it("reads only same-app windows floating over the target as its popups", async () => {
+    const { attachedWindows } = await import("./computer-agent.cjs");
+    const target = { pid: 7, windowId: "1", bounds: { x: 0, y: 0, width: 1000, height: 800 }, visible: true, layer: 0, zIndex: 5 };
+    const win = (id, overrides = {}) => ({ pid: 7, windowId: id, bounds: { x: 100, y: 100, width: 300, height: 400 }, visible: true, layer: 3, zIndex: 9, ...overrides });
+    const ids = (windows) => attachedWindows(windows, target).map((window) => window.windowId);
+    expect(ids([target, win("2")])).toEqual(["2"]);
+    expect(ids([win("3", { pid: 8 }), win("4", { visible: false }), win("5", { bounds: { x: 0, y: 0, width: 1200, height: 900 } })])).toEqual([]);
+    // Mostly outside the target, too small, or behind it.
+    expect(ids([win("6", { bounds: { x: 900, y: 100, width: 300, height: 400 } }), win("7", { bounds: { x: 100, y: 100, width: 39, height: 400 } })])).toEqual([]);
+    expect(ids([win("8", { layer: 0, zIndex: 4 }), win("9", { layer: 0, zIndex: 6 }), win("10", { layer: 0, zIndex: null })])).toEqual(["9", "10"]);
+    // At most two, front-most first.
+    expect(ids([win("11", { layer: 3, zIndex: 9 }), win("12", { layer: 8, zIndex: 1 }), win("13", { layer: 3, zIndex: 12 })])).toEqual(["12", "13"]);
   });
 
   it("refuses typing and Return once typed text was seen in the wrong box", () => {
@@ -1110,6 +1577,11 @@ describe("computer agent Electron boundary", () => {
     expect(host).toContain("Privacy_ScreenCapture");
     expect(main).toContain("registerComputerAgentIpc({ ipcMain, getMainWindow: () => mainWindow, assertMainRendererEvent })");
     for (const reason of ['"logout"', '"window_closed"']) expect(main).toContain(`computerAgent?.stop(${reason})`);
+    // The only child process is the fixed window-list script (pid validated).
+    expect(host.match(/execFile\(/g)).toHaveLength(1);
+    expect(host).toContain('execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", script]');
+    expect(host).toContain("!Number.isInteger(pid) || pid <= 0");
+    expect(host).not.toMatch(/\bexec\(|spawn\(|execSync|shell:\s*true/);
     const agent = readFileSync(new URL("./computer-agent.cjs", import.meta.url), "utf8");
     expect(agent).not.toContain("node:child_process");
     const tools = [...agent.matchAll(/callTool\("([a-z_]+)"/g)].map((match) => match[1]);

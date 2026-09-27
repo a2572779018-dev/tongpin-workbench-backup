@@ -212,9 +212,10 @@ function extractTreeTexts(markdown, limit = 120) {
 
 /**
  * Turn a normalized Cua Driver window state into the policy's element model.
- * `refs` are sequential, capture-local handles (e1, e2, …) shown to Jev.
+ * `refs` are sequential, capture-local handles (e1, e2, …) shown to Jev;
+ * `refStart` continues the numbering for a second window of the same capture.
  */
-function modelElements(elements, windowBounds) {
+function modelElements(elements, windowBounds, refStart = 0) {
   const model = [];
   for (const raw of Array.isArray(elements) ? elements : []) {
     if (!raw || typeof raw !== "object") continue;
@@ -233,7 +234,7 @@ function modelElements(elements, windowBounds) {
     const messageLike = messageBox || (editable && !secure && !searchLike && key === "axtextarea");
     const hasPress = Array.isArray(raw.actions) && raw.actions.some((action) => /press|click|invoke|pick|confirm/i.test(String(action)));
     model.push({
-      ref: `e${model.length + 1}`,
+      ref: `e${refStart + model.length + 1}`,
       token: typeof raw.elementToken === "string" ? raw.elementToken : null,
       role: clean(raw.role, 60),
       roleShort: shortRole(raw.role),
@@ -321,9 +322,12 @@ function emptyTracker() {
     // searchMoved: ↓/↑ moved the highlighted search result after typing.
     // searchByKeys: the search text arrived as keystrokes, so keyboard focus
     // was in the search box (an accessibility write proves no focus).
-    // searchSeen: the search literal whose keystrokes made matching results
-    // appear (set by the executor's landing check).
-    focus: "none", searchText: null, searchMoved: false, searchByKeys: false, searchSeen: null, composerText: null, conversationTarget: null, conversationVia: null,
+    // searchSeen: the search literal the executor's landing check saw reach
+    // the search box, and searchSeenBy how: "value" (the box shows it),
+    // "results" (new items naming it; searchResultsBase = how many there were
+    // before typing) or "list" (the list under the box appeared or redrew).
+    // The proof is re-checked on every capture and before Return runs.
+    focus: "none", searchText: null, searchMoved: false, searchByKeys: false, searchSeen: null, searchSeenBy: null, searchResultsBase: null, composerText: null, conversationTarget: null, conversationVia: null,
     sendCount: 0, irreversibleCounts: Object.freeze({}), typed: Object.freeze([]),
     delivery: "background", backgroundSuspect: false,
     // Element identities whose background click/type was refused or had no
@@ -472,9 +476,10 @@ function buildCandidates(context) {
     // and Return could send a draft, so it stays a risky submit.
     const searchConfirmed = tracker.focus === "search" && Boolean(tracker.searchText) && tracker.searchByKeys === true &&
       (elements.some((element) => element.searchLike && normalizeName(element.value) === normalizeName(tracker.searchText)) ||
-        // WeChat shows neither the search text nor a value: results naming
-        // the literal that appeared right after the keystrokes are the proof.
-        tracker.searchSeen === tracker.searchText);
+        // WeChat shows neither the search text nor a value: the landing
+        // check's proof (results naming the literal, or the list under the
+        // box reacting), still standing in this capture.
+        context.searchProof === "holds");
     if (searchConfirmed && tracker.searchMoved) {
       returnRisk = "none";
       returnDescription = "Press Return to open the search result that is highlighted now (the arrow keys moved the highlight, so it may not be the first match).";
@@ -676,12 +681,13 @@ function sentTextCount(elements, content) {
  */
 function typedTextSpots(elements, text) {
   const target = normalizeName(text);
-  const spots = { search: 0, message: 0, other: 0, results: 0 };
+  const spots = { search: 0, message: 0, other: 0, results: 0, listResults: 0 };
   if (!target) return spots;
   for (const element of Array.isArray(elements) ? elements : []) {
-    // Non-editable items naming the literal: search results, when they grow.
+    // Non-editable items naming the literal: search results, when they grow
+    // (counted apart when they are rows of a search list window).
     if (!element.editable) {
-      if (normalizeName(element.text).includes(target)) spots.results += 1;
+      if (normalizeName(element.text).includes(target)) spots[element.popup ? "listResults" : "results"] += 1;
       continue;
     }
     if (element.secure || !normalizeName(element.value).includes(target)) continue;
@@ -693,23 +699,148 @@ function typedTextSpots(elements, text) {
 }
 
 /**
+ * Elements a landing check reads: the target window's, plus the read-only
+ * items of the search list hanging under its search box when the app draws
+ * that list as a window of its own (the caller passes only that list's rows:
+ * other floating windows, such as a suggestion popup above a message box,
+ * never count). A list's own input boxes never count either.
+ */
+function landingView(elements, popupElements) {
+  const main = Array.isArray(elements) ? elements : [];
+  const popup = Array.isArray(popupElements) ? popupElements.filter((element) => element && !element.editable) : [];
+  return popup.length ? [...main, ...popup] : main;
+}
+
+/**
+ * A dropdown window's top edge lies between this far above a search box's top
+ * (a window that also covers the box, shadow included)…
+ */
+const ANCHOR_ABOVE = 12;
+/** …and this far below the box's bottom edge. */
+const ANCHOR_BELOW = 48;
+/** A list is at least this tall (points); a tooltip under the box is not. */
+const ANCHOR_MIN_HEIGHT = 60;
+
+/**
+ * Search box suggestion or result lists that the app draws as windows of
+ * their own (WeChat): same-app windows whose top edge sits at a visible search
+ * box of the target window (from just above its top to just below its
+ * bottom), that are about as wide as the box or wider, cover at least half of
+ * it horizontally and are tall enough to be a list. `popups`:
+ * [{ windowId, bounds, hash, read }] in screen points, like element frames.
+ * Returns [{ windowId, hash, read }].
+ */
+function anchoredSearchLists(elements, popups) {
+  const boxes = (Array.isArray(elements) ? elements : []).filter((element) => element && element.searchLike && element.frame);
+  const lists = [];
+  for (const popup of Array.isArray(popups) ? popups : []) {
+    const bounds = popup && popup.bounds;
+    if (!bounds || !(bounds.width > 0 && bounds.height >= ANCHOR_MIN_HEIGHT)) continue;
+    const anchored = boxes.some(({ frame }) => {
+      const overlap = Math.min(bounds.x + bounds.width, frame.x + frame.width) - Math.max(bounds.x, frame.x);
+      return bounds.width >= frame.width * 0.8 && overlap >= frame.width / 2 &&
+        bounds.y >= frame.y - ANCHOR_ABOVE && bounds.y <= frame.y + frame.height + ANCHOR_BELOW;
+    });
+    // `read`: the window's own capture succeeded (its rows, if any, are known).
+    if (anchored) lists.push({ windowId: String(popup.windowId), hash: typeof popup.hash === "string" && popup.hash ? popup.hash : null, read: popup.read !== false });
+  }
+  return lists;
+}
+
+/**
+ * What one capture knows about search lists. `looked` only when the app's
+ * floating windows could be listed and a search box of the target window has
+ * a frame to hang a list from — otherwise "no list" means "could not look".
+ * `lists`: the anchored lists; `ids`: every floating window listed.
+ */
+function searchListState({ looked, elements, popups }) {
+  const hasBox = (Array.isArray(elements) ? elements : []).some((element) => element && element.searchLike && element.frame);
+  const windows = Array.isArray(popups) ? popups : [];
+  return {
+    looked: Boolean(looked) && hasBox,
+    lists: anchoredSearchLists(elements, windows),
+    ids: windows.map((popup) => String(popup.windowId)),
+  };
+}
+
+/**
+ * The search list under the search box appeared, or was redrawn, between the
+ * look right before typing and now. Such a list closes when the box loses
+ * keyboard focus, so a list that is open and reacted after the keystrokes
+ * means they reached the box. Only what was actually looked at counts: a
+ * failed look is never "there was no list", a missing picture never "it
+ * redrew", and another window only replaces a list that is gone.
+ */
+function searchListReacted(before, now) {
+  if (!before || !before.looked || !now || !now.looked || !now.lists.length) return false;
+  if (!before.lists.length) return true;
+  return before.lists.some((old) => {
+    const same = now.lists.find((list) => list.windowId === old.windowId);
+    if (same) return Boolean(old.hash && same.hash && old.hash !== same.hash);
+    return !now.ids.includes(old.windowId);
+  });
+}
+
+/**
  * Where text typed "into focus" went, judged against the input boxes that
  * already held it before typing: "expected" (the intended kind of box),
  * "elsewhere" (only a box of the other kind gained it — a search literal in a
  * chat's message box, or a message in a search box) or "unknown" (the app
  * exposes no values, nothing changed yet, or an unlabelled box gained it).
+ * `elements`: landingView of this capture; `searchList`: searchListState now
+ * (`check.beforeList` is the one taken right before typing, and
+ * `check.rowsRead` whether that look read the list's rows). `by` names the
+ * proof of a search: "value", "results" (in the target window) or "list"
+ * (the search list's rows grew, or the list appeared or redrew).
  */
-function typedLanding(check, elements) {
-  if (!check || !check.before) return "unknown";
+function typedLandingDetail(check, elements, searchList = null) {
+  if (!check || !check.before) return { landed: "unknown", by: null };
   const after = typedTextSpots(elements, check.text);
   const gained = (kind) => after[kind] > (check.before[kind] || 0);
   // A search box that shows no value (WeChat) still proves itself by new
   // results naming the literal. Text stuck in a message box adds at most one
   // such item (a chat list's draft preview), so it takes at least two.
   const results = after.results - (check.before.results || 0);
-  if (check.field === "search") return gained("search") ? "expected" : gained("message") ? "elsewhere" : results >= 2 ? "expected" : "unknown";
-  if (check.field === "message") return gained("message") || gained("other") ? "expected" : gained("search") ? "elsewhere" : "unknown";
-  return gained("search") || gained("message") || gained("other") ? "expected" : "unknown";
+  // A list's rows count only against rows read right before typing: a list
+  // that already named the literal (recent searches) proves nothing new.
+  const listResults = check.rowsRead === true ? after.listResults - (check.before.listResults || 0) : 0;
+  if (check.field === "search") {
+    if (gained("search")) return { landed: "expected", by: "value" };
+    if (gained("message")) return { landed: "elsewhere", by: null };
+    if (results >= 2) return { landed: "expected", by: "results" };
+    if (listResults >= 2) return { landed: "expected", by: "list" };
+    // WeChat's results are a separate window whose items may not be readable
+    // at all: the list under the box appearing or redrawing is the proof.
+    return searchListReacted(check.beforeList || null, searchList) ? { landed: "expected", by: "list" } : { landed: "unknown", by: null };
+  }
+  if (check.field === "message") return { landed: gained("message") || gained("other") ? "expected" : gained("search") ? "elsewhere" : "unknown", by: null };
+  return { landed: gained("search") || gained("message") || gained("other") ? "expected" : "unknown", by: null };
+}
+
+function typedLanding(check, elements, searchList = null) {
+  return typedLandingDetail(check, elements, searchList).landed;
+}
+
+/**
+ * Whether the landing check's search proof still stands in this capture:
+ * "holds", "gone" (the list closed, the results or the text disappeared — the
+ * search box has most likely lost keyboard focus) or "unknown" (it could not
+ * be looked at). "none" when there is no proof for the current search text.
+ * A list proof stands while the list hangs under the box, whether or not its
+ * rows could be read this time.
+ */
+function searchProof(tracker, elements, searchList) {
+  if (!tracker || !tracker.searchSeen || tracker.searchSeen !== tracker.searchText) return "none";
+  const text = normalizeName(tracker.searchText);
+  if (tracker.searchSeenBy === "list") return !searchList || !searchList.looked ? "unknown" : searchList.lists.length ? "holds" : "gone";
+  if (tracker.searchSeenBy === "results") return typedTextSpots(elements, tracker.searchText).results - (tracker.searchResultsBase || 0) >= 2 ? "holds" : "gone";
+  if (tracker.searchSeenBy === "value") return (Array.isArray(elements) ? elements : []).some((element) => element.searchLike && normalizeName(element.value).includes(text)) ? "holds" : "gone";
+  return "unknown";
+}
+
+/** The run's belief after a search proof is gone: the search box closed. */
+function withdrawSearch(tracker) {
+  return Object.freeze({ ...tracker, focus: tracker.focus === "search" ? "none" : tracker.focus, searchText: null, searchMoved: false, searchSeen: null, searchSeenBy: null, searchResultsBase: null });
 }
 
 /**
@@ -839,7 +970,7 @@ function nextTracker(tracker, candidate, status, { task }) {
       break;
     case "hotkey":
       // Re-opening search allows the search literal to be typed again.
-      Object.assign(next, { focus: "search", searchText: null, searchMoved: false, searchSeen: null, typed: next.typed.filter((entry) => entry.field !== "focus:search") });
+      Object.assign(next, { focus: "search", searchText: null, searchMoved: false, searchSeen: null, searchSeenBy: null, searchResultsBase: null, typed: next.typed.filter((entry) => entry.field !== "focus:search") });
       break;
     case "type": {
       next.typed.push({ field: candidate.elementIdentity || `focus:${candidate.field}`, text: candidate.text });
@@ -848,7 +979,7 @@ function nextTracker(tracker, candidate, status, { task }) {
       const focusAfter = candidate.elementIdentity ? tracker.focus : null;
       // A second landed literal may have been appended to the first: the
       // application no longer knows the exact field content.
-      if (candidate.field === "search") Object.assign(next, { focus: focusAfter ?? "search", searchText: tracker.searchText ? null : candidate.text, searchMoved: false, searchByKeys: !candidate.elementIdentity, searchSeen: null });
+      if (candidate.field === "search") Object.assign(next, { focus: focusAfter ?? "search", searchText: tracker.searchText ? null : candidate.text, searchMoved: false, searchByKeys: !candidate.elementIdentity, searchSeen: null, searchSeenBy: null, searchResultsBase: null });
       else if (candidate.field === "message") Object.assign(next, { focus: focusAfter ?? (tracker.focus === "field" ? "field" : "conversation"), composerText: tracker.composerText ? null : candidate.text });
       else Object.assign(next, { focus: focusAfter ?? "field", composerText: tracker.composerText ? null : candidate.text });
       break;
@@ -895,7 +1026,7 @@ function nextTracker(tracker, candidate, status, { task }) {
   return Object.freeze(next);
 }
 
-function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow, landing }) {
+function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow, landing, searchListShown = false }) {
   const content = task.irreversible && task.irreversible.content;
   let sendEvidenceFacts;
   if (tracker.sendCount > 0 && content && sendBaseline !== null && observation) {
@@ -920,6 +1051,10 @@ function facts({ tracker, task, observation, sendBaseline, appName, appRunning, 
     ...(targetWindow === "visible" || targetWindow === "hidden" || targetWindow === "none" ? { targetWindow } : {}),
     // Only on the first observation after text was typed "into focus".
     ...(landing ? { typedLanding: { field: landing.field, text: landing.text, landed: landing.landed } } : {}),
+    // A list hangs under the search box (suggestions or results), drawn as a
+    // window of its own whose items the observation may not show: the search
+    // box is open.
+    ...(searchListShown ? { searchListShown: true } : {}),
   };
 }
 
@@ -970,6 +1105,7 @@ function extraConsentDialog(candidate, extra) {
 module.exports = {
   LIMITS,
   RESERVED,
+  anchoredSearchLists,
   authorizeCandidate,
   buildCandidates,
   consentDialog,
@@ -978,6 +1114,7 @@ module.exports = {
   extractTreeTexts,
   facts,
   labelRisk,
+  landingView,
   modelElements,
   nextTracker,
   normalizeName,
@@ -985,10 +1122,15 @@ module.exports = {
   projectObservation,
   publicCandidate,
   recipientNewlySelected,
+  searchListReacted,
+  searchListState,
+  searchProof,
   sendEvidence,
   sentTextCount,
   typedLanding,
+  typedLandingDetail,
   typedTextSpots,
   validateLimits,
   validateTaskSpec,
+  withdrawSearch,
 };

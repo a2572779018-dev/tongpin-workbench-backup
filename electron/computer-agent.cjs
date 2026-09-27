@@ -53,6 +53,9 @@ const TIMING = Object.freeze({
 // Chat apps list many conversations and messages before the input box, so the
 // walk is generous; only a ranked, bounded projection ever leaves this process.
 const CAPTURE = Object.freeze({ maxElements: 1000, maxDepth: 40, maxDimension: 1280, maxTreeChars: 128 * 1024, sparseBelow: 6 });
+// Same-app windows over the target (WeChat's search list is its own window):
+// read-only extras of each capture, small and few.
+const POPUP_CAPTURE = Object.freeze({ maxWindows: 2, maxElements: 200, maxDepth: 30, maxDimension: 320, maxTexts: 40 });
 /** Captures on which focus-typed text is looked for before the check lapses. */
 const TYPE_CHECK_LOOKS = 3;
 
@@ -210,6 +213,50 @@ function chooseWindow(windows) {
   if (visible) return { window: visible, hidden: false };
   const hidden = pick(normal.filter((window) => !window.visible));
   return hidden ? { window: hidden, hidden: true } : null;
+}
+
+/**
+ * Output of the fixed window-list script run by computer-agent-host.cjs:
+ * rows of [windowId, layer, x, y, width, height] for one app's on-screen
+ * windows on CGWindow layers other than 0 (search lists, popovers and menus
+ * drawn as windows of their own). Cua Driver's list_windows reports layer-0
+ * windows only. Untrusted text: malformed rows are dropped, and each record
+ * still passes normalizeWindowInfo. null when the output is not a list at
+ * all: the windows could not be listed, which is not "there are none".
+ */
+function parseLayeredWindows(text, pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  let rows;
+  try { rows = JSON.parse(String(text ?? "").trim()); } catch { return null; }
+  if (!Array.isArray(rows)) return null;
+  return rows.slice(0, 20)
+    .filter((row) => Array.isArray(row) && row.length >= 6 && row.slice(0, 6).every(finite) && Number.isInteger(row[0]) && Number.isInteger(row[1]))
+    .map(([windowId, layer, x, y, width, height]) => ({ windowId, pid, layer, bounds: { x, y, width, height }, isOnScreen: true, minimized: false, title: "", appName: "" }));
+}
+
+/**
+ * Visible windows of the target's own app floating over the target: smaller
+ * than it, lying mostly inside it and in front of it when the stacking order
+ * is known. Apps draw search result lists, menus and popovers this way
+ * (WeChat's search list is such a window); a capture of the target window
+ * alone never shows them.
+ */
+function attachedWindows(windows, target) {
+  if (!target || !target.bounds) return [];
+  const area = (bounds) => bounds.width * bounds.height;
+  const inside = (bounds) => {
+    const width = Math.min(bounds.x + bounds.width, target.bounds.x + target.bounds.width) - Math.max(bounds.x, target.bounds.x);
+    const height = Math.min(bounds.y + bounds.height, target.bounds.y + target.bounds.height) - Math.max(bounds.y, target.bounds.y);
+    return width > 0 && height > 0 ? width * height : 0;
+  };
+  const inFront = (window) => window.layer > target.layer ||
+    (window.layer === target.layer && (window.zIndex === null || target.zIndex === null || window.zIndex > target.zIndex));
+  return (Array.isArray(windows) ? windows : [])
+    .filter((window) => window && window.pid === target.pid && window.windowId !== target.windowId && window.visible)
+    .filter((window) => window.bounds.width >= 40 && window.bounds.height >= 24 && area(window.bounds) < area(target.bounds))
+    .filter((window) => inside(window.bounds) >= area(window.bounds) / 2 && inFront(window))
+    .sort((a, b) => b.layer - a.layer || (b.zIndex ?? 0) - (a.zIndex ?? 0))
+    .slice(0, POPUP_CAPTURE.maxWindows);
 }
 
 function normalizeElement(raw) {
@@ -376,6 +423,13 @@ function createComputerAgentController({
   emit = () => undefined,
   /** Brings 同频 forward again after a run that kept the target app in front. */
   restoreHost = () => undefined,
+  /**
+   * On-screen windows of `pid` on CGWindow layers other than 0, as raw window
+   * records (parseLayeredWindows); null when they could not be listed. Asked
+   * only while a search is open, to find a search list the app draws as its
+   * own window.
+   */
+  listPopupWindows = async () => null,
   registerStopShortcut = null,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); }),
@@ -667,6 +721,106 @@ function createComputerAgentController({
     return normalizeState(output, target);
   }
 
+  /**
+   * One attached window, read only: its tree (often empty — Cua cannot always
+   * tie such a window to an accessibility window) and, with Screen Recording,
+   * a hash of a small picture so a redraw can be told from no change. Never
+   * fails the observation.
+   */
+  async function capturePopup(state, window) {
+    const withShot = state.permissions.screenRecording === true;
+    try {
+      const output = await native(state, (driver, sdk, signal) => driver.getWindowState(sdk.GetWindowStateInput.new({
+        pid: window.pid,
+        windowId: BigInt(window.windowId),
+        session: state.sessionId,
+        includeAccessibilityTree: true,
+        includeScreenshot: withShot,
+        maxElements: POPUP_CAPTURE.maxElements,
+        maxDepth: POPUP_CAPTURE.maxDepth,
+        ...(withShot ? { maxDimension: POPUP_CAPTURE.maxDimension } : {}),
+      }), { signal }));
+      const snapshot = normalizeState(output, { pid: window.pid, windowId: window.windowId, title: window.title, bounds: window.bounds });
+      if (!snapshot) return null;
+      const image = withShot && Array.isArray(output.images) && output.images[0] && typeof output.images[0].dataBase64 === "string" && output.images[0].dataBase64
+        ? output.images[0].dataBase64
+        : null;
+      return {
+        windowId: window.windowId,
+        bounds: window.bounds,
+        read: true,
+        elements: snapshot.elements.slice(0, POPUP_CAPTURE.maxElements),
+        windowBounds: snapshot.windowBounds,
+        treeMarkdown: snapshot.treeMarkdown,
+        hash: image ? createHash("sha256").update(image).digest("hex") : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Same-app windows floating over the target: Cua's layer-0 windows plus the
+   * host's listing of the other layers. `looked` is false when the host could
+   * not list them, so "no list" is never mistaken for "could not look".
+   */
+  async function floatingWindows(state, chosenWindow, windows) {
+    let layered = null;
+    try { layered = await listPopupWindows(chosenWindow.pid); } catch { layered = null; }
+    if (!Array.isArray(layered)) return { looked: false, windows: attachedWindows(windows, chosenWindow) };
+    const extra = layered.slice(0, 20)
+      .map((raw) => normalizeWindowInfo(raw, hostPid))
+      .filter((window) => window && window.pid === chosenWindow.pid && window.layer !== 0);
+    return { looked: true, windows: attachedWindows([...windows, ...extra], chosenWindow) };
+  }
+
+  /**
+   * Reads the floating windows (read only) and, against the target's search
+   * box in `elements`, which of them is its search list. A window whose read
+   * fails still counts by its position, with no picture.
+   */
+  async function readFloating(state, floating, elements) {
+    const popups = [];
+    for (const window of floating.windows) {
+      const popup = await capturePopup(state, window);
+      if (state.stopped) return null;
+      popups.push(popup || { windowId: window.windowId, bounds: window.bounds, read: false, elements: [], windowBounds: window.bounds, treeMarkdown: "", hash: null });
+    }
+    // Rows are shown to Jev and, for the search list only, read by the landing
+    // check: no candidate is built from them (no token) and they never count
+    // as evidence of the open chat, the recipient or a sent message.
+    const popupElements = [];
+    for (const popup of popups) {
+      for (const element of policy.modelElements(popup.elements, popup.windowBounds, elements.length + popupElements.length)) {
+        popupElements.push({ ...element, token: null, popup: true, popupWindowId: popup.windowId });
+      }
+    }
+    const searchList = policy.searchListState({ looked: floating.looked, elements, popups });
+    const listIds = new Set(searchList.lists.map((list) => list.windowId));
+    return { popups, popupElements, searchList, searchRows: popupElements.filter((element) => listIds.has(element.popupWindowId)) };
+  }
+
+  /** The search lists now, for the window and search box of `observation`. */
+  async function readSearchLists(state, observation, elements) {
+    if (!observation.target || !observation.chosenWindow) return null;
+    try {
+      const windows = await listAppWindows(state, { running: true, pid: observation.target.pid });
+      if (state.stopped) return null;
+      const floating = await floatingWindows(state, observation.chosenWindow, windows);
+      if (state.stopped) return null;
+      return await readFloating(state, floating, elements);
+    } catch {
+      return null;
+    }
+  }
+
+  /** A search is open (or its proof must be re-checked): look for its list. */
+  function searchOpen(state) {
+    const tracker = state.tracker;
+    return tracker.focus === "search" || Boolean(state.typeCheck && state.typeCheck.field === "search") ||
+      Boolean(tracker.searchSeen && tracker.searchSeen === tracker.searchText);
+  }
+
   function activeRun() {
     return run && !run.stopped ? run : null;
   }
@@ -690,10 +844,20 @@ function createComputerAgentController({
       const targetApp = apps[state.targetIndex] || apps[0];
       let target = null;
       let hiddenWindow = null;
+      let chosenWindow = null;
+      let floating = { looked: false, windows: [] };
       if (targetApp && targetApp.running) {
-        const chosen = chooseWindow(await listAppWindows(state, targetApp));
+        const windows = await listAppWindows(state, targetApp);
+        const chosen = chooseWindow(windows);
         if (chosen && !chosen.hidden) {
           target = { app: targetApp.name, pid: chosen.window.pid, windowId: chosen.window.windowId, title: chosen.window.title, bounds: chosen.window.bounds, running: true, minimized: false };
+          chosenWindow = chosen.window;
+          // A search list is usually drawn on a layer Cua does not list; look
+          // for floating windows only while a search is open (a script run).
+          if (searchOpen(state)) {
+            floating = await floatingWindows(state, chosen.window, windows);
+            if (state.stopped) return failure("stopped");
+          }
         } else if (chosen) {
           hiddenWindow = chosen.window;
         }
@@ -717,6 +881,12 @@ function createComputerAgentController({
       const axSparse = snapshot ? isSparse(snapshot.elements) : false;
       const windowBounds = snapshot ? snapshot.windowBounds : null;
       const elements = snapshot ? policy.modelElements(snapshot.elements, windowBounds) : [];
+      const read = snapshot && floating.windows.length
+        ? await readFloating(state, floating, elements)
+        : { popups: [], popupElements: [], searchList: policy.searchListState({ looked: floating.looked, elements, popups: [] }), searchRows: [] };
+      if (!read || state.stopped) return failure("stopped");
+      const { popups, popupElements, searchList, searchRows } = read;
+      const landingElements = policy.landingView(elements, searchRows);
       // Text typed "into focus" is checked on each capture until it is seen
       // (at most TYPE_CHECK_LOOKS captures; a slow app may render it late).
       // Seen only in the wrong kind of input box means focus was not where the
@@ -725,15 +895,20 @@ function createComputerAgentController({
       if (state.typeCheck && snapshot) {
         const check = state.typeCheck;
         check.looks += 1;
-        landing = { field: check.field, text: check.text, landed: policy.typedLanding(check, elements) };
+        const detail = policy.typedLandingDetail(check, landingElements, searchList);
+        landing = { field: check.field, text: check.text, landed: detail.landed };
         if (landing.landed !== "unknown" || check.looks >= TYPE_CHECK_LOOKS) state.typeCheck = null;
         if (landing.landed === "elsewhere") {
           state.tracker = Object.freeze({ ...state.tracker, misdirected: true, focus: "none", searchText: null, composerText: null });
         } else if (landing.landed === "expected" && check.field === "search" && state.tracker.focus === "search" && state.tracker.searchText === check.text) {
           // The keystrokes reached the search box: Return may open its result.
-          state.tracker = Object.freeze({ ...state.tracker, searchSeen: check.text });
+          state.tracker = Object.freeze({ ...state.tracker, searchSeen: check.text, searchSeenBy: detail.by, searchResultsBase: detail.by === "results" ? (check.before.results || 0) : null });
         }
       }
+      // The proof must still stand in this capture: a search list that closed
+      // or results or text that disappeared mean the search box lost focus.
+      const proof = snapshot ? policy.searchProof(state.tracker, landingElements, searchList) : "unknown";
+      if (proof === "gone") state.tracker = policy.withdrawSearch(state.tracker);
       const treeTexts = snapshot ? policy.extractTreeTexts(snapshot.treeMarkdown) : [];
       const windowTitle = snapshot ? snapshot.windowTitle : null;
       const appName = targetApp ? targetApp.name : state.grantApps[0].name;
@@ -752,6 +927,7 @@ function createComputerAgentController({
         screenshot: screenshotUsed && snapshot.screenshot ? snapshot.screenshot : null,
         windowBounds,
         tracker: state.tracker,
+        searchProof: proof,
         canLaunch: true,
       });
       const observationId = `ob_${createId().slice(0, 24)}`;
@@ -762,19 +938,32 @@ function createComputerAgentController({
         appAllowed: Boolean(target),
         elements,
         treeTexts,
+        chosenWindow,
+        popupElements,
+        searchList,
+        searchRows,
         windowTitle,
         fingerprint: snapshot ? semanticFingerprint(snapshot) : null,
         candidates: new Map(candidates.map((candidate) => [candidate.id, candidate])),
       };
-      const observation = policy.projectObservation({ app: appName, windowTitle, elements, treeTexts, axSparse, task: state.task });
+      const popupTexts = popups.flatMap((popup) => policy.extractTreeTexts(popup.treeMarkdown, POPUP_CAPTURE.maxTexts));
+      const observation = policy.projectObservation({
+        app: appName, windowTitle, axSparse, task: state.task,
+        elements: popupElements.length ? [...elements, ...popupElements] : elements,
+        treeTexts: popupTexts.length ? [...treeTexts, ...popupTexts] : treeTexts,
+      });
       const targetWindow = target ? "visible" : targetApp && targetApp.running ? "hidden" : "none";
-      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing });
+      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing, searchListShown: searchList.lists.length > 0 });
       return success({
         observationId,
         observation,
         candidates: candidates.map(policy.publicCandidate),
         facts,
-        display: { app: appName, title: windowTitle, elementCount: elements.length, axSparse, screenshotUsed },
+        display: {
+          app: appName, title: windowTitle, elementCount: elements.length, axSparse, screenshotUsed,
+          ...(popups.length ? { popupCount: popups.length, popupElementCount: popupElements.length } : {}),
+          ...(searchList.lists.length ? { searchListShown: true } : {}),
+        },
       });
     } catch {
       return failure("observe_failed");
@@ -958,11 +1147,6 @@ function createComputerAgentController({
       }
     }
 
-    // Typing "into focus" is checked on later captures against the input
-    // boxes that already held the literal (see policy.typedLanding).
-    const typeCheck = candidate.kind === "type" && !elementToken
-      ? { field: candidate.field, text: candidate.text, before: policy.typedTextSpots(observation.elements, candidate.text), looks: 0 }
-      : null;
     // Cua's foreground rung fronts the window for one action and then gives
     // the screen back to the previous app. Apps such as WeChat close their
     // search box when they lose the front, so ⌘F, the typed search and Return
@@ -970,6 +1154,50 @@ function createComputerAgentController({
     // target in front for the rest of the run; stop() hands it back.
     if (delivery === "foreground" && target && ["key", "hotkey", "type", "point"].includes(candidate.kind)) {
       await keepInFront(state, target);
+    }
+
+    // Return "opens the search result" only while the search proof still
+    // stands right now: Jev decides for seconds, and a search box that lost
+    // focus meanwhile (WeChat closes it when it loses the front) would leave
+    // Return to a message box that may send whatever it holds.
+    if (candidate.kind === "key" && candidate.key === "return" && candidate.risk === "none" && state.tracker.focus === "search" && target) {
+      const fresh = await capture(state, target, false).catch(() => null);
+      if (!fresh || state.stopped) return outcome("blocked", { authorization, code: "target_changed", message: "界面已变化，未执行这一步" });
+      const freshElements = policy.modelElements(fresh.elements, fresh.windowBounds);
+      const lists = state.tracker.searchSeenBy === "list" || state.tracker.searchSeenBy === "results"
+        ? await readSearchLists(state, observation, freshElements)
+        : null;
+      if (state.stopped) return outcome("blocked", { authorization, code: "stopped", message: SAFE_MESSAGES.stopped });
+      const text = policy.normalizeName(state.tracker.searchText);
+      const valueHolds = Boolean(text) && freshElements.some((element) => element.searchLike && policy.normalizeName(element.value) === text);
+      const proof = policy.searchProof(state.tracker, policy.landingView(freshElements, lists ? lists.searchRows : []), lists ? lists.searchList : null);
+      if (!valueHolds && proof !== "holds") {
+        if (proof === "gone") state.tracker = policy.withdrawSearch(state.tracker);
+        return outcome("blocked", { authorization, code: "search_closed", message: "搜索结果已经看不到了（搜索可能已关闭），没有按回车" });
+      }
+    }
+
+    // Typing "into focus" is checked on later captures against the input
+    // boxes that already held the literal (see policy.typedLanding). For a
+    // search, the list under the box is looked at again right before the
+    // keystrokes: a redraw is judged against that, not against an
+    // observation that may be many seconds old.
+    let typeCheck = null;
+    if (candidate.kind === "type" && !elementToken) {
+      let beforeList = null;
+      let beforeRows = [];
+      if (candidate.field === "search") {
+        const lists = await readSearchLists(state, observation, observation.elements);
+        if (state.stopped) return outcome("blocked", { authorization, code: "stopped", message: SAFE_MESSAGES.stopped });
+        if (lists) { beforeList = lists.searchList; beforeRows = lists.searchRows; }
+      }
+      typeCheck = {
+        field: candidate.field, text: candidate.text, looks: 0,
+        before: policy.typedTextSpots(policy.landingView(observation.elements, beforeRows), candidate.text),
+        beforeList,
+        // The list's rows are compared only when this look read every list.
+        rowsRead: Boolean(beforeList && beforeList.looked && beforeList.lists.every((list) => list.read)),
+      };
     }
     const suspendEsc = candidate.kind === "key" && candidate.key === "escape";
     if (suspendEsc) disarmStopShortcut();
@@ -1055,7 +1283,9 @@ module.exports = {
   BLOCKED_APPS,
   TIMING,
   appMatches,
+  attachedWindows,
   chooseWindow,
+  parseLayeredWindows,
   classifyError,
   createComputerAgentController,
   isBlockedApp,

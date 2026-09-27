@@ -176,6 +176,18 @@ describe("computer executor server (task spec, Jev decisions, billing)", () => {
     expect(malformed.state.executor_facts).not.toHaveProperty("typedLanding");
   });
 
+  it("passes that a search list is shown, and only as a plain true", async () => {
+    const created = await createTask();
+    if (created.kind !== "run") throw new Error("expected run");
+    await runtime.service.computer.decide("member", created.run.runId, decisionBody({ facts: { focus: "search", irreversibleDone: false, searchListShown: true } }));
+    const shown = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
+    expect(shown.state.executor_facts).toMatchObject({ searchListShown: true });
+    expect(JSON.stringify(shown.questions.next_action.instructions)).toContain("executor_facts.searchListShown");
+    await runtime.service.computer.decide("member", created.run.runId, decisionBody({ step: 2, observationId: "obs_fixture_0002", facts: { focus: "search", irreversibleDone: false, searchListShown: "yes" as never } }));
+    const malformed = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
+    expect(malformed.state.executor_facts).not.toHaveProperty("searchListShown");
+  });
+
   it("asks Jev one closed choice plus verification nouls and bills actual usage at admin prices", async () => {
     const created = await createTask();
     if (created.kind !== "run") throw new Error("expected run");

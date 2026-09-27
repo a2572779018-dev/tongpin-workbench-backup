@@ -6,9 +6,38 @@
  * the four narrow IPC channels. main.cjs only calls registerComputerAgentIpc.
  */
 
+const { execFile } = require("node:child_process");
 const { app, desktopCapturer, dialog, globalShortcut, shell, systemPreferences } = require("electron");
-const { createComputerAgentController } = require("./computer-agent.cjs");
+const { createComputerAgentController, parseLayeredWindows } = require("./computer-agent.cjs");
 const { computerUseSystemVersion } = require("./computer-use.cjs");
+
+/**
+ * One app's on-screen windows on CGWindow layers other than 0, read with the
+ * system's own JavaScript for Automation (CoreGraphics window list; no Apple
+ * Events, no other app is driven). Cua Driver lists layer-0 windows only, and
+ * WeChat draws its search list on another layer. The script is fixed: only
+ * the validated pid is written into it.
+ */
+function listLayeredWindows(pid) {
+  if (process.platform !== "darwin" || !Number.isInteger(pid) || pid <= 0) return Promise.resolve(null);
+  // Same calls as the check run on the member's Mac (WeChat's search list
+  // came back as layer 3); 17 = kCGWindowListOptionOnScreenOnly |
+  // kCGWindowListExcludeDesktopElements.
+  const script = [
+    "function run() {",
+    "  ObjC.import(\"CoreGraphics\");",
+    "  const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(17, 0))) || [];",
+    `  return JSON.stringify(list.filter((w) => w.kCGWindowOwnerPID === ${pid} && w.kCGWindowLayer !== 0 && w.kCGWindowBounds)`,
+    "    .slice(0, 20).map((w) => [w.kCGWindowNumber, w.kCGWindowLayer, w.kCGWindowBounds.X, w.kCGWindowBounds.Y, w.kCGWindowBounds.Width, w.kCGWindowBounds.Height]));",
+    "}",
+  ].join("\n");
+  return new Promise((resolve) => {
+    execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", script], { timeout: 3_000, maxBuffer: 64 * 1024, windowsHide: true }, (error, stdout) => {
+      // null: the windows could not be listed (never "there are none").
+      resolve(error ? null : parseLayeredWindows(stdout, pid));
+    });
+  });
+}
 
 const PRIVACY_PANES = Object.freeze({
   accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
@@ -82,6 +111,7 @@ function registerComputerAgentIpc({ ipcMain, getMainWindow, assertMainRendererEv
         const window = mainWindow();
         if (window) bringForward(window);
       },
+      listPopupWindows: listLayeredWindows,
       registerStopShortcut: (onStop) => {
         if (!globalShortcut.register("Escape", onStop)) return null;
         return () => globalShortcut.unregister("Escape");

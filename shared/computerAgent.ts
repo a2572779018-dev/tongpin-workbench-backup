@@ -188,13 +188,24 @@ export interface ComputerExecutorFacts {
    * search literal in a chat's message box); the run stops without Return.
    */
   typedLanding?: { field: "search" | "message" | "field"; text: string; landed: "expected" | "elsewhere" | "unknown" };
+  /**
+   * A list hangs under the app's search box (suggestions or results) as a
+   * window of its own, whose items the observation may not show: the search
+   * box is open.
+   */
+  searchListShown?: boolean;
 }
 export interface ComputerObserveResult {
   observationId: string;
   observation: ComputerObservation;
   candidates: ComputerCandidate[];
   facts: ComputerExecutorFacts;
-  display: { app: string | null; title: string | null; elementCount: number; axSparse: boolean; screenshotUsed: boolean };
+  /**
+   * `popupCount`/`popupElementCount`: same-app windows floating over the
+   * target (read while a search is open) and how many of their items were
+   * readable; `searchListShown`: one of them is the list under the search box.
+   */
+  display: { app: string | null; title: string | null; elementCount: number; axSparse: boolean; screenshotUsed: boolean; popupCount?: number; popupElementCount?: number; searchListShown?: boolean };
 }
 
 export type ComputerExecuteStatus = "delivered" | "unverified" | "no_effect" | "failed" | "blocked" | "unknown";

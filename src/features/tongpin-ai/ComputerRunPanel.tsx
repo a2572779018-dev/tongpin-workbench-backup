@@ -37,9 +37,16 @@ function mergeStep(steps: ComputerTimelineStep[], next: ComputerTimelineStep): C
   return effect === undefined ? merged : merged.map(step => step.step === next.step - 1 && step.execution ? { ...step, verifiedEffect: effect } as ComputerTimelineStep : step);
 }
 
+/** Windows the app floats over the target (its search list), read with it. */
+function popupText(observation: NonNullable<ComputerTimelineStep["observation"]>): string {
+  if (!observation.popupCount) return "";
+  const what = observation.searchListShown ? "搜索列表" : "浮层窗口";
+  return observation.popupElementCount ? ` · ${what} ${observation.popupElementCount} 项` : ` · ${what}（读不到内容）`;
+}
+
 function StepChain({ step }: { step: ComputerTimelineStep & { verifiedEffect?: number } }) {
   const parts: Array<{ key: string; text: string; tone?: "ok" | "warn" | "muted" }> = [];
-  if (step.observation) parts.push({ key: "observe", text: `读取「${step.observation.app ?? "目标应用"}」${step.observation.elementCount ? ` · ${step.observation.elementCount} 个元素` : ""}${step.observation.screenshotUsed ? " · 截图定位" : ""}` });
+  if (step.observation) parts.push({ key: "observe", text: `读取「${step.observation.app ?? "目标应用"}」${step.observation.elementCount ? ` · ${step.observation.elementCount} 个元素` : ""}${popupText(step.observation)}${step.observation.screenshotUsed ? " · 截图定位" : ""}` });
   else parts.push({ key: "observe", text: "读取界面…", tone: "muted" });
   if (step.candidateCount !== undefined) parts.push({ key: "candidates", text: `候选 ${step.candidateCount} 个` });
   if (step.choice) parts.push({ key: "choice", text: `Jev 选择：${step.choice.label}（置信度 ${percent(step.choice.confidence)}）`, tone: step.choice.risk !== "none" ? "warn" : undefined });
