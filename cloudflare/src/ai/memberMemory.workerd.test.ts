@@ -91,7 +91,7 @@ describe.sequential("member memory in the production Worker and Durable Object",
     const storage = await mf.unsafeGetDurableObjectStorage(WORKER_NAME, "TongpinCore", { name: "primary" });
     const tables = await storage.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_member_memor%' ORDER BY name");
     expect(tables.map(row => row.name)).toEqual(["ai_member_memories", "ai_member_memory_reviews", "ai_member_memory_snapshots"]);
-    expect(await storage.exec("SELECT module, version FROM ai_schema_migrations")).toEqual([{ module: "member_memory", version: 1 }]);
+    expect(await storage.exec("SELECT module, version FROM ai_schema_migrations ORDER BY version")).toEqual([1, 2, 3].map(version => ({ module: "member_memory", version })));
     expect(await api<AiMemoryState>("/api/ai/memory", member)).toMatchObject({ available: false, revision: 0 });
     await api("/api/ai/memory", admin, undefined, "GET", 403);
     await api("/api/admin/ai/memory", member, undefined, "GET", 403);
