@@ -1032,54 +1032,8 @@
   background: var(--tp-ai-white);
 }
 
-.tp-ai-agent {
-  display: flex;
-  min-width: 0;
-  gap: 0.66rem;
-  align-items: center;
-}
-
-.tp-ai-agent__avatar {
-  display: grid;
-  width: 2.65rem;
-  aspect-ratio: 1;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 2px solid var(--tp-ai-ink);
-  border-radius: 50%;
-  background: var(--tp-ai-yellow);
-  box-shadow: 3px 3px 0 var(--tp-ai-ink);
-}
-
-.tp-ai-agent > span:last-child {
-  display: grid;
-  min-width: 0;
-}
-
-.tp-ai-agent strong {
-  overflow: hidden;
-  font-size: 0.82rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tp-ai-agent small {
-  display: flex;
-  gap: 0.35rem;
-  align-items: center;
-  margin-top: 0.15rem;
-  color: #69645b;
-  font-family: "DM Mono", monospace;
-  font-size: 0.5rem;
-}
-
-.tp-ai-agent small i {
-  width: 0.48rem;
-  aspect-ratio: 1;
-  border: 1px solid var(--tp-ai-ink);
-  border-radius: 50%;
-  background: var(--tp-ai-green);
-}
+/* The chat header no longer shows an agent badge; `.tp-ai-agent` belongs to
+   the 多 Agent cards (multi-agent.css). */
 
 .tp-ai-chat__header-actions,
 .tp-ai-skills__header-actions {
