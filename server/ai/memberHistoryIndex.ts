@@ -206,6 +206,10 @@ export class AiMemberHistoryIndex {
       const seen = new Set<string>();
       let spentMessages = 0, spentChars = 0, truncated = false, indexed = 0, removed = 0;
       const overBudget = () => spentMessages >= input.budget.messages || spentChars >= input.budget.characters;
+      // A backfill that reaches the member cap only fingerprints older conversations
+      // (index-then-evict would rewrite rows for nothing). Live writes are new
+      // activity: they are indexed and the least recent conversations make room.
+      const memberFull = () => state.indexed_chars >= this.caps.memberCharacters || state.indexed_chunks >= this.caps.memberChunks;
 
       for (const conversation of input.conversations) {
         seen.add(conversation.id);
@@ -267,6 +271,7 @@ export class AiMemberHistoryIndex {
           const at = ats.get(message.id) ?? 0;
           const role = message.role === "user" ? "u" : "a";
           if (baseline) { next.set(message.id, [message.id, message.fingerprint, SUPPRESSED, at, role, 0]); continue; }
+          if (!input.live && memberFull()) { next.set(message.id, [message.id, message.fingerprint, CAPPED, at, role, 0]); continue; }
           if (overBudget()) { truncated = true; complete = false; continue; }
           const text = historyIndexText(message.content);
           const chars = Array.from(text).length;
@@ -280,7 +285,7 @@ export class AiMemberHistoryIndex {
         const lastAt = ordered.reduce((max, item) => Math.max(max, item[3]), 0);
         const chunkTotal = ordered.reduce((sum, item) => sum + Math.max(0, item[2]), 0);
         const charTotal = ordered.reduce((sum, item) => sum + (item[2] > 0 ? item[5] : 0), 0);
-        const status = baseline ? "suppressed" : complete ? "indexed" : "partial";
+        const status = baseline ? "suppressed" : !complete ? "partial" : chunkTotal === 0 && ordered.some(item => item[2] === CAPPED) ? "capped" : "indexed";
         this.sql.exec(`INSERT INTO ai_member_history_conversations(tenant_id,user_id,conversation_id,generation,title,fingerprint,source_revision,status,messages,last_at,chars,chunks,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(tenant_id,user_id,conversation_id) DO UPDATE SET generation=excluded.generation,title=excluded.title,fingerprint=excluded.fingerprint,source_revision=excluded.source_revision,status=excluded.status,messages=excluded.messages,last_at=excluded.last_at,chars=excluded.chars,chunks=excluded.chunks,updated_at=excluded.updated_at`,
         this.tenantId, user, conversation.id, generation, conversation.title.slice(0, 200), fingerprint, conversation.revision ?? 0, status, JSON.stringify(ordered), lastAt, charTotal, chunkTotal, now);

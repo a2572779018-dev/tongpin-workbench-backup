@@ -144,6 +144,19 @@ describe("member history index (per-member, incremental, trigram FTS5)", () => {
     expect(MEMBER_HISTORY_LIMITS.memberCharacters).toBe(600_000);
   });
 
+  it("stops a backfill at the member cap instead of indexing and evicting older conversations", () => {
+    const small = new AiMemberHistoryIndex(sql, "default", { memberCharacters: 300 });
+    const many = Array.from({ length: 40 }, (_, number) => conversation(`conv-${number}`, `对话 ${number}`, [user(`q${number}`, `第 ${number} 次季度汇报讨论${"甲".repeat(40)}`)]));
+    expect(sync(many, { live: false, budget: { messages: 80, characters: 1_000_000 } }, small, "member-c")).toMatchObject({ complete: true });
+    const inserted = (database.prepare("SELECT MAX(id) AS id FROM ai_member_history_chunks").get() as { id: number }).id;
+    expect(inserted).toBeLessThanOrEqual(8);
+    expect(small.overview("member-c").indexedConversations).toBeLessThanOrEqual(6);
+    // A later live message in an old conversation is new activity and gets indexed.
+    const touched = many.map(item => item.id === "conv-39" ? { ...item, messages: [...item.messages, user("fresh", "最新的季度汇报补充说明")] } : item);
+    expect(sync(touched, { live: true }, small, "member-c")).toMatchObject({ indexed: 1 });
+    expect(search("补充说明", undefined, small, "member-c").map(hit => hit.messageId)).toEqual(["fresh"]);
+  });
+
   it("keeps members and organizations apart", () => {
     sync([report]);
     const other = new AiMemberHistoryIndex(sql, "org-2");
