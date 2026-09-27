@@ -112,10 +112,15 @@ export class ThoughtBubble {
    *  offset with `scale` folded in keeps the bubble centered/anchored exactly
    *  as before at any scale, rather than drifting off the character's head
    *  (Pixi scales a container's children around its own local origin, not
-   *  around whatever point `setPosition`'s un-scaled math had in mind). */
-  setPosition(px: number, py: number, scale = 1): void {
+   *  around whatever point `setPosition`'s un-scaled math had in mind).
+   *  `worldWidth`, when given, clamps the bubble's final horizontal position
+   *  so it never renders partly outside the room — see ToolBubble's own copy
+   *  of this doc comment. */
+  setPosition(px: number, py: number, scale = 1, worldWidth?: number): void {
     this.container.scale.set(scale);
-    const x = px - (this.bgW * RENDER_SCALE * scale) / 2;
+    const bubbleW = this.bgW * RENDER_SCALE * scale;
+    let x = px - bubbleW / 2;
+    if (worldWidth !== undefined) x = Math.min(Math.max(x, 0), Math.max(0, worldWidth - bubbleW));
     const y = py + OFFSET_Y * scale - this.bgH * RENDER_SCALE * scale;
     this.container.x = Math.round(x);
     this.container.y = Math.round(y);

@@ -59,10 +59,15 @@ export class NameTag {
    *  just above the character's head. `scale` (default 1) is EmployeeFigure's
    *  per-frame counter-scale — see ThoughtBubble.setPosition's doc comment
    *  for why it must be folded into this offset math rather than applied as
-   *  a plain container scale around the wrong origin. */
-  setPosition(px: number, py: number, scale = 1): void {
+   *  a plain container scale around the wrong origin. `worldWidth`, when
+   *  given, clamps the tag's final horizontal position so it never renders
+   *  partly outside the room — see ToolBubble's own copy of this doc
+   *  comment. */
+  setPosition(px: number, py: number, scale = 1, worldWidth?: number): void {
     this.container.scale.set(scale);
-    const x = px - (this.bgW * RENDER_SCALE * scale) / 2;
+    const tagW = this.bgW * RENDER_SCALE * scale;
+    let x = px - tagW / 2;
+    if (worldWidth !== undefined) x = Math.min(Math.max(x, 0), Math.max(0, worldWidth - tagW));
     const y = py - this.bgH * RENDER_SCALE * scale;
     this.container.x = Math.round(x);
     this.container.y = Math.round(y);

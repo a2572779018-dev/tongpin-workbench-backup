@@ -195,6 +195,7 @@ export class OfficeSceneController {
       // surfaces in the hover/click detail card instead, not here.
       label: "协调员",
       rect: layout.coordinator,
+      worldWidth: this.worldWidth,
       onHover: this.onHover,
       onSelect: this.onSelect,
     });
@@ -221,6 +222,7 @@ export class OfficeSceneController {
         recipe: recipeForWorker(worker.id),
         label: worker.role,
         rect,
+        worldWidth: this.worldWidth,
         onHover: this.onHover,
         onSelect: this.onSelect,
       });

@@ -20,6 +20,10 @@ const ICONS: Record<BubbleKind, string> = {
 const PADDING_X = 6;
 const PADDING_Y = 3;
 const CORNER_RADIUS = 4;
+/** Default cap when a caller doesn't pass its own — see the constructor's
+ *  `maxWidth` option and seating.ts's WORKER_BUBBLE_MAX_W, which every real
+ *  worker bubble is constructed with instead (this default only matters for
+ *  a caller with no desk-column budget to hand in). */
 const MAX_WIDTH = 150;
 const BG_COLOR = palette.ink;
 const BG_ALPHA = 0.95;
@@ -34,10 +38,15 @@ const OFFSET_Y = -32;
 const FADE_IN_DURATION = 0.15;
 const FADE_OUT_DURATION = 0.3;
 const LINGER_DURATION = 2.0;
-const WRAP_WIDTH = MAX_WIDTH / RENDER_SCALE - PADDING_X * 2;
 const MAX_CHARS = 140;
 
 type BubbleState = "hidden" | "fading-in" | "visible" | "lingering" | "fading-out";
+
+export interface ToolBubbleOptions {
+  /** World-unit width cap for this instance (see seating.ts's
+   *  WORKER_BUBBLE_MAX_W) — defaults to MAX_WIDTH when omitted. */
+  maxWidth?: number;
+}
 
 export class ToolBubble {
   readonly container: Container;
@@ -49,8 +58,14 @@ export class ToolBubble {
   private lingerElapsed = 0;
   private bgW = 0;
   private bgH = 0;
+  /** This instance's own width budget, in "big" (pre-RENDER_SCALE) text
+   *  units — see fitToWidth(). */
+  private readonly widthBudget: number;
 
-  constructor() {
+  constructor(opts: ToolBubbleOptions = {}) {
+    const maxWidth = opts.maxWidth ?? MAX_WIDTH;
+    this.widthBudget = maxWidth / RENDER_SCALE - PADDING_X * 2;
+
     this.container = new Container();
     this.container.zIndex = 100_000;
     this.container.eventMode = "none";
@@ -62,18 +77,14 @@ export class ToolBubble {
     this.container.addChild(this.inner);
 
     this.bg = new Graphics();
+    // Single line, ellipsis-truncated to this.widthBudget (see fitToWidth)
+    // instead of wordWrap: this office's desks sit close enough together
+    // (see WORKER_BUBBLE_MAX_W's own comment) that a bubble wrapping to a
+    // second line would need more vertical room than a worker row budgets
+    // for — better to shorten than to grow taller into the row above.
     this.label = new Text({
       text: "",
-      style: {
-        fontSize: FONT_SIZE,
-        fontWeight: "bold",
-        fill: TEXT_COLOR,
-        fontFamily: "monospace",
-        align: "left",
-        wordWrap: true,
-        wordWrapWidth: WRAP_WIDTH,
-        breakWords: true,
-      },
+      style: { fontSize: FONT_SIZE, fontWeight: "bold", fill: TEXT_COLOR, fontFamily: "monospace", align: "left" },
     });
     this.label.x = PADDING_X;
     this.label.y = PADDING_Y;
@@ -83,11 +94,30 @@ export class ToolBubble {
 
   show(kind: BubbleKind, text: string): void {
     const display = `${ICONS[kind]} ${text}`;
-    const trimmed = display.length > MAX_CHARS ? display.slice(0, MAX_CHARS - 1).trimEnd() + "…" : display;
-    if (trimmed === this.label.text && this.state !== "hidden" && this.state !== "fading-out") return;
-    this.label.text = trimmed;
+    const capped = display.length > MAX_CHARS ? display.slice(0, MAX_CHARS - 1).trimEnd() + "…" : display;
+    const previous = this.label.text;
+    const fitted = this.fitToWidth(capped);
+    if (fitted === previous && this.state !== "hidden" && this.state !== "fading-out") return;
+    this.label.text = fitted;
     this.redrawBg();
     this.reveal();
+  }
+
+  /** Shortens `text` with a trailing "…" until it renders within
+   *  this.widthBudget, measuring via this.label itself (Pixi has no
+   *  measure-only API; the mutation is harmless since show() always
+   *  re-assigns this.label.text to the final result right after calling
+   *  this). Leaves `text` untouched when it already fits. */
+  private fitToWidth(text: string): string {
+    this.label.text = text;
+    if (this.label.width <= this.widthBudget) return text;
+    let candidate = text;
+    while (candidate.length > 1) {
+      candidate = candidate.slice(0, -1);
+      this.label.text = `${candidate}…`;
+      if (this.label.width <= this.widthBudget) return this.label.text;
+    }
+    return this.label.text; // down to one character + ellipsis — as short as this gets
   }
 
   private reveal(): void {
@@ -111,11 +141,16 @@ export class ToolBubble {
   /** See ThoughtBubble.setPosition's doc comment: `scale` is EmployeeFigure's
    *  per-frame counter-scale, folded into this offset so the bubble stays
    *  centered/anchored at any scale instead of drifting off the character's
-   *  head. */
-  setPosition(px: number, py: number, scale = 1): void {
+   *  head. `worldWidth`, when given, clamps the bubble's final horizontal
+   *  position so it never renders partly off either edge of the room — a
+   *  worker seated near the wall would otherwise have its own bubble spill
+   *  outside the world despite being correctly centered on its own desk. */
+  setPosition(px: number, py: number, scale = 1, worldWidth?: number): void {
     this.container.scale.set(scale);
-    const halfBubble = (this.bgW * RENDER_SCALE * scale) / 2;
-    this.container.x = Math.round(px - halfBubble);
+    const bubbleW = this.bgW * RENDER_SCALE * scale;
+    let x = px - bubbleW / 2;
+    if (worldWidth !== undefined) x = Math.min(Math.max(x, 0), Math.max(0, worldWidth - bubbleW));
+    this.container.x = Math.round(x);
     this.container.y = Math.round(py + OFFSET_Y * scale - this.bgH * RENDER_SCALE * scale);
   }
 

@@ -6,12 +6,11 @@ import { NameTag } from "./NameTag";
 import { ThoughtBubble } from "./ThoughtBubble";
 import { ToolBubble, type BubbleKind } from "./ToolBubble";
 import { characterIndexForRecipe, type RecipeKey } from "./roster";
-import { DESK_SCALE, HEAD_DESK_SCALE, type DeskRect } from "./seating";
+import { DESK_SCALE, WORKER_BUBBLE_MAX_W, WORLD_WIDTH, type DeskRect } from "./seating";
 import { CHAR_FRAME_H, CHAR_FRAME_W } from "./spriteFrameMath";
 import { getOfficeTextures } from "./spriteSheets";
 import type { VisualState } from "./visualState";
 
-const CHARACTER_SCALE = { worker: DESK_SCALE, coordinator: HEAD_DESK_SCALE } as const;
 const BOB_AMPLITUDE = 1.4;
 const BOB_SPEED = 5.5;
 const FLOURISH_DURATION = 0.7;
@@ -46,14 +45,24 @@ export interface EmployeeFigureOptions {
   recipe: RecipeKey;
   label: string;
   rect: DeskRect;
+  /** Current world width (see seating.ts's computeWorldWidth) — clamps this
+   *  figure's name tag/activity bubble so neither renders partly outside the
+   *  room (see NameTag/ThoughtBubble/ToolBubble's own setPosition). Defaults
+   *  to the fixed fallback WORLD_WIDTH so tests/call sites that don't pass it
+   *  still behave (no clamping tighter than the room's own usual width). */
+  worldWidth?: number;
   onHover?: (id: string | null) => void;
   onSelect?: (id: string) => void;
 }
 
 /** One employee: desk + character + role label + status overlay + activity
  *  bubble. Coordinator and worker share this class — they differ only in
- *  desk/character scale and which bubble (ThoughtBubble vs. ToolBubble) they
- *  carry, per the product spec. */
+ *  desk scale and which bubble (ThoughtBubble vs. ToolBubble) they carry, per
+ *  the product spec. The character/chair themselves render at the same
+ *  scale for both: an earlier revision scaled the coordinator's character up
+ *  with its desk, but a full 16×32 body at that scale read as oversized next
+ *  to the room's other figures and its taller footprint left no vertical
+ *  room for the worker row below it — see the feature's report. */
 export class EmployeeFigure {
   readonly id: string;
   readonly container: Container;
@@ -71,6 +80,7 @@ export class EmployeeFigure {
   private readonly displayH: number;
   private readonly badgeX: number;
   private readonly badgeY: number;
+  private readonly worldWidth: number;
 
   private greyed = false;
   private busy = false;
@@ -81,6 +91,7 @@ export class EmployeeFigure {
   constructor(opts: EmployeeFigureOptions) {
     this.id = opts.id;
     this.kind = opts.kind;
+    this.worldWidth = opts.worldWidth ?? WORLD_WIDTH;
     this.container = new Container();
     this.container.sortableChildren = true;
 
@@ -96,7 +107,10 @@ export class EmployeeFigure {
     this.desk = new Desk(opts.rect, { head: opts.kind === "coordinator" });
     this.desk.container.zIndex = 0;
 
-    const scale = CHARACTER_SCALE[opts.kind];
+    // Always the worker scale — see this class's own doc comment for why the
+    // coordinator's character/chair no longer scale up with its (still
+    // bigger) desk.
+    const scale = DESK_SCALE;
     this.displayH = CHAR_FRAME_H * scale;
     const characterIndex = characterIndexForRecipe(opts.recipe);
     this.character = new CharacterSprite(getOfficeTextures().characters[characterIndex]);
@@ -163,11 +177,14 @@ export class EmployeeFigure {
     if (opts.kind === "coordinator") {
       this.thoughtBubble = new ThoughtBubble();
       this.container.addChild(this.thoughtBubble.container);
-      this.thoughtBubble.setPosition(this.anchorX, this.anchorY - this.displayH);
+      this.thoughtBubble.setPosition(this.anchorX, this.anchorY - this.displayH, 1, this.worldWidth);
     } else {
-      this.toolBubble = new ToolBubble();
+      // Capped to this desk's own column width (see seating.ts's
+      // WORKER_BUBBLE_MAX_W) so a long activity string shortens with an
+      // ellipsis instead of bleeding into a neighboring worker's own bubble.
+      this.toolBubble = new ToolBubble({ maxWidth: WORKER_BUBBLE_MAX_W });
       this.container.addChild(this.toolBubble.container);
-      this.toolBubble.setPosition(this.anchorX, this.anchorY - this.displayH);
+      this.toolBubble.setPosition(this.anchorX, this.anchorY - this.displayH, 1, this.worldWidth);
     }
   }
 
@@ -240,15 +257,15 @@ export class EmployeeFigure {
     const counter = cameraScale > 0 ? Math.min(1 / cameraScale, MAX_LABEL_COUNTER_SCALE) : 1;
     const headTopY = this.anchorY - this.displayH;
     const nameTagY = headTopY - NAME_TAG_GAP;
-    this.nameTag.setPosition(this.anchorX, nameTagY, counter);
+    this.nameTag.setPosition(this.anchorX, nameTagY, counter, this.worldWidth);
     // Fixed world anchor, exactly like nameTagY/headTopY above — the bubble's
     // own OFFSET_Y*scale (see ThoughtBubble/ToolBubble) is what grows this
     // gap proportionally at the narrow-panel counter-scale fallback, the
     // same relationship anchorY/displayH already had to bubbleY before the
     // name tag existed.
     const bubbleY = nameTagY - (NAME_TAG_APPROX_H + BUBBLE_GAP_ABOVE_NAME_TAG);
-    this.thoughtBubble?.setPosition(this.anchorX, bubbleY, counter);
-    this.toolBubble?.setPosition(this.anchorX, bubbleY, counter);
+    this.thoughtBubble?.setPosition(this.anchorX, bubbleY, counter, this.worldWidth);
+    this.toolBubble?.setPosition(this.anchorX, bubbleY, counter, this.worldWidth);
 
     if (this.busy && !reducedMotion) {
       this.bobT += dt;

@@ -46,11 +46,20 @@ export const WORLD_WIDTH = 640;
 // crop's top did), so only the *bottom* of each row grew — by exactly
 // CHAIR_DROP_NATIVE*scale (the chair's own small re-added peek, now that it
 // and the character share one native height — see EmployeeFigure.ts), i.e.
-// 12 world units for a worker row and 18 for the coordinator's. The extra
-// margin here is headroom for that plus the last row's clearance above the
-// floor plants, not a full re-tuning — re-check against a rendered
-// screenshot if it ever needs to change again.
-export const WORLD_HEIGHT = 550;
+// 12 world units for a worker row and 18 for the coordinator's.
+//
+// Bumped again (550→618) for the "bubbles collide with the coordinator" fix:
+// the coordinator's own character/chair now render at the same scale as a
+// worker's (see EmployeeFigure.ts) instead of HEAD_UI_SCALE, so HEAD_Y could
+// in principle have shrunk back down — but it grows here instead, because
+// the coordinator's activity bubble needs to clear the signboard above it
+// (see HEAD_Y's own comment) and the first worker row's own bubble needs to
+// clear the coordinator's row below *that* — both bubbles reach well above
+// their own name tag (see ThoughtBubble/ToolBubble's OFFSET_Y), so this
+// pass re-derives all three row constants together rather than patching one
+// in isolation. Re-check against a rendered screenshot if it ever needs to
+// change again.
+export const WORLD_HEIGHT = 618;
 /** Smallest/largest world width computeWorldWidth() will ever produce, so an
  *  extreme viewport still gets a room shaped like an office — not a sliver
  *  too narrow for the coordinator's own desk, or a runway so wide it reads as
@@ -99,9 +108,13 @@ export function computeWorldWidth(viewWidthCss: number, cameraScale: number): nu
  *  that drawing them at 1:1 would read as sparse, so everything here is drawn
  *  at a uniform 2× local scale instead (still an integer, so it stays crisp
  *  composed with the camera's own scale — see chooseCameraScale above). The
- *  coordinator gets one size class up, HEAD_UI_SCALE, so their desk/figure
- *  visibly anchors the room the way the previous (Pixel Agents) 2×-vs-1× head
- *  desk did. */
+ *  coordinator gets one size class up, HEAD_UI_SCALE, so their desk visibly
+ *  anchors the room the way the previous (Pixel Agents) 2×-vs-1× head desk
+ *  did — the coordinator's own character/chair stay at the *worker* scale
+ *  though (see EmployeeFigure.ts): at HEAD_UI_SCALE a full 16×32 character
+ *  read as oversized next to the room's other full-body figures, and its
+ *  much taller footprint left no room for the worker row below it — see the
+ *  feature's report. */
 export const UI_SCALE = 2;
 export const HEAD_UI_SCALE = 3;
 /** @deprecated kept as aliases — EmployeeFigure/Desk still spell these the
@@ -137,18 +150,39 @@ export const HEAD_DESK_H = DESK_NATIVE_H * HEAD_UI_SCALE;
 export const DESK_SIDE_NATIVE_W = 8;
 
 const ROW_GAP = 48;
+/** Widest a worker's activity bubble (ToolBubble) is allowed to render, in
+ *  world units — passed into ToolBubble's constructor by EmployeeFigure.ts.
+ *  Narrower than ToolBubble's own unconstrained default (150): that default
+ *  is wider than a single desk-to-desk pitch (DESK_W + ROW_GAP, the center-
+ *  to-center distance to an immediate neighbor), so two adjacent workers'
+ *  bubbles could bleed into each other at their own full width. This caps
+ *  each bubble to its own pitch minus a small gutter, so even two neighbors
+ *  both at max width never touch — ToolBubble shortens with an ellipsis
+ *  rather than wrapping to a second line (which would need more vertical
+ *  room than a row budgets for) — see the feature's report. */
+export const WORKER_BUBBLE_MAX_W = DESK_W + ROW_GAP + 30;
 // Row Y's give each row's *desk top*; the character/chair/label group that
 // hangs off each desk (see EmployeeFigure.ts) extends well past the old
 // desk-only footprint, so these are spaced by a full row "pitch" rather than
 // the desk-height-sized gap alone — tuned so a row's activity bubble (now up
 // to 2 lines of legible, screen-space-constant 12px text — see
 // ThoughtBubble.ts/ToolBubble.ts) never overlaps the row above it, and the
-// coordinator's own bubble clears the signboard. Trimmed slightly from the
-// previous pass (104/270/410) to fit WORLD_HEIGHT's own reduction — re-check
-// against a rendered screenshot if either changes again.
-const HEAD_Y = 108;
-const WORKER_ROW_Y = 262;
-const WORKER_ROW_Y_2 = 402;
+// coordinator's own bubble clears the signboard.
+//
+// Re-derived together (108/262/402 → 132/330/470) for the "bubbles collide
+// with the coordinator" fix: the coordinator's own character/chair now
+// render at the worker scale (see EmployeeFigure.ts), shrinking its row's
+// footprint, but its activity bubble's own reach *above* its name tag is
+// unchanged (ThoughtBubble's OFFSET_Y, same as before) — it still needs to
+// clear the signboard above (HEAD_Y grows for that), and the first worker
+// row's own bubble still needs to clear the coordinator's (now smaller, but
+// still present) row below *that* (WORKER_ROW_Y grows to match). The
+// worker-row-to-worker-row pitch (WORKER_ROW_Y_2 − WORKER_ROW_Y) is kept at
+// its previous 140 — that gap was never affected by the coordinator's own
+// size. Re-check against a rendered screenshot if any of these change again.
+const HEAD_Y = 132;
+const WORKER_ROW_Y = 330;
+const WORKER_ROW_Y_2 = 470;
 /** Workers beyond this many wrap onto a second row. Two rows of up to 3 reads
  *  as a "neat grid" for a full 6-worker room instead of a single cramped row
  *  of 4 plus a lonely row of 2. */
