@@ -7,6 +7,7 @@ import {
   fitWorld,
   DESK_W,
   HEAD_DESK_W,
+  WORKER_BUBBLE_MAX_W,
   TILE,
   WORLD_WIDTH,
   WORLD_HEIGHT,
@@ -43,6 +44,20 @@ describe("computeLayout", () => {
           }
         }
       }
+    }
+  });
+
+  it("keeps each worker's widest activity bubble inside its own column, so neighbours never touch", () => {
+    for (const width of [360, WORLD_WIDTH, 760]) {
+      const rects = [...computeLayout(["a", "b", "c"], width).workers.values()].sort((a, b) => a.x - b.x);
+      for (let i = 1; i < rects.length; i++) {
+        const pitch = (rects[i].x + rects[i].w / 2) - (rects[i - 1].x + rects[i - 1].w / 2);
+        expect(WORKER_BUBBLE_MAX_W).toBeLessThan(pitch);
+      }
+      // The outer bubbles stay inside the room.
+      const first = rects[0], last = rects[rects.length - 1];
+      expect(first.x + first.w / 2 - WORKER_BUBBLE_MAX_W / 2).toBeGreaterThanOrEqual(0);
+      expect(last.x + last.w / 2 + WORKER_BUBBLE_MAX_W / 2).toBeLessThanOrEqual(width);
     }
   });
 

@@ -149,7 +149,11 @@ export const HEAD_DESK_H = DESK_NATIVE_H * HEAD_UI_SCALE;
  *  tiles/reads seamlessly beside the monitor — see extract-limezu.py. */
 export const DESK_SIDE_NATIVE_W = 8;
 
-const ROW_GAP = 48;
+// Desk-to-desk gap. Wide enough that each worker's single-line activity
+// bubble (WORKER_BUBBLE_MAX_W) fits inside its own column: live Mac check
+// (3 分析员, 12px bubbles) showed neighbours' bubbles running into one strip
+// at the previous 48.
+const ROW_GAP = 88;
 /** Widest a worker's activity bubble (ToolBubble) is allowed to render, in
  *  world units — passed into ToolBubble's constructor by EmployeeFigure.ts.
  *  Narrower than ToolBubble's own unconstrained default (150): that default
@@ -160,7 +164,7 @@ const ROW_GAP = 48;
  *  both at max width never touch — ToolBubble shortens with an ellipsis
  *  rather than wrapping to a second line (which would need more vertical
  *  room than a row budgets for) — see the feature's report. */
-export const WORKER_BUBBLE_MAX_W = DESK_W + ROW_GAP + 30;
+export const WORKER_BUBBLE_MAX_W = DESK_W + ROW_GAP - 12;
 // Row Y's give each row's *desk top*; the character/chair/label group that
 // hangs off each desk (see EmployeeFigure.ts) extends well past the old
 // desk-only footprint, so these are spaced by a full row "pitch" rather than
