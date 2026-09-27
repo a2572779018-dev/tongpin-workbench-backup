@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { computeLayout, fitWorld, DESK_W, HEAD_DESK_W, WORLD_WIDTH, WORLD_HEIGHT } from "./seating";
+import {
+  buildDecorLayout,
+  chooseCameraScale,
+  computeLayout,
+  computeWorldWidth,
+  fitWorld,
+  DESK_W,
+  HEAD_DESK_W,
+  TILE,
+  WORLD_WIDTH,
+  WORLD_HEIGHT,
+} from "./seating";
 
 describe("computeLayout", () => {
   it("always seats the coordinator at a fixed head desk, independent of worker count", () => {
@@ -65,6 +76,68 @@ describe("computeLayout", () => {
     const ids = Array.from({ length: 9 }, (_, i) => `w${i}`);
     const layout = computeLayout(ids);
     expect(layout.workers.size).toBe(6);
+  });
+
+  it("re-centers every desk when given a different world width", () => {
+    const narrow = computeLayout(["a", "b", "c"], 400);
+    const wide = computeLayout(["a", "b", "c"], 700);
+    for (const rect of narrow.workers.values()) {
+      expect(rect.x).toBeGreaterThanOrEqual(0);
+      expect(rect.x + rect.w).toBeLessThanOrEqual(400);
+    }
+    expect(narrow.coordinator.x).not.toBe(wide.coordinator.x);
+    expect(narrow.coordinator.x + narrow.coordinator.w / 2).toBeCloseTo(200); // still centered
+    expect(wide.coordinator.x + wide.coordinator.w / 2).toBeCloseTo(350);
+  });
+});
+
+describe("chooseCameraScale", () => {
+  it("defaults to 1 (2x total zoom) across the panel's typical content width", () => {
+    for (const width of [560, 640, 696, 760, 900]) expect(chooseCameraScale(width)).toBe(1);
+  });
+
+  it("falls back to 0.5 below the typical range and 1.5 above it", () => {
+    expect(chooseCameraScale(300)).toBe(0.5);
+    expect(chooseCameraScale(1200)).toBe(1.5);
+  });
+
+  it("degrades to 1 for a not-yet-measured (zero or negative) width", () => {
+    expect(chooseCameraScale(0)).toBe(1);
+    expect(chooseCameraScale(-10)).toBe(1);
+  });
+});
+
+describe("computeWorldWidth", () => {
+  it("fills a typical panel width with no leftover beyond a fraction of one tile", () => {
+    const width = computeWorldWidth(696, 1);
+    expect(width % TILE).toBe(0);
+    expect(width).toBeLessThanOrEqual(696);
+    expect(width).toBeGreaterThan(696 - TILE);
+  });
+
+  it("stays inside a sane min/max so an extreme viewport still reads as a room", () => {
+    expect(computeWorldWidth(50, 0.5)).toBeGreaterThanOrEqual(300);
+    expect(computeWorldWidth(5000, 1.5)).toBeLessThanOrEqual(800);
+  });
+
+  it("falls back to the default WORLD_WIDTH for a not-yet-measured input", () => {
+    expect(computeWorldWidth(0, 1)).toBe(WORLD_WIDTH);
+    expect(computeWorldWidth(696, 0)).toBe(WORLD_WIDTH);
+  });
+});
+
+describe("buildDecorLayout", () => {
+  it("centers the signboard and insets the rug from both walls at any world width", () => {
+    for (const width of [400, WORLD_WIDTH, 760]) {
+      const decor = buildDecorLayout(width);
+      expect(decor.rug.x).toBeGreaterThan(0);
+      expect(decor.rug.x + decor.rug.w).toBeLessThan(width);
+      expect(decor.signboard.x * 2).toBeCloseTo(width - 126 * 2, -1); // roughly centered
+    }
+  });
+
+  it("defaults to the fixed fallback width when called with no argument", () => {
+    expect(buildDecorLayout()).toEqual(buildDecorLayout(WORLD_WIDTH));
   });
 });
 

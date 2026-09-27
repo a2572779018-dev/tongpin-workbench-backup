@@ -20,6 +20,16 @@ const FLOURISH_DURATION = 0.7;
  *  clear that overhang at the *coordinator's* larger HEAD_UI_SCALE, not just
  *  the worker one. */
 const LABEL_GAP = 16;
+/** Caps how far update()'s counter-scale (see below) can grow past 1. At the
+ *  default camera scale (1) counter is exactly 1 (a no-op) — this only
+ *  affects the narrow-panel fallback (camera scale 0.5, counter would
+ *  otherwise be 2): full counter-scaling would keep text at a *constant*
+ *  CSS size there too, but desk spacing (seating.ts's ROW_GAP) is a fixed
+ *  world-unit constant, not itself scale-aware, so an uncapped 2x text
+ *  footprint can crowd neighboring labels/bubbles at that one fallback step.
+ *  Capping trades a bit of that fallback's text size (still well above the
+ *  pre-fix ~6px) for keeping the crowding modest. */
+const MAX_LABEL_COUNTER_SCALE = 1.35;
 
 export interface EmployeeFigureOptions {
   id: string;
@@ -112,7 +122,10 @@ export class EmployeeFigure {
 
     this.label = new Text({
       text: opts.label,
-      style: { fontSize: 11, fontWeight: "600", fill: "#3f4038", fontFamily: "sans-serif", align: "center" },
+      // fontSize 12 matches the "≥12 CSS px, crisp" bar for screen-space text
+      // — see update()'s counter-scale below, which keeps this rendered size
+      // constant regardless of the camera's own zoom.
+      style: { fontSize: 12, fontWeight: "600", fill: "#3f4038", fontFamily: "sans-serif", align: "center" },
     });
     this.label.anchor.set(0.5, 0);
     this.label.x = this.anchorX;
@@ -196,11 +209,23 @@ export class EmployeeFigure {
     this.flourishT = reducedMotion ? FLOURISH_DURATION : 0;
   }
 
-  update(dt: number, reducedMotion: boolean): void {
+  update(dt: number, reducedMotion: boolean, cameraScale: number): void {
     this.desk.update(dt, reducedMotion);
     this.character.update(dt, reducedMotion);
     this.thoughtBubble?.update(dt, reducedMotion);
     this.toolBubble?.update(dt, reducedMotion);
+
+    // Counter-scale the name label and activity bubble every frame so their
+    // text renders at a constant, readable CSS size regardless of the
+    // camera's own zoom (see Camera.ts's `scale` getter and seating.ts's
+    // chooseCameraScale) — everything else in this figure (desk, chair,
+    // character, status badge) stays world-scaled on purpose, since those are
+    // art, not text that needs to stay legible at any zoom.
+    const counter = cameraScale > 0 ? Math.min(1 / cameraScale, MAX_LABEL_COUNTER_SCALE) : 1;
+    this.label.scale.set(counter);
+    const bubbleY = this.anchorY - this.displayH;
+    this.thoughtBubble?.setPosition(this.anchorX, bubbleY, counter);
+    this.toolBubble?.setPosition(this.anchorX, bubbleY, counter);
 
     if (this.busy && !reducedMotion) {
       this.bobT += dt;

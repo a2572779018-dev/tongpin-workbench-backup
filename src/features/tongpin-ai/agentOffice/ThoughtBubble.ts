@@ -16,8 +16,13 @@ const MAX_WIDTH = 150;
 const FILL_COLOR = palette.cream;
 const OUTLINE_COLOR = palette.ink;
 const TEXT_COLOR = "#3d3a2f";
-const FONT_SIZE = 12;
-const RENDER_SCALE = 0.5; // render at 2x, scale down for crispness
+// 24 * RENDER_SCALE(0.5) = 12 CSS-px-equivalent final size once
+// EmployeeFigure's own per-frame counter-scale (see its update()) cancels out
+// whatever the camera's own zoom is — matching the "≥12 CSS px, crisp" bar
+// for screen-space text. RENDER_SCALE itself stays a separate, smaller
+// pre-scale-then-shrink step purely for glyph crispness (unrelated to sizing).
+const FONT_SIZE = 24;
+const RENDER_SCALE = 0.5;
 const OFFSET_Y = -34;
 const FADE_IN_DURATION = 0.15;
 const FADE_OUT_DURATION = 0.3;
@@ -101,9 +106,17 @@ export class ThoughtBubble {
     this.lingerElapsed = 0;
   }
 
-  setPosition(px: number, py: number): void {
-    const x = px - (this.bgW * RENDER_SCALE) / 2;
-    const y = py + OFFSET_Y - this.bgH * RENDER_SCALE;
+  /** `scale` (default 1) is EmployeeFigure's per-frame counter-scale, applied
+   *  to this whole bubble so its on-screen size stays constant regardless of
+   *  the camera's own zoom — see EmployeeFigure.update(). Recomputing the
+   *  offset with `scale` folded in keeps the bubble centered/anchored exactly
+   *  as before at any scale, rather than drifting off the character's head
+   *  (Pixi scales a container's children around its own local origin, not
+   *  around whatever point `setPosition`'s un-scaled math had in mind). */
+  setPosition(px: number, py: number, scale = 1): void {
+    this.container.scale.set(scale);
+    const x = px - (this.bgW * RENDER_SCALE * scale) / 2;
+    const y = py + OFFSET_Y * scale - this.bgH * RENDER_SCALE * scale;
     this.container.x = Math.round(x);
     this.container.y = Math.round(y);
   }

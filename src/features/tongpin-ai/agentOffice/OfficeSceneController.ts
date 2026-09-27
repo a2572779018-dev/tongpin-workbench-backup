@@ -6,7 +6,7 @@ import { MessageEnvelope, type EnvelopeKind } from "./MessageEnvelope";
 import { bubbleTextForWorker, visualStateForStatus, type VisualState } from "./visualState";
 import type { BubbleKind } from "./ToolBubble";
 import { recipeForWorker, COORDINATOR_RECIPE_KEY } from "./roster";
-import { computeLayout, WORLD_HEIGHT, WORLD_WIDTH } from "./seating";
+import { chooseCameraScale, computeLayout, computeWorldWidth, WORLD_HEIGHT, WORLD_WIDTH } from "./seating";
 import { buildOfficeBackdrop } from "./sceneDraw";
 import type { AgentOfficeSnapshot } from "./types";
 
@@ -54,7 +54,11 @@ export interface SceneFigure {
   setLabel(text: string): void;
   getAnchor(): { x: number; y: number };
   playFlourish(kind: "success" | "failure", reducedMotion: boolean): void;
-  update(dt: number, reducedMotion: boolean): void;
+  /** `cameraScale` is the camera's current on-screen scale (see Camera.ts's
+   *  own `scale` getter) — used to counter-scale the name label/activity
+   *  bubble so their text stays a constant, readable CSS size regardless of
+   *  camera zoom (see EmployeeFigure.update()). */
+  update(dt: number, reducedMotion: boolean, cameraScale: number): void;
   destroy(): void;
 }
 export interface SceneEnvelope {
@@ -70,12 +74,12 @@ export interface OfficeSceneDeps {
    *  spriteSheets.ts), so — like createFigure/createEnvelope — it is
    *  injectable purely so a test can supply a plain empty Container instead
    *  and never need a loaded texture, a canvas or WebGL. */
-  createBackdrop(): Container;
+  createBackdrop(worldWidth: number): Container;
 }
 const defaultDeps: OfficeSceneDeps = {
   createFigure: (opts) => new EmployeeFigure(opts),
   createEnvelope: (start, end, kind, instant) => new MessageEnvelope(start, end, kind, instant),
-  createBackdrop: () => buildOfficeBackdrop(),
+  createBackdrop: (worldWidth) => buildOfficeBackdrop(worldWidth),
 };
 
 export interface OfficeSceneOptions {
@@ -94,8 +98,13 @@ export class OfficeSceneController {
   private readonly host: SceneHost;
   private readonly deps: OfficeSceneDeps;
   private readonly world: Container;
-  private readonly backdrop: Container;
+  private backdrop: Container;
   private readonly camera: Camera;
+  /** World width actually built into the current backdrop/layout — starts at
+   *  the fixed fallback and is replaced by setSize()'s own measurement-driven
+   *  choice (see computeWorldWidth) the first time it differs, rebuilding the
+   *  backdrop and every figure at the new width (see rebuildWorld()). */
+  private worldWidth = WORLD_WIDTH;
   private readonly now: () => number;
   private readonly onHover?: (id: string | null) => void;
   private readonly onSelect?: (id: string) => void;
@@ -121,19 +130,47 @@ export class OfficeSceneController {
 
     this.world = new Container();
     this.world.sortableChildren = true;
-    this.backdrop = this.deps.createBackdrop();
+    this.backdrop = this.deps.createBackdrop(this.worldWidth);
     this.backdrop.zIndex = -1;
     this.world.addChild(this.backdrop);
     host.stage.addChild(this.world);
 
-    this.camera = new Camera(this.world, WORLD_WIDTH, WORLD_HEIGHT);
+    this.camera = new Camera(this.world, this.worldWidth, WORLD_HEIGHT);
     this.lastTick = this.now();
     host.ticker.add(this.tickHandler);
   }
 
   setSize(width: number, height: number): void {
+    const desiredScale = chooseCameraScale(width);
+    const desiredWorldWidth = computeWorldWidth(width, desiredScale);
+    if (desiredWorldWidth !== this.worldWidth) this.rebuildWorld(desiredWorldWidth);
     this.camera.setViewSize(width, height);
     if (this.reducedMotion) this.camera.snapToFit();
+  }
+
+  /** Rebuilds the backdrop and every figure at `newWorldWidth` — needed
+   *  because desk/decor positions (see seating.ts) are computed from the
+   *  world's own width, not just measured and centered within it. Reapplies
+   *  the last snapshot immediately after, so a live resize never drops
+   *  visual state (status, bubbles, labels) — only their desk positions
+   *  actually change. */
+  private rebuildWorld(newWorldWidth: number): void {
+    this.world.removeChild(this.backdrop);
+    this.backdrop.destroy({ children: true });
+    this.backdrop = this.deps.createBackdrop(newWorldWidth);
+    this.backdrop.zIndex = -1;
+    this.world.addChild(this.backdrop);
+
+    this.coordinatorFigure?.destroy();
+    this.coordinatorFigure = null;
+    for (const figure of this.workerFigures.values()) figure.destroy();
+    this.workerFigures.clear();
+    this.workerIdsSignature = "";
+
+    this.worldWidth = newWorldWidth;
+    this.camera.setWorldSize(newWorldWidth, WORLD_HEIGHT);
+
+    if (this.prevSnapshot) this.applySnapshot(this.prevSnapshot);
   }
 
   setReducedMotion(reduced: boolean): void {
@@ -148,7 +185,7 @@ export class OfficeSceneController {
 
   private ensureCoordinator(): SceneFigure {
     if (this.coordinatorFigure) return this.coordinatorFigure;
-    const layout = computeLayout([]);
+    const layout = computeLayout([], this.worldWidth);
     const figure = this.deps.createFigure({
       id: "__coordinator__",
       kind: "coordinator",
@@ -174,7 +211,7 @@ export class OfficeSceneController {
     for (const figure of this.workerFigures.values()) figure.destroy();
     this.workerFigures.clear();
 
-    const layout = computeLayout(ids);
+    const layout = computeLayout(ids, this.worldWidth);
     for (const worker of next.workers) {
       const rect = layout.workers.get(worker.id);
       if (!rect) continue; // beyond the 6-worker layout budget; not rendered
@@ -243,8 +280,9 @@ export class OfficeSceneController {
     this.lastTick = now;
 
     this.camera.update();
-    this.coordinatorFigure?.update(dt, this.reducedMotion);
-    for (const figure of this.workerFigures.values()) figure.update(dt, this.reducedMotion);
+    const cameraScale = this.camera.scale;
+    this.coordinatorFigure?.update(dt, this.reducedMotion, cameraScale);
+    for (const figure of this.workerFigures.values()) figure.update(dt, this.reducedMotion, cameraScale);
 
     for (let i = this.envelopes.length - 1; i >= 0; i--) {
       if (this.envelopes[i].update(dt)) {

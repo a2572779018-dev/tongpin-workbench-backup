@@ -44,6 +44,7 @@ import bookshelfBUrl from "./assets/limezu/bookshelf_b.png?url&no-inline";
 import whiteboardUrl from "./assets/limezu/whiteboard.png?url&no-inline";
 import plantBigUrl from "./assets/limezu/plant_big.png?url&no-inline";
 import plantSmallUrl from "./assets/limezu/plant_small.png?url&no-inline";
+import rugUrl from "./assets/limezu/rug.png?url&no-inline";
 import coffeeUrl from "./assets/limezu/coffee.png?url&no-inline";
 import clockUrl from "./assets/limezu/clock.png?url&no-inline";
 import signboardUrl from "./assets/limezu/signboard.png?url&no-inline";
@@ -68,6 +69,7 @@ export const FURNITURE_URLS = {
   whiteboard: whiteboardUrl,
   plantBig: plantBigUrl,
   plantSmall: plantSmallUrl,
+  rug: rugUrl,
   coffee: coffeeUrl,
   clock: clockUrl,
   signboard: signboardUrl,
@@ -89,6 +91,7 @@ export const ALL_SPRITE_URLS: readonly string[] = [
   FURNITURE_URLS.whiteboard,
   FURNITURE_URLS.plantBig,
   FURNITURE_URLS.plantSmall,
+  FURNITURE_URLS.rug,
   FURNITURE_URLS.coffee,
   FURNITURE_URLS.clock,
   FURNITURE_URLS.signboard,

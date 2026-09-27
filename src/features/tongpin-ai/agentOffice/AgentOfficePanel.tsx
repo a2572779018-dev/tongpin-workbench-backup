@@ -59,12 +59,12 @@ export function AgentOfficePanel({ snapshot, height }: AgentOfficePanelProps) {
       </button>
       {expanded ? (
         <div id={bodyId} className="tp-ai-office-panel__body">
-          <AgentOfficeView snapshot={snapshot} height={height} />
           {/* LimeZu's "Modern Interiors" license requires visible credit —
-           *  see THIRD_PARTY_NOTICES.md — shown here so it appears in both
-           *  the canvas scene and the no-WebGL list fallback, which share
-           *  this body wrapper. */}
-          <p className="tp-ai-office-panel__credit">办公室像素美术：LimeZu · limezu.itch.io</p>
+           *  shown in the app's About panel (see electron/main.cjs and
+           *  about-panel-options.cjs) rather than here, so this UI stays
+           *  free of attribution text; THIRD_PARTY_NOTICES.md still carries
+           *  the full notice. */}
+          <AgentOfficeView snapshot={snapshot} height={height} />
         </div>
       ) : null}
     </section>

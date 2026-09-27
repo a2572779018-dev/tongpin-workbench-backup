@@ -218,6 +218,46 @@ describe("OfficeSceneController", () => {
     for (const e of createdEnvelopes) expect(e.destroy).toHaveBeenCalledTimes(1);
   });
 
+  it("passes the camera's current scale into every figure's update() on tick", () => {
+    const { host, tickHandlers } = fakeHost();
+    const figure = fakeFigure();
+    const createFigure = vi.fn(() => figure);
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure, createEnvelope: fakeEnvelope } });
+    controller.applySnapshot(snap({ workers: [{ id: "w1", role: "研究员", task: "t", status: "queued" }] }));
+    for (const cb of tickHandlers) cb();
+    expect(figure.update).toHaveBeenCalledWith(expect.any(Number), false, expect.any(Number));
+    controller.dispose();
+  });
+
+  it("rebuilds the backdrop and every figure when setSize's measured width changes the chosen world width", () => {
+    const { host } = fakeHost();
+    const createBackdrop = vi.fn(fakeBackdrop);
+    const createFigure = vi.fn(fakeFigure);
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop, createFigure, createEnvelope: fakeEnvelope } });
+    const workers: AgentOfficeSnapshot["workers"] = [{ id: "w1", role: "研究员", task: "t", status: "queued" }];
+    controller.applySnapshot(snap({ workers }));
+    const backdropCallsBefore = createBackdrop.mock.calls.length;
+    const figureCallsBefore = createFigure.mock.calls.length;
+
+    controller.setSize(696, 510); // 696 CSS px → world width 688, different from the 640 default
+    expect(createBackdrop.mock.calls.length).toBeGreaterThan(backdropCallsBefore);
+    expect(createFigure.mock.calls.length).toBeGreaterThan(figureCallsBefore); // coordinator + w1 recreated
+
+    const workerCalls = createFigure.mock.calls.filter(([opts]) => opts?.kind === "worker");
+    expect(workerCalls).toHaveLength(2); // once before the rebuild, once after
+    controller.dispose();
+  });
+
+  it("does not rebuild when setSize's measured width doesn't change the chosen world width", () => {
+    const { host } = fakeHost();
+    const createBackdrop = vi.fn(fakeBackdrop);
+    const controller = new OfficeSceneController(host, { deps: { createBackdrop, createFigure: fakeFigure, createEnvelope: fakeEnvelope } });
+    const callsAfterConstruction = createBackdrop.mock.calls.length;
+    controller.setSize(640, 510); // matches the constructor's own default world width (640) exactly
+    expect(createBackdrop.mock.calls.length).toBe(callsAfterConstruction);
+    controller.dispose();
+  });
+
   it("setPaused starts/stops the host ticker", () => {
     const { host } = fakeHost();
     const controller = new OfficeSceneController(host, { deps: { createBackdrop: fakeBackdrop, createFigure: fakeFigure, createEnvelope: fakeEnvelope } });

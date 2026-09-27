@@ -1315,6 +1315,9 @@ produces, all under `src/features/tongpin-ai/agentOffice/assets/`:
   has no plain white board; this reads as the same kind of object).
 - `limezu/plant_big.png` / `plant_small.png` — `Theme_Sorter_Singles/
   2_Living_Room_Singles/Living_Room_Singles_18.png` and `_15.png`.
+- `limezu/rug.png` — a small diamond-motif floor accent, `Theme_Sorter_Singles/
+  2_Living_Room_Singles/Living_Room_Singles_28.png`, tiled (Pixi `TilingSprite`)
+  under the worker desk clusters — see `seating.ts`'s `buildDecorLayout().rug`.
 - `limezu/coffee.png` / `limezu/clock.png` — the first (16×32) frame only of
   `3_Animated_objects/16x16/spritesheets/animated_coffee.png` (of 6) and of
   `animated_cuckoo_clock.png` (of 10). This office never animates its

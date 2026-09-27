@@ -24,7 +24,11 @@ const MAX_WIDTH = 150;
 const BG_COLOR = palette.ink;
 const BG_ALPHA = 0.95;
 const TEXT_COLOR = "#fffdf5";
-const FONT_SIZE = 12;
+// See ThoughtBubble.ts's own comment on this pairing: 24 * RENDER_SCALE(0.5)
+// = 12 CSS-px-equivalent once EmployeeFigure's per-frame counter-scale
+// cancels the camera's own zoom — the "≥12 CSS px, crisp" bar for
+// screen-space text.
+const FONT_SIZE = 24;
 const RENDER_SCALE = 0.5;
 const OFFSET_Y = -32;
 const FADE_IN_DURATION = 0.15;
@@ -104,10 +108,15 @@ export class ToolBubble {
     this.lingerElapsed = 0;
   }
 
-  setPosition(px: number, py: number): void {
-    const halfBubble = (this.bgW * RENDER_SCALE) / 2;
+  /** See ThoughtBubble.setPosition's doc comment: `scale` is EmployeeFigure's
+   *  per-frame counter-scale, folded into this offset so the bubble stays
+   *  centered/anchored at any scale instead of drifting off the character's
+   *  head. */
+  setPosition(px: number, py: number, scale = 1): void {
+    this.container.scale.set(scale);
+    const halfBubble = (this.bgW * RENDER_SCALE * scale) / 2;
     this.container.x = Math.round(px - halfBubble);
-    this.container.y = Math.round(py + OFFSET_Y - this.bgH * RENDER_SCALE);
+    this.container.y = Math.round(py + OFFSET_Y * scale - this.bgH * RENDER_SCALE * scale);
   }
 
   hide(): void {

@@ -120,9 +120,12 @@ FURNITURE_SINGLES = {
     "bookshelf_a.png": singles("5_Classroom_and_Library_Singles", "Classroom_and_Library_Singles", 46),
     "bookshelf_b.png": singles("5_Classroom_and_Library_Singles", "Classroom_and_Library_Singles", 58),
     "whiteboard.png": singles("5_Classroom_and_Library_Singles", "Classroom_and_Library_Singles", 39),
-    # Living_Room theme: potted plants.
+    # Living_Room theme: potted plants + a small diamond-motif rug tile (used
+    # tiled, under the worker desk clusters — see seating.ts's DECOR_LAYOUT.rug
+    # and sceneDraw.ts).
     "plant_big.png": singles("2_Living_Room_Singles", "Living_Room_Singles", 18),
     "plant_small.png": singles("2_Living_Room_Singles", "Living_Room_Singles", 15),
+    "rug.png": singles("2_Living_Room_Singles", "Living_Room_Singles", 28),
 }
 
 

@@ -36,6 +36,7 @@ const {
   shouldPlayNotificationSound,
 } = require("./notification-sound-policy.cjs");
 const { normalizeReleaseNotes } = require("./release-notes.cjs");
+const { buildAboutPanelOptions } = require("./about-panel-options.cjs");
 const {
   buildLoraExplorerUrl,
   validateLoraExplorerUrl,
@@ -2244,6 +2245,12 @@ app.setName(isQuickTaskPreview ? "同频快捷待办预览" : "同频");
 if (process.platform === "win32") {
   app.setAppUserModelId("com.tongpin.workbench");
 }
+// LimeZu's office art credit lives here (see about-panel-options.cjs) rather
+// than in the office panel's own UI.
+app.setAboutPanelOptions(buildAboutPanelOptions({
+  applicationName: isQuickTaskPreview ? "同频快捷待办预览" : "同频",
+  applicationVersion: app.getVersion(),
+}));
 
 app.whenReady().then(async () => {
   configureApplicationMenu();

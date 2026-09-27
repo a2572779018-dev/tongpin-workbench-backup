@@ -5,6 +5,7 @@ import { attemptLoadPixi } from "./loadStrategy";
 import { installContextLossRecovery, planInitFailure, type InitFailurePlan } from "./glRecovery";
 import { prefersReducedMotion } from "./motionPlan";
 import { paletteHex } from "./palette";
+import { chooseCameraScale, WORLD_HEIGHT } from "./seating";
 import { buildFallbackRows } from "./fallbackModel";
 import { AgentOfficeFallback } from "./AgentOfficeFallback";
 import type { AgentOfficeSnapshot } from "./types";
@@ -29,7 +30,7 @@ export interface AgentOfficeViewProps {
  * guard discards any async result from a mount the effect has since torn
  * down.
  */
-export function AgentOfficeView({ snapshot, height = 320 }: AgentOfficeViewProps) {
+export function AgentOfficeView({ snapshot, height = WORLD_HEIGHT }: AgentOfficeViewProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<OfficeSceneController | null>(null);
   const appRef = useRef<Application | null>(null);
@@ -68,11 +69,29 @@ export function AgentOfficeView({ snapshot, height = 320 }: AgentOfficeViewProps
     const syncReducedMotion = () => {
       controllerRef.current?.setReducedMotion(prefersReducedMotion());
     };
+    // Derives this panel's own CSS height from its *measured width* and the
+    // same 1x/2x/3x camera-scale steps OfficeSceneController fits the world
+    // to (see seating.ts's chooseCameraScale), so the host div is always
+    // exactly tall enough for the world at whatever scale it actually renders
+    // at — no vertical letterboxing at the narrow/wide fallback scales
+    // either, not just the typical 2x one. React's own `style={{height}}`
+    // (the `height` prop) only supplies the very first, pre-measurement
+    // frame; this direct DOM write takes over from here. Safe to keep doing
+    // every sync: React never re-touches a style property whose *source prop*
+    // hasn't changed between renders, so this doesn't fight React's own
+    // reconciliation.
+    const applyResponsiveHeight = (): number => {
+      const width = host.getBoundingClientRect().width || host.clientWidth || 640;
+      const nextHeight = Math.round(WORLD_HEIGHT * chooseCameraScale(width));
+      host.style.height = `${nextHeight}px`;
+      return nextHeight;
+    };
     const syncSize = () => {
       const controller = controllerRef.current;
       if (!controller) return;
+      const nextHeight = applyResponsiveHeight();
       const rect = host.getBoundingClientRect();
-      controller.setSize(rect.width || 640, rect.height || height);
+      controller.setSize(rect.width || 640, nextHeight);
     };
     const scheduleRebuild = (delayMs: number, attempt: number) => {
       initRetriesRef.current = attempt;
@@ -99,6 +118,7 @@ export function AgentOfficeView({ snapshot, height = 320 }: AgentOfficeViewProps
       ];
 
       const app = new pixiModule.Application();
+      const initialHeight = applyResponsiveHeight();
       try {
         await app.init({
           background: paletteHex.paper,
@@ -107,7 +127,7 @@ export function AgentOfficeView({ snapshot, height = 320 }: AgentOfficeViewProps
           resolution: Math.max(window.devicePixelRatio || 1, 2),
           autoDensity: true,
           width: host.clientWidth || 640,
-          height: host.clientHeight || height,
+          height: host.clientHeight || initialHeight,
         });
       } catch (err) {
         if (cancelled || mountIdRef.current !== mountId) return;

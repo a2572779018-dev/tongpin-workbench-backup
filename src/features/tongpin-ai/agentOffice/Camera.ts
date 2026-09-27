@@ -10,6 +10,29 @@ import type { Container } from "pixi.js";
 
 const LERP_SPEED = 0.12;
 
+// Composed with the scene's own fixed 2x sprite bake (UI_SCALE, see
+// seating.ts), these give a whole-number native-px-to-CSS-px zoom of
+// 1x/2x/3x — the only levels this scene's nearest-filtered pixel art (see
+// spriteSheets.ts's `nearest()`) samples crisply; anything else shimmers or
+// blurs. Kept here (not imported from seating.ts) so Camera stays the
+// generic, seating-agnostic "fit to screen" utility it always was — it only
+// needs to agree with seating.ts on *how many* steps there are and that 1 is
+// the middle one, which chooseCameraScale()'s own doc comment explains.
+const ALLOWED_SCALES = [0.5, 1, 1.5];
+
+/** The largest allowed scale that still fits within `raw` (so the world never
+ *  overflows the viewport) — i.e. "round down to the nearest allowed step".
+ *  Falls back to `raw` itself, unsnapped, only when even the smallest step
+ *  would overflow: a softer, evenly-shrunk frame beats slicing the office in
+ *  half, for a viewport too small to fit at any allowed step. */
+function nearestAllowedScale(raw: number): number {
+  let snapped = raw;
+  for (const candidate of ALLOWED_SCALES) {
+    if (candidate <= raw) snapped = candidate;
+  }
+  return snapped;
+}
+
 export class Camera {
   private container: Container;
   private currentX = 0;
@@ -27,6 +50,21 @@ export class Camera {
     this.worldHeight = worldHeight;
   }
 
+  /** The scale actually being rendered right now (post-lerp) — read by
+   *  OfficeSceneController to counter-scale name labels/bubbles so their text
+   *  stays a constant, readable CSS size regardless of camera zoom (see
+   *  EmployeeFigure.update()). */
+  get scale(): number {
+    return this.currentScale;
+  }
+
+  /** Update the world size this camera fits (see seating.ts's
+   *  computeWorldWidth) — takes effect on the next setViewSize()/update(). */
+  setWorldSize(width: number, height: number): void {
+    this.worldWidth = width;
+    this.worldHeight = height;
+  }
+
   setViewSize(width: number, height: number): void {
     this.viewWidth = width;
     this.viewHeight = height;
@@ -36,13 +74,7 @@ export class Camera {
   private fitScale(): number {
     if (this.viewWidth <= 0 || this.viewHeight <= 0) return 1;
     const raw = Math.min(this.viewWidth / this.worldWidth, this.viewHeight / this.worldHeight);
-    // Snap to a whole-pixel multiple so every sprite samples crisply at
-    // 2×/3× — real pixel art, unlike the office's old procedural Graphics
-    // drawing, shows shimmer/blur under a fractional scale. Only snap when
-    // there is room to grow into a whole step, though: a panel too small to
-    // fit the world even at 1× still shrinks smoothly instead of cropping
-    // it — a softer frame beats slicing the office in half.
-    return raw >= 1 ? Math.floor(raw) : raw;
+    return nearestAllowedScale(raw);
   }
 
   /** Skip the lerp and snap straight to the fitted, centered pose — used on
