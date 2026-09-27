@@ -1,5 +1,7 @@
 import { AI_MEMORY_LIMITS, AI_MEMORY_TARGETS, type AiMemoryReviewChanges, type AiMemoryTarget } from "../../shared/aiMemory";
+import { AI_MEMORY_SKILL_ID, type AiMemorySkillInput } from "../../shared/aiMemoryLearning";
 import { rejectMemoryContent } from "./memberMemorySafety";
+import { validateMemberSkill } from "./memberSkills";
 import { applyMemoryBatch, MEMBER_MEMORY_TARGET_NAMES, memoryCharLength, memoryLimit, normalizeMemoryEntry, type MemoryBatchOperation } from "./memberMemoryStore";
 
 export interface MemberMemoryReviewOperation {
@@ -9,9 +11,33 @@ export interface MemberMemoryReviewOperation {
   oldText?: string;
 }
 
+/** A personal-skill proposal from the review (validated; never applied without the member). */
+export interface ParsedMemberSkillProposal { action: "create" | "update"; skillId?: string; skill: AiMemorySkillInput }
+
 export type ParsedMemberMemoryReview =
-  | { ok: true; operations: MemberMemoryReviewOperation[]; invalid: number }
+  | { ok: true; operations: MemberMemoryReviewOperation[]; invalid: number; skill?: ParsedMemberSkillProposal | null; skillInvalid?: boolean }
   | { ok: false; error: "empty" | "not_json" | "shape" | "too_many" };
+
+/**
+ * `"skill": null | {action, skill_id?, name, when_to_use, instructions, triggers}`.
+ * Anything malformed, secret-bearing or instruction-shaped is dropped (not guessed).
+ */
+export function parseMemberSkillProposal(value: unknown): { skill: ParsedMemberSkillProposal | null; invalid: boolean } {
+  if (value === undefined || value === null) return { skill: null, invalid: false };
+  if (typeof value !== "object" || Array.isArray(value)) return { skill: null, invalid: true };
+  const record = value as Record<string, unknown>;
+  const allowed = ["action", "skill_id", "name", "when_to_use", "whenToUse", "instructions", "triggers"];
+  if (Object.keys(record).some(key => !allowed.includes(key))) return { skill: null, invalid: true };
+  const action = record.action === undefined ? "create" : record.action;
+  if (action !== "create" && action !== "update") return { skill: null, invalid: true };
+  const skillId = record.skill_id;
+  if (action === "update" && (typeof skillId !== "string" || !AI_MEMORY_SKILL_ID.test(skillId))) return { skill: null, invalid: true };
+  const validated = validateMemberSkill({
+    name: record.name, whenToUse: record.when_to_use ?? record.whenToUse, instructions: record.instructions, triggers: record.triggers,
+  });
+  if (!validated.ok) return { skill: null, invalid: true };
+  return { skill: { action, ...(action === "update" ? { skillId: skillId as string } : {}), skill: validated.skill }, invalid: false };
+}
 
 const NOTHING_TO_SAVE = /^(?:nothing to save\.?|无需保存。?|没有需要保存的内容。?|无。?)$/i;
 
@@ -49,7 +75,8 @@ export function parseMemberMemoryReview(content: string): ParsedMemberMemoryRevi
       || (needsOld && (!oldText || memoryCharLength(oldText) > AI_MEMORY_LIMITS.entryCharacters))) { invalid += 1; continue; }
     operations.push({ target: target as AiMemoryTarget, action, ...(needsContent ? { content: contentText } : {}), ...(needsOld ? { oldText } : {}) });
   }
-  return { ok: true, operations, invalid };
+  const proposal = parseMemberSkillProposal((root as { skill?: unknown }).skill);
+  return { ok: true, operations, invalid, ...(proposal.skill ? { skill: proposal.skill } : {}), ...(proposal.invalid ? { skillInvalid: true } : {}) };
 }
 
 /** Explicit member requests. `forget` wins: it is the only cue that unlocks removals. */

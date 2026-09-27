@@ -61,7 +61,7 @@ describe("member memory learning loop (Hermes background review, adapted)", () =
 
   it("stays off until an administrator enables it: one provider call, no journal, no prompt block", async () => {
     const fresh = runtime.service.forTenant("org-fresh").memberMemory;
-    expect(fresh.adminView().settings).toEqual({ enabled: false, reviewTier: "quick", pricePoints: 100 });
+    expect(fresh.adminView().settings).toEqual({ enabled: false, reviewTier: "quick", pricePoints: 100, recallEnabled: true, skillsEnabled: true });
     memory().saveAdminSettings({ enabled: false, reviewTier: "quick", pricePoints: 50 });
     const response = await send("记住：我是市场部的产品经理，回复请先给结论");
     await memberMemoryRuntime.idle();
@@ -323,6 +323,10 @@ describe("member memory learning loop (Hermes background review, adapted)", () =
     expect(() => memory().saveAdminSettings({ enabled: true, reviewTier: "ultra", pricePoints: 1 })).toThrow(expect.objectContaining({ code: "AI_MEMORY_INVALID" }));
     expect(() => memory().saveAdminSettings({ enabled: true, reviewTier: "quick", pricePoints: -1 })).toThrow(expect.objectContaining({ code: "AI_MEMORY_INVALID" }));
     expect(() => memory().saveAdminSettings({ enabled: true, reviewTier: "quick", pricePoints: 1, extra: true })).toThrow(expect.objectContaining({ code: "AI_MEMORY_INVALID" }));
-    expect(memory().saveAdminSettings({ enabled: true, reviewTier: "deep", pricePoints: 0 }).settings).toEqual({ enabled: true, reviewTier: "deep", pricePoints: 0 });
+    expect(memory().saveAdminSettings({ enabled: true, reviewTier: "deep", pricePoints: 0 }).settings).toEqual({ enabled: true, reviewTier: "deep", pricePoints: 0, recallEnabled: true, skillsEnabled: true });
+    // Older admin clients omit the recall/skill switches: the saved values are kept.
+    expect(memory().saveAdminSettings({ enabled: true, reviewTier: "deep", pricePoints: 0, recallEnabled: false, skillsEnabled: false }).settings).toMatchObject({ recallEnabled: false, skillsEnabled: false });
+    expect(memory().saveAdminSettings({ enabled: true, reviewTier: "quick", pricePoints: 5 }).settings).toEqual({ enabled: true, reviewTier: "quick", pricePoints: 5, recallEnabled: false, skillsEnabled: false });
+    expect(() => memory().saveAdminSettings({ enabled: true, reviewTier: "quick", pricePoints: 5, recallEnabled: "yes" })).toThrow(expect.objectContaining({ code: "AI_MEMORY_INVALID" }));
   });
 });

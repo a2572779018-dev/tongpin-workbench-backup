@@ -11,6 +11,7 @@ import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey } from "./t
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
 import { videoModel } from "../../shared/aiVideoModels";
 import { AI_CITATION_LIMITS, isAiCitation } from "../../shared/aiCitations";
+import { notifyAiWorkspaceV1Saved } from "./workspaceWriteHooks";
 
 export const AI_WORKSPACE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ai_workspaces (
@@ -626,7 +627,8 @@ export class AiWorkspaceRepository {
         ? { ...snapshot, state: request.state }
         : snapshot;
     // Both adapters execute a synchronous transaction, with no external I/O or await inside.
-    return this.sql.transaction(() => {
+    const committed: { revision?: number; state?: AiWorkspaceState } = {};
+    const saved = this.sql.transaction(() => {
       const prior = this.sql.all<{ request_hash: string }>("SELECT request_hash FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND mutation_id=?", tenant, storedUserId, request.mutationId)[0];
       const current = this.read(userId, tenant);
       if (prior) {
@@ -660,7 +662,11 @@ export class AiWorkspaceRepository {
       this.sql.exec("INSERT INTO ai_workspace_mutations(user_id,tenant_id,mutation_id,request_hash,revision) VALUES(?,?,?,?,?)", storedUserId, tenant, request.mutationId, hash, revision);
       // Compact receipts, not user records. Older requests still fail CAS and cannot replay writes.
       this.sql.exec("DELETE FROM ai_workspace_mutations WHERE tenant_id=? AND user_id=? AND revision<=?", tenant, storedUserId, Math.max(0, revision - 2048));
+      committed.revision = revision; committed.state = stateToSave;
       return acknowledge({ revision, schemaVersion: 1, updatedAt, state: stateToSave, storage: workspaceStorageUsage(serialized) });
     });
+    // Derived indexes (member history recall) follow the committed snapshot; replays notify nothing.
+    if (committed.state && committed.revision !== undefined) notifyAiWorkspaceV1Saved(this.sql, { tenantId: tenant, userId, revision: committed.revision, state: committed.state });
+    return saved;
   }
 }

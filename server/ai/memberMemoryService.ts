@@ -7,7 +7,13 @@ import {
 } from "../../shared/aiMemory";
 import { routeChatProvider } from "./autoRouting";
 import type { AiHarness } from "./harness";
-import { buildMemberMemoryReviewPayload, MEMBER_MEMORY_REVIEW_INSTRUCTIONS, memberMemoryNonce, renderMemberMemoryPrompt, withMemberMemoryPrompt, type MemberMemoryReviewTurn } from "./memberMemoryPrompt";
+import { buildMemberMemoryReviewPayload, MEMBER_MEMORY_REVIEW_INSTRUCTIONS, memberMemoryNonce, renderMemberMemoryPrompt, withMemberLearningPrompt, withMemberMemoryPrompt, type MemberMemoryReviewTurn } from "./memberMemoryPrompt";
+import { AiMemberHistoryIndex, historySourceFromState, MEMBER_HISTORY_LIMITS, memberHistoryEligible } from "./memberHistoryIndex";
+import { AiMemberLearning, memberTurnText, recallTenants, registerMemberHistoryObserver, type MemberReviewContext } from "./memberLearning";
+import { AiWorkspaceRepository, validateAiWorkspaceConversationEntity } from "./workspace";
+import { currentWorkspaceVersion } from "./workspaceCurrentReads";
+import { AiWorkspaceV2Store } from "./workspaceV2Store";
+import type { AiMemoryRecallEvent } from "../../shared/aiMemoryLearning";
 import { detectMemoryCue, isTrivialMemoryTurn, memoryReviewChanged, parseMemberMemoryReview, planMemberMemoryReview, type MemberMemoryReviewOperation } from "./memberMemoryReview";
 import { rejectMemoryContent } from "./memberMemorySafety";
 import {
@@ -33,10 +39,15 @@ const REVIEW_TIMEOUT_MS = 45_000;
 const REVIEW_MAX_ATTEMPTS = 2;
 const REVIEW_RETRY_DELAY_MS = 60_000;
 const REVIEW_OUTPUT_TOKENS = 1024;
+/** A review that may also propose a skill needs room for its instructions. */
+const REVIEW_WITH_SKILL_OUTPUT_TOKENS = 1536;
+/** Reconcile workspace revisions with the history index at most this often (per database handle). */
+const HISTORY_RECONCILE_MS = 60 * 60_000;
+const historyReconciledAt = new WeakMap<object, number>();
 const DAY_MS = 24 * 60 * 60_000;
 const REQUEST_ID = /^[a-zA-Z0-9_-]{16,100}$/;
 
-export interface AiBackgroundMemoryCycle { scanned: number; processed: number; failed: number }
+export interface AiBackgroundMemoryCycle { scanned: number; processed: number; failed: number; history?: { synced: number; purged: number } }
 
 /**
  * In-process start of accepted reviews. The journal row is the source of
@@ -93,7 +104,7 @@ function readsMemory(request: AiChatRequest): boolean {
   return !request.skillIds?.includes("agent-continuation-v1") && request.outputFormat !== "computer_plan" && request.outputFormat !== "computer_task";
 }
 
-type ReviewTarget = { provider: StoredProvider; model: string; encryptedKey: string; maxOutputTokens: number };
+type ReviewTarget = { provider: StoredProvider; model: string; encryptedKey: string; maxOutputTokens: number; skillOutputTokens: number };
 type ReviewCall = { content: string; inputTokens: number; outputTokens: number };
 
 async function idempotencyKey(...parts: Array<string | number>): Promise<string> {
@@ -121,21 +132,29 @@ export interface AiMemberMemoryDeps {
  */
 export class AiMemberMemoryService {
   readonly repository: AiMemberMemoryRepository;
+  /** History recall and personal skills (Hermes session_search / skills, adapted). */
+  readonly learning: AiMemberLearning;
   constructor(private readonly deps: AiMemberMemoryDeps) {
     this.repository = new AiMemberMemoryRepository(deps.store.sql, deps.store.tenantId);
+    this.learning = new AiMemberLearning(deps.store.sql, deps.store.tenantId);
+    // Index each committed workspace save (once per database handle).
+    registerMemberHistoryObserver(deps.store.sql);
   }
 
   // ---------------------------------------------------------------- member API
-  private view(stored: StoredMemberMemory, settings: AiMemoryAdminSettings): AiMemoryState {
+  private view(stored: StoredMemberMemory, settings: AiMemoryAdminSettings, userId?: string): AiMemoryState {
     const store = (target: AiMemoryTarget) => ({ target, entries: [...stored[target]], usedCharacters: memoryUsage(stored[target]), limitCharacters: memoryLimit(target) });
+    let learning: ReturnType<AiMemberLearning["view"]> | undefined;
+    if (userId) { try { learning = this.learning.view(userId, settings); } catch { learning = undefined; } }
     return {
       revision: stored.revision, available: settings.enabled, learningEnabled: stored.learningEnabled, pricePoints: settings.pricePoints,
       stores: { memory: store("memory"), user: store("user") }, updatedAt: stored.updatedAt, updatedBy: stored.updatedBy,
+      ...(learning ? { recall: learning.recall, skills: learning.skills } : {}),
     };
   }
   state(userId: string): AiMemoryState {
     this.deps.store.assertAccess(userId);
-    return this.view(this.repository.read(userId), this.repository.settings());
+    return this.view(this.repository.read(userId), this.repository.settings(), userId);
   }
   updateEntry(userId: string, body: unknown): AiMemoryState {
     this.deps.store.assertAccess(userId);
@@ -172,52 +191,132 @@ export class AiMemberMemoryService {
       this.repository.deleteSnapshots(userId);
       return next;
     });
-    return this.view(stored, settings);
+    return this.view(stored, settings, userId);
   }
   setLearning(userId: string, body: unknown): AiMemoryState {
     this.deps.store.assertAccess(userId);
     const p = record(body, ["learningEnabled"], "请提交有效的记忆开关");
     if (typeof p.learningEnabled !== "boolean") throw new AiError(400, "AI_MEMORY_INVALID", "记忆开关格式不正确");
     const now = Date.now();
+    let changed = false;
     const stored = this.deps.store.sql.transaction(() => {
       const current = this.repository.read(userId);
       if (current.learningEnabled === p.learningEnabled) return current;
+      changed = true;
       // The revision bump also cancels any in-flight review at its compare-and-set.
       const next = this.repository.write(userId, current.revision, { ...current, learningEnabled: p.learningEnabled as boolean }, "member");
       this.repository.deleteSnapshots(userId);
       if (!p.learningEnabled) this.deps.store.sql.exec("UPDATE ai_member_memory_reviews SET status='skipped',reason='learning_off',updated_at=? WHERE tenant_id=? AND user_id=? AND status='queued'", now, this.repository.tenantId, this.repository.userKey(userId));
       return next;
     });
-    return this.view(stored, this.repository.settings());
+    if (changed) {
+      try {
+        // Off: history stops matching at once and is deleted in the background.
+        // On: the member's existing conversations are indexed again (unless a
+        // clear-all asked for them to stay forgotten).
+        if (!p.learningEnabled) this.learning.history.reset(userId, this.learning.history.mode(userId) === "baseline" ? "baseline" : "sync");
+        else if (this.repository.settings().enabled) this.learning.history.enqueue(userId, "backfill");
+      } catch { /* The index is derived data; the switch itself has been saved. */ }
+    }
+    return this.view(stored, this.repository.settings(), userId);
   }
+  /**
+   * Clear-all: memory, prompt snapshots, the review journal, personal skills
+   * and recall activity. Conversations stay where they are, but what existed
+   * at this moment is no longer searchable by recall (only later messages are).
+   */
   clear(userId: string): AiMemoryState {
     this.deps.store.assertAccess(userId);
-    const stored = this.deps.store.sql.transaction(() => this.repository.clear(userId, Date.now()));
-    return this.view(stored, this.repository.settings());
+    const stored = this.deps.store.sql.transaction(() => {
+      const next = this.repository.clear(userId, Date.now());
+      this.learning.skills.clear(userId);
+      this.learning.activity.clear(userId);
+      return next;
+    });
+    try {
+      this.learning.history.reset(userId, "baseline");
+      this.recordHistoryBaseline(userId);
+    } catch { /* A failed baseline is retried by the background queue. */ }
+    return this.view(stored, this.repository.settings(), userId);
+  }
+  /** After a clear-all: record the existing V1 messages as seen (not indexed). V2 accounts go through the queue. */
+  private recordHistoryBaseline(userId: string): void {
+    if (!memberHistoryEligible(this.deps.store.sql, this.repository.tenantId, userId)) return;
+    if (currentWorkspaceVersion(this.deps.store, userId) !== 1) { this.learning.history.enqueue(userId, "baseline"); return; }
+    const snapshot = new AiWorkspaceRepository(this.deps.store.sql).read(userId, this.repository.tenantId);
+    this.learning.history.sync(userId, { conversations: historySourceFromState(snapshot.state), full: true, version: 1, revision: snapshot.revision, live: false, budget: { messages: Number.MAX_SAFE_INTEGER, characters: Number.MAX_SAFE_INTEGER } });
   }
   reviewStatuses(userId: string, requestIds: unknown): AiMemoryReviewStatus[] {
     this.deps.store.assertAccess(userId);
     if (!Array.isArray(requestIds) || requestIds.length > AI_MEMORY_LIMITS.reviewStatusBatch || requestIds.some(id => typeof id !== "string" || !REQUEST_ID.test(id))) {
       throw new AiError(400, "AI_MEMORY_INVALID", "请求编号格式不正确");
     }
-    return this.repository.reviewStatuses(userId, [...new Set(requestIds as string[])]);
+    const ids = [...new Set(requestIds as string[])];
+    const statuses = this.repository.reviewStatuses(userId, ids);
+    let activities = new Map<string, NonNullable<AiMemoryReviewStatus["activity"]>>();
+    try { activities = this.learning.activity.activities(userId, ids); } catch { /* counts only; optional */ }
+    return statuses.map(status => {
+      const activity = activities.get(status.requestId);
+      return activity && (activity.recalled > 0 || activity.trigger || activity.skills.length) ? { ...status, activity } : status;
+    });
+  }
+
+  // ----------------------------------------------------- recall and skills API
+  /** Excerpts one reply used, for the member who owns it only. */
+  recallDetail(userId: string, requestId: unknown): AiMemoryRecallEvent | null {
+    this.deps.store.assertAccess(userId);
+    if (typeof requestId !== "string" || !REQUEST_ID.test(requestId)) throw new AiError(400, "AI_MEMORY_INVALID", "请求编号格式不正确");
+    return this.learning.activity.detail(userId, requestId);
+  }
+  /** Adopted personal skills for the @ mention list (names only). */
+  personalSkills(userId: string): { enabled: boolean; skills: Array<{ id: string; name: string; whenToUse: string }> } {
+    this.deps.store.assertAccess(userId);
+    const settings = this.repository.settings();
+    const enabled = settings.enabled && settings.skillsEnabled;
+    return { enabled, skills: enabled ? this.learning.skills.adopted(userId).map(({ id, name, whenToUse }) => ({ id, name, whenToUse })) : [] };
+  }
+  /** 采纳 / 编辑 / 忽略 / 删除 / 自建. Deleting stays possible while the feature is off. */
+  updateSkill(userId: string, body: unknown): AiMemoryState {
+    this.deps.store.assertAccess(userId);
+    const settings = this.repository.settings();
+    const action = body && typeof body === "object" && !Array.isArray(body) ? (body as { action?: unknown }).action : undefined;
+    if (!(settings.enabled && settings.skillsEnabled) && action !== "delete" && action !== "dismiss") throw new AiError(403, "AI_MEMORY_SKILLS_DISABLED", "管理员已关闭技能学习；你仍可查看和删除已有技能");
+    this.deps.store.sql.transaction(() => this.learning.skills.apply(userId, body));
+    return this.view(this.repository.read(userId), settings, userId);
   }
 
   // ----------------------------------------------------------------- admin API
   adminView(): { settings: AiMemoryAdminSettings; stats: AiMemoryAdminStats } {
-    return { settings: this.repository.settings(), stats: this.repository.stats(Date.now()) };
+    const now = Date.now();
+    const stats = this.repository.stats(now);
+    try {
+      const activity = this.learning.activity.stats(now - 7 * DAY_MS);
+      stats.recall = { ...this.learning.history.stats(), recalls7d: activity.recalls };
+      stats.skills = { ...this.learning.skills.stats(), applied7d: activity.skillUses };
+    } catch { /* aggregates are optional */ }
+    return { settings: this.repository.settings(), stats };
   }
   saveAdminSettings(body: unknown): { settings: AiMemoryAdminSettings; stats: AiMemoryAdminStats } {
-    const p = record(body, ["enabled", "reviewTier", "pricePoints"], "请提交完整的记忆设置");
+    const p = record(body, ["enabled", "reviewTier", "pricePoints", "recallEnabled", "skillsEnabled"], "请提交完整的记忆设置");
     if (typeof p.enabled !== "boolean") throw new AiError(400, "AI_MEMORY_INVALID", "请选择是否启用记忆");
     if (!AI_BUSINESS_TIERS.includes(p.reviewTier as AiMode)) throw new AiError(400, "AI_MEMORY_INVALID", "请选择记忆整理使用的档位");
     if (!Number.isSafeInteger(p.pricePoints) || Number(p.pricePoints) < 0 || Number(p.pricePoints) > AI_MEMORY_PRICE_MAX) throw new AiError(400, "AI_MEMORY_INVALID", `每次记忆整理的折算需为 0 到 ${AI_MEMORY_PRICE_MAX.toLocaleString("en-US")} 的整数`);
-    const settings = parseMemoryAdminSettings(p);
+    for (const key of ["recallEnabled", "skillsEnabled"] as const) if (p[key] !== undefined && typeof p[key] !== "boolean") throw new AiError(400, "AI_MEMORY_INVALID", "请选择是否启用历史回忆与技能学习");
+    const before = this.repository.settings();
+    // Older admin clients omit the two switches: keep what is saved.
+    const settings = parseMemoryAdminSettings(p, before);
     if (settings.enabled) {
       try { this.reviewTarget(settings.reviewTier); }
       catch (error) { throw new AiError(400, "AI_MEMORY_TIER_UNAVAILABLE", `所选档位暂不能用于记忆整理：${error instanceof AiError ? error.message : "请先完成该档位的文字模型配置"}`); }
     }
     this.repository.saveSettings(settings);
+    const recallBefore = before.enabled && before.recallEnabled, recallAfter = settings.enabled && settings.recallEnabled;
+    try {
+      // Off: every member's history index stops matching and is deleted in the background.
+      if (recallBefore && !recallAfter) this.learning.history.resetTenant();
+      // On: members' existing conversations are indexed by the background queue.
+      if (!recallBefore && recallAfter) this.learning.history.enqueueDrift();
+    } catch { /* Settings are saved; the background reconcile repairs the index. */ }
     return this.adminView();
   }
 
@@ -231,27 +330,42 @@ export class AiMemberMemoryService {
    * memory", never a failed reply.
    */
   withMemory<T extends AiPersonaProfile>(persona: T, userId: string, request: AiChatRequest, capture: boolean): T {
+    let settings: AiMemoryAdminSettings, stored: StoredMemberMemory;
     try {
-      if (!readsMemory(request) || !this.repository.settings().enabled) return persona;
-      const stored = this.repository.read(userId);
-      if (!stored.learningEnabled) return persona;
-      const conversationId = request.conversationId ?? "legacy";
-      const now = Date.now();
-      // Old clients share one "legacy" scope; they get a live (unfrozen) block.
-      if (conversationId !== "legacy") {
-        const snapshot = this.repository.snapshot(userId, conversationId);
-        if (snapshot && now - snapshot.capturedAt < MEMBER_MEMORY_SNAPSHOT_TTL_MS) return withMemberMemoryPrompt(persona, snapshot.block);
-      }
-      const block = renderMemberMemoryPrompt(stored, memberMemoryNonce(this.repository.tenantId, userId, conversationId, capture ? now : stored.revision));
-      if (capture && conversationId !== "legacy") this.deps.store.sql.transaction(() => this.repository.saveSnapshot(userId, conversationId, block, now));
-      return withMemberMemoryPrompt(persona, block);
+      if (!readsMemory(request)) return persona;
+      settings = this.repository.settings();
+      if (!settings.enabled) return persona;
+      stored = this.repository.read(userId);
     } catch {
       return persona;
     }
+    let result = persona;
+    try { if (stored.learningEnabled) result = withMemberMemoryPrompt(persona, this.frozenMemoryBlock(userId, request, stored, capture)); }
+    catch { result = persona; }
+    try {
+      // Personal skills and recalled history for this request only (never frozen).
+      const learning = this.learning.prepare(userId, request, { settings, learningEnabled: stored.learningEnabled, memoryText: [...stored.user, ...stored.memory].join("\n"), capture });
+      return withMemberLearningPrompt(result, learning);
+    } catch {
+      return result;
+    }
+  }
+  private frozenMemoryBlock(userId: string, request: AiChatRequest, stored: StoredMemberMemory, capture: boolean): string {
+    const conversationId = request.conversationId ?? "legacy";
+    const now = Date.now();
+    // Old clients share one "legacy" scope; they get a live (unfrozen) block.
+    if (conversationId !== "legacy") {
+      const snapshot = this.repository.snapshot(userId, conversationId);
+      if (snapshot && now - snapshot.capturedAt < MEMBER_MEMORY_SNAPSHOT_TTL_MS) return snapshot.block;
+    }
+    const block = renderMemberMemoryPrompt(stored, memberMemoryNonce(this.repository.tenantId, userId, conversationId, capture ? now : stored.revision));
+    if (capture && conversationId !== "legacy") this.deps.store.sql.transaction(() => this.repository.saveSnapshot(userId, conversationId, block, now));
+    return block;
   }
 
   /** Called once a reply has been settled and returned. Never throws, never awaits. */
   afterReply(userId: string, request: AiChatRequest, response: Pick<AiChatResponse, "content" | "completion" | "dispatch">): void {
+    try { this.learning.commit(userId, request.requestId, response); } catch { /* informational */ }
     try {
       if (this.enqueue(userId, request, response)) memberMemoryRuntime.schedule(() => this.processReview(userId, request.requestId, { background: false }));
     } catch { /* A memory side effect must never affect the member's reply. */ }
@@ -288,7 +402,8 @@ export class AiMemberMemoryService {
       provider = routeChatProvider(saved, probe, isTongpinQuickAgent(saved.quickModel) ? verifiedBaiAgentModels(saved) : null);
       model = tier === "deep" || tier === "pro" ? provider.deepModel : provider.quickModel;
     }
-    return { provider, model, encryptedKey: route.encryptedKey, maxOutputTokens: Math.max(256, Math.min(route.maxOutputTokens, REVIEW_OUTPUT_TOKENS)) };
+    return { provider, model, encryptedKey: route.encryptedKey, maxOutputTokens: Math.max(256, Math.min(route.maxOutputTokens, REVIEW_OUTPUT_TOKENS)),
+      skillOutputTokens: Math.max(256, Math.min(route.maxOutputTokens, REVIEW_WITH_SKILL_OUTPUT_TOKENS)) };
   }
   private async callReviewer(target: ReviewTarget, payload: string, key: string): Promise<ReviewCall> {
     const { provider, model } = target;
@@ -396,14 +511,24 @@ export class AiMemberMemoryService {
       if (!reserved) return this.finish(userId, claimed, "skipped", "quota", tier);
       const cue = claimed.cue;
       let inputTokens = 0, outputTokens = 0;
-      const call = async (payload: string, phase: string) => {
-        const result = await this.callReviewer(target, payload, await idempotencyKey(this.repository.tenantId, userId, requestId, claimed.attempts, phase));
+      const call = async (payload: string, phase: string, callTarget: ReviewTarget = target) => {
+        const result = await this.callReviewer(callTarget, payload, await idempotencyKey(this.repository.tenantId, userId, requestId, claimed.attempts, phase));
         inputTokens += result.inputTokens; outputTokens += result.outputTokens;
         return result.content;
       };
       const stores = { memory: before.memory, user: before.user };
-      const first = parseMemberMemoryReview(await call(buildMemberMemoryReviewPayload({ stores, turns, cue, persona }), "review"));
+      // Recall context (avoid duplicate or contradicting memory) and, for a
+      // reusable way of working, a skill evaluation. Local reads only.
+      let context: MemberReviewContext = { history: [], skills: null };
+      try {
+        const memberText = turns.filter(turn => turn.role === "user").at(-1)?.content ?? "";
+        const stored = this.deps.store.request(userId, requestId);
+        context = this.learning.reviewContext(userId, { settings, memberText, conversationId: claimed.conversationId, cue, reply: reply ?? "", result: stored?.result });
+      } catch { context = { history: [], skills: null }; }
+      const firstTarget = context.skills ? { ...target, maxOutputTokens: target.skillOutputTokens } : target;
+      const first = parseMemberMemoryReview(await call(buildMemberMemoryReviewPayload({ stores, turns, cue, persona, history: context.history, skills: context.skills }), "review", firstTarget));
       if (!first.ok) return this.finish(userId, claimed, "failed", `parse_${first.error}`, tier, { inputTokens, outputTokens });
+      const proposal = context.skills && first.skill ? { action: first.skill.action, ...(first.skill.skillId ? { skillId: first.skill.skillId } : {}), skill: first.skill.skill, reason: context.skills.reason, evidence: context.skills.evidence } : null;
       let plan = planMemberMemoryReview(stores, first.operations, { cue });
       if (plan.overflow.length) {
         // Hermes: an overflowing write returns the current entries and asks
@@ -411,7 +536,7 @@ export class AiMemberMemoryService {
         const overflowTargets = plan.overflow.map(item => item.target);
         const previous: MemberMemoryReviewOperation[] = first.operations.filter(op => overflowTargets.includes(op.target));
         const retry = parseMemberMemoryReview(await call(buildMemberMemoryReviewPayload({
-          stores: plan.stores, turns, cue, persona,
+          stores: plan.stores, turns, cue, persona, history: context.history,
           consolidation: { error: plan.overflow.map(item => item.message).join(" "), previousOperations: previous.map(op => ({ target: op.target, action: op.action, ...(op.oldText ? { old_text: op.oldText } : {}), ...(op.content ? { content: op.content } : {}) })) },
         }), "consolidate"));
         if (retry.ok) {
@@ -433,18 +558,25 @@ export class AiMemberMemoryService {
         // Optimistic concurrency: a member edit, clear or opt-out during the
         // provider call wins; the review is discarded and nothing is charged.
         const stale = latest.revision !== before.revision || !latest.learningEnabled;
-        const status = stale ? "skipped" : changed ? "applied" : "unchanged";
-        if (status === "applied") {
+        // A skill is only ever proposed; the member adopts it (or not) later.
+        let skillId: string | null = null;
+        if (!stale && proposal && this.repository.settings().skillsEnabled) {
+          try { skillId = this.learning.skills.propose(userId, proposal, requestId, finishedAt); } catch { skillId = null; }
+        }
+        const status = stale ? "skipped" : changed || skillId ? "applied" : "unchanged";
+        if (status === "applied" && changed) {
           this.repository.write(userId, before.revision, { memory: plan.stores.memory, user: plan.stores.user, learningEnabled: true }, "review");
           // Forgetting takes effect immediately; other updates wait for the
           // next conversation (frozen snapshot, prefix cache intact).
           if (cue === "forget" && plan.changes.removed > 0) this.repository.deleteSnapshots(userId);
         }
+        // The administrator's review price applies when memory changed or a skill was proposed.
         const charged = this.settleReservation(userId, current, status === "applied", tier);
-        const reason = stale ? "memory_changed" : plan.overflow.length ? "overflow" : Object.keys(plan.dropped).length ? `dropped:${Object.entries(plan.dropped).map(([key, count]) => `${key}=${count}`).join(",")}` : null;
+        const reason = stale ? "memory_changed" : plan.overflow.length ? "overflow" : Object.keys(plan.dropped).length ? `dropped:${Object.entries(plan.dropped).map(([key, count]) => `${key}=${count}`).join(",")}` : first.skillInvalid ? "skill_invalid" : null;
         this.repository.updateReview(userId, requestId, {
           status, reason, leaseUntil: 0, reservedPoints: 0, chargedPoints: charged, inputTokens, outputTokens,
           ...(status === "applied" ? { added: plan.changes.added, updated: plan.changes.updated, removed: plan.changes.removed } : {}),
+          ...(skillId ? { skillId } : {}),
         }, finishedAt);
       });
     } catch (error) {
@@ -468,9 +600,9 @@ export class AiMemberMemoryService {
   async runBackgroundCycle(limit: number, forTenant: (tenantId: string) => AiMemberMemoryService): Promise<AiBackgroundMemoryCycle> {
     const bounded = Number.isInteger(limit) ? Math.max(1, Math.min(8, limit)) : 4;
     const result: AiBackgroundMemoryCycle = { scanned: 0, processed: 0, failed: 0 };
-    let due: Array<{ tenantId: string; storedUserId: string; requestId: string }>;
+    let due: Array<{ tenantId: string; storedUserId: string; requestId: string }> = [];
     try { due = AiMemberMemoryRepository.dueReviews(this.repository.sql, Date.now(), bounded * 4); }
-    catch { return result; }
+    catch { due = []; }
     for (const row of due) {
       if (result.processed >= bounded) break;
       result.scanned += 1;
@@ -481,6 +613,67 @@ export class AiMemberMemoryService {
         result.failed += 1;
       }
     }
+    try { result.history = await this.runHistoryMaintenance(forTenant); } catch { /* next tick */ }
     return result;
+  }
+
+  /**
+   * History index upkeep, bounded per tick: delete superseded rows, reconcile
+   * workspace revisions hourly, and backfill up to two members.
+   */
+  private async runHistoryMaintenance(forTenant: (tenantId: string) => AiMemberMemoryService): Promise<{ synced: number; purged: number }> {
+    const sql = this.deps.store.sql;
+    const now = Date.now();
+    const purged = AiMemberHistoryIndex.runPurges(sql, 2);
+    if (now - (historyReconciledAt.get(sql) ?? 0) >= HISTORY_RECONCILE_MS) {
+      historyReconciledAt.set(sql, now);
+      for (const tenantId of recallTenants(sql)) new AiMemberHistoryIndex(sql, tenantId).enqueueDrift(now);
+    }
+    let synced = 0;
+    for (const job of AiMemberHistoryIndex.dueQueue(sql, now, 2)) {
+      if (await forTenant(job.tenantId).processHistoryJob(job.userId, job.attempts)) synced += 1;
+    }
+    return { synced, purged };
+  }
+
+  /** One bounded backfill step for one member (V1 snapshot or V2 conversations). */
+  async processHistoryJob(userId: string, attempts: number): Promise<boolean> {
+    const index = this.learning.history;
+    const sql = this.deps.store.sql;
+    try {
+      if (!memberHistoryEligible(sql, this.repository.tenantId, userId) || !this.deps.store.hasAccess(userId) || !await this.deps.isPrincipalActive(this.repository.tenantId, userId)) {
+        index.finishQueued(userId, true);
+        return false;
+      }
+      if (currentWorkspaceVersion(this.deps.store, userId) === 1) {
+        const snapshot = new AiWorkspaceRepository(sql).read(userId, this.repository.tenantId);
+        const result = index.sync(userId, { conversations: historySourceFromState(snapshot.state), full: true, version: 1, revision: snapshot.revision, live: false, budget: MEMBER_HISTORY_LIMITS.backfillBudget });
+        index.finishQueued(userId, result.complete);
+        return true;
+      }
+      const v2 = new AiWorkspaceV2Store(sql, new AiWorkspaceRepository(sql));
+      const directory = v2.listActiveConversations(userId, this.repository.tenantId);
+      index.dropMissingConversations(userId, new Set(directory.conversations.map(item => item.entityId)));
+      const known = index.conversationRevisions(userId);
+      const changed = directory.conversations.filter(item => known.get(item.entityId) !== item.revision);
+      const batch = changed.slice(0, 4);
+      let complete = true;
+      if (batch.length) {
+        const entities = (await v2.readActiveEntities(userId, batch.map(item => ({ kind: "conversation" as const, entityId: item.entityId })), this.repository.tenantId)).entities;
+        const conversations = entities.flatMap(entity => {
+          if (!entity || entity.deleted) return [];
+          const conversation = validateAiWorkspaceConversationEntity(entity.value);
+          return [{ id: conversation.id, title: conversation.title, messages: conversation.messages, revision: entity.revision }];
+        });
+        const result = index.sync(userId, { conversations, full: false, version: 2, revision: null, live: false, budget: MEMBER_HISTORY_LIMITS.backfillBudget });
+        complete = result.complete && changed.length <= batch.length;
+      }
+      if (complete) index.markComplete(userId, 2);
+      index.finishQueued(userId, complete);
+      return true;
+    } catch {
+      try { index.failQueued(userId, attempts); } catch { /* retried by reconcile */ }
+      return false;
+    }
   }
 }

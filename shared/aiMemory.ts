@@ -1,4 +1,5 @@
 import type { AiMode } from "./ai";
+import type { AiMemoryRecallOverview, AiMemoryReplyActivity, AiMemorySkillsView } from "./aiMemoryLearning";
 
 /**
  * Member-private curated memory ("AI 对你的了解"), adapted from NousResearch
@@ -69,6 +70,10 @@ export interface AiMemoryState {
   stores: Record<AiMemoryTarget, AiMemoryStoreView>;
   updatedAt: string | null;
   updatedBy: "member" | "review" | null;
+  /** History recall overview (older servers omit it). */
+  recall?: AiMemoryRecallOverview;
+  /** Proposed and adopted personal skills (older servers omit it). */
+  skills?: AiMemorySkillsView;
 }
 
 export type AiMemoryEntryOperation =
@@ -87,11 +92,15 @@ export interface AiMemoryReviewChanges {
   removed: number;
 }
 
-/** Only counts: the reply indicator never carries memory text. */
+/** Only counts and skill names: the reply indicator never carries memory text. */
 export interface AiMemoryReviewStatus {
   requestId: string;
   status: "none" | "pending" | "applied" | "unchanged" | "skipped" | "failed";
   changes?: AiMemoryReviewChanges;
+  /** History excerpts and personal skills this reply used (omitted when none). */
+  activity?: AiMemoryReplyActivity;
+  /** The background review proposed (or proposed an update to) a personal skill. */
+  skillProposed?: boolean;
 }
 
 export interface AiMemoryAdminSettings {
@@ -99,6 +108,10 @@ export interface AiMemoryAdminSettings {
   /** Business tier whose text route runs the background reviewer. */
   reviewTier: AiMode;
   pricePoints: number;
+  /** History recall (searching the member's own earlier conversations). Only with `enabled`. */
+  recallEnabled: boolean;
+  /** Skill learning: the review may propose personal skills; adopted ones apply. Only with `enabled`. */
+  skillsEnabled: boolean;
 }
 
 /** Organization aggregates only. Administrators can never read memory text. */
@@ -110,12 +123,19 @@ export interface AiMemoryAdminStats {
   points7d: number;
   /** Provider-reported reviewer tokens (organization cost, not member points). */
   tokens7d: { input: number; output: number };
+  /** History recall aggregates (never text). Older servers omit it. */
+  recall?: { indexedMembers: number; indexedMessages: number; recalls7d: number };
+  /** Personal skill aggregates (never names or text). Older servers omit it. */
+  skills?: { proposed: number; adopted: number; applied7d: number };
 }
 
 export const AI_MEMORY_DEFAULT_SETTINGS: Readonly<AiMemoryAdminSettings> = Object.freeze({
   enabled: false,
   reviewTier: "quick",
   pricePoints: 100,
+  // Default on: they only take effect once an administrator enables memory.
+  recallEnabled: true,
+  skillsEnabled: true,
 });
 
 export const AI_MEMORY_PRICE_MAX = 100_000;

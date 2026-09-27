@@ -124,15 +124,15 @@ describe("member memory persistence", () => {
     repository = new AiMemberMemoryRepository(sql);
   });
 
-  it("runs numbered migration 1 once through the AI store and records it in the ledger", () => {
-    const ledger = database.prepare("SELECT module, version FROM ai_schema_migrations").all();
-    expect(ledger).toEqual([{ module: "member_memory", version: 1 }]);
+  it("runs numbered migrations 1–3 once through the AI store and records them in the ledger", () => {
+    const ledger = database.prepare("SELECT module, version FROM ai_schema_migrations ORDER BY version").all();
+    expect(ledger).toEqual([1, 2, 3].map(version => ({ module: "member_memory", version })));
     const tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ai_member_memor%' ORDER BY name").all().map(row => row.name);
     expect(tables).toEqual(["ai_member_memories", "ai_member_memory_reviews", "ai_member_memory_snapshots"]);
     // Idempotent on every Durable Object start.
     expect(applyAiModuleMigrations(sql, "member_memory", MEMBER_MEMORY_MIGRATIONS)).toEqual([]);
     new AiStore(sql).initialize();
-    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_schema_migrations").get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_schema_migrations").get()).toEqual({ count: 3 });
   });
 
   it("defaults to an empty, learning-enabled member and the administrator's disabled feature", () => {

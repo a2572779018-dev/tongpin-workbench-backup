@@ -4,6 +4,7 @@ import {
   type AiMemoryAdminSettings, type AiMemoryAdminStats, type AiMemoryReviewStatus, type AiMemoryTarget,
 } from "../../shared/aiMemory";
 import type { AiModuleMigration } from "./aiMigrations";
+import { MEMBER_LEARNING_MIGRATIONS } from "./memberLearningSchema";
 import { AiError } from "./security";
 import type { AiSql } from "./storage";
 import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey } from "./tenant";
@@ -220,7 +221,7 @@ CREATE TABLE IF NOT EXISTS ai_member_memory_snapshots (
 );
 `);
   },
-}];
+}, ...MEMBER_LEARNING_MIGRATIONS];
 
 export interface StoredMemberMemory {
   revision: number;
@@ -252,6 +253,8 @@ export interface MemberMemoryReviewRow {
   inputTokens: number;
   outputTokens: number;
   reason: string | null;
+  /** Personal skill proposed (or refined) by this review. */
+  skillId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -260,7 +263,7 @@ interface MemoryRow { revision: number; memory_entries: string; user_entries: st
 interface ReviewRow {
   tenant_id: string; user_id: string; request_id: string; conversation_id: string; status: MemberMemoryReviewRowStatus; cue: MemberMemoryCue;
   attempts: number; due_at: number; lease_until: number; reserved_points: number; charged_points: number;
-  added: number; updated: number; removed: number; input_tokens: number; output_tokens: number; reason: string | null; created_at: number; updated_at: number;
+  added: number; updated: number; removed: number; input_tokens: number; output_tokens: number; reason: string | null; skill_id?: string | null; created_at: number; updated_at: number;
 }
 
 const SETTINGS_ID = "member_memory";
@@ -280,7 +283,7 @@ function reviewFrom(row: ReviewRow): MemberMemoryReviewRow {
     tenantId: row.tenant_id, storedUserId: row.user_id, requestId: row.request_id, conversationId: row.conversation_id,
     status: row.status, cue: row.cue, attempts: row.attempts, dueAt: row.due_at, leaseUntil: row.lease_until,
     reservedPoints: row.reserved_points, chargedPoints: row.charged_points, added: row.added, updated: row.updated,
-    removed: row.removed, inputTokens: row.input_tokens, outputTokens: row.output_tokens, reason: row.reason, createdAt: row.created_at, updatedAt: row.updated_at,
+    removed: row.removed, inputTokens: row.input_tokens, outputTokens: row.output_tokens, reason: row.reason, skillId: row.skill_id ?? null, createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
 
@@ -290,7 +293,10 @@ export function parseMemoryAdminSettings(value: unknown, fallback: AiMemoryAdmin
   const reviewTier = AI_BUSINESS_TIERS.includes(record.reviewTier as AiMode) ? record.reviewTier as AiMode : fallback.reviewTier;
   const pricePoints = Number.isSafeInteger(record.pricePoints) && Number(record.pricePoints) >= 0 && Number(record.pricePoints) <= AI_MEMORY_PRICE_MAX
     ? Number(record.pricePoints) : fallback.pricePoints;
-  return { enabled, reviewTier, pricePoints };
+  // Settings saved before recall/skills existed keep the defaults (on).
+  const recallEnabled = typeof record.recallEnabled === "boolean" ? record.recallEnabled : fallback.recallEnabled;
+  const skillsEnabled = typeof record.skillsEnabled === "boolean" ? record.skillsEnabled : fallback.skillsEnabled;
+  return { enabled, reviewTier, pricePoints, recallEnabled, skillsEnabled };
 }
 
 /** Tenant-scoped persistence. Every member method keys rows by the authenticated user id only. */
@@ -365,8 +371,8 @@ export class AiMemberMemoryRepository {
     const row = this.sql.all<ReviewRow>("SELECT * FROM ai_member_memory_reviews WHERE tenant_id=? AND user_id=? AND request_id=?", this.tenantId, this.userKey(userId), requestId)[0];
     return row ? reviewFrom(row) : undefined;
   }
-  updateReview(userId: string, requestId: string, patch: Partial<Pick<MemberMemoryReviewRow, "status" | "attempts" | "dueAt" | "leaseUntil" | "reservedPoints" | "chargedPoints" | "added" | "updated" | "removed" | "inputTokens" | "outputTokens" | "reason">>, now: number): void {
-    const columns: Record<string, string> = { status: "status", attempts: "attempts", dueAt: "due_at", leaseUntil: "lease_until", reservedPoints: "reserved_points", chargedPoints: "charged_points", added: "added", updated: "updated", removed: "removed", inputTokens: "input_tokens", outputTokens: "output_tokens", reason: "reason" };
+  updateReview(userId: string, requestId: string, patch: Partial<Pick<MemberMemoryReviewRow, "status" | "attempts" | "dueAt" | "leaseUntil" | "reservedPoints" | "chargedPoints" | "added" | "updated" | "removed" | "inputTokens" | "outputTokens" | "reason" | "skillId">>, now: number): void {
+    const columns: Record<string, string> = { status: "status", attempts: "attempts", dueAt: "due_at", leaseUntil: "lease_until", reservedPoints: "reserved_points", chargedPoints: "charged_points", added: "added", updated: "updated", removed: "removed", inputTokens: "input_tokens", outputTokens: "output_tokens", reason: "reason", skillId: "skill_id" };
     const keys = Object.keys(patch).filter(key => key in columns) as Array<keyof typeof patch>;
     if (!keys.length) return;
     this.sql.exec(`UPDATE ai_member_memory_reviews SET ${keys.map(key => `${columns[key]}=?`).join(",")},updated_at=? WHERE tenant_id=? AND user_id=? AND request_id=?`,
@@ -382,7 +388,7 @@ export class AiMemberMemoryRepository {
       const row = byId.get(requestId);
       if (!row) return { requestId, status: "none" as const };
       if (row.status === "queued" || row.status === "running") return { requestId, status: "pending" as const };
-      return { requestId, status: row.status, ...(row.status === "applied" ? { changes: { added: row.added, updated: row.updated, removed: row.removed } } : {}) };
+      return { requestId, status: row.status, ...(row.status === "applied" ? { changes: { added: row.added, updated: row.updated, removed: row.removed } } : {}), ...(row.skillId ? { skillProposed: true } : {}) };
     });
   }
   reviewsSince(userId: string, since: number): { count: number; lastCreatedAt: number | null; active: number } {

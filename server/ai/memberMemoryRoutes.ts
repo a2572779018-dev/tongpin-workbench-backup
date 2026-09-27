@@ -49,6 +49,10 @@ export function createAiMemberMemoryRouter(
     router.put("/settings", (request, response) => response.json(memory(request).setLearning(userId(request), request.body)));
     router.post("/entries", (request, response) => response.json(memory(request).updateEntry(userId(request), request.body)));
     router.get("/reviews", (request, response) => response.json({ reviews: memory(request).reviewStatuses(userId(request), memoryReviewIds(request.query.requestIds)) }));
+    // History recall excerpts of one reply, and personal skills (Hermes-style learning).
+    router.get("/recalls/:requestId", (request, response) => response.json({ recall: memory(request).recallDetail(userId(request), request.params.requestId) }));
+    router.get("/skills", (request, response) => response.json(memory(request).personalSkills(userId(request))));
+    router.post("/skills", (request, response) => response.json(memory(request).updateSkill(userId(request), request.body)));
   }
   router.use((_request, response) => response.status(404).json({ error: { code: "NOT_FOUND", message: "请求的接口不存在" } }));
   router.use(errorHandler);

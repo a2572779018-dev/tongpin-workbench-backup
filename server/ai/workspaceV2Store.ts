@@ -5,6 +5,7 @@ import type { AiSql } from "./storage";
 import { normalizeAiTenantId, tenantStorageKey } from "./tenant";
 import { AI_WORKSPACE_V2_ENTITY_BYTES, AiWorkspaceRepository, validateAiWorkspaceArtifactEntity, validateAiWorkspaceConversationEntity, validateAiWorkspaceDraft, validateAiWorkspaceDraftAttachments, validateAiWorkspaceProjectEntity, validateAiWorkspaceVideoDraftSetting } from "./workspace";
 import { AiWorkspaceV2ShadowRepository, assembleV2Segments, canonical, split, type Segment } from "./workspaceV2Shadow";
+import { notifyAiWorkspaceV2ConversationWritten } from "./workspaceWriteHooks";
 
 /**
  * Internal V2 preparation plus deliberately narrow leaf, project,
@@ -728,7 +729,8 @@ export class AiWorkspaceV2Store {
       const bytes = new TextEncoder().encode(JSON.stringify(conversation));
       const sha256 = await hash(bytes), chunks = encodeChunks(bytes);
       const priorSha = await hash(new TextEncoder().encode(JSON.stringify(base.value)));
-      return this.sql.transaction(() => {
+      const committed: { revision?: number } = {};
+      const appendedAck = this.sql.transaction(() => {
         const { meta } = this.activeScope(userId, tenant);
         if (meta.epoch !== body.epoch || meta.message_index_version !== 1) stale();
         const prior = this.sql.all<{ request_hash: string; ack_json: string }>(
@@ -834,8 +836,12 @@ export class AiWorkspaceV2Store {
         const ack = { epoch: meta.epoch, entityId: conversationId, revision, messageIds };
         this.sql.exec("INSERT INTO ai_workspace_v2_message_appends(tenant_id,user_id,mutation_id,request_hash,ack_json) VALUES(?,?,?,?,?)",
           tenant, storedUser, body.mutationId as string, requestHash, JSON.stringify(ack));
+        committed.revision = revision;
         return ack;
       });
+      // Derived indexes follow the committed conversation; a replayed receipt notifies nothing.
+      if (committed.revision !== undefined) notifyAiWorkspaceV2ConversationWritten(this.sql, { tenantId: tenant, userId, revision: committed.revision, conversation });
+      return appendedAck;
     } catch (error) {
       const replay = readReplay();
       if (replay) return replay;
@@ -1027,7 +1033,8 @@ export class AiWorkspaceV2Store {
       }
       throw error;
     }
-    return this.sql.transaction(() => {
+    const written: Array<{ revision: number; conversation: AiWorkspaceConversation }> = [];
+    const mutationAck = this.sql.transaction(() => {
       const { meta } = this.activeScope(userId, tenant);
       if (meta.epoch !== body.epoch) throw new AiError(409, "AI_WORKSPACE_CONFLICT", "分实体准备版本已变化，请重新同步");
       if (this.sql.all<{ mutation_id: string }>("SELECT mutation_id FROM ai_workspace_v2_message_appends WHERE tenant_id=? AND user_id=? AND mutation_id=?",
@@ -1133,6 +1140,7 @@ export class AiWorkspaceV2Store {
         this.sql.exec("DELETE FROM ai_workspace_v2_entity_chunks WHERE tenant_id=? AND user_id=? AND kind=? AND entity_id=?", tenant, storedUser, op.kind, target);
         for (const [index, data] of (op.chunks ?? []).entries()) this.sql.exec("INSERT INTO ai_workspace_v2_entity_chunks(tenant_id,user_id,kind,entity_id,chunk_index,data) VALUES(?,?,?,?,?,?)", tenant, storedUser, op.kind, target, index, data);
         entities.push({ kind: op.kind, entityId: target, revision, deleted });
+        if (op.kind === "conversation" && op.conversation && !deleted) written.push({ revision, conversation: op.conversation });
       }
       const ack = { epoch: meta.epoch, entities };
       this.sql.exec("INSERT INTO ai_workspace_v2_mutations(tenant_id,user_id,mutation_id,request_hash,ack_json) VALUES(?,?,?,?,?)", tenant, storedUser, body.mutationId as string, requestHash, JSON.stringify(ack));
@@ -1142,5 +1150,8 @@ export class AiWorkspaceV2Store {
         tenant, storedUser, tenant, storedUser, MAX_MUTATION_RECEIPTS);
       return ack;
     });
+    // Title/time edits and new empty conversations reach derived indexes after commit.
+    for (const item of written) notifyAiWorkspaceV2ConversationWritten(this.sql, { tenantId: tenant, userId, revision: item.revision, conversation: item.conversation });
+    return mutationAck;
   }
 }

@@ -61,6 +61,13 @@ export async function handleAiMemberMemoryRequest(request: Request, service: AiS
     if (path === "/api/ai/memory/settings" && method === "PUT") return json(memory.setLearning(user.id, await parseMemoryJson(request)));
     if (path === "/api/ai/memory/entries" && method === "POST") return json(memory.updateEntry(user.id, await parseMemoryJson(request)));
     if (path === "/api/ai/memory/reviews" && method === "GET") return json({ reviews: memory.reviewStatuses(user.id, memoryReviewIds(url.searchParams.get("requestIds"))) });
+    if (path.startsWith("/api/ai/memory/recalls/") && method === "GET") {
+      let requestId: string;
+      try { requestId = decodeURIComponent(path.slice("/api/ai/memory/recalls/".length)); } catch { throw new AiError(400, "AI_MEMORY_INVALID", "请求编号格式不正确"); }
+      return json({ recall: memory.recallDetail(user.id, requestId) });
+    }
+    if (path === "/api/ai/memory/skills" && method === "GET") return json(memory.personalSkills(user.id));
+    if (path === "/api/ai/memory/skills" && method === "POST") return json(memory.updateSkill(user.id, await parseMemoryJson(request)));
     throw new AiError(404, "NOT_FOUND", "请求的接口不存在");
   } catch (error) {
     if (error instanceof AiError) return json({ error: { code: error.code, message: error.message } }, error.status);
