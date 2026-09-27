@@ -7,9 +7,6 @@
  */
 
 const { execFile } = require("node:child_process");
-const { mkdtemp, rm, writeFile } = require("node:fs/promises");
-const { tmpdir } = require("node:os");
-const { join } = require("node:path");
 const { app, desktopCapturer, dialog, globalShortcut, shell, systemPreferences } = require("electron");
 const { createComputerAgentController, parseLayeredWindows, parseRecognizedText } = require("./computer-agent.cjs");
 const { computerUseSystemVersion } = require("./computer-use.cjs");
@@ -44,16 +41,18 @@ function listLayeredWindows(pid) {
 
 /**
  * The system's text recognition (Vision's VNRecognizeTextRequest, through
- * JavaScript for Automation) over one window picture. The script is fixed;
- * its only input is the path of a private temporary copy of the picture,
- * removed right after. Nothing leaves this machine. Rows as
+ * JavaScript for Automation) over one window picture, handed over on the
+ * script's standard input — never written to disk. The script is fixed and
+ * takes no arguments. Nothing leaves this machine. Rows as
  * parseRecognizedText reads them; null when recognition is unavailable.
  */
 const RECOGNIZE_TEXT_SCRIPT = [
-  "function run(argv) {",
+  "function run() {",
   "  ObjC.import(\"Foundation\");",
   "  ObjC.import(\"Vision\");",
-  "  const handler = $.VNImageRequestHandler.alloc.initWithURLOptions($.NSURL.fileURLWithPath(argv[0]), $.NSDictionary.dictionary);",
+  "  const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;",
+  "  if (!data || !data.length) return \"null\";",
+  "  const handler = $.VNImageRequestHandler.alloc.initWithDataOptions(data, $.NSDictionary.dictionary);",
   "  const request = $.VNRecognizeTextRequest.alloc.init;",
   "  request.recognitionLevel = 0;",
   "  request.usesLanguageCorrection = false;",
@@ -73,22 +72,20 @@ const RECOGNIZE_TEXT_SCRIPT = [
 ].join("\n");
 const MAX_PICTURE_BASE64 = 32 * 1024 * 1024;
 
-async function recognizeWindowText(imageBase64) {
-  if (process.platform !== "darwin" || typeof imageBase64 !== "string" || !imageBase64 || imageBase64.length > MAX_PICTURE_BASE64) return null;
-  let dir = null;
-  try {
-    dir = await mkdtemp(join(tmpdir(), "tongpin-text-"));
-    const file = join(dir, "window.png");
-    await writeFile(file, Buffer.from(imageBase64, "base64"), { mode: 0o600 });
-    const stdout = await new Promise((resolve) => {
-      execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", RECOGNIZE_TEXT_SCRIPT, file], { timeout: 8_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true }, (error, out) => resolve(error ? null : out));
-    });
-    return stdout === null ? null : parseRecognizedText(stdout);
-  } catch {
-    return null;
-  } finally {
-    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-  }
+function recognizeWindowText(imageBase64) {
+  if (process.platform !== "darwin" || typeof imageBase64 !== "string" || !imageBase64 || imageBase64.length > MAX_PICTURE_BASE64) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", RECOGNIZE_TEXT_SCRIPT], { timeout: 8_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+        resolve(error ? null : parseRecognizedText(stdout));
+      });
+      child.stdin.on("error", () => undefined);
+      child.stdin.end(Buffer.from(imageBase64, "base64"));
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 const PRIVACY_PANES = Object.freeze({

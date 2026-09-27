@@ -63,7 +63,8 @@ export function popupText(observation: NonNullable<ComputerTimelineStep["observa
 export function screenTextNote(observation: NonNullable<ComputerTimelineStep["observation"]>): string {
   const screen = observation.screenText;
   if (!screen) return "";
-  return ` · 屏幕文字：聊天标题${screen.recipientInTitle ? "✓" : "未核对"}、输入框${screen.composerHoldsText ? "✓" : "未见该文字"}${screen.copies ? `、已见 ${screen.copies} 处` : ""}`;
+  if (screen.phase === "after") return ` · 屏幕文字：${screen.composerHoldsText ? "输入框里仍有这段文字" : "输入框已清空"}、聊天里可见 ${screen.copies} 处`;
+  return ` · 屏幕文字：聊天标题${screen.recipientInTitle ? "✓" : "未核对"}、输入框${screen.composerHoldsText ? "恰好是这段文字 ✓" : "未核对"}`;
 }
 
 /**

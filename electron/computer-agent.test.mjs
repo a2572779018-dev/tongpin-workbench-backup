@@ -1167,7 +1167,8 @@ function screenReader(app, { title = (chat) => chat, composer = (input) => input
       rows.push(row(title(app.chat), 420, 14, 60, 22));
       app.sent.forEach((text, index) => rows.push(row(text, 820, 200 + index * 40, 80, 20)));
       const typed = app.input ? composer(app.input) : "";
-      if (typed) rows.push(row(typed, 320, 700, 90, 20));
+      // An empty composer shows a placeholder at the text's place, as WeChat does.
+      rows.push(typed ? row(typed, 320, 700, 90, 20) : row("按住鼠标 语音输入文字", 320, 700, 160, 20));
       rows.push(row("发送", 930, 760, 40, 20));
     }
     return rows;
@@ -1247,10 +1248,24 @@ describe("computer agent one-stop send in apps that hide their text (WeChat)", (
     expect(parseRecognizedText("null")).toBeNull();
     expect(parseRecognizedText("not json")).toBeNull();
     const host = readFileSync(new URL("./computer-agent-host.cjs", import.meta.url), "utf8");
-    // A fixed script; the picture's temporary path is its only input, removed afterwards.
-    expect(host).toContain('execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", RECOGNIZE_TEXT_SCRIPT, file]');
+    // A fixed script without arguments; the picture goes through standard input, never to disk.
+    expect(host).toContain('execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", RECOGNIZE_TEXT_SCRIPT]');
+    expect(host).toContain("child.stdin.end(Buffer.from(imageBase64, \"base64\"))");
     expect(host).toContain("recognizeText: recognizeWindowText,");
-    expect(host).toContain("await rm(dir, { recursive: true, force: true })");
+    expect(host).not.toMatch(/writeFile|mkdtemp|tmpdir/);
+  });
+
+  it("puts an app back on its own rung when the run switches to it", async () => {
+    const app = wechatApp({ hidden: true });
+    const agent = await started({ app, foregroundFirstBundles: new Set(["com.tencent.xinwechat"]) });
+    await step(agent, "app_1");
+    const view = await observe(agent);
+    expect(view.candidates.map((candidate) => candidate.id)).toContain("open_search_fg");
+    expect(view.candidates.some((candidate) => candidate.kind === "click")).toBe(false);
+    // A new app itself starts from the background rung (the executor decides per app).
+    const tracker = policy.foregroundFirst(policy.emptyTracker());
+    const switched = policy.nextTracker(tracker, { kind: "activate_app", risk: "none", delivery: "background" }, "delivered", { task: TASK });
+    expect(switched).toMatchObject({ delivery: "background", elementsRefused: false, preferForeground: false });
   });
 
   it("remembers an app that refused background input and starts its next run in the foreground", async () => {
@@ -1265,6 +1280,52 @@ describe("computer agent one-stop send in apps that hide their text (WeChat)", (
 });
 
 describe("computer agent authorization and scope", () => {
+  it("reads a send off the screen only from a composer line the run's typing brought up", () => {
+    const task = TASK;
+    const bounds = { x: 100, y: 50, width: 1000, height: 800 };
+    const line = (text, x, y, w = 90, h = 20) => ({ text, x, y, w, h });
+    const facts = (lines, before, extra = {}) => policy.screenSendFacts({ task, screen: { lines }, windowBounds: bounds, before: before ? { lines: before } : null, ...extra });
+    const title = line("姐姐", 330, 14, 60, 22);
+    const list = [line("姐姐", 70, 80, 60, 20), line("妈妈", 70, 140, 60, 20)];
+
+    // The composer line appeared with the typing and stands alone: a complete, anchored reading.
+    const typed = facts([title, ...list, line("中秋快乐", 320, 700)], [title, ...list, line("按住鼠标 语音输入文字", 320, 700, 160)]);
+    expect(typed).toMatchObject({ anchored: true, recipientInTitle: true, composerLine: { x: 320, y: 700 }, copies: 0 });
+
+    // An old bubble with the text and a draft the text was added to: no composer line.
+    const bubble = line("中秋快乐", 820, 600, 80);
+    expect(facts([title, bubble, line("你好中秋快乐", 320, 700, 120)], [title, bubble, line("你好", 320, 700, 40)]).composerLine).toBeNull();
+    // A two-line draft: the text's line has more of the box right above it.
+    expect(facts([title, line("明天几点到？", 320, 680, 110), line("中秋快乐", 320, 700)], [title, line("明天几点到？", 320, 680, 110)]).composerLine).toBeNull();
+    // Nothing is found without the lines from before the typing.
+    expect(facts([title, line("中秋快乐", 320, 700)], null).composerLine).toBeNull();
+
+    // List previews (left of the chat pane) never count as the composer or as copies.
+    const preview = line("中秋快乐", 70, 760, 80);
+    const withPreview = facts([title, preview, line("中秋快乐", 320, 700)], [title, preview]);
+    expect(withPreview).toMatchObject({ composerLine: { x: 320, y: 700 }, copies: 0 });
+    // After the send: a caret or a partial read at the composer's place still means "not sent".
+    const at = withPreview.composerLine;
+    expect(facts([title, preview, line("中秋快乐|", 322, 701)], null, { composerAt: at })).toMatchObject({ composerLine: { x: 322 }, copies: 0 });
+    // Sent: the composer shows its placeholder again and a bubble appeared in the chat pane.
+    expect(facts([title, preview, line("中秋快乐", 820, 640, 80), line("按住鼠标 语音输入文字", 320, 700, 160)], null, { composerAt: at })).toMatchObject({ composerLine: null, copies: 1 });
+  });
+
+  it("takes only the chat pane's exact title for the recipient", () => {
+    const bounds = { x: 100, y: 50, width: 1400, height: 800 };
+    const line = (text, x, y, w = 90, h = 20) => ({ text, x, y, w, h });
+    const read = (titleLines, elements = []) => policy.screenSendFacts({ task: TASK, screen: { lines: [...titleLines, line("中秋快乐", 330, 700)] }, windowBounds: bounds, before: { lines: [] }, elements });
+    // A wide window: the title starts left of 30% of the width but in the chat pane.
+    expect(read([line("姐姐", 340, 14, 60, 22)]).recipientInTitle).toBe(true);
+    // A group named 姐姐: its member count is part of the title, read together or apart.
+    expect(read([line("姐姐(3)", 340, 14, 80, 22)]).recipientInTitle).toBe(false);
+    expect(read([line("姐姐", 340, 14, 40, 22), line("(3)", 384, 14, 24, 22)]).recipientInTitle).toBe(false);
+    // The list pane and a search box in the top bar are not the chat title.
+    expect(read([line("姐姐", 80, 14, 40, 22)]).recipientInTitle).toBe(false);
+    const search = { searchLike: true, frame: { x: 100 + 600, y: 50 + 8, width: 300, height: 30 } };
+    expect(read([line("姐姐", 700, 14, 40, 22)], [search]).recipientInTitle).toBe(false);
+  });
+
   it("asks for new consent when the open chat is not the granted recipient", async () => {
     const agent = await started({ app: wechatApp({ chat: "妈妈", input: "中秋快乐" }), extraConsent: false });
     const view = await observe(agent);
@@ -1738,7 +1799,7 @@ describe("computer agent Electron boundary", () => {
     // list (pid validated) and the text recognizer (a private temporary picture).
     expect(host.match(/execFile\(/g)).toHaveLength(2);
     expect(host).toContain('execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", script]');
-    expect(host).toContain('execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", RECOGNIZE_TEXT_SCRIPT, file]');
+    expect(host).toContain('execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", RECOGNIZE_TEXT_SCRIPT]');
     expect(host).toContain("!Number.isInteger(pid) || pid <= 0");
     expect(host).not.toMatch(/\bexec\(|spawn\(|execSync|shell:\s*true/);
     const agent = readFileSync(new URL("./computer-agent.cjs", import.meta.url), "utf8");

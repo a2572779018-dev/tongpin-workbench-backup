@@ -873,20 +873,27 @@ function withdrawSearch(tracker) {
 /* Screen text (the system's text recognition, run in the main process */
 /* on the target window's picture). Only these derived facts leave it: */
 /* whether the granted recipient's name is the chat title, whether the */
-/* composer holds the granted text, how many copies are visible.       */
+/* composer holds exactly the granted text, how many copies are shown. */
 /* ------------------------------------------------------------------ */
 
 /** Chat titles sit in the window's top bar: a line whose middle lies at most
- * this far (points) below the window's top edge, right of the left pane
- * (at least this share of the window's width from its left edge). */
+ * this far (points) below the window's top edge. */
 const SCREEN_TITLE_BAND = 56;
+/** Without a composer to anchor the chat pane, a title must start at least
+ * this share of the window's width from its left edge (right of the list). */
 const SCREEN_TITLE_MIN_X = 0.3;
-/** A line is "the same place" as the composer line within this distance (points). */
-const SCREEN_SAME_PLACE = 10;
+/** The chat pane starts at most this far (points) left of the composer's text. */
+const SCREEN_PANE_SLACK = 40;
+/** A line is "the same place" as another within these distances (points). */
+const SCREEN_SAME_X = 20;
+const SCREEN_SAME_Y = 10;
 const SCREEN_MAX_LINES = 400;
+/** A group chat's member count shown after its name, e.g. "(3)". */
+const TITLE_COUNT = /^[（(]\d+[)）]$/u;
 
+/** Lossless comparison key: only whitespace is dropped (never a "(3)"). */
 function screenKey(value) {
-  return normalizeName(value).replace(/\s+/gu, "");
+  return clean(value, 200).replace(/\s+/gu, "");
 }
 
 /** Recognized lines in window-local points (top-left origin), bounded and validated. */
@@ -903,34 +910,75 @@ function sentCopy(text, content) {
 }
 
 function samePlace(a, b) {
-  return Math.abs(a.x - b.x) <= SCREEN_SAME_PLACE * 2 && Math.abs(a.y + a.h / 2 - (b.y + b.h / 2)) <= SCREEN_SAME_PLACE;
+  return Math.abs(a.x - b.x) <= SCREEN_SAME_X && Math.abs(a.y + a.h / 2 - (b.y + b.h / 2)) <= SCREEN_SAME_Y;
+}
+
+/** Text directly above or below a line and overlapping it sideways: more of the same box. */
+function adjacentText(lines, line) {
+  const gap = line.h * 0.6;
+  return lines.some((other) => other !== line && !SEND_LABEL.test(clean(other.text, 40)) &&
+    other.x < line.x + line.w + SCREEN_PANE_SLACK && other.x + other.w > line.x - 10 &&
+    ((other.y + other.h <= line.y + 2 && line.y - (other.y + other.h) < gap) || (other.y >= line.y + line.h - 2 && other.y - (line.y + line.h) < gap)));
+}
+
+/**
+ * The composer line after the run typed the granted text: the lowest line
+ * reading exactly that text which was not on screen before the typing
+ * (`before`: the window's lines read after the chat opened, before typing),
+ * with no other text right above or below it. An old bubble or list preview
+ * with the same text was there before; a draft the text was added to makes
+ * the line read differently or leaves text next to it. Null when unsure.
+ */
+function findComposerLine(lines, content, before) {
+  if (!content || !before) return null;
+  const earlier = screenLines(before);
+  const fresh = lines.filter((line) => screenKey(line.text) === content &&
+    !earlier.some((old) => samePlace(old, line) && screenKey(old.text) === content));
+  const line = fresh.reduce((lowest, item) => (!lowest || item.y > lowest.y ? item : lowest), null);
+  return line && !adjacentText(lines, line) ? line : null;
+}
+
+function localFrame(frame, windowBounds) {
+  return { x: frame.x - windowBounds.x, y: frame.y - windowBounds.y, w: frame.width, h: frame.height };
+}
+function within(line, box) {
+  const cx = line.x + line.w / 2, cy = line.y + line.h / 2;
+  return cx >= box.x && cx <= box.x + box.w && cy >= box.y && cy <= box.y + box.h;
 }
 
 /**
  * What the window's recognized text says about the granted send.
- * - recipientInTitle: the recipient's exact name is the chat title (top bar,
- *   right of the conversation list), as a window title naming it would be.
- * - composerLine: before a send, the lowest line reading exactly the granted
- *   text — the composer sits at the bottom, under every sent bubble — so the
- *   composer holds exactly that text. Null when no such line is seen.
- * - copies: lines elsewhere reading the text (sent bubbles, the list preview).
- * `composerAt` (from the baseline taken before the send) keeps measuring the
- * same place afterwards: still there means the text was not sent.
+ * - composerLine: before the send, the composer line (findComposerLine);
+ *   after it (`composerAt` = that line), a line at the same place that still
+ *   contains the text (a caret or a partial read still counts). The composer
+ *   anchors the chat pane: its text starts near the pane's left edge.
+ * - recipientInTitle: a line in the top bar of the chat pane reads exactly the
+ *   recipient's name (not "姐姐(3)", a group, and not inside a search box).
+ * - copies: chat-pane lines above the composer that contain the text.
+ * `anchored` is false when no composer was found: the title check then only
+ * uses a fixed share of the window's width, and nothing authorizes a send.
  */
-function screenSendFacts({ task, screen, windowBounds, composerAt = null }) {
+function screenSendFacts({ task, screen, windowBounds, before = null, composerAt = null, elements = [] }) {
   const irreversible = task.irreversible;
   if (!irreversible || irreversible.kind !== "send_message" || !screen || !windowBounds || !(windowBounds.width > 0)) return null;
   const lines = screenLines(screen);
   const recipient = screenKey(irreversible.recipient || "");
   const content = screenKey(irreversible.content || "");
-  const titleBand = (line) => line.y + line.h / 2 <= SCREEN_TITLE_BAND && line.x >= windowBounds.width * SCREEN_TITLE_MIN_X;
-  const recipientInTitle = Boolean(recipient) && lines.some((line) => titleBand(line) && screenKey(line.text) === recipient);
-  const exact = content ? lines.filter((line) => screenKey(line.text) === content && !titleBand(line)) : [];
   const composerLine = composerAt
-    ? exact.find((line) => samePlace(line, composerAt)) || null
-    : exact.reduce((lowest, line) => (!lowest || line.y > lowest.y ? line : lowest), null);
-  const copies = content ? lines.filter((line) => !titleBand(line) && sentCopy(screenKey(line.text), content) && !(composerLine && samePlace(line, composerLine))).length : 0;
+    ? lines.find((line) => samePlace(line, composerAt) && screenKey(line.text).includes(content)) || null
+    : findComposerLine(lines, content, before);
+  const anchor = composerAt || composerLine;
+  const paneLeft = anchor ? anchor.x - SCREEN_PANE_SLACK : windowBounds.width * SCREEN_TITLE_MIN_X;
+  const searchBoxes = (Array.isArray(elements) ? elements : []).filter((element) => element && element.searchLike && plausibleFrame(element.frame, windowBounds)).map((element) => localFrame(element.frame, windowBounds));
+  const titleBand = (line) => line.y + line.h / 2 <= SCREEN_TITLE_BAND && line.x >= paneLeft && !searchBoxes.some((box) => within(line, box));
+  const titles = lines.filter(titleBand);
+  const recipientInTitle = Boolean(recipient) && titles.some((line) => screenKey(line.text) === recipient &&
+    !titles.some((other) => other !== line && TITLE_COUNT.test(screenKey(other.text)) && other.x >= line.x + line.w - 4 && other.x <= line.x + line.w + SCREEN_PANE_SLACK && Math.abs(other.y - line.y) < line.h));
+  const copies = content && anchor
+    ? lines.filter((line) => line.x >= paneLeft && line.y + line.h <= anchor.y - 4 && !titleBand(line) && sentCopy(screenKey(line.text), content)).length
+    : 0;
   return {
+    anchored: Boolean(anchor),
     recipientInTitle,
     composerLine: composerLine ? { x: composerLine.x, y: composerLine.y, w: composerLine.w, h: composerLine.h } : null,
     copies,
@@ -944,10 +992,7 @@ function sendEvidence({ task, tracker, observation }) {
   const content = normalizeName(irreversible.content);
   const labels = observation.elements.filter((element) => !element.editable);
   const exactRecipient = labels.filter((element) => normalizeName(element.text) === recipient).length;
-  // The recognized chat title counts as the window naming the recipient; the
-  // recognized composer line (exactly the granted text) as the input holding it.
-  const screen = observation.screen || null;
-  const titleNamesRecipient = normalizeName(observation.windowTitle || "") === recipient || Boolean(screen && screen.recipientInTitle);
+  const titleNamesRecipient = normalizeName(observation.windowTitle || "") === recipient;
   const recipientVisible = titleNamesRecipient || exactRecipient > 0 || observation.treeTexts.some((text) => normalizeName(text) === recipient);
   // Opening a chat by clicking the exact contact is strong provenance. Search
   // + Return may open another result (a group, an article), so it also needs
@@ -960,9 +1005,16 @@ function sendEvidence({ task, tracker, observation }) {
   // the name a second time (the chat header), a selected row or the title.
   const provenance = titleNamesRecipient || selectedRecipient || (openedByRun && exactRecipient >= 2);
   const inputs = observation.elements.filter((element) => element.editable && !element.searchLike);
+  const typedByRun = tracker.composerText !== null && normalizeName(tracker.composerText) === content && (tracker.focus === "conversation" || tracker.focus === "field");
   const inputHolds = inputs.some((element) => normalizeName(element.value) === content)
-    || (inputs.every((element) => !element.value) && ((tracker.composerText !== null && normalizeName(tracker.composerText) === content && (tracker.focus === "conversation" || tracker.focus === "field"))
-      || Boolean(screen && screen.composerLine && tracker.focus !== "search")));
+    || (inputs.every((element) => !element.value) && typedByRun);
+  // An app that shows neither the chat nor the composer to accessibility
+  // (WeChat): the window's recognized text is a complete proof on its own —
+  // the chat pane's title reads exactly the recipient, and the composer line
+  // the run's typing brought up reads exactly the text with nothing next to it.
+  const screen = observation.screen || null;
+  if ((!recipientVisible || !provenance) && screen && screen.anchored && screen.recipientInTitle && screen.composerLine &&
+    typedByRun && inputs.every((element) => !element.value)) return { ok: true, by: "screen" };
   if (!recipientVisible) return { ok: false, reason: `界面上没有看到联系人「${irreversible.recipient}」` };
   if (!provenance) return { ok: false, reason: `无法确认当前打开的聊天就是「${irreversible.recipient}」` };
   if (!inputHolds) return { ok: false, reason: `无法确认输入框里恰好是「${irreversible.content}」` };
@@ -1062,7 +1114,9 @@ function nextTracker(tracker, candidate, status, { task }) {
   const recipient = recipientOf(task);
   switch (candidate.kind) {
     case "activate_app":
-      Object.assign(next, { focus: "none", searchText: null, searchMoved: false, composerText: null, conversationTarget: null, conversationVia: null, delivery: tracker.preferForeground ? "foreground" : "background" });
+      // Another app starts from the background rung with its own elements;
+      // the executor puts it on the foreground rung when that app needs it.
+      Object.assign(next, { focus: "none", searchText: null, searchMoved: false, composerText: null, conversationTarget: null, conversationVia: null, delivery: "background", elementsRefused: false, preferForeground: false, refused: [] });
       break;
     case "hotkey":
       // Re-opening search allows the search literal to be typed again.
@@ -1136,13 +1190,13 @@ function facts({ tracker, task, observation, sendBaseline, appName, appRunning, 
     // The app shows neither its bubbles nor its composer to accessibility
     // (WeChat): count the copies read off the screen instead, against the
     // copies read right before the send, and look at the composer's place.
-    if (screen && screenBaseline && sendEvidenceFacts.before === 0 && sendEvidenceFacts.after === 0 && !inputValues.length) {
+    if (screen && screen.anchored && screenBaseline && screenBaseline.composerLine && sendEvidenceFacts.before === 0 && sendEvidenceFacts.after === 0 && !inputValues.length) {
       sendEvidenceFacts = { before: screenBaseline.copies, after: screen.copies, inputStillHasText: Boolean(screen.composerLine), screen: true };
     }
   }
   // Before the send: what the screen shows about the chat and the composer.
   const screenCheck = screen && tracker.sendCount === 0 && (screen.recipientInTitle || screen.composerLine)
-    ? { recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.composerLine) }
+    ? { recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.anchored && screen.composerLine) }
     : null;
   return {
     focus: tracker.focus,

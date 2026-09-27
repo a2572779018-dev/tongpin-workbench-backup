@@ -677,6 +677,7 @@ function createComputerAgentController({
         tracker: policy.emptyTracker(),
         sendBaseline: null,
         screenBaseline: null,
+        screenBeforeTyping: null,
         typeCheck: null,
         frontedTarget: false,
         observation: null,
@@ -694,8 +695,7 @@ function createComputerAgentController({
       current.apps = apps;
       // Apps known (or learned earlier in this session) to take no background
       // input start on the foreground rung instead of spending steps on misses.
-      const bundle = targetBundle(current);
-      if (bundle && (foregroundFirstBundles.has(bundle) || learnedForeground.has(bundle))) current.tracker = policy.foregroundFirst(current.tracker);
+      if (foregroundApp(targetBundle(current))) current.tracker = policy.foregroundFirst(current.tracker);
       return success({
         runId: current.runId,
         platform: platform === "darwin" ? "macos" : "windows",
@@ -814,7 +814,8 @@ function createComputerAgentController({
         includeScreenshot: true,
         maxDimension: SCREEN_TEXT.maxDimension,
       }), { signal }));
-      if (!output || output.pid !== target.pid || bigString(output.windowId) !== target.windowId) return null;
+      // Only a picture of exactly the window maps onto window coordinates.
+      if (!output || output.pid !== target.pid || bigString(output.windowId) !== target.windowId || output.screenshotFrameValid !== true) return null;
       const image = Array.isArray(output.images) && output.images[0] && typeof output.images[0].dataBase64 === "string" ? output.images[0].dataBase64 : "";
       const bounds = normalizeBounds(output.windowBounds) || target.bounds;
       if (!image || !bounds || state.stopped) return null;
@@ -825,7 +826,7 @@ function createComputerAgentController({
         if (!Array.isArray(row)) continue;
         const [text, confidence, nx, ny, nw, nh] = row;
         const clean = safeText(text, SCREEN_TEXT.maxLineChars);
-        if (!clean || ![nx, ny, nw, nh].every(finite) || !(nw > 0 && nh > 0) || (finite(confidence) && confidence < 0.3)) continue;
+        if (!clean || ![nx, ny, nw, nh].every(finite) || !(nw > 0 && nh > 0) || !finite(confidence) || confidence < 0.5) continue;
         lines.push({ text: clean, x: nx * bounds.width, y: (1 - ny - nh) * bounds.height, w: nw * bounds.width, h: nh * bounds.height });
       }
       return { lines, windowBounds: bounds };
@@ -834,12 +835,8 @@ function createComputerAgentController({
     }
   }
 
-  /** Screen facts about the granted send, in the phases where they matter. */
-  async function screenFacts(state, target, composerAt = null) {
-    const irreversible = state.task.irreversible;
-    if (!irreversible || irreversible.kind !== "send_message") return null;
-    const read = await readScreenText(state, target);
-    return read ? policy.screenSendFacts({ task: state.task, screen: read, windowBounds: read.windowBounds, composerAt }) : null;
+  function sendTask(state) {
+    return Boolean(state.task.irreversible && state.task.irreversible.kind === "send_message");
   }
 
   /**
@@ -1043,9 +1040,17 @@ function createComputerAgentController({
       // whether the open chat and the composer are the granted ones; after
       // it, whether a new copy appeared and the composer emptied.
       const tracker = state.tracker;
-      const aroundSend = tracker.sendCount > 0 ? Boolean(state.screenBaseline) : Boolean(tracker.conversationTarget || tracker.composerText);
-      const screen = target && aroundSend ? await screenFacts(state, target, tracker.sendCount > 0 ? state.screenBaseline.composerLine : null) : null;
+      const aroundSend = sendTask(state) && (tracker.sendCount > 0 ? Boolean(state.screenBaseline) : Boolean(tracker.conversationTarget || tracker.composerText));
+      const screenRead = target && aroundSend ? await readScreenText(state, target) : null;
       if (state.stopped) return failure("stopped");
+      // Lines read after the chat opened and before the run typed its text:
+      // what was already on screen (old bubbles, a draft) is told apart from
+      // the line the typing brought up.
+      if (screenRead && tracker.sendCount === 0 && tracker.composerText === null) state.screenBeforeTyping = screenRead;
+      const screen = screenRead ? policy.screenSendFacts({
+        task: state.task, screen: screenRead, windowBounds: screenRead.windowBounds, elements,
+        before: state.screenBeforeTyping, composerAt: tracker.sendCount > 0 ? state.screenBaseline.composerLine : null,
+      }) : null;
       state.observation.screen = screen;
       const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing, searchListShown: searchList.lists.length > 0, screen, screenBaseline: state.screenBaseline });
       return success({
@@ -1057,7 +1062,7 @@ function createComputerAgentController({
           app: appName, title: windowTitle, elementCount: elements.length, axSparse, screenshotUsed,
           ...(popups.length ? { popupCount: popups.length, popupElementCount: popupElements.length, floating: policy.floatingGeometry(listBounds, popups, searchList.lists, elements) } : {}),
           ...(searchList.lists.length ? { searchListShown: true } : {}),
-          ...(screen ? { screenText: { recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.composerLine), copies: screen.copies } } : {}),
+          ...(screen ? { screenText: { phase: tracker.sendCount > 0 ? "after" : "before", recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.anchored && screen.composerLine), copies: screen.copies } } : {}),
         },
       });
     } catch {
@@ -1203,16 +1208,22 @@ function createComputerAgentController({
     const authObservation = { appAllowed: observation.appAllowed, elements: observation.elements, windowTitle: observation.windowTitle, treeTexts: observation.treeTexts, screen: observation.screen || null };
     let decision = policy.authorizeCandidate(candidate, { task, tracker: state.tracker, observation: authObservation, grantApps: state.grantApps });
     let authorization = "allowed";
-    if (!decision.allowed && decision.extraConsent) {
-      emit({ type: "extra_consent", summary: decision.extraConsent.summary });
+    /** One more native confirmation; null when granted, else the blocked outcome. */
+    const confirmNatively = async (extra) => {
+      emit({ type: "extra_consent", summary: extra.summary });
       let approved = false;
-      try { approved = (await showExtraConsent(policy.extraConsentDialog(candidate, decision.extraConsent))) === true; } catch { approved = false; }
+      try { approved = (await showExtraConsent(policy.extraConsentDialog(candidate, extra))) === true; } catch { approved = false; }
       if (!approved) {
         await stop("user");
         return outcome("blocked", { authorization: "extra_consent", code: "extra_consent_denied", message: "你没有允许这一步，电脑操作已停止" });
       }
       if (state.stopped) return outcome("blocked", { authorization: "extra_consent", code: "stopped", message: SAFE_MESSAGES.stopped });
       authorization = "extra_consent";
+      return null;
+    };
+    if (!decision.allowed && decision.extraConsent) {
+      const refused = await confirmNatively(decision.extraConsent);
+      if (refused) return refused;
       decision = { allowed: true };
     }
     if (!decision.allowed) return outcome("blocked", { authorization: "denied", code: "authorization_denied", message: decision.reason || "这一步不在本次授权范围内" });
@@ -1230,8 +1241,9 @@ function createComputerAgentController({
         const freshTexts = policy.extractTreeTexts(fresh.treeMarkdown);
         // The send is checked against the window's text as it is right now,
         // which is also the baseline its result is measured against.
-        const freshScreen = candidate.risk === "send" ? await screenFacts(state, target) : null;
+        const freshRead = candidate.risk === "send" && sendTask(state) ? await readScreenText(state, target) : null;
         if (state.stopped) return outcome("blocked", { authorization, code: "stopped", message: SAFE_MESSAGES.stopped });
+        const freshScreen = freshRead ? policy.screenSendFacts({ task, screen: freshRead, windowBounds: freshRead.windowBounds, elements: freshElements, before: state.screenBeforeTyping }) : null;
         if (candidate.elementIdentity) {
           const matches = freshElements.filter((element) => element.identity === candidate.elementIdentity && element.token);
           if (matches.length !== 1) return outcome("blocked", { authorization, code: "target_changed", message: "要操作的控件已变化，未执行这一步" });
@@ -1239,7 +1251,14 @@ function createComputerAgentController({
         }
         if (authorization === "allowed") {
           const again = policy.authorizeCandidate(candidate, { task, tracker: state.tracker, observation: { appAllowed: true, elements: freshElements, windowTitle: fresh.windowTitle, treeTexts: freshTexts, screen: freshScreen }, grantApps: state.grantApps });
-          if (!again.allowed) return outcome("blocked", { authorization: "denied", code: "authorization_changed", message: again.reason || (again.extraConsent && again.extraConsent.reason) || "界面已变化，未执行这一步" });
+          // What the fresh capture no longer proves by itself (a screen read
+          // that failed this time) goes to the member natively, as it would have.
+          if (!again.allowed && again.extraConsent) {
+            const refused = await confirmNatively(again.extraConsent);
+            if (refused) return refused;
+          } else if (!again.allowed) {
+            return outcome("blocked", { authorization: "denied", code: "authorization_changed", message: again.reason || "界面已变化，未执行这一步" });
+          }
         }
         const content = task.irreversible && task.irreversible.content;
         if (candidate.risk === "send" && content) {
@@ -1334,10 +1353,15 @@ function createComputerAgentController({
       if (after && policy.recipientNewlySelected(observation.elements, policy.modelElements(after.elements, after.windowBounds), task, candidate.targetFrame)) status = "delivered";
     }
     state.tracker = policy.nextTracker(state.tracker, candidate, status, { task });
+    // Another app starts on its own rung: the foreground one when it needs it.
+    if (candidate.kind === "activate_app" && foregroundApp(targetBundle(state))) state.tracker = policy.foregroundFirst(state.tracker);
     // Cua refuses every element-addressed background action on an app whose
-    // accessibility nodes it cannot tie to the window; stop offering them.
+    // accessibility nodes it cannot tie to the window; stop offering them,
+    // and start this app's next run in the foreground.
     if (status === "failed" && result.code === "element_outside_target_window" && !state.tracker.elementsRefused) {
       state.tracker = Object.freeze({ ...state.tracker, elementsRefused: true });
+      const bundle = targetBundle(state);
+      if (bundle) learnedForeground.add(bundle);
     }
     // Anything but a clean refusal may have typed somewhere: arm the check.
     if (typeCheck && status !== "failed" && status !== "blocked") state.typeCheck = typeCheck;
@@ -1353,6 +1377,10 @@ function createComputerAgentController({
     return outcome(status, { authorization, code, delivery, message });
   }
 
+  function foregroundApp(bundle) {
+    return Boolean(bundle) && (foregroundFirstBundles.has(bundle) || learnedForeground.has(bundle));
+  }
+
   function targetBundle(state) {
     const app = (state.apps && state.apps[state.targetIndex]) || null;
     return String((app && app.bundleId) || (state.grantApps[0] && state.grantApps[0].bundleId) || "").toLowerCase();
@@ -1363,12 +1391,6 @@ function createComputerAgentController({
     if (pending) pending.cancelled = true;
     const current = run;
     run = null;
-    // An app that refused element-addressed background input will refuse it
-    // again: the next run in this session starts in the foreground.
-    if (current && current.tracker && current.tracker.elementsRefused) {
-      const bundle = targetBundle(current);
-      if (bundle) learnedForeground.add(bundle);
-    }
     disarmStopShortcut();
     if (!current) return success({ stopped: true });
     current.stopped = true;

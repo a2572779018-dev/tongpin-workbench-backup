@@ -219,7 +219,7 @@ export interface ComputerObserveResult {
     app: string | null; title: string | null; elementCount: number; axSparse: boolean; screenshotUsed: boolean;
     popupCount?: number; popupElementCount?: number; searchListShown?: boolean;
     /** Around a send: what the window's recognized text showed (never the text itself). */
-    screenText?: { recipientInTitle: boolean; composerHoldsText: boolean; copies: number };
+    screenText?: { phase: "before" | "after"; recipientInTitle: boolean; composerHoldsText: boolean; copies: number };
     floating?: { popups: Array<{ x: number; y: number; w: number; h: number; list: boolean }>; searchBox: { x: number; y: number; w: number; h: number } | null } | null;
   };
 }
