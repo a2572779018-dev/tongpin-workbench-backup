@@ -1,5 +1,6 @@
-import { CircleCheck, CircleStop, LoaderCircle, MonitorUp, ShieldCheck, TriangleAlert, X } from "lucide-react";
+import { CircleCheck, CircleStop, LoaderCircle, MonitorUp, PanelRightClose, PanelRightOpen, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import type { AiMode, AiQuota } from "../../../shared/ai";
 import { COMPUTER_ACTION_KIND_LABELS, COMPUTER_OUTCOME_LABELS, type ComputerAgentEvent, type ComputerRunStart } from "../../../shared/computerAgent";
 import { getComputerUseBridge } from "../../lib/computerUseBridge";
@@ -23,6 +24,15 @@ interface ComputerRunPanelProps {
   onQuota: (quota: AiQuota) => void;
   onFinish: (result: ComputerRunResult) => void;
   onClose: () => void;
+  /**
+   * The page's right-hand panel slot. When the page offers one (even while it
+   * is closed, as null), the composer area keeps only a one-line status bar
+   * and the run's details open beside the chat; without it the details show
+   * in place, as before.
+   */
+  sideSlot?: HTMLElement | null;
+  panelOpen?: boolean;
+  onPanelOpenChange?: (open: boolean) => void;
 }
 
 const percent = (value: number) => `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
@@ -61,6 +71,16 @@ export function ComputerQuestionActions({ confirmLabel, canSubmit, onConfirm, on
   </div>;
 }
 
+/** One line for the status bar: the latest step and what Jev is doing in it. */
+export function latestStepText(steps: readonly ComputerTimelineStep[]): string {
+  const step = steps.at(-1);
+  if (!step) return "";
+  const doing = step.execution ? step.execution.message
+    : step.choice ? `Jev 选择：${step.choice.label}`
+      : step.phase === "decide" ? "Jev 决策中…" : `读取「${step.observation?.app ?? "目标应用"}」界面…`;
+  return `第 ${step.step} 步 · ${doing}`;
+}
+
 function StepChain({ step }: { step: ComputerTimelineStep & { verifiedEffect?: number } }) {
   const parts: Array<{ key: string; text: string; tone?: "ok" | "warn" | "muted" }> = [];
   if (step.observation) parts.push({ key: "observe", text: `读取「${step.observation.app ?? "目标应用"}」${step.observation.elementCount ? ` · ${step.observation.elementCount} 个元素` : ""}${popupText(step.observation)}${step.observation.screenshotUsed ? " · 截图定位" : ""}` });
@@ -76,12 +96,12 @@ function StepChain({ step }: { step: ComputerTimelineStep & { verifiedEffect?: n
   return <p className="tp-ai-computer-run__chain">{parts.map((part, index) => <span key={part.key} className={part.tone ? `is-${part.tone}` : undefined}>{index ? <i aria-hidden="true">→</i> : null}{part.text}</span>)}</p>;
 }
 
-export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, onClose }: ComputerRunPanelProps) {
+export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, onClose, sideSlot, panelOpen = true, onPanelOpenChange }: ComputerRunPanelProps) {
   const bridge = getComputerUseBridge()?.agent;
   const controllerRef = useRef<AbortController | null>(null);
   const answerRef = useRef<((value: ComputerAnswer | null) => void) | null>(null);
-  const callbacksRef = useRef({ onQuota, onFinish });
-  callbacksRef.current = { onQuota, onFinish };
+  const callbacksRef = useRef({ onQuota, onFinish, onPanelOpenChange });
+  callbacksRef.current = { onQuota, onFinish, onPanelOpenChange };
   const [run, setRun] = useState<ComputerRunStart | null>(null);
   const [status, setStatus] = useState("正在用当前档位模型整理任务…");
   const [steps, setSteps] = useState<ComputerTimelineStep[]>([]);
@@ -123,6 +143,8 @@ export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, o
         answerRef.current = resolve;
         setAnswer("");
         setQuestion(next);
+        // A question needs the member: bring the details beside the chat into view.
+        callbacksRef.current.onPanelOpenChange?.(true);
       }),
     }).then(outcome => {
       answerRef.current = null;
@@ -170,13 +192,18 @@ export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, o
 
   const task = run?.task;
   const running = !result;
-  return <section className="tp-ai-computer tp-ai-computer-run" aria-label="电脑操作执行器" aria-busy={running}>
-    <header>
-      <span><MonitorUp size={17} aria-hidden="true" />电脑操作 · Jev 逐步决策</span>
-      {running
-        ? <button type="button" className="tp-ai-computer-run__stop" onClick={stop} disabled={stopping} aria-label="停止电脑操作"><CircleStop size={16} aria-hidden="true" />停止</button>
-        : <button type="button" onClick={onClose} aria-label="关闭电脑操作面板"><X size={16} aria-hidden="true" /></button>}
-    </header>
+  const sideLayout = sideSlot !== undefined;
+  const header = <header>
+    <span><MonitorUp size={17} aria-hidden="true" />电脑操作 · Jev 逐步决策</span>
+    <div className="tp-ai-computer-run__header-actions">
+      {running ? <button type="button" className="tp-ai-computer-run__stop" onClick={stop} disabled={stopping} aria-label="停止电脑操作"><CircleStop size={16} aria-hidden="true" />停止</button> : null}
+      {sideLayout
+        ? <button type="button" onClick={() => onPanelOpenChange?.(false)} aria-label="收起电脑操作过程"><PanelRightClose size={16} aria-hidden="true" /></button>
+        : !running ? <button type="button" onClick={onClose} aria-label="关闭电脑操作面板"><X size={16} aria-hidden="true" /></button> : null}
+    </div>
+  </header>;
+  const details = <section className={`tp-ai-computer tp-ai-computer-run${sideLayout ? " is-side" : ""}`} aria-label="电脑操作执行器" aria-busy={running}>
+    {header}
     <p className="tp-ai-computer__goal">{computerInstructionText(request.instruction) || request.instruction}</p>
     {task ? <dl className="tp-ai-computer-run__spec">
       <div><dt>任务目标</dt><dd>{task.goal}</dd></div>
@@ -201,5 +228,38 @@ export function ComputerRunPanel({ request, accountId, api, onQuota, onFinish, o
     </form> : null}
     {result ? <p className={`tp-ai-computer-run__result is-${result.outcome}`}>{result.summary}</p> : null}
     <p className="tp-ai-computer__boundary"><ShieldCheck size={13} aria-hidden="true" />只在你授权的应用里操作；Jev 只收到界面结构摘要，不接收截图；超出授权的发送、删除、付款会先停下来问你。按 Esc 可随时停止。</p>
+  </section>;
+  if (!sideLayout) return details;
+  return <>
+    <ComputerRunStatusBar running={running} stopping={stopping} question={Boolean(question)} outcome={result?.outcome}
+      text={question ? question.question : result ? result.summary : latestStepText(steps) || status}
+      panelOpen={panelOpen && Boolean(sideSlot)} onTogglePanel={() => onPanelOpenChange?.(!(panelOpen && sideSlot))} onStop={stop} onClose={onClose} />
+    {sideSlot && panelOpen ? createPortal(<div className="tp-ai-computer-side__body">{details}</div>, sideSlot) : null}
+  </>;
+}
+
+/**
+ * The composer area while a computer run is active: one line with where the
+ * run is, and the buttons that matter now (open the details, answer Jev,
+ * stop, or go back to chatting once it has ended).
+ */
+export function ComputerRunStatusBar({ running, stopping, question, outcome, text, panelOpen, onTogglePanel, onStop, onClose }: {
+  running: boolean; stopping: boolean; question: boolean; outcome?: ComputerRunResult["outcome"]; text: string; panelOpen: boolean;
+  onTogglePanel: () => void; onStop: () => void; onClose: () => void;
+}) {
+  const title = question ? "需要你确认" : running ? (stopping ? "正在停止" : "电脑操作进行中") : COMPUTER_OUTCOME_LABELS[outcome ?? "abstained"];
+  const tone = question ? "is-question" : running ? "is-running" : outcome === "verified" ? "is-done" : "is-ended";
+  return <section className={`tp-ai-computer-bar ${tone}`} aria-label="电脑操作状态" aria-busy={running}>
+    <span className="tp-ai-computer-bar__icon" aria-hidden="true">
+      {question ? <TriangleAlert size={16} /> : running ? <LoaderCircle size={16} className="is-spinning" /> : outcome === "verified" ? <CircleCheck size={16} /> : <TriangleAlert size={16} />}
+    </span>
+    <p className="tp-ai-computer-bar__text" role="status"><strong>{title}</strong><span>{text}</span></p>
+    <div className="tp-ai-computer-bar__actions">
+      {question && !panelOpen ? <button type="button" className="is-primary" onClick={onTogglePanel}>去确认</button>
+        : <button type="button" onClick={onTogglePanel} aria-pressed={panelOpen}>{panelOpen ? <PanelRightClose size={15} aria-hidden="true" /> : <PanelRightOpen size={15} aria-hidden="true" />}{panelOpen ? "收起过程" : "查看过程"}</button>}
+      {running
+        ? <button type="button" className="is-stop" onClick={onStop} disabled={stopping} aria-label="停止电脑操作"><CircleStop size={15} aria-hidden="true" />停止</button>
+        : <button type="button" className="is-primary" onClick={onClose}>继续对话</button>}
+    </div>
   </section>;
 }

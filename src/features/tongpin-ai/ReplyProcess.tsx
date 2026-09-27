@@ -47,6 +47,7 @@ import {
 import { harnessTraceRefresh, harnessTraceRequestId, sameHarnessTrace } from "./runTracePolling";
 import { useReplyHighlight } from "./useReplyHighlight";
 import type { TongpinAIArtifact, TongpinAIMessage } from "./types";
+import { ComputerRunLinkContext, type ComputerRunLink } from "./computerRunLink";
 import "./reply-markdown.css";
 import "./reply-process.css";
 
@@ -182,7 +183,7 @@ function ExecDetail({ part }: { part: Extract<ReplyProcessPart, { kind: "exec" }
   </div>;
 }
 
-function PartRow({ part, office }: { part: ReplyProcessPart; office?: AgentOfficeSnapshot | null }) {
+function PartRow({ part, office, computerLink }: { part: ReplyProcessPart; office?: AgentOfficeSnapshot | null; computerLink?: ComputerRunLink | null }) {
   let title: ReactNode;
   let detail: ReactNode = null;
   switch (part.kind) {
@@ -217,8 +218,9 @@ function PartRow({ part, office }: { part: ReplyProcessPart; office?: AgentOffic
       detail = <ExecDetail part={part} />;
       break;
     case "tool":
-      title = <><strong>工具调用 · {part.label}</strong><small>{part.statusText}</small>
-        {part.hasCard ? <button type="button" className="tp-ai-process-part__link" onClick={showResultCard}>{part.state === "done" ? "查看结果" : "查看任务"}</button> : null}</>;
+      title = <><strong>工具调用 · {part.label}</strong><small>{computerLink?.running ? "电脑操作进行中" : part.statusText}</small>
+        {part.hasCard ? <button type="button" className="tp-ai-process-part__link" onClick={showResultCard}>{part.state === "done" ? "查看结果" : "查看任务"}</button> : null}
+        {computerLink ? <button type="button" className="tp-ai-process-part__link" onClick={computerLink.open}>{computerLink.running ? "查看操作过程" : "查看操作记录"}</button> : null}</>;
       break;
   }
   return <li className={`tp-ai-process-part is-${part.kind} is-${part.state}`}>
@@ -249,6 +251,7 @@ export function ReplyProcess({ message, artifact, onTraceChange }: {
   onTraceChange?: (messageId: string, trace: AiHarnessTrace) => void;
 }) {
   const details = useContext(ReplyProcessDetailsContext);
+  const computerLink = useContext(ComputerRunLinkContext);
   const [mountedRevision] = useState(details.revision);
   const [choice, setChoice] = useState<ReplyProcessChoice>();
   const [trace, setTrace] = useState(message.trace);
@@ -285,7 +288,8 @@ export function ReplyProcess({ message, artifact, onTraceChange }: {
       </button>
       {view.phase !== "settled" ? <span className="sr-only" role="status">{replyProcessActivity(view, message)}</span> : null}
       {expanded ? <ol id={bodyId} className="tp-ai-process__parts" aria-label="回复过程详情" ref={view.streaming ? aiMotionRef : undefined}>
-        {view.parts.map(part => <PartRow key={part.key} part={part} office={part.kind === "agents" ? office : undefined} />)}
+        {view.parts.map(part => <PartRow key={part.key} part={part} office={part.kind === "agents" ? office : undefined}
+          computerLink={part.kind === "tool" && part.tool === "computer" && computerLink?.messageId === message.id ? computerLink : null} />)}
         {view.phase === "settled" ? <li className={`tp-ai-process-part is-done is-outcome-${view.outcome}`}>
           <span className="tp-ai-process-part__icon">{OUTCOME_ICONS[view.outcome]}</span>
           <div className="tp-ai-process-part__body"><p className="tp-ai-process-part__title">

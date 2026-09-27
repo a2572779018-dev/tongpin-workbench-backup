@@ -20,7 +20,7 @@ describe("unified computer executor integration", () => {
   });
 
   it("enters the same executor from natural-language dispatch with the member's own words", () => {
-    expect(page).toContain("beginComputerUse(originalPrompt, conversationId, decision.prompt)");
+    expect(page).toContain("beginComputerUse(originalPrompt, conversationId, decision.prompt, messageId)");
     expect(page).toContain("computerPanel={computerRequest ? <ComputerRunPanel");
     expect(workspace).toContain("computerRequest && computerPanel ? computerPanel");
     // A tier without the computer capability is told before any model call.

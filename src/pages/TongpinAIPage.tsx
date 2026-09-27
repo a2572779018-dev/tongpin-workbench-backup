@@ -29,6 +29,7 @@ import { assertGeneratedMediaCapacity, toolAttachmentContext } from "../features
 import { draftsWithoutComputerRequests, mentionedCapabilityRequest } from "../features/tongpin-ai/skillMentions";
 import { computerUseConversationRequestMessage } from "../features/tongpin-ai/computerUseFlow";
 import { ComputerRunPanel } from "../features/tongpin-ai/ComputerRunPanel";
+import { ComputerRunLinkContext, type ComputerRunLink } from "../features/tongpin-ai/computerRunLink";
 import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence, typewriterDuration } from "../features/tongpin-ai/chatPerformance";
 import { computerTierNotice } from "../features/tongpin-ai/computerTier";
@@ -155,6 +156,8 @@ type ComputerUseRequest = {
   contextHint?: string;
   mode: TongpinAIMode;
   hasResult: boolean;
+  /** The reply whose dispatch handed off to this run (its tool row links to the details). */
+  sourceMessageId?: string;
 };
 
 function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onPersonaSaved }: {
@@ -189,6 +192,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [checkingQuota, setCheckingQuota] = useState(false);
   const [computerProbe, setComputerProbe] = useState<ComputerUseProbeResult | null>(null);
   const [computerRequest, setComputerRequest] = useState<ComputerUseRequest | null>(null);
+  // The run's details open beside the chat (right panel); the composer area keeps one status line.
+  const [computerPanelOpen, setComputerPanelOpen] = useState(true);
+  const [computerSideSlot, setComputerSideSlot] = useState<HTMLElement | null>(null);
   const [preflightGate] = useState(() => new ChatPreflightGate());
   const [budgetNotice, setBudgetNotice] = useState<{ context: readonly unknown[]; result: AiChatPreflight } | null>(null);
   const requestRef = useRef(new Map<string, { controller: AbortController; messageId: string }>());
@@ -457,6 +463,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const activeArtifact = activeArtifactId
     ? artifactById.get(activeArtifactId)
     : undefined;
+  const computerSideOpen = view === "chat" && Boolean(computerRequest) && computerPanelOpen;
+  const openComputerPanel = useCallback((open: boolean) => {
+    setComputerPanelOpen(open);
+    if (open) setArtifactOpen(false);
+  }, []);
+  const computerRunLink = useMemo<ComputerRunLink | null>(() => computerRequest?.sourceMessageId
+    ? { messageId: computerRequest.sourceMessageId, running: !computerRequest.hasResult, open: () => openComputerPanel(true) }
+    : null, [computerRequest?.sourceMessageId, computerRequest?.hasResult, openComputerPanel]);
   const latestConversationArtifact = latestConversationArtifactId
     ? artifactById.get(latestConversationArtifactId)
     : undefined;
@@ -620,7 +634,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       : conversation));
   }
 
-  function beginComputerUse(originalPrompt: string, existingConversationId?: string, contextHint?: string) {
+  function beginComputerUse(originalPrompt: string, existingConversationId?: string, contextHint?: string, sourceMessageId?: string) {
     if (!computerBridgeAvailable || !getComputerUseBridge()) {
       showAnnouncement("电脑控制只在同频桌面端中提供");
       return;
@@ -692,11 +706,13 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     setArtifactOpen(false);
     setComposerTool("text");
     setWebSearch(false);
+    setComputerPanelOpen(true);
     setComputerRequest({
       id: createLocalId("computer"),
       conversationId,
       originalPrompt,
       ...(contextHint && contextHint !== originalPrompt ? { contextHint } : {}),
+      ...(sourceMessageId ? { sourceMessageId } : {}),
       mode,
       hasResult: false,
     });
@@ -1235,7 +1251,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         const computerReady = Boolean(computerBridgeAvailable && getComputerUseBridge());
         const computerProcess = settledProcess("completed", withReplyProcessTool(liveProcess, { kind: "tool", tool: "computer", status: computerReady ? "handed_off" : "unavailable" }));
         updateReply(conversationId, messageId, { content: computerReady ? "已识别为电脑操作任务，即将进入系统安全确认流程。" : "已识别为电脑操作任务，但当前环境未接入安全桌面能力。", status: "ready", startedAt: undefined, ...(computerProcess ? { process: computerProcess } : {}) });
-        if (computerReady) beginComputerUse(originalPrompt, conversationId, decision.prompt);
+        if (computerReady) beginComputerUse(originalPrompt, conversationId, decision.prompt, messageId);
         return;
       }
       acceptGeneration(conversationId, messageId, response, harnessPlanRequestId, liveContent);
@@ -2222,6 +2238,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     if (!artifact || artifact.conversationId !== activeConversationId) return;
     setActiveArtifactId(artifactId);
     setArtifactOpen(true);
+    // One right-hand panel at a time: a result replaces the computer run's details.
+    setComputerPanelOpen(false);
   }
 
   function toggleSkill(skillId: string) {
@@ -2261,7 +2279,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     <section
       className={
         "tp-ai-page" +
-        (artifactOpen && activeArtifact && view === "chat"
+        ((artifactOpen && activeArtifact && view === "chat") || computerSideOpen
           ? " has-preview"
           : "") +
         (sidebarCollapsed ? " is-sidebar-collapsed" : "")
@@ -2348,6 +2366,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           onUpdateContext={(instructions, contextDocuments) => setProjects(current => current.map(project => project.id === activeProject.id ? { ...project, instructions, contextDocuments } : project))}
         />
       ) : (
+        <ComputerRunLinkContext.Provider value={computerRunLink}>
         <ChatWorkspace
           viewerId={user.id}
           assistantName={persona.profile.name || "同频 AI"}
@@ -2423,7 +2442,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           computerPanel={computerRequest ? <ComputerRunPanel key={computerRequest.id} accountId={user.id} api={api}
             request={{ id: computerRequest.id, conversationId: computerRequest.conversationId, mode: computerRequest.mode, instruction: computerRequest.originalPrompt, ...(computerRequest.contextHint ? { contextHint: computerRequest.contextHint } : {}) }}
             onQuota={quota => { statusGenerationRef.current += 1; setAiStatus(current => current ? { ...current, quota } : current); }}
-            onFinish={result => recordComputerResult(result.summary)} onClose={closeComputerUse} /> : undefined}
+            onFinish={result => recordComputerResult(result.summary)} onClose={closeComputerUse}
+            sideSlot={computerSideOpen ? computerSideSlot : null} panelOpen={computerPanelOpen} onPanelOpenChange={openComputerPanel} /> : undefined}
           onStop={stopResponse}
           pendingSupplements={steer.bubbles(activeConversation?.id)}
           onSteer={steerAllowed && activeConversation ? text => addSupplement(activeConversation.id, text) : undefined}
@@ -2449,9 +2469,12 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           }}
           retryableMessageIds={new Set([...retryRequestsRef.current.keys(), ...conversations.flatMap(item => item.messages.filter(message => message.status === "error" && message.requestId && message.retryDisposition).map(message => message.id))])}
         />
+        </ComputerRunLinkContext.Provider>
       )}
 
-      {view === "chat" && artifactOpen && activeArtifact ? (
+      {computerSideOpen ? (
+        <aside ref={setComputerSideSlot} className="tp-ai-preview tp-ai-computer-side" aria-label="电脑操作过程" />
+      ) : view === "chat" && artifactOpen && activeArtifact ? (
         <ArtifactPreview
           artifact={activeArtifact}
           onClose={() => setArtifactOpen(false)}
