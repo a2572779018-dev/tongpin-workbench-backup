@@ -59,6 +59,13 @@ export function renderMemberMemoryPrompt(stores: Readonly<Record<AiMemoryTarget,
   ].join("\n");
 }
 
+/**
+ * Present whenever memory is active for this member, even before the first
+ * entry exists. Without it the model tells a member who says “记住……” that it
+ * can only remember within this conversation, which is false here.
+ */
+export const MEMBER_MEMORY_CAPABILITY_NOTE = "长期记忆已开启：每轮对话结束后，同频 AI 会在后台把值得长期记住的内容整理进成员的「AI 对你的了解」（成员明确说“记住……”“以后……”时会优先整理），之后的新对话都会参考；成员可以随时在那里查看、修改或删除。成员要求记住时，简短确认会记住即可，不要说自己会忘记或只能在本次对话里记住，也不要建议成员另行保存。";
+
 /** Server-only carriers: symbol keys never serialize and never reach clients. */
 export const MEMBER_MEMORY_PROMPT: unique symbol = Symbol("tongpin.memberMemoryPrompt");
 /** Per-request personal skills and recalled history (after the frozen memory block). */

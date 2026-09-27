@@ -128,7 +128,8 @@ describe("AI chat preflight and atomic quota budget", () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
-  it("does not mutate an existing expired reservation during a read-only preflight", async () => {
+  it("does not mutate an existing expired reservation during a read-only preflight, nor let it block the next send", async () => {
+    runtime.service.setQuota("member", "admin", { limitTokens: 100_000 });
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
     transport.mockImplementationOnce(async () => { await held; return reply(); });
@@ -138,7 +139,13 @@ describe("AI chat preflight and atomic quota budget", () => {
       const stored = runtime.store.request("member", request.requestId)!;
       stored.expiresAt = Date.now() - 1000; runtime.store.saveRequest(stored);
       const quota = runtime.store.quota("member"), usage = runtime.store.usage("member");
-      expect(runtime.service.preflight("member", chat())).toMatchObject({ reason: "request_in_progress", canSend: false });
+      // Past its deadline the request can no longer be running (the provider call
+      // has its own timeout); chat() settles it as uncertain before sending, so
+      // the preflight must not keep the conversation blocked.
+      expect(runtime.service.preflight("member", chat({ conversationId: request.conversationId }))).toMatchObject({ reason: null, canSend: true });
+      stored.expiresAt = Date.now() + 60_000; runtime.store.saveRequest(stored);
+      expect(runtime.service.preflight("member", chat({ conversationId: request.conversationId }))).toMatchObject({ reason: "request_in_progress", canSend: false });
+      stored.expiresAt = Date.now() - 1000; runtime.store.saveRequest(stored);
       expect(runtime.store.request("member", request.requestId)).toEqual(stored);
       expect(runtime.store.quota("member")).toEqual(quota);
       expect(runtime.store.usage("member")).toEqual(usage);

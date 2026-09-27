@@ -631,11 +631,16 @@ export class AiService {
   }
   private chatPreflight(userId: string, request: AiChatRequest, provider: AiProviderConfig, persona: AiPersonaProfile, model: string): AiChatPreflight {
     const quota = this.store.quota(userId);
-    const pendingRequests = this.store.pending(userId);
+    // An expired pending request is settled as uncertain by the next chat()
+    // (recover), which this read-only check never reaches; counting it here
+    // would block the conversation until some other call happened to recover it.
+    const now = Date.now();
+    const live = (item: StoredRequest) => !(item.expiresAt < now);
+    const pendingRequests = this.store.pending(userId).filter(live);
     const conversationId = validConversationId(request.conversationId, request.requestId);
     const activeVideos = this.store.activeVideoJobs(userId);
     const pending = pendingRequests.length + activeVideos.length >= 3
-      || this.store.pendingForConversation(userId, conversationId).length > 0
+      || this.store.pendingForConversation(userId, conversationId).filter(live).length > 0
       || this.store.activeVideoForConversation(userId, conversationId).length > 0;
     let budget = chatBudget(request, provider, quota, persona, model);
     let reason = budgetReason(budget, quota, pending);

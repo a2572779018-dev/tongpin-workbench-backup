@@ -68,6 +68,7 @@ describe("member memory learning loop (Hermes background review, adapted)", () =
     expect(transport).toHaveBeenCalledTimes(1);
     expect(status(response.requestId)).toEqual({ requestId: response.requestId, status: "none" });
     expect(systemPrompt()).not.toContain("member_memory");
+    expect(systemPrompt()).not.toContain("长期记忆已开启");
     expect(memory().state("member-a")).toMatchObject({ available: false, learningEnabled: true });
     expect(() => add("user", "成员偏好先给结论")).toThrow(expect.objectContaining({ status: 403, code: "AI_MEMORY_DISABLED" }));
   });
@@ -145,10 +146,19 @@ describe("member memory learning loop (Hermes background review, adapted)", () =
     expect(status(response.requestId).status).toBe("none");
     expect(reviewBodies).toHaveLength(0);
     expect(systemPrompt()).not.toContain("member_memory");
+    expect(systemPrompt()).not.toContain("长期记忆已开启");
     expect(memory().state("member-a")).toMatchObject({ learningEnabled: false, stores: { user: { entries: ["成员偏好先给结论"] } } });
     memory().setLearning("member-a", { learningEnabled: true });
     await send("帮我起草一个会议纪要模板", "conv-2");
     expect(systemPrompt()).toContain("成员偏好先给结论");
+  });
+
+  it("tells the model that memory is on even before the first entry, so it never claims it will forget", async () => {
+    expect(memory().state("member-a").stores.user.entries).toEqual([]);
+    await send("记住：我姐姐喜欢喝茶，不爱太甜的月饼");
+    expect(systemPrompt()).toContain("长期记忆已开启");
+    expect(systemPrompt()).toContain("不要说自己会忘记");
+    expect(systemPrompt()).not.toContain("<member_memory");
   });
 
   it("injects a frozen per-conversation block; member edits apply immediately", async () => {

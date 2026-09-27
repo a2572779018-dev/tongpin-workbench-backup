@@ -7,7 +7,7 @@ import {
 } from "../../shared/aiMemory";
 import { routeChatProvider } from "./autoRouting";
 import type { AiHarness } from "./harness";
-import { buildMemberMemoryReviewPayload, MEMBER_MEMORY_REVIEW_INSTRUCTIONS, memberMemoryNonce, renderMemberMemoryPrompt, withMemberLearningPrompt, withMemberMemoryPrompt, type MemberMemoryReviewTurn } from "./memberMemoryPrompt";
+import { buildMemberMemoryReviewPayload, MEMBER_MEMORY_CAPABILITY_NOTE, MEMBER_MEMORY_REVIEW_INSTRUCTIONS, memberMemoryNonce, renderMemberMemoryPrompt, withMemberLearningPrompt, withMemberMemoryPrompt, type MemberMemoryReviewTurn } from "./memberMemoryPrompt";
 import { AiMemberHistoryIndex, historySourceFromState, MEMBER_HISTORY_LIMITS, memberHistoryEligible } from "./memberHistoryIndex";
 import { AiMemberLearning, memberTurnText, recallTenants, registerMemberHistoryObserver, type MemberReviewContext } from "./memberLearning";
 import { AiWorkspaceRepository, validateAiWorkspaceConversationEntity } from "./workspace";
@@ -340,7 +340,7 @@ export class AiMemberMemoryService {
       return persona;
     }
     let result = persona;
-    try { if (stored.learningEnabled) result = withMemberMemoryPrompt(persona, this.frozenMemoryBlock(userId, request, stored, capture)); }
+    try { if (stored.learningEnabled) result = withMemberMemoryPrompt(persona, [MEMBER_MEMORY_CAPABILITY_NOTE, this.frozenMemoryBlock(userId, request, stored, capture)].filter(Boolean).join("\n\n")); }
     catch { result = persona; }
     try {
       // Personal skills and recalled history for this request only (never frozen).
