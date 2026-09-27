@@ -79,8 +79,10 @@ export function draftsWithoutComputerRequests(drafts: Record<string, string>) {
     ([, value]) => !mentionedToolIds(value).includes("computer"),
   ));
 }
+/** A member's own adopted skill (`@my-xxxxxx`); the server resolves it for that member only. */
+export const PERSONAL_SKILL_MENTION = /^my-[a-z0-9]{6}$/;
 export function insertSkillMention(text: string, range: { start: number; end: number }, id: string) {
-  if (!ALL_MENTION_IDS.includes(id as typeof ALL_MENTION_IDS[number])) throw Error("技能尚未接入");
+  if (!ALL_MENTION_IDS.includes(id as typeof ALL_MENTION_IDS[number]) && !PERSONAL_SKILL_MENTION.test(id)) throw Error("技能尚未接入");
   const prefix = text.slice(0, range.start) + `@${id} `;
   return { text: prefix + text.slice(range.end), caret: prefix.length };
 }

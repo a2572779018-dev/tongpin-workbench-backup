@@ -6,6 +6,10 @@ import { useAuth } from "../../auth/AuthContext";
 import { ApiRequestError } from "../../lib/api";
 import type { User } from "../../types";
 import { memberMemoryApi, memoryEntryLength, memoryUsagePercent } from "./memberMemoryClient";
+import { memberLearningApi, refreshPersonalSkills } from "./memberLearningClient";
+import { MemberRecallSection } from "./MemberRecallSection";
+import { MemberSkillsSection } from "./MemberSkillsSection";
+import type { AiMemorySkillOperation } from "../../../shared/aiMemoryLearning";
 import { formatAiPoints } from "./quotaFormatting";
 import "./member-memory.css";
 
@@ -85,7 +89,7 @@ export function MemberMemoryPanel({ user, onClose }: { user: User; onClose: () =
       return true;
     } catch (error) {
       if (!aliveRef.current) return false;
-      const conflict = error instanceof ApiRequestError && error.code === "AI_MEMORY_CONFLICT";
+      const conflict = error instanceof ApiRequestError && ["AI_MEMORY_CONFLICT", "AI_MEMORY_SKILL_CONFLICT", "AI_MEMORY_SKILL_NOT_FOUND"].includes(error.code);
       if (conflict) await load();
       setNotice({ kind: "error", text: error instanceof Error ? error.message : "操作失败，请稍后重试" });
       return false;
@@ -95,6 +99,12 @@ export function MemberMemoryPanel({ user, onClose }: { user: User; onClose: () =
     }
   }
   const update = (operation: AiMemoryEntryOperation, success: string) => state ? run(() => client.update(state.revision, operation), success) : Promise.resolve(false);
+  const updateSkill = async (operation: AiMemorySkillOperation, success: string) => {
+    const ok = await run(() => memberLearningApi(api, user.id).updateSkill(operation), success);
+    // The @ list follows adoptions, edits and deletions.
+    if (ok) void refreshPersonalSkills();
+    return ok;
+  };
 
   async function addEntry(event: FormEvent<HTMLFormElement>, target: AiMemoryTarget) {
     event.preventDefault();
@@ -112,6 +122,8 @@ export function MemberMemoryPanel({ user, onClose }: { user: User; onClose: () =
   }
 
   const total = state ? state.stores.memory.entries.length + state.stores.user.entries.length : 0;
+  const adoptedSkills = state?.skills?.items.filter(skill => skill.status === "adopted").length ?? 0;
+  const learned = total + (state?.skills?.items.length ?? 0) + (state?.recall?.recent.length ?? 0) + (state?.recall?.indexedConversations ?? 0);
   const host = document.querySelector(".tp-ai-page") ?? document.body;
   return createPortal(<div className="tp-ai-usage-layer tp-ai-memory-layer">
     <div className="tp-ai-usage-layer__backdrop" aria-hidden="true" onClick={() => { if (!busyRef.current) onClose(); }} />
@@ -123,7 +135,12 @@ export function MemberMemoryPanel({ user, onClose }: { user: User; onClose: () =
       {!state ? <div className="tp-ai-memory-body">
         {loadError ? <><p role="alert" className="tp-ai-memory-notice is-error">{loadError}</p><button type="button" className="tp-ai-memory-button" onClick={() => void load()}>重新读取</button></> : <p role="status">正在读取…</p>}
       </div> : <div className="tp-ai-memory-body">
-        <p className="tp-ai-memory-intro">同频 AI 会在对话结束后整理值得长期记住的信息，在以后的回复中参考，越用越懂你。你可以随时修改或删除。</p>
+        <p className="tp-ai-memory-intro">同频 AI 会在对话结束后整理值得长期记住的信息，记下你常做的事的做法；你提到以前聊过的内容时，它会回忆相关对话。越用越懂你，你可以随时修改或删除。</p>
+        {state.available ? <ul className="tp-ai-memory-summary" aria-label="AI 对你的了解概况">
+          <li><strong>{total}</strong><span>条记忆</span></li>
+          {state.recall ? <li><strong>{state.recall.indexedConversations.toLocaleString("zh-CN")}</strong><span>段对话可回忆</span></li> : null}
+          {state.skills ? <li><strong>{adoptedSkills}</strong><span>个技能</span></li> : null}
+        </ul> : null}
         {!state.available ? <p className="tp-ai-memory-notice" role="status">管理员尚未开启记忆功能：AI 暂不会学习或使用这些内容。你仍可以查看和删除已有记忆。</p> : null}
         <label className={`tp-ai-memory-switch${state.learningEnabled && state.available ? " is-on" : ""}`}>
           <input type="checkbox" role="switch" checked={state.learningEnabled} disabled={busy || !state.available}
@@ -172,17 +189,20 @@ export function MemberMemoryPanel({ user, onClose }: { user: User; onClose: () =
             </form> : null}
           </section>;
         })}
+        {state.recall ? <MemberRecallSection recall={state.recall} /> : null}
+        {state.skills ? <MemberSkillsSection skills={state.skills} busy={busy} onUpdate={updateSkill} /> : null}
         <footer className="tp-ai-memory-footer">
           {confirmClear
-            ? <><span>清空后，两类记忆都会删除且无法恢复；聊天记录和专属 AI 设置不受影响。</span>
+            ? <><span>清空后，两类记忆、回忆记录和 AI 学到的技能都会删除且无法恢复；现有对话仍保留，但不会再被回忆（之后的新对话照常可以回忆）。专属 AI 设置不受影响。</span>
               <button type="button" className="tp-ai-memory-button is-danger" disabled={busy} onClick={() => void run(() => client.clear(), "已清空全部记忆").then(() => setConfirmClear(false))}>确认清空</button>
               <button type="button" className="tp-ai-memory-button is-quiet" disabled={busy} onClick={() => setConfirmClear(false)}>取消</button></>
-            : <button type="button" className="tp-ai-memory-button is-danger-outline" disabled={busy || total === 0} onClick={() => setConfirmClear(true)}><Trash2 size={14} aria-hidden="true" />清空全部记忆</button>}
+            : <button type="button" className="tp-ai-memory-button is-danger-outline" disabled={busy || learned === 0} onClick={() => setConfirmClear(true)}><Trash2 size={14} aria-hidden="true" />清空全部记忆</button>}
         </footer>
         <p className="tp-ai-usage-dialog__notice tp-ai-memory-privacy"><ShieldCheck size={15} aria-hidden="true" />
-          <span>只有你本人能查看和修改这些内容，管理员和老板无法查看。密码、验证码、证件号和银行卡号不会被记住。
-            {state.pricePoints > 0 ? ` AI 更新记忆时，每次按管理员设定扣除 ${formatAiPoints(state.pricePoints)}，没有更新不扣点。` : " 整理记忆不额外扣除同频点。"}</span></p>
-        <p className="tp-ai-memory-footnote"><Info size={13} aria-hidden="true" />新学到的内容会在下一次新对话中生效；你在这里做的修改会立即生效。</p>
+          <span>只有你本人能查看和修改这些内容，管理员和老板无法查看；回忆只会搜索你自己的对话。密码、验证码、证件号和银行卡号不会被记住。
+            {state.pricePoints > 0 ? ` AI 更新记忆或提议技能时，每次按管理员设定扣除 ${formatAiPoints(state.pricePoints)}，没有更新不扣点。` : " 整理记忆和提议技能不额外扣除同频点。"}
+            {state.recall?.enabled ? " 回忆到的片段会作为本次对话的输入，计入正常用量。" : ""}</span></p>
+        <p className="tp-ai-memory-footnote"><Info size={13} aria-hidden="true" />新学到的记忆会在下一次新对话中生效；技能在你采纳后生效；你在这里做的修改会立即生效。</p>
       </div>}
     </section>
   </div>, host);

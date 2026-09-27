@@ -58,6 +58,7 @@ import type { VideoChatRequest } from "./videoChat";
 import { CHAT_MESSAGE_PAGE_SIZE } from "./chatPerformance";
 import { TONGPIN_AI_SKILLS } from "./mockData";
 import { activeSkillMention, insertSkillMention, mentionedToolIds, resolveToolIntent, TOOL_MENTIONS, WORKFLOW_MENTIONS } from "./skillMentions";
+import { usePersonalSkillMentions } from "./memberLearningClient";
 import { ToolPlanRequestGate, toolPlanClientContextKey } from "./toolPlanState";
 import { videoReferencesFromAttachments, type LocalVideoReferenceImage } from "./videoReferenceAttachments";
 import { VoiceInputControl, useVoiceAutoRead, useVoiceTranscriptInsert } from "./voice/VoiceInputControl";
@@ -236,7 +237,9 @@ export function ChatWorkspace({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<ReturnType<typeof activeSkillMention>>();
   const [mentionIndex, setMentionIndex] = useState(0);
+  const personalSkills = usePersonalSkillMentions();
   const mentionSkills = mention ? [
+    ...personalSkills.map(({ id, name }) => ({ id, name: `${name} · 我的技能`, available: true })),
     ...TONGPIN_AI_SKILLS.map(({ id, name }) => ({ id, name, available: true })),
     ...WORKFLOW_MENTIONS.map(({ id, name }) => ({ id, name: `${name} · 工作流`, available: true })),
     // Skills and Hubs are prompt-level capabilities and work on text-only

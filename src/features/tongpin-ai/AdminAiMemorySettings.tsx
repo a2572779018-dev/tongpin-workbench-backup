@@ -19,7 +19,7 @@ export function AdminAiMemorySettings() {
   const account = session?.user.id ?? "";
   const id = useId();
   const [view, setView] = useState<View | null>(null);
-  const [draft, setDraft] = useState<{ enabled: boolean; reviewTier: AiMode; pricePoints: string }>({ enabled: false, reviewTier: "quick", pricePoints: "100" });
+  const [draft, setDraft] = useState<{ enabled: boolean; reviewTier: AiMode; pricePoints: string; recallEnabled: boolean; skillsEnabled: boolean }>({ enabled: false, reviewTier: "quick", pricePoints: "100", recallEnabled: true, skillsEnabled: true });
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -27,7 +27,7 @@ export function AdminAiMemorySettings() {
 
   const apply = useCallback((next: View) => {
     setView(next);
-    setDraft({ enabled: next.settings.enabled, reviewTier: next.settings.reviewTier, pricePoints: String(next.settings.pricePoints) });
+    setDraft({ enabled: next.settings.enabled, reviewTier: next.settings.reviewTier, pricePoints: String(next.settings.pricePoints), recallEnabled: next.settings.recallEnabled !== false, skillsEnabled: next.settings.skillsEnabled !== false });
   }, []);
   const load = useCallback(async (signal?: AbortSignal) => {
     try { const next = await api<View>("/api/admin/ai/memory", { headers: { "X-Tongpin-Account": account }, signal }); if (!signal?.aborted) apply(next); }
@@ -42,14 +42,15 @@ export function AdminAiMemorySettings() {
     if (!Number.isSafeInteger(pricePoints) || pricePoints < 0 || pricePoints > AI_MEMORY_PRICE_MAX) { setNotice({ kind: "error", text: `每次更新记忆的折算需为 0 到 ${number(AI_MEMORY_PRICE_MAX)} 的整数` }); return; }
     busyRef.current = true; setBusy(true); setNotice(null);
     try {
-      apply(await api<View>("/api/admin/ai/memory", { method: "PUT", headers, body: JSON.stringify({ enabled: draft.enabled, reviewTier: draft.reviewTier, pricePoints }) }));
+      apply(await api<View>("/api/admin/ai/memory", { method: "PUT", headers, body: JSON.stringify({ enabled: draft.enabled, reviewTier: draft.reviewTier, pricePoints, recallEnabled: draft.recallEnabled, skillsEnabled: draft.skillsEnabled }) }));
       setNotice({ kind: "success", text: draft.enabled ? "记忆设置已保存，成员的新对话将开始参考并整理记忆" : "记忆设置已保存；已关闭学习和使用，成员仍可查看和删除已有记忆" });
     } catch (error) {
       setNotice({ kind: "error", text: error instanceof Error ? error.message : "记忆设置保存失败" });
     } finally { busyRef.current = false; setBusy(false); }
   }
 
-  const dirty = view !== null && (draft.enabled !== view.settings.enabled || draft.reviewTier !== view.settings.reviewTier || draft.pricePoints !== String(view.settings.pricePoints));
+  const dirty = view !== null && (draft.enabled !== view.settings.enabled || draft.reviewTier !== view.settings.reviewTier || draft.pricePoints !== String(view.settings.pricePoints)
+    || draft.recallEnabled !== (view.settings.recallEnabled !== false) || draft.skillsEnabled !== (view.settings.skillsEnabled !== false));
   const stats = view?.stats;
   return <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`} aria-busy={!view || busy}>
     <header className="tp-ai-admin-heading">
@@ -68,7 +69,10 @@ export function AdminAiMemorySettings() {
             </select></label>
           <label className="tp-ai-admin-field" htmlFor={`${id}-price`}>每次更新记忆折算 · 同频点
             <input id={`${id}-price`} type="number" min="0" max={AI_MEMORY_PRICE_MAX} step="1" value={draft.pricePoints} onChange={event => setDraft(current => ({ ...current, pricePoints: event.target.value }))} /></label>
-          <p className="tp-ai-admin-hint is-wide">建议使用「快速」档位控制成本。只有记忆真的被更新时才向成员扣点，设为 0 表示不扣点（模型用量仍由组织承担）。寒暄和很短的对话不会触发整理，每位成员每天最多整理 40 次；密码、验证码、证件与银行卡号等敏感信息一律不保存。</p>
+          <p className="tp-ai-admin-hint is-wide">建议使用「快速」档位控制成本。只有记忆真的被更新（或提议了技能）时才向成员扣点，设为 0 表示不扣点（模型用量仍由组织承担）。寒暄和很短的对话不会触发整理，每位成员每天最多整理 40 次；密码、验证码、证件与银行卡号等敏感信息一律不保存。</p>
+          <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.recallEnabled} disabled={!draft.enabled} onChange={event => setDraft(current => ({ ...current, recallEnabled: event.target.checked }))} />历史回忆：成员提到以前聊过的内容时，从其本人的其他对话中找出相关片段参考</label>
+          <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.skillsEnabled} disabled={!draft.enabled} onChange={event => setDraft(current => ({ ...current, skillsEnabled: event.target.checked }))} />技能学习：成员多次做同类任务后提议个人技能，成员采纳后才生效</label>
+          <p className="tp-ai-admin-hint is-wide">两项都随记忆开关生效，默认开启。回忆不调用模型，只把少量片段作为对话输入（计入正常用量）；技能提议复用上面的记忆整理档位与每次折算。关闭历史回忆后，已建立的对话索引会在后台删除。</p>
         </fieldset>
         <footer className="tp-ai-admin-actions">
           <button className="tp-ai-admin-button is-primary" type="submit" disabled={busy || !dirty}>{busy ? "保存中…" : "保存记忆设置"}</button>
@@ -82,6 +86,8 @@ export function AdminAiMemorySettings() {
         <div><dt>近 7 天整理</dt><dd>{number(stats.reviews7d.applied)} 次有更新<small>无变化 {number(stats.reviews7d.unchanged)} · 跳过 {number(stats.reviews7d.skipped)} · 失败 {number(stats.reviews7d.failed)}</small></dd></div>
         <div><dt>近 7 天向成员扣点</dt><dd>{formatAiPoints(stats.points7d)}</dd></div>
         <div><dt>近 7 天整理模型用量</dt><dd>{number(stats.tokens7d.input + stats.tokens7d.output)} Token<small>输入 {number(stats.tokens7d.input)} · 输出 {number(stats.tokens7d.output)}</small></dd></div>
+        {stats.recall ? <div><dt>可回忆的成员</dt><dd>{number(stats.recall.indexedMembers)}<small>{number(stats.recall.indexedMessages)} 条消息 · 近 7 天回忆 {number(stats.recall.recalls7d)} 次</small></dd></div> : null}
+        {stats.skills ? <div><dt>个人技能</dt><dd>{number(stats.skills.adopted)} 个已采纳<small>待确认 {number(stats.skills.proposed)} · 近 7 天使用 {number(stats.skills.applied7d)} 次</small></dd></div> : null}
       </dl> : null}
     </>}
   </section>;
