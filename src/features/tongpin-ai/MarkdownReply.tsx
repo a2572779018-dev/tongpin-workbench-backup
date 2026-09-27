@@ -15,6 +15,7 @@ import { ReplyListItem, ReplyOrderedList, ReplyTaskCheckbox, ReplyUnorderedList 
 import { useReplyHighlight } from "./useReplyHighlight";
 import { tableRowsFromHast, tableToCsv, tableToMarkdown, tableToTsv } from "./replyTableData";
 import { TypewriterText } from "./TypewriterText";
+import { useStreamReveal } from "./streamReveal";
 import { saveBlobWithFeedback } from "./downloadFeedback";
 import { ReplyCitationMarker } from "./ReplyCitation";
 import { blockCitations, remarkReplyCitationAnchors, remarkReplyModelCitations, type ReplyBlockCitations, type ReplyCitations } from "./replyCitations";
@@ -177,8 +178,12 @@ export function revealReplyTree(node: ReactNode, visible: number): ReactNode {
 
 /** `citations` belong to a settled reply only: a streaming reply shows plain text. */
 export const MarkdownReply = memo(function MarkdownReply({ content, typing = false, streaming = false, citations }: { content: string; typing?: boolean; streaming?: boolean; citations?: ReplyCitations }) {
+  // Streamed text catches up at a steady pace instead of jumping per network
+  // burst, and keeps rendering as live until it has caught up.
+  const reveal = useStreamReveal(content, streaming && !typing);
+  const live = streaming || reveal.revealing;
   // Keyed by value: an equal marker set on a re-created message keeps every memoized block.
-  const citationKey = citations && !streaming ? JSON.stringify(citations) : "";
+  const citationKey = citations && !live ? JSON.stringify(citations) : "";
   const renderBlock = useMemo<(source: string, start: number) => ReactNode>(() => {
     if (!citationKey) return renderPlainBlock;
     const markers = JSON.parse(citationKey) as ReplyCitations;
@@ -190,9 +195,9 @@ export const MarkdownReply = memo(function MarkdownReply({ content, typing = fal
     ? splitMarkdownIntoBlocks(content).map(block => renderBlock(block.raw, block.start))
     : null, [content, typing, renderBlock]);
   const text = useMemo(() => replyTreeText(tree), [tree]);
-  return <div className="tp-ai-markdown">
+  return <div className={`tp-ai-markdown${live || typing ? " is-live" : ""}`}>
     {typing ? <TypewriterText content={text} render={offset => revealReplyTree(tree, offset)} />
-      : <StableMarkdownBlocks content={content} renderBlock={renderBlock} renderTail={streaming ? renderStreamingTail : undefined} />}
+      : <StableMarkdownBlocks content={live ? reveal.text : content} renderBlock={renderBlock} renderTail={live ? renderStreamingTail : undefined} />}
     {typing && <span className="tp-ai-message__typing-caret" aria-hidden="true" />}
   </div>;
 });

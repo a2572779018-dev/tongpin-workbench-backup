@@ -189,3 +189,12 @@
 .tp-ai-followups button { border: 1px solid #d9cba3; border-radius: 999px; padding: 0.28em 0.85em; background: #faf7ef; color: #5d5138; font: inherit; font-size: 0.86em; cursor: pointer; }
 .tp-ai-followups button:hover { background: #f1ead4; border-color: #a68b31; }
 .tp-ai-followups button:focus-visible { outline: 2px solid #a68b31; outline-offset: 1px; }
+
+/* A reply that appears live (streaming or the local typewriter) eases in once. */
+.tp-ai-markdown.is-live {
+  animation: tp-ai-reply-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+@keyframes tp-ai-reply-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}

@@ -1,7 +1,17 @@
 /* Steer: the running (spinner) send button and pending supplements.
    Selectors carry .tp-ai-page so they outrank chat-layout.css, which loads later. */
-.tp-ai-page .tp-ai-send-button.is-running {
+/* One button for send / busy / steer / stop: its colors ease between states and
+   its glyphs (all always present) cross-fade — the arrow lifts away as a reply
+   starts, the ring grows in and turns, the stop square settles inside it. */
+.tp-ai-page .tp-ai-send-button {
   position: relative;
+  overflow: hidden;
+  transition: background-color 220ms ease, color 220ms ease, border-color 220ms ease, opacity 200ms ease, transform 140ms ease;
+}
+.tp-ai-page .tp-ai-send-button:active:not(:disabled) {
+  transform: scale(0.92);
+}
+.tp-ai-page .tp-ai-send-button.is-running {
   color: #3d3520;
   background: #faf3da;
   cursor: pointer;
@@ -9,14 +19,53 @@
 .tp-ai-page .tp-ai-send-button.is-running:hover:not(:disabled) {
   background: #f3e5b3;
 }
+/* Busy (checking quota, planning a tool) is work in progress, not a disabled control. */
+.tp-ai-page .tp-ai-send-button[data-state="busy"]:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+.tp-ai-send-glyphs {
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.tp-ai-send-glyphs > svg {
+  grid-area: 1 / 1;
+}
+.tp-ai-send-glyph {
+  transition: opacity 180ms ease, transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.tp-ai-send-glyph--stop {
+  opacity: 0;
+  transform: scale(0.2);
+}
+.tp-ai-send-button[data-state="stop"] .tp-ai-send-glyph--stop {
+  opacity: 1;
+  transform: none;
+  transition-delay: 70ms;
+}
+.tp-ai-send-button:is([data-state="stop"], [data-state="busy"]) .tp-ai-send-glyph--arrow {
+  opacity: 0;
+  transform: translateY(-11px) scale(0.55);
+}
 .tp-ai-send-button__ring {
   position: absolute;
   inset: 4px;
   border: 2px solid #e6d7a4;
   border-top-color: #8a6d1d;
   border-radius: 50%;
+  /* Spins through transform; the entrance uses the separate scale property. */
   animation: tp-ai-send-spin 0.9s linear infinite;
+  animation-play-state: paused;
+  opacity: 0;
+  scale: 0.35;
+  transition: opacity 200ms ease, scale 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
   pointer-events: none;
+}
+.tp-ai-send-button:is([data-state="stop"], [data-state="busy"]) .tp-ai-send-button__ring {
+  animation-play-state: running;
+  opacity: 1;
+  scale: 1;
 }
 @keyframes tp-ai-send-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {

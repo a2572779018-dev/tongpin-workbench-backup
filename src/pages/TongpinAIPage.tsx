@@ -30,7 +30,7 @@ import { draftsWithoutComputerRequests, mentionedCapabilityRequest } from "../fe
 import { computerUseConversationRequestMessage } from "../features/tongpin-ai/computerUseFlow";
 import { ComputerRunPanel } from "../features/tongpin-ai/ComputerRunPanel";
 import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
-import { conversationsForPersistence } from "../features/tongpin-ai/chatPerformance";
+import { conversationsForPersistence, typewriterDuration } from "../features/tongpin-ai/chatPerformance";
 import { computerTierNotice } from "../features/tongpin-ai/computerTier";
 import { AI_DOWNLOAD_FEEDBACK_EVENT, saveBlobWithFeedback, type AiDownloadFeedback } from "../features/tongpin-ai/downloadFeedback";
 import { videoReferenceDraftAttachments, videoReferencesFromAttachments } from "../features/tongpin-ai/videoReferenceAttachments";
@@ -1062,7 +1062,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     });
   }
 
-  function displayReply(conversationId: string, messageId: string, response: AiChatResponse, preserveExistingTrace = false) {
+  /** `shownText` is the answer text the member already saw stream in. */
+  function displayReply(conversationId: string, messageId: string, response: AiChatResponse, preserveExistingTrace = false, shownText = "") {
     retryRequestsRef.current.delete(messageId);
     const finish = () => {
       const typing = typingRef.current.get(conversationId);
@@ -1074,10 +1075,20 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       updateReply(conversationId, messageId, completedReply(response, { preserveExistingTrace }));
       clearReplyActivity(conversationId, messageId);
     };
+    // A reply whose text never streamed (an answer wrapped in the dispatch
+    // envelope, a recovered reply) would land all at once: play it in with the
+    // local typewriter first. Stop (Esc) finishes it at once.
+    if (mountedRef.current && !shownText.trim() && response.content.trim() && !typingRef.current.has(conversationId)) {
+      updateReply(conversationId, messageId, { ...completedReply(response, { preserveExistingTrace }), status: "typing" });
+      setReplyActivity(conversationId, messageId, "typing");
+      const timer = window.setTimeout(finish, typewriterDuration(response.content) + 150);
+      typingRef.current.set(conversationId, { timer, messageId, finish });
+      return;
+    }
     finish();
   }
 
-  function acceptGeneration(conversationId: string, messageId: string, response: AiChatResponse | AiImageResponse, harnessPlanRequestId?: string) {
+  function acceptGeneration(conversationId: string, messageId: string, response: AiChatResponse | AiImageResponse, harnessPlanRequestId?: string, shownText = "") {
     const latestConversation = liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId, messageId);
     if (!latestConversation) { clearReplyActivity(conversationId, messageId); return; }
     const imageResult = "images" in response;
@@ -1098,7 +1109,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       updateReply(conversationId, messageId, { artifactId });
     }
     setAiStatus(current => current ? { ...current, quota: response.quota } : current);
-    displayReply(conversationId, messageId, imageResult ? { ...response, content: "图片已生成，点击下方成果查看和下载。" } : response, Boolean(harnessPlanRequestId));
+    displayReply(conversationId, messageId, imageResult ? { ...response, content: "图片已生成，点击下方成果查看和下载。" } : response, Boolean(harnessPlanRequestId), shownText);
   }
 
   async function performChat(conversationId: string, messageId: string, request: GenerationRequest | string) {
@@ -1181,7 +1192,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       if (!("images" in response) && response.dispatch) {
         const decision = response.dispatch;
         if (decision.kind === "text" || decision.clarification) {
-          acceptGeneration(conversationId, messageId, { ...response, content: decision.kind === "text" ? decision.content : decision.clarification! });
+          acceptGeneration(conversationId, messageId, { ...response, content: decision.kind === "text" ? decision.content : decision.clarification! }, undefined, liveContent);
           if (decision.kind !== "text") updateReply(conversationId, messageId, { taskPhase: "awaiting_input" });
           return;
         }
@@ -1227,7 +1238,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         if (computerReady) beginComputerUse(originalPrompt, conversationId, decision.prompt);
         return;
       }
-      acceptGeneration(conversationId, messageId, response, harnessPlanRequestId);
+      acceptGeneration(conversationId, messageId, response, harnessPlanRequestId, liveContent);
     } catch (error) {
       if (!mountedRef.current) return;
       const interrupted = controller.signal.aborted;

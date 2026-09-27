@@ -547,7 +547,9 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
   if (activeId && busy[activeId] && streamContent[activeId]) displayMessages.push({
     id: `stream-${activeId}`, role: "assistant", content: streamContent[activeId].content,
     analysisSummary: streamContent[activeId].analysisSummary || undefined,
-    time: timeLabel(), status: streamContent[activeId].content ? "typing" : "thinking", startedAt: streamContent[activeId].startedAt,
+    // Always "thinking" while it streams: "typing" is the local typewriter for
+    // settled text and restarted its reveal from the top on every delta.
+    time: timeLabel(), status: "thinking", startedAt: streamContent[activeId].startedAt,
     ...(streamContent[activeId].liveProcess ? { liveProcess: streamContent[activeId].liveProcess } : {}),
   });
   const activeArtifacts = new Map(Object.entries(artifacts).filter(([, item]) => item.conversationId === activeId));

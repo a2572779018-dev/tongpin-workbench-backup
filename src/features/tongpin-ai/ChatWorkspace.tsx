@@ -47,6 +47,7 @@ import { AI_IMAGE_ACCEPT, AI_VIDEO_ACCEPT } from "../../../shared/aiMedia";
 import { AttachmentChips } from "./AttachmentChips";
 import { containsFileDrag, uniqueIntakeFiles } from "./attachmentIntake";
 import { ChatMessageRow } from "./ChatMessageRow";
+import { planMessageMotion, playMessageMotion, type MessageMotionBaseline } from "./messageMotion";
 import { ReplyProcessDetailsContext, ReplyProcessDetailsToggle, useReplyProcessDetails } from "./ReplyProcess";
 import { hasReplyProcess } from "./replyProcessModel";
 import { OPEN_MODAL_SELECTOR, shouldStopReplyOnEscape } from "./stopReplyShortcut";
@@ -151,6 +152,18 @@ interface ChatWorkspaceProps {
   onCancelSupplement?: (id: string) => void;
   /** Live unified computer executor panel; replaces the composer while a task runs. */
   computerPanel?: ReactNode;
+}
+
+/** The send button's glyphs, always all present in every state (the three
+ * branches render the same button element and glyphs), so CSS keyed on the
+ * button's data-state cross-fades them: the arrow lifts away, the ring grows
+ * in and turns, the stop square settles inside it (steer.css). */
+function SendButtonGlyphs() {
+  return <span className="tp-ai-send-glyphs" aria-hidden="true">
+    <span className="tp-ai-send-button__ring" />
+    <ArrowUp className="tp-ai-send-glyph tp-ai-send-glyph--arrow" size={20} strokeWidth={2.5} />
+    <Square className="tp-ai-send-glyph tp-ai-send-glyph--stop" size={10} fill="currentColor" />
+  </span>;
 }
 
 export function ChatWorkspace({
@@ -497,6 +510,15 @@ export function ChatWorkspace({
     if (anchor && list) list.scrollTop = anchor.top + list.scrollHeight - anchor.height;
     historyAnchorRef.current = null;
   }, [visibleCount, messages.length]);
+  // Rows appended live ease in, and another conversation fades in once; runs
+  // before paint so a new row never flashes at its final place first.
+  const motionBaselineRef = useRef<MessageMotionBaseline | null>(null);
+  useLayoutEffect(() => {
+    const plan = planMessageMotion(motionBaselineRef.current, conversationId, messages);
+    motionBaselineRef.current = { conversationId, ids: messages.map(message => message.id) };
+    const list = messageListRef.current;
+    if (list) playMessageMotion(list, plan);
+  }, [conversationId, messages]);
   useEffect(() => {
     if (isEmpty) {
       const list = messageListRef.current;
@@ -511,10 +533,22 @@ export function ChatWorkspace({
     followResponseRef.current = true;
     scheduleFollowScroll();
   }, [pendingSupplements.length, scheduleFollowScroll]);
+  // A streamed reply keeps easing in its last words briefly after the request
+  // ends (streamReveal.ts): keep following its height for that moment too.
+  const [replySettling, setReplySettling] = useState(false);
+  const wasRespondingRef = useRef(responding);
+  useEffect(() => {
+    const ended = wasRespondingRef.current && !responding;
+    wasRespondingRef.current = responding;
+    if (!ended) return;
+    setReplySettling(true);
+    const timer = window.setTimeout(() => setReplySettling(false), 1_200);
+    return () => { window.clearTimeout(timer); setReplySettling(false); };
+  }, [responding]);
   useEffect(() => {
     // Local typewriter updates do not rerender this workspace. Observe only the
     // active reply's height to retain follow-to-bottom without a polling loop.
-    if ((!responding && (!lastMessage?.artifactId || artifactById.get(lastMessage.artifactId)?.kind !== "视频")) || typeof ResizeObserver === "undefined") return;
+    if ((!responding && !replySettling && (!lastMessage?.artifactId || artifactById.get(lastMessage.artifactId)?.kind !== "视频")) || typeof ResizeObserver === "undefined") return;
     const list = messageListRef.current;
     // Pending supplements render after the reply; keep observing the reply row itself.
     const rows = list?.querySelectorAll("[data-ai-message-id]");
@@ -525,7 +559,7 @@ export function ChatWorkspace({
     });
     observer.observe(reply);
     return () => observer.disconnect();
-  }, [responding, responsePhase, conversationId, messages.length, lastMessage?.artifactId, artifactById, scheduleFollowScroll]);
+  }, [responding, replySettling, responsePhase, conversationId, messages.length, lastMessage?.artifactId, artifactById, scheduleFollowScroll]);
   useEffect(() => {
     if (composerFocusRequest > 0) composerRef.current?.focus();
   }, [composerFocusRequest]);
@@ -929,7 +963,7 @@ export function ChatWorkspace({
               if (files.length) void addFiles(files);
             }} />
             {!videoOpen && attachments.length ? <AttachmentChips attachments={attachments.map(workspaceAttachment)} onRemove={index => onRemoveAttachment?.(index)} onSelectVideoFrame={onSelectVideoFrame} disabled={responding || readingFiles} /> : null}
-            {readingFiles ? <div className="tp-ai-attachment-progress" role="status"><LoaderCircle size={16} />正在处理附件…<button type="button" onClick={() => attachmentController.current?.abort()}>取消</button></div> : null}
+            {readingFiles ? <div className="tp-ai-attachment-progress" role="status"><LoaderCircle className="is-spinning" size={16} aria-hidden="true" />正在处理附件…<button type="button" onClick={() => attachmentController.current?.abort()}>取消</button></div> : null}
             {composerTool !== "text" ? <div className="tp-ai-composer-capabilities" aria-label="当前生成设置">
               <button type="button" disabled={responding} onClick={() => onComposerToolChange?.("text")} aria-label={`取消${composerTool === "presentation" ? "生成 PPT" : "生成图片"}`}>
                 {composerTool === "presentation" ? <Presentation size={14} /> : <ImageIcon size={14} />}{composerTool === "presentation" ? "生成 PPT" : "生成图片"}<X size={13} />
@@ -1131,28 +1165,29 @@ export function ChatWorkspace({
                 <button
                   type="button"
                   className="tp-ai-send-button is-running"
+                  data-state="stop"
                   aria-label={COMPOSER_STEER_LABELS.stop}
                   aria-keyshortcuts={escapeStops ? "Escape" : undefined}
                   title={escapeStops ? COMPOSER_STEER_LABELS.stopTitle : COMPOSER_STEER_LABELS.stopTitleWithoutEscape}
                   disabled={!onStop}
                   onClick={onStop}
                 >
-                  <span className="tp-ai-send-button__ring" aria-hidden="true" />
-                  <Square size={10} fill="currentColor" aria-hidden="true" />
+                  <SendButtonGlyphs />
                 </button>
               ) : sendMode === "steer" ? (
-                <button type="submit" className="tp-ai-send-button is-steer" aria-label={COMPOSER_STEER_LABELS.steer} title={COMPOSER_STEER_LABELS.steer}>
-                  <ArrowUp size={20} strokeWidth={2.5} />
+                <button type="submit" className="tp-ai-send-button is-steer" data-state="steer" aria-label={COMPOSER_STEER_LABELS.steer} title={COMPOSER_STEER_LABELS.steer}>
+                  <SendButtonGlyphs />
                 </button>
               ) : (
                 <button
                   type="submit"
                   className="tp-ai-send-button"
+                  data-state={checkingQuota || imagePlanning || videoBusy ? "busy" : "send"}
                   disabled={computerMentioned ? responding || readingFiles || !onOpenComputer || attachments.length > 0 : videoOpen ? videoBusy || !draft.trim() : imagePlanning || checkingQuota || readingFiles || quotaInsufficient || (!draft.trim() && !attachments.length) || !serviceConnected || Boolean(connectionError) || connectionLoading || availabilityBlocked || capabilityUnavailable}
                   aria-label={computerMentioned ? "进入安全电脑控制" : videoOpen ? videoBusy ? "正在整理并提交视频任务" : "生成视频" : imagePlanning ? `同频 AI 正在整理并提交${composerTool === "presentation" ? "PPT" : "图片"}任务` : composerTool === "image" ? "生成图片" : composerTool === "presentation" ? "生成 PPT" : checkingQuota ? "正在核对额度" : "发送消息"}
                   aria-busy={checkingQuota || imagePlanning || videoBusy}
                 >
-                  {checkingQuota || imagePlanning || videoBusy ? <LoaderCircle size={20} /> : <ArrowUp size={20} strokeWidth={2.5} />}
+                  <SendButtonGlyphs />
                 </button>
               )}
             </div>

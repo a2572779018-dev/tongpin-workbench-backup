@@ -152,6 +152,7 @@ describe("composer rendering while a reply runs", () => {
     expect(markup).toContain(`aria-label="${COMPOSER_STEER_LABELS.stop}"`);
     expect(markup).toContain('title="停止（Esc）"');
     expect(markup).toContain('aria-keyshortcuts="Escape"');
+    expect(markup).toContain('data-state="stop"');
     expect(markup).toContain('class="tp-ai-send-button__ring"');
     expect(markup).not.toContain(COMPOSER_STEER_LABELS.steer);
     const textarea = /<textarea[^>]*id="tp-ai-message-input"[^>]*>/.exec(markup)?.[0] ?? "";
@@ -162,8 +163,9 @@ describe("composer rendering while a reply runs", () => {
   it("turns the spinner back into a send button once text is typed, without Esc stopping", () => {
     const markup = render({ onSteer: () => true, draft: "改成英文" });
     expect(markup).toContain(`aria-label="${COMPOSER_STEER_LABELS.steer}"`);
-    expect(markup).toMatch(/<button type="submit" class="tp-ai-send-button is-steer"/);
-    expect(markup).not.toContain('class="tp-ai-send-button__ring"');
+    expect(markup).toMatch(/<button type="submit" class="tp-ai-send-button is-steer" data-state="steer"/);
+    // The ring stays in the button (so it can fade out) but only stop/busy show and turn it.
+    expect(markup).not.toContain('data-state="stop"');
     expect(markup).not.toContain('aria-keyshortcuts="Escape"');
     expect(markup).toContain("Enter 发送补充，不会打断当前回复");
   });
@@ -175,7 +177,8 @@ describe("composer rendering while a reply runs", () => {
     expect(markup).not.toContain(COMPOSER_STEER_LABELS.steer);
     const idle = render({ responding: false, draft: "新问题", messages: [user, reply({ status: "ready", content: "好的" })] });
     expect(idle).toContain('aria-label="发送消息"');
-    expect(idle).not.toContain('class="tp-ai-send-button__ring"');
+    expect(idle).toContain('data-state="send"');
+    expect(idle).not.toContain('data-state="stop"');
   });
 
   it("shows pending supplements after the running reply with a 补充 tag, status and withdraw button", () => {
@@ -202,6 +205,9 @@ describe("steer styles and wiring", () => {
   it("rotates the ring only when motion is allowed", () => {
     const css = readFileSync(new URL("./steer.css", import.meta.url), "utf8");
     expect(css).toContain("animation: tp-ai-send-spin 0.9s linear infinite;");
+    // Shown and turning only while stopping is possible or the send is busy.
+    expect(css).toContain("animation-play-state: paused;");
+    expect(css).toMatch(/:is\(\[data-state="stop"\], \[data-state="busy"\]\) \.tp-ai-send-button__ring \{\s*animation-play-state: running;/);
     const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
     expect(reduced).toContain(".tp-ai-send-button__ring");
     expect(reduced).toContain("animation: none;");

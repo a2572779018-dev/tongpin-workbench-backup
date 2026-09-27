@@ -1418,7 +1418,8 @@ export function AppShell({
           </header>
         ) : null}
 
-        <div className="page-canvas">
+        {/* Keyed by view: each page switch mounts a fresh canvas, which eases in (page-enter). */}
+        <div className="page-canvas" key={view}>
           <NotificationToolbarProvider value={notificationToolbar}>
             {children}
           </NotificationToolbarProvider>

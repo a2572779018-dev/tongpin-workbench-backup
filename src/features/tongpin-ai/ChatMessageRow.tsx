@@ -85,10 +85,15 @@ export const ChatMessageRow = memo(function ChatMessageRow({
         </li>)}
       </ul> : null}
       {message.role === "assistant" ? <ReplyProcess message={message} artifact={artifact} onTraceChange={onTraceChange} /> : null}
-      {message.status === "thinking" ? <>{message.content ? <MarkdownReply content={message.content} streaming /> : null}{!processShown && !message.content ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> : null}</> :
-        message.role === "assistant" && message.status !== "error"
-          ? <MarkdownReply content={message.content} typing={message.status === "typing"} citations={citations} />
-          : <p>{message.content}</p>}
+      {/* One MarkdownReply from the first streamed word to the settled reply: it
+          is never remounted between thinking, typing and ready, so the text
+          does not flash or restart when the reply completes. */}
+      {message.role === "assistant" && message.status !== "error" ? <>
+        {message.content || message.status !== "thinking"
+          ? <MarkdownReply content={message.content} streaming={message.status === "thinking"} typing={message.status === "typing"} citations={citations} />
+          : null}
+        {message.status === "thinking" && !processShown && !message.content ? <ReplyWaiting key={message.id} startedAt={message.startedAt} /> : null}
+      </> : message.status === "thinking" && !message.content ? null : <p>{message.content}</p>}
       {message.artifactId && !artifact ? <button type="button" className="tp-ai-artifact-card" onClick={() => onOpenArtifact(message.artifactId!)}>
         成果暂未加载，点击重试
       </button> : null}
