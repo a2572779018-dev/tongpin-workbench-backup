@@ -106,3 +106,28 @@ describe("ChatMessageRow memo", () => {
     expect(workspace).toContain("followFrameRef.current = requestAnimationFrame(");
   });
 });
+
+describe("opening the AI page", () => {
+  it("reads as opening, not as a lock, while it loads", async () => {
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { AiAccessState } = await import("./AiAccessState");
+    const loading = renderToStaticMarkup(createElement(AiAccessState, { name: "小秋", loading: true, onRetry: () => undefined }));
+    expect(loading).toContain('class="tp-ai-entry is-loading"');
+    expect(loading).toContain("正在打开同频 AI");
+    expect(loading).toContain("tp-ai-entry__spinner");
+    expect(loading).not.toContain("<button");
+    const locked = renderToStaticMarkup(createElement(AiAccessState, { name: "小秋", loading: false, locked: true, onRetry: () => undefined }));
+    expect(locked).toContain('class="tp-ai-entry"');
+    expect(locked).toContain("你的 AI 还未开通");
+    expect(locked).not.toContain("tp-ai-entry__spinner");
+  });
+
+  it("delays the loading card, eases the workspace in with opacity only, and stays still under reduced motion", () => {
+    const css = readFileSync(new URL("./ai-refinements.css", import.meta.url), "utf8");
+    expect(css).toMatch(/\.tp-ai-entry\.is-loading \.tp-ai-entry__card,\n\.tp-ai-entry\.is-loading \.tp-ai-entry__account \{ animation: tp-ai-entry-wait 220ms ease 320ms backwards; \}/);
+    expect(css).toContain(".tp-ai-page { animation: tp-ai-page-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }");
+    expect(css).toContain("@keyframes tp-ai-page-in { from { opacity: 0; } }");
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\n  \.tp-ai-entry\.is-loading \.tp-ai-entry__card,\n  \.tp-ai-entry\.is-loading \.tp-ai-entry__account,\n  \.tp-ai-entry__spinner,\n  \.tp-ai-page \{ animation: none; \}\n\}/);
+  });
+});

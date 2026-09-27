@@ -69,6 +69,23 @@
 .tp-ai-entry__account { position: absolute; bottom: 20px; left: 24px; max-width: calc(100% - 48px); overflow-wrap: anywhere; font-size: 12px; color: #736c5b; }
 .tp-ai-entry--setup { padding: 0; }
 .tp-ai-entry--setup button { margin-top: 0; }
+/* Opening the AI page: the loading card waits a moment before it fades in (a
+   quick load never flashes it), and the workspace eases in once its data has
+   loaded. Opacity only: a transform on the page would re-anchor its fixed
+   dialogs while the animation runs. */
+.tp-ai-entry.is-loading .tp-ai-entry__card,
+.tp-ai-entry.is-loading .tp-ai-entry__account { animation: tp-ai-entry-wait 220ms ease 320ms backwards; }
+.tp-ai-entry__spinner { animation: tp-ai-entry-spin .9s linear infinite; }
+.tp-ai-page { animation: tp-ai-page-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+@keyframes tp-ai-entry-wait { from { opacity: 0; } }
+@keyframes tp-ai-entry-spin { to { transform: rotate(360deg); } }
+@keyframes tp-ai-page-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .tp-ai-entry.is-loading .tp-ai-entry__card,
+  .tp-ai-entry.is-loading .tp-ai-entry__account,
+  .tp-ai-entry__spinner,
+  .tp-ai-page { animation: none; }
+}
 .tp-ai-persona-memory-note { font-size: 12px; line-height: 1.65; color: #716d60; margin: 12px 0; }
 .tp-ai-page .tp-ai-budget-notice { gap: 12px; flex-wrap: wrap; padding: 12px 14px; background: #faf2d8; border: 1px solid #d6c58e; border-radius: 12px; color: #5d4d25; box-shadow: none; }
 .tp-ai-budget-notice > span { flex: 1 1 260px; min-width: 0; }

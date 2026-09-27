@@ -3,7 +3,7 @@ import type { AiHarnessTrace } from "../../../shared/ai";
 import type { AiVideoJob } from "../../../shared/aiVideo";
 import type { AiWorkspaceSnapshot } from "../../../shared/aiWorkspace";
 import { ApiRequestError } from "../../lib/api";
-import { collectBackgroundAiWork, pollBackgroundAiWork, startBackgroundAiContinuation, type BackgroundAiApi } from "./AiHarnessContinuationRunner";
+import { collectBackgroundAiWork, countAiViewLeave, pollBackgroundAiWork, startBackgroundAiContinuation, type BackgroundAiApi } from "./AiHarnessContinuationRunner";
 import { notifyAiWorkspaceSaved } from "./workspaceLeaveGuard";
 
 function trace(status: AiHarnessTrace["status"]): AiHarnessTrace {
@@ -368,5 +368,26 @@ describe("App-root AI continuation discovery", () => {
     notifyAiWorkspaceSaved("member-a");
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(workspaceReads).toBe(readsAfterStop);
+  });
+});
+
+describe("App-root runner restarts", () => {
+  it("counts leaving the AI view, not entering it", () => {
+    let state = { active: false, leaves: 0 };
+    state = countAiViewLeave(state, true);
+    expect(state).toEqual({ active: true, leaves: 0 });
+    state = countAiViewLeave(state, false);
+    expect(state).toEqual({ active: false, leaves: 1 });
+    expect(countAiViewLeave(state, false)).toBe(state);
+    state = countAiViewLeave(countAiViewLeave(state, true), false);
+    expect(state.leaves).toBe(2);
+  });
+
+  it("restarts on a leave only: entering the AI view no longer adds a second whole-workspace read", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("./AiHarnessContinuationRunner.tsx", import.meta.url), "utf8");
+    expect(source).toContain("const leaves = useAiViewLeaves(aiViewActive);");
+    expect(source).toContain("}, [accountId, api, leaves]);");
+    expect(source).not.toContain("[accountId, aiViewActive, api]");
   });
 });

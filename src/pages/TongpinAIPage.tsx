@@ -43,7 +43,7 @@ import { generatedMediaForFollowup, generatedMediaForMixedFollowup, readGenerate
 import { readGeneratedImageSelection, type GeneratedImageSelection } from "../features/tongpin-ai/generatedImageSelection";
 import { persistedVideoChatRequest, type VideoChatRequest } from "../features/tongpin-ai/videoChat";
 import { explicitVideoChoice, naturalVideoRequest } from "../features/tongpin-ai/naturalVideoRequest";
-import { parseMediaTaskResponse, type MediaTaskRun } from "../features/tongpin-ai/mediaTaskClient";
+import { mediaArtifactAwaitsTask, parseMediaTaskResponse, type MediaTaskRun } from "../features/tongpin-ai/mediaTaskClient";
 import { preserveVideoClarificationDraft } from "../features/tongpin-ai/videoDraftRecovery";
 import { hasConversationActivity } from "../features/tongpin-ai/conversationActivity";
 import { captureSubmission, mergeContinuation, type SubmissionSnapshot } from "../features/tongpin-ai/submissionSnapshot";
@@ -393,11 +393,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     };
     void poll(); return () => { controller.abort(); clearTimeout(timer); };
   }, [api, user.id, pendingVideoIds]);
-  const pendingMediaRequests = artifacts.filter(artifact => typeof artifact.data?.mediaTaskRequestId === "string" && !artifact.data.mediaTaskSubmitError && (
-    !["completed", "failed", "cancelled"].includes(String(artifact.data.mediaTaskStatus))
-    || artifact.kind === "图片" && !Array.isArray(artifact.data.images)
-    || artifact.kind === "视频" && !artifact.data.mediaTaskServiceRequestId
-  )).map(artifact => `${artifact.conversationId}\t${artifact.data!.mediaTaskRequestId}\t${artifact.kind === "视频" ? "video" : "image"}`).sort().join("\n");
+  const pendingMediaRequests = artifacts.filter(mediaArtifactAwaitsTask)
+    .map(artifact => `${artifact.conversationId}\t${artifact.data!.mediaTaskRequestId}\t${artifact.kind === "视频" ? "video" : "image"}`).sort().join("\n");
   useEffect(() => {
     if (!pendingMediaRequests) return;
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;

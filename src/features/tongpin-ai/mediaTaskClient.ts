@@ -35,6 +35,25 @@ const statuses = new Set<MediaTaskStatus>([
   "running", "partial", "completed", "failed", "cancelled", "unknown",
 ]);
 
+/**
+ * Whether a saved media artifact still waits on its task, so the page keeps
+ * reading the task by request id: the task has not finished, or it completed
+ * and its results have not reached the artifact yet (the images, the video's
+ * service request). A failed or cancelled task has no results to wait for and
+ * is not read again (it used to be re-read every 12 s for as long as the page
+ * stayed open).
+ */
+export function mediaArtifactAwaitsTask(artifact: { kind: string; data?: { [key: string]: unknown } }): boolean {
+  const data = artifact.data;
+  if (typeof data?.mediaTaskRequestId !== "string" || data.mediaTaskSubmitError) return false;
+  const status = String(data.mediaTaskStatus);
+  if (status === "failed" || status === "cancelled") return false;
+  if (status !== "completed") return true;
+  if (artifact.kind === "图片") return !Array.isArray(data.images);
+  if (artifact.kind === "视频") return !data.mediaTaskServiceRequestId;
+  return false;
+}
+
 export const mediaTaskReadPath = (requestId: string): string =>
   `/api/ai/media-tasks/by-request/${encodeURIComponent(requestId)}`;
 

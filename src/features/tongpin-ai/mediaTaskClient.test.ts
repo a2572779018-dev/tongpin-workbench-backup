@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  mediaArtifactAwaitsTask,
   mediaTaskAnswerPath,
   mediaTaskAuthorizationAmount,
   mediaTaskAuthorizePath,
@@ -58,5 +59,41 @@ describe("media task reply client boundary", () => {
     expect(mediaTaskNeedsPolling("partial")).toBe(true);
     expect(mediaTaskIsSettled("unknown")).toBe(true);
     expect(mediaTaskNeedsPolling("completed")).toBe(false);
+  });
+});
+
+describe("page-level reads of saved media tasks", () => {
+  const image = (data: Record<string, unknown>) => ({ kind: "图片", data: { mediaTaskRequestId: "request-1", ...data } });
+  const video = (data: Record<string, unknown>) => ({ kind: "视频", data: { mediaTaskRequestId: "request-2", ...data } });
+
+  it("keeps reading a task that is still running, or completed without its results on the artifact yet", () => {
+    for (const status of ["queued", "planning", "awaiting_input", "awaiting_authorization", "running", "partial", "unknown", undefined]) {
+      expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: status }))).toBe(true);
+    }
+    expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: "completed" }))).toBe(true);
+    expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: "completed", images: [{ assetId: "a" }] }))).toBe(false);
+    expect(mediaArtifactAwaitsTask(video({ mediaTaskStatus: "completed" }))).toBe(true);
+    expect(mediaArtifactAwaitsTask(video({ mediaTaskStatus: "completed", mediaTaskServiceRequestId: "svc-1" }))).toBe(false);
+  });
+
+  it("stops at a failed or cancelled task, which has no results to wait for", () => {
+    // Before: a cancelled video without a service request (or a failed image
+    // without images) was read again every 12 s for as long as the page stayed open.
+    expect(mediaArtifactAwaitsTask(video({ mediaTaskStatus: "cancelled" }))).toBe(false);
+    expect(mediaArtifactAwaitsTask(video({ mediaTaskStatus: "failed" }))).toBe(false);
+    expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: "failed" }))).toBe(false);
+    expect(mediaArtifactAwaitsTask(image({ mediaTaskStatus: "cancelled" }))).toBe(false);
+  });
+
+  it("decides the page's background reads", async () => {
+    const { readFileSync } = await import("node:fs");
+    const page = readFileSync(new URL("../../pages/TongpinAIPage.tsx", import.meta.url), "utf8");
+    expect(page).toContain("const pendingMediaRequests = artifacts.filter(mediaArtifactAwaitsTask)");
+  });
+
+  it("ignores artifacts that are not media tasks or were never submitted", () => {
+    expect(mediaArtifactAwaitsTask({ kind: "图片" })).toBe(false);
+    expect(mediaArtifactAwaitsTask({ kind: "视频", data: { videoJobId: "job-1" } })).toBe(false);
+    expect(mediaArtifactAwaitsTask(image({ mediaTaskSubmitError: "余额不足" }))).toBe(false);
   });
 });

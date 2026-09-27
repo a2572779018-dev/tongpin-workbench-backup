@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { AiHarnessTrace } from "../../../shared/ai";
 import type { AiVideoJob } from "../../../shared/aiVideo";
 import type { AiWorkspaceSnapshot } from "../../../shared/aiWorkspace";
@@ -231,12 +231,36 @@ export function startBackgroundAiContinuation(
  */
 export function AiHarnessContinuationRunner({ accountId, aiViewActive }: { accountId: string; aiViewActive: boolean }) {
   const { api } = useAuth();
+  const leaves = useAiViewLeaves(aiViewActive);
 
   useEffect(() => {
     return startBackgroundAiContinuation(api, accountId);
     // Leaving the AI view restarts the runner after App has flushed the latest
-    // workspace, so newly-created work is discovered immediately.
-  }, [accountId, aiViewActive, api]);
+    // workspace, so newly-created work is discovered immediately. Entering it
+    // does not: the page reads the whole workspace itself at that moment, and
+    // a second read in parallel only slowed the page's first paint.
+  }, [accountId, api, leaves]);
 
   return null;
+}
+
+export interface AiViewLeaves { active: boolean; leaves: number }
+
+/** One more leave when the AI view goes from active to inactive. */
+export function countAiViewLeave(state: AiViewLeaves, active: boolean): AiViewLeaves {
+  if (state.active === active) return state;
+  return { active, leaves: state.leaves + (state.active && !active ? 1 : 0) };
+}
+
+/** Counts the times the AI view was left. Adjusted during render (React's
+ * "state from a changed prop" pattern), so a leave restarts the runner in the
+ * same commit as the view change, as before. */
+export function useAiViewLeaves(aiViewActive: boolean): number {
+  const [state, setState] = useState<AiViewLeaves>({ active: aiViewActive, leaves: 0 });
+  if (state.active !== aiViewActive) {
+    const next = countAiViewLeave(state, aiViewActive);
+    setState(next);
+    return next.leaves;
+  }
+  return state.leaves;
 }
