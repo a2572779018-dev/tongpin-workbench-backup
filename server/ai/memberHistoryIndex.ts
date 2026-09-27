@@ -44,7 +44,9 @@ const PARTIAL = "~partial";
 
 interface StateRow {
   generation: number; mode: string; complete: number; source_version: number; source_revision: number; conversations: string;
-  indexed_chars: number; indexed_chunks: number; indexed_messages: number; indexed_conversations: number; updated_at: number;
+  indexed_chars: number; indexed_chunks: number; indexed_messages: number; indexed_conversations: number;
+  /** Clear-all time: messages dated before it (or undated) are never indexed again. */
+  forgotten_before: number; updated_at: number;
 }
 interface ConversationRow { conversation_id: string; generation: number; title: string; fingerprint: string; source_revision: number; status: string; messages: string; last_at: number; chars: number; chunks: number }
 
@@ -58,6 +60,8 @@ export interface HistorySyncInput {
   revision: number | null;
   /** New messages were just written (their time is "now" when no request date exists). */
   live: boolean;
+  /** Ids the write itself added (a V2 append): "now" when undated, even right after a reset. */
+  written?: ReadonlySet<string>;
   budget: { messages: number; characters: number };
 }
 export interface HistorySyncResult { complete: boolean; indexed: number; removed: number; truncated: boolean }
@@ -121,7 +125,7 @@ export class AiMemberHistoryIndex {
 
   // ------------------------------------------------------------------ state
   private state(user: string): StateRow | undefined {
-    return this.sql.all<StateRow>("SELECT generation,mode,complete,source_version,source_revision,conversations,indexed_chars,indexed_chunks,indexed_messages,indexed_conversations,updated_at FROM ai_member_history_state WHERE tenant_id=? AND user_id=?", this.tenantId, user)[0];
+    return this.sql.all<StateRow>("SELECT generation,mode,complete,source_version,source_revision,conversations,indexed_chars,indexed_chunks,indexed_messages,indexed_conversations,forgotten_before,updated_at FROM ai_member_history_state WHERE tenant_id=? AND user_id=?", this.tenantId, user)[0];
   }
   private ensureState(user: string, now: number): StateRow {
     const existing = this.state(user);
@@ -202,6 +206,9 @@ export class AiMemberHistoryIndex {
       const state = this.ensureState(user, now);
       const generation = state.generation;
       const baseline = state.mode === "baseline";
+      // After a clear-all, messages dated before it (or undated) stay out of the
+      // index, across later resets too (organization or member switch off/on).
+      const forgotten = (at: number) => state.forgotten_before > 0 ? at === 0 || at < state.forgotten_before : baseline;
       const map = parseMap(state.conversations);
       const seen = new Set<string>();
       let spentMessages = 0, spentChars = 0, truncated = false, indexed = 0, removed = 0;
@@ -219,8 +226,14 @@ export class AiMemberHistoryIndex {
         if (truncated) continue;
         const row = this.sql.all<ConversationRow>("SELECT conversation_id,generation,title,fingerprint,source_revision,status,messages,last_at,chars,chunks FROM ai_member_history_conversations WHERE tenant_id=? AND user_id=? AND conversation_id=?",
           this.tenantId, user, conversation.id)[0];
-        const stored = new Map((row && row.generation === generation ? parseMessages(row.messages) : []).map(item => [item[0], item] as const));
-        if (row && row.generation !== generation) this.deleteChunks(user, conversation.id);
+        const known = row !== undefined && row.generation === generation;
+        const stored = new Map((known ? parseMessages(row.messages) : []).map(item => [item[0], item] as const));
+        if (row && !known) this.deleteChunks(user, conversation.id);
+        // "Now" dates an undated message only when it was just written: in a
+        // conversation this generation already covers, or anywhere once the
+        // index is complete. After a reset every old message looks fresh and
+        // keeps its request date (or none).
+        const liveDates = input.live && (known || state.complete === 1);
         const current = new Map(messages.map(message => [message.id, message] as const));
         // Deleted or edited messages leave the index first.
         for (const [id, item] of stored) {
@@ -248,7 +261,7 @@ export class AiMemberHistoryIndex {
         let previous = 0;
         for (const message of messages) {
           const at = ats.get(message.id) ?? 0;
-          if (at) previous = at; else ats.set(message.id, input.live ? now : previous);
+          if (at) previous = at; else ats.set(message.id, liveDates || input.written?.has(message.id) ? now : previous);
         }
         // Newest first: recent messages are indexed first and survive the
         // per-conversation cap. Messages already indexed are always carried
@@ -270,7 +283,8 @@ export class AiMemberHistoryIndex {
           }
           const at = ats.get(message.id) ?? 0;
           const role = message.role === "user" ? "u" : "a";
-          if (baseline) { next.set(message.id, [message.id, message.fingerprint, SUPPRESSED, at, role, 0]); continue; }
+          // Existing before a clear-all: recorded as seen, never indexed.
+          if (forgotten(at)) { next.set(message.id, [message.id, message.fingerprint, SUPPRESSED, at, role, 0]); continue; }
           if (!input.live && memberFull()) { next.set(message.id, [message.id, message.fingerprint, CAPPED, at, role, 0]); continue; }
           if (overBudget()) { truncated = true; complete = false; continue; }
           const text = historyIndexText(message.content);
@@ -285,7 +299,7 @@ export class AiMemberHistoryIndex {
         const lastAt = ordered.reduce((max, item) => Math.max(max, item[3]), 0);
         const chunkTotal = ordered.reduce((sum, item) => sum + Math.max(0, item[2]), 0);
         const charTotal = ordered.reduce((sum, item) => sum + (item[2] > 0 ? item[5] : 0), 0);
-        const status = baseline ? "suppressed" : !complete ? "partial" : chunkTotal === 0 && ordered.some(item => item[2] === CAPPED) ? "capped" : "indexed";
+        const status = !complete ? "partial" : chunkTotal > 0 ? "indexed" : ordered.some(item => item[2] === CAPPED) ? "capped" : ordered.some(item => item[2] === SUPPRESSED) ? "suppressed" : "indexed";
         this.sql.exec(`INSERT INTO ai_member_history_conversations(tenant_id,user_id,conversation_id,generation,title,fingerprint,source_revision,status,messages,last_at,chars,chunks,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(tenant_id,user_id,conversation_id) DO UPDATE SET generation=excluded.generation,title=excluded.title,fingerprint=excluded.fingerprint,source_revision=excluded.source_revision,status=excluded.status,messages=excluded.messages,last_at=excluded.last_at,chars=excluded.chars,chunks=excluded.chunks,updated_at=excluded.updated_at`,
         this.tenantId, user, conversation.id, generation, conversation.title.slice(0, 200), fingerprint, conversation.revision ?? 0, status, JSON.stringify(ordered), lastAt, charTotal, chunkTotal, now);
@@ -437,17 +451,18 @@ export class AiMemberHistoryIndex {
    * existing messages as already seen instead of indexing them (clear-all);
    * `sync`: the next sync indexes everything again (re-enable).
    */
-  reset(userId: string, mode: "sync" | "baseline", options: { enqueue?: boolean } = {}): void {
+  reset(userId: string, mode: "sync" | "baseline", options: { enqueue?: boolean; forgetBefore?: number } = {}): void {
     const user = this.userKey(userId);
     this.sql.transaction(() => {
       const now = Date.now();
       const state = this.state(user);
+      const forgotten = Math.max(state?.forgotten_before ?? 0, options.forgetBefore ?? 0);
       if (!state) {
-        this.sql.exec("INSERT INTO ai_member_history_state(tenant_id,user_id,generation,mode,complete,updated_at) VALUES(?,?,1,?,0,?)", this.tenantId, user, mode, now);
+        this.sql.exec("INSERT INTO ai_member_history_state(tenant_id,user_id,generation,mode,complete,forgotten_before,updated_at) VALUES(?,?,1,?,0,?,?)", this.tenantId, user, mode, forgotten, now);
       } else {
         const generation = state.generation + 1;
-        this.sql.exec(`UPDATE ai_member_history_state SET generation=?,mode=?,complete=0,source_revision=-1,conversations='{}',indexed_chars=0,indexed_chunks=0,indexed_messages=0,indexed_conversations=0,updated_at=? WHERE tenant_id=? AND user_id=?`,
-          generation, mode, now, this.tenantId, user);
+        this.sql.exec(`UPDATE ai_member_history_state SET generation=?,mode=?,complete=0,source_revision=-1,conversations='{}',indexed_chars=0,indexed_chunks=0,indexed_messages=0,indexed_conversations=0,forgotten_before=?,updated_at=? WHERE tenant_id=? AND user_id=?`,
+          generation, mode, forgotten, now, this.tenantId, user);
         this.sql.exec("INSERT INTO ai_member_history_purges(tenant_id,user_id,below_generation,created_at) VALUES(?,?,?,?) ON CONFLICT(tenant_id,user_id) DO UPDATE SET below_generation=excluded.below_generation",
           this.tenantId, user, generation, now);
       }
@@ -461,7 +476,8 @@ export class AiMemberHistoryIndex {
   resetTenant(): void {
     this.sql.transaction(() => {
       const now = Date.now();
-      this.sql.exec(`UPDATE ai_member_history_state SET generation=generation+1,mode='sync',complete=0,source_revision=-1,conversations='{}',indexed_chars=0,indexed_chunks=0,indexed_messages=0,indexed_conversations=0,updated_at=? WHERE tenant_id=?`, now, this.tenantId);
+      // A member's clear-all (baseline mode / forgotten_before) survives the organization switch.
+      this.sql.exec(`UPDATE ai_member_history_state SET generation=generation+1,mode=CASE WHEN mode='baseline' THEN 'baseline' ELSE 'sync' END,complete=0,source_revision=-1,conversations='{}',indexed_chars=0,indexed_chunks=0,indexed_messages=0,indexed_conversations=0,updated_at=? WHERE tenant_id=?`, now, this.tenantId);
       this.sql.exec(`INSERT INTO ai_member_history_purges(tenant_id,user_id,below_generation,created_at) SELECT tenant_id,user_id,generation,? FROM ai_member_history_state WHERE tenant_id=? ON CONFLICT(tenant_id,user_id) DO UPDATE SET below_generation=excluded.below_generation`, now, this.tenantId);
       this.sql.exec("DELETE FROM ai_member_history_conversations WHERE tenant_id=?", this.tenantId);
       this.sql.exec("DELETE FROM ai_member_history_queue WHERE tenant_id=?", this.tenantId);

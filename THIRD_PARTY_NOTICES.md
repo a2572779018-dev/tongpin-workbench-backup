@@ -1055,7 +1055,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## NousResearch Hermes Agent (member memory learning loop)
+## NousResearch Hermes Agent (member memory learning loop, history recall, personal skills)
 
 - Source: https://github.com/NousResearch/hermes-agent
 - Commit: `d0288be5b3330d2442e3907185b8e9d0958297bb`
@@ -1066,8 +1066,11 @@ SOFTWARE.
   agent and gives the fork a `memory` tool; Tongpin runs inside a Cloudflare
   Durable Object with an Express mirror, so the review is one journaled
   strict-JSON model call (plus at most one consolidation retry) whose
-  operations are validated and applied by TypeScript code. No Hermes code,
-  gateway, skills, session database or external memory provider is bundled.
+  operations are validated and applied by TypeScript code. History recall
+  (Hermes `session_search`) and skill learning are likewise re-implemented in
+  TypeScript on the AI SQLite database. No Hermes code, gateway, bundled or
+  hub skills, session database, loadable SQLite extension or external memory
+  provider is bundled.
 - Adapted files (upstream → Tongpin):
   - `tools/memory_tool_store.py` (`MemoryStore`: character budgets counting the
     `\n§\n` delimiter, unique-substring `old_text` matching with whole-entry
@@ -1092,11 +1095,38 @@ SOFTWARE.
     `MemoryUpdateIndicator.tsx`.
   - `tests/tools/test_memory_tool.py` → test semantics and scanner cases in
     `server/ai/memberMemoryStore.test.ts` and `server/ai/memberMemorySafety.test.ts`.
+  - `tools/session_search_tool.py` (discovery shape: search past sessions but
+    never the current one, one hit per session, bounded excerpts with session
+    title and date, real stored messages instead of a model summary, an
+    "index still rebuilding" note) → `server/ai/memberHistoryRecall.ts`,
+    `server/ai/memberLearning.ts`, `src/features/tongpin-ai/MemberRecallSection.tsx`.
+  - `hermes_state_fts.py` / `hermes_state_search.py` (FTS5 with the `trigram`
+    tokenizer for substring matching of CJK text, a bounded substring scan for
+    1–2 character CJK terms, quoted FTS terms, deferred index backfill in
+    bounded chunks) → `server/ai/memberHistoryIndex.ts`,
+    `server/ai/memberHistoryText.ts`, `server/ai/memberLearningSchema.ts`.
+  - `tools/skill_manager_tool.py` (bounded name / description / body,
+    validation and security scan before any write), `tools/skill_usage.py`
+    (use counters, active → stale lifecycle) and `agent/background_review.py`
+    (`_LESSON_LAYER_BLOCK`, `_DO_NOT_CAPTURE_BLOCK`, the combined "memory and
+    skills" review, "update an existing skill before creating one") →
+    `server/ai/memberSkills.ts`, the skill section of the reviewer
+    instructions in `server/ai/memberMemoryPrompt.ts`,
+    `src/features/tongpin-ai/MemberSkillsSection.tsx`.
 - Tongpin changes: Chinese character budgets (memory 1,000 / user 600, see
   `shared/aiMemory.ts`), per-member SQLite storage with revisions instead of
   files, per-conversation frozen snapshots with a 6-hour lifetime, member-only
   access, an administrator switch/tier/price, and billing through the existing
-  quota ledger only when memory actually changes.
+  quota ledger only when memory actually changes. Recall: one shared SQLite
+  database, so every row carries tenant and member and the FTS table is only a
+  candidate generator re-filtered on them; incremental indexing from workspace
+  saves; a TypeScript character-bigram coverage ranking instead of Hermes'
+  loadable CJK tokenizer; excerpts injected automatically as delimited data
+  (no tool call), capped at 4 excerpts / 1,500 characters. Skills: the review
+  only *proposes*; nothing applies until the member adopts it, dismissed or
+  deleted kinds are not proposed again, skills are private to the member,
+  applied by deterministic trigger matching or an explicit `@my-…` mention and
+  framed as member preferences rather than system instructions.
 
 MIT License
 

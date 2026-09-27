@@ -10,8 +10,8 @@ import type { AiSql } from "./storage";
  */
 
 export interface AiWorkspaceV1SavedEvent { tenantId: string; userId: string; revision: number; state: AiWorkspaceState }
-/** A committed V2 message append or conversation metadata put. */
-export interface AiWorkspaceV2ConversationEvent { tenantId: string; userId: string; revision: number; conversation: AiWorkspaceConversation }
+/** A committed V2 message append (`appended`: the new message ids) or conversation metadata put. */
+export interface AiWorkspaceV2ConversationEvent { tenantId: string; userId: string; revision: number; conversation: AiWorkspaceConversation; appended?: readonly string[] }
 
 export interface AiWorkspaceWriteObserver {
   v1Saved?(event: AiWorkspaceV1SavedEvent): void;

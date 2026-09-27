@@ -840,7 +840,7 @@ export class AiWorkspaceV2Store {
         return ack;
       });
       // Derived indexes follow the committed conversation; a replayed receipt notifies nothing.
-      if (committed.revision !== undefined) notifyAiWorkspaceV2ConversationWritten(this.sql, { tenantId: tenant, userId, revision: committed.revision, conversation });
+      if (committed.revision !== undefined) notifyAiWorkspaceV2ConversationWritten(this.sql, { tenantId: tenant, userId, revision: committed.revision, conversation, appended: messageIds });
       return appendedAck;
     } catch (error) {
       const replay = readReplay();

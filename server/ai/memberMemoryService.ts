@@ -234,7 +234,7 @@ export class AiMemberMemoryService {
       return next;
     });
     try {
-      this.learning.history.reset(userId, "baseline");
+      this.learning.history.reset(userId, "baseline", { forgetBefore: Date.now() });
       this.recordHistoryBaseline(userId);
     } catch { /* A failed baseline is retried by the background queue. */ }
     return this.view(stored, this.repository.settings(), userId);

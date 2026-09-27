@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS ai_member_history_state (
   indexed_chunks INTEGER NOT NULL DEFAULT 0,
   indexed_messages INTEGER NOT NULL DEFAULT 0,
   indexed_conversations INTEGER NOT NULL DEFAULT 0,
+  forgotten_before INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (tenant_id, user_id)
 );

@@ -158,6 +158,37 @@ describe("member history recall and personal skills (service)", () => {
     expect(prompt).not.toContain("每部分先写结论再列数据");
   });
 
+  it("a clear-all stays in force when recall is switched off and on again (organization or member)", async () => {
+    const pause = () => new Promise(resolve => setTimeout(resolve, 3));
+    const earlier = await send("帮我做一个季度汇报模板", "conv-report");
+    // m3: a question that never got an answer, so it has no date of its own.
+    const old = conversation("conv-report", "季度汇报", [...REPORT.messages.slice(0, 1), { ...REPORT.messages[1], requestId: earlier.requestId }, message("m3", "user", "季度汇报模板的封面要用公司蓝色")]);
+    await save([old]);
+    await pause();
+    memory().clear("member-a");
+    await pause();
+    const later = await send("新的季度汇报模板要加上预算和人力两部分", "conv-plan");
+    const fresh = conversation("conv-plan", "季度汇报新版", [message("p1", "user", "新的季度汇报模板要加上预算和人力两部分"), message("p2", "assistant", "新版季度汇报模板：预算、人力、风险。", { requestId: later.requestId })]);
+    await save([fresh, old]);
+    const rebuilt = async () => {
+      for (let tick = 0; tick < 5 && memory().state("member-a").recall!.pending; tick += 1) await runtime.service.runBackgroundMemoryCycle();
+      expect(memory().state("member-a").recall).toMatchObject({ indexedConversations: 1, indexedMessages: 2, pending: false });
+      await send("上次那个汇报模板再发我看看", "conv-new");
+      expect(systemPrompt()).toContain("预算和人力");
+      expect(systemPrompt()).not.toContain("每部分先写结论再列数据");
+      expect(systemPrompt()).not.toContain("公司蓝色");
+    };
+    await rebuilt();
+    settings({ recallEnabled: false });
+    settings({ recallEnabled: true });
+    // A save right after re-enabling does not re-date old messages as new.
+    await save([fresh, old]);
+    await rebuilt();
+    memory().setLearning("member-a", { learningEnabled: false });
+    memory().setLearning("member-a", { learningEnabled: true });
+    await rebuilt();
+  });
+
   it("backfills older conversations in bounded background batches", async () => {
     memory().saveAdminSettings({ enabled: false, reviewTier: "quick", pricePoints: 50 });
     const many = Array.from({ length: 30 }, (_, number) => conversation(`conv-${number}`, `项目 ${number}`, [
@@ -199,6 +230,18 @@ describe("member history recall and personal skills (service)", () => {
     runtime.store.sql.exec("INSERT OR REPLACE INTO ai_member_history_queue(tenant_id,user_id,reason,due_at,attempts) VALUES('default',?,'reconcile',0,0)", stored);
     await runtime.service.runBackgroundMemoryCycle();
     expect(memory().state("member-a").recall).toMatchObject({ indexedMessages: 3, pending: false });
+    // Clear-all on V2: the baseline runs in the background, yet a message appended
+    // meanwhile is indexed at once and the older ones never are.
+    await new Promise(resolve => setTimeout(resolve, 3));
+    memory().clear("member-a");
+    expect(memory().state("member-a").recall).toMatchObject({ indexedMessages: 0, pending: true });
+    await v2.appendActiveMessages("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "conv-report", expectedRevision: conversationRevision + 2,
+      messages: [message("v2", "user", "汇报模板以后都加一页人员变动")] });
+    await send("上次那个汇报模板再发我看看", "conv-new-3");
+    expect(systemPrompt()).toContain("人员变动");
+    expect(systemPrompt()).not.toContain("客户反馈部分");
+    await runtime.service.runBackgroundMemoryCycle();
+    expect(memory().state("member-a").recall).toMatchObject({ indexedMessages: 1, pending: false });
   });
 
   it("proposes a skill after repeated requests, bills it like a memory update, and applies it once adopted", async () => {

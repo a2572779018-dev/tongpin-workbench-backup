@@ -191,7 +191,8 @@ export function registerMemberHistoryObserver(sql: AiSql): void {
       if (!memberHistoryEligible(sql, event.tenantId, event.userId)) return;
       const index = new AiMemberHistoryIndex(sql, event.tenantId);
       const known = index.generation(event.userId) !== null;
-      const result = index.sync(event.userId, { conversations: [historySourceFromConversation(event.conversation, event.revision)], full: false, version: 2, revision: null, live: known, budget: MEMBER_HISTORY_LIMITS.liveBudget });
+      const result = index.sync(event.userId, { conversations: [historySourceFromConversation(event.conversation, event.revision)], full: false, version: 2, revision: null, live: known,
+        ...(event.appended?.length ? { written: new Set(event.appended) } : {}), budget: MEMBER_HISTORY_LIMITS.liveBudget });
       // A member seen for the first time on V2 still needs their other conversations.
       if (!known || !result.complete) index.enqueue(event.userId, "backfill");
     },
