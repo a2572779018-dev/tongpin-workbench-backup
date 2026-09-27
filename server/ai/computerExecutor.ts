@@ -203,6 +203,7 @@ function sanitizeFacts(value: unknown): ComputerExecutorFacts {
     ...(typedIntoSearch ? { typedIntoSearch } : {}), ...(typedIntoMessageBox ? { typedIntoMessageBox } : {}),
     ...(conversationOpenedFor ? { conversationOpenedFor } : {}), ...(sendEvidence ? { sendEvidence } : {}),
     ...(targetApp ? { targetApp } : {}), ...(typeof root.appRunning === "boolean" ? { appRunning: root.appRunning } : {}),
+    ...(root.targetWindow === "visible" || root.targetWindow === "hidden" || root.targetWindow === "none" ? { targetWindow: root.targetWindow } : {}),
   };
 }
 
@@ -259,6 +260,7 @@ const NEXT_ACTION_RULES = [
   "Prefer the candidate that directly advances the next unfinished part of `task.goal`. Do not repeat an action that `history` shows already succeeded.",
   "Choose `done` only if `observation` clearly shows that `task.success_check` is satisfied.",
   "Choose `reobserve` if the screen still seems to be loading or changing.",
+  "If `executor_facts.targetWindow` is `hidden` or `none`, the app's window is minimized, on another desktop or not open, so `observation` is empty for that reason and re-observing will not change it: choose the candidate that opens the app or brings its window to the front.",
   "Choose `abstain` if no candidate is both safe and useful, or if the screen needs the user (login, QR code, captcha, password or payment password, unexpected dialog).",
   "Never choose a candidate that sends, submits, deletes or pays for anything other than exactly `task.irreversible_step`, and never repeat it once `progress.irreversible_step_done` is true.",
 ];

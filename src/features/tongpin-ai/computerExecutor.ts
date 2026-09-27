@@ -347,7 +347,12 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       }
       if (choice.id === "reobserve") {
         reobserveStreak += 1;
-        if (reobserveStreak >= MAX_REOBSERVE_STREAK) throw new RunStop(irreversibleAttempted ? "unknown" : "abstained", "action_uncertain", "界面一直没有稳定下来");
+        if (reobserveStreak >= MAX_REOBSERVE_STREAK) {
+          const hidden = view.facts.targetWindow === "hidden" || view.facts.targetWindow === "none";
+          throw new RunStop(irreversibleAttempted ? "unknown" : "abstained", "action_uncertain", hidden
+            ? `「${appName}」的窗口已最小化、在其他桌面或没有打开，读不到界面；请先把「${appName}」窗口打开再试`
+            : "界面一直没有稳定下来");
+        }
         history.push({ step, action: "Waited and re-observed the screen.", result: "reobserved" });
         callbacks.onStep?.({ step, phase: "reobserve", note: "Jev 选择重新读取界面" });
         await sleep(REOBSERVE_DELAY_MS);

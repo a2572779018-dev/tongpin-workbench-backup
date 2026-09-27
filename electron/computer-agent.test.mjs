@@ -357,7 +357,7 @@ describe("computer agent observation and closed candidates", () => {
       expect(candidate).not.toHaveProperty("text");
       expect(candidate.description.length).toBeLessThanOrEqual(400);
     }
-    expect(view.facts).toMatchObject({ focus: "none", irreversibleDone: false, targetApp: "微信", appRunning: true });
+    expect(view.facts).toMatchObject({ focus: "none", irreversibleDone: false, targetApp: "微信", appRunning: true, targetWindow: "visible" });
   });
 
   it("uses a screenshot only for a sparse tree and maps element frames to window pixels", async () => {
@@ -393,6 +393,7 @@ describe("computer agent observation and closed candidates", () => {
     const agent = await started({ app: wechatApp({ running: false }) });
     const view = await observe(agent);
     expect(view.candidates.map((candidate) => candidate.id)).toEqual(["app_1", "reobserve", "abstain", "done"]);
+    expect(view.facts).toMatchObject({ appRunning: false, targetWindow: "none" });
     const launched = await agent.controller.execute({ observationId: view.observationId, candidateId: "app_1" });
     expect(launched).toMatchObject({ ok: true, value: { status: "unverified" } });
     expect(agent.fake.calls.tools.at(-1)).toEqual({ name: "launch_app", argumentsJson: "{\"bundle_id\":\"com.tencent.xinWeChat\"}" });
@@ -410,6 +411,7 @@ describe("computer agent observation and closed candidates", () => {
     const view = await observe(agent);
     const front = view.candidates.find((candidate) => candidate.id === "app_1");
     expect(front.label).toBe("把「微信」窗口切到前台");
+    expect(view.facts).toMatchObject({ appRunning: true, targetWindow: "hidden" });
     await agent.controller.execute({ observationId: view.observationId, candidateId: "app_1" });
     expect(agent.fake.calls.tools.map((call) => call.name)).toEqual(["launch_app", "bring_to_front"]);
     expect(agent.fake.calls.tools[1].argumentsJson).toBe(`{"pid":4242,"window_id":${WINDOW_ID}}`);

@@ -744,7 +744,7 @@ function nextTracker(tracker, candidate, status, { task }) {
   return Object.freeze(next);
 }
 
-function facts({ tracker, task, observation, sendBaseline, appName, appRunning }) {
+function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow }) {
   const content = task.irreversible && task.irreversible.content;
   let sendEvidenceFacts;
   if (tracker.sendCount > 0 && content && sendBaseline !== null && observation) {
@@ -764,6 +764,9 @@ function facts({ tracker, task, observation, sendBaseline, appName, appRunning }
     ...(sendEvidenceFacts ? { sendEvidence: sendEvidenceFacts } : {}),
     ...(appName ? { targetApp: appName } : {}),
     appRunning: Boolean(appRunning),
+    // "hidden": minimized, on another Space or without a main window, so the
+    // observation is empty until the app is brought to the front.
+    ...(targetWindow === "visible" || targetWindow === "hidden" || targetWindow === "none" ? { targetWindow } : {}),
   };
 }
 

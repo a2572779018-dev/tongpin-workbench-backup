@@ -151,6 +151,34 @@ describe("computer executor loop", () => {
     expect(steps.some(step => step.authorization === "allowed" && step.execution?.status === "delivered")).toBe(true);
   });
 
+  it("says the app window is hidden, not that the screen is unstable, when Jev only re-observes an empty window", async () => {
+    const hidden: ComputerObserveResult = {
+      ...view(0, [candidate("app_1", "把「微信」窗口切到前台", "none", "activate_app")], { targetWindow: "hidden" }),
+      observation: { trust: "untrusted_screen_content", app: "微信", windowTitle: null, axSparse: false, elementsTotal: 0, elements: [], texts: [] },
+      display: { app: "微信", title: null, elementCount: 0, axSparse: false, screenshotUsed: false },
+    };
+    const h = harness({ views: [hidden], decisions: [{ id: "reobserve", confidence: 0.6 }, { id: "reobserve", confidence: 0.6 }, { id: "reobserve", confidence: 0.6 }] });
+    const result = await run(h);
+    expect(result.summary).toContain("窗口已最小化");
+    expect(h.calls.decide[0].facts).toMatchObject({ targetWindow: "hidden" });
+    expect(h.calls.execute).toHaveLength(0);
+  });
+
+  it("gives background refusals their own budget, so an escalation is not read as 'nothing works'", async () => {
+    const h = harness({
+      views: [view(0, [candidate("click_e1", "点击「搜索」", "none", "click")]), view(1, [candidate("point_e1_fg", "点击「搜索」（前台）", "none", "point")]), view(2, [candidate("type_p1_focus_fg", "在搜索框输入「姐姐」（前台）", "none", "type")]), view(3, [candidate("key_escape", "按 Esc 关闭弹出内容")])],
+      decisions: [{ id: "click_e1" }, { id: "point_e1_fg" }, { id: "type_p1_focus_fg" }, { id: "abstain", confidence: 0.9 }],
+      executions: [
+        { status: "failed", message: "未能执行（目标应用不接受后台操作），下一步可改用前台操作", delivery: "background" },
+        { status: "delivered", message: "已执行", delivery: "foreground" },
+        { status: "delivered", message: "已执行", delivery: "foreground" },
+      ],
+    });
+    const result = await run(h);
+    expect(result.reason).not.toBe("repeated_failures");
+    expect(h.calls.execute.map(item => item.candidateId)).toEqual(["click_e1", "point_e1_fg", "type_p1_focus_fg"]);
+  });
+
   it("stops at a clarification without consent or execution", async () => {
     const h = harness({ task: "clarification", views: wechatViews, decisions: [] });
     const result = await run(h);

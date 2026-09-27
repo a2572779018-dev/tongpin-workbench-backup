@@ -744,7 +744,8 @@ function createComputerAgentController({
         candidates: new Map(candidates.map((candidate) => [candidate.id, candidate])),
       };
       const observation = policy.projectObservation({ app: appName, windowTitle, elements, treeTexts, axSparse, task: state.task });
-      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running) });
+      const targetWindow = target ? "visible" : targetApp && targetApp.running ? "hidden" : "none";
+      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow });
       return success({
         observationId,
         observation,

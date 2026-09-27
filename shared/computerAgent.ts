@@ -180,6 +180,8 @@ export interface ComputerExecutorFacts {
   sendEvidence?: { before: number; after: number; inputStillHasText: boolean | null };
   targetApp?: string;
   appRunning?: boolean;
+  /** Whether the granted app has a usable window: "hidden" = minimized, on another Space or no main window. */
+  targetWindow?: "visible" | "hidden" | "none";
 }
 export interface ComputerObserveResult {
   observationId: string;
