@@ -58,10 +58,12 @@ describe("agentOfficeSnapshotFromMessage", () => {
     expect(dispatching.workers.map(worker => [worker.id, worker.role, worker.status, worker.activity])).toEqual([
       ["agent-1", "研究员", "queued", "排队等待"], ["agent-2", "分析员", "queued", "排队等待"], ["agent-3", "核对员", "queued", "排队等待"]]);
     expect(dispatching.workers[0].task).toBe("查找深圳今天的天气。\n只列事实，注明来源。");
+    // Each desk says which aspect of the request that worker owns.
+    expect(dispatching.workers.map(worker => worker.title)).toEqual(["查天气", "比较方案", "核对结论"]);
 
     const working = agentOfficeSnapshotFromMessage(streaming(4_000, { status: "typing" }))!;
     expect(working).toMatchObject({ runId: REQUEST_ID, phase: "working", coordinator: { status: "thinking", activity: "等待子 Agent 完成（1/3）" }, updatedAt: 4_000 });
-    expect(working.workers[0]).toEqual({ id: "agent-1", role: "研究员", task: "查找深圳今天的天气。\n只列事实，注明来源。", status: "done",
+    expect(working.workers[0]).toEqual({ id: "agent-1", role: "研究员", title: "查天气", task: "查找深圳今天的天气。\n只列事实，注明来源。", status: "done",
       activity: "深圳今天晴，适合出行。", startedAt: 2_010, finishedAt: 4_000, resultSummary: "深圳今天晴，适合出行。", sourceCount: 3 });
     expect(working.workers[1]).toMatchObject({ id: "agent-2", status: "thinking", startedAt: 2_020 });
     expect(working.workers[1].finishedAt).toBeUndefined();

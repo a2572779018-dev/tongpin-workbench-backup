@@ -24,7 +24,7 @@ describe("buildFallbackRows", () => {
       phase: "working",
       coordinator: { name: "Pro 协调", status: "working", activity: "跟进研究员进度" },
       workers: [
-        { id: "w1", role: "研究员", task: "查找行业数据", status: "searching", activity: "联网搜索行业报告", startedAt: 0 },
+        { id: "w1", role: "研究员", title: "行业数据", task: "查找行业数据", status: "searching", activity: "联网搜索行业报告", startedAt: 0 },
         { id: "w2", role: "撰稿员", task: "撰写摘要", status: "done", startedAt: 0, finishedAt: 5000, resultSummary: "已完成摘要", sourceCount: 3 },
       ],
       updatedAt: 5000,
@@ -35,6 +35,7 @@ describe("buildFallbackRows", () => {
     const rows = buildFallbackRows(snapshot(), 5000);
     expect(rows[0].id).toBe("__coordinator__");
     expect(rows[0].label).toBe("协调员");
+    expect(rows[0].title).toBeNull();
     expect(rows[0].task).toBe("跟进研究员进度");
   });
 
@@ -42,11 +43,13 @@ describe("buildFallbackRows", () => {
     const rows = buildFallbackRows(snapshot(), 5000);
     const w1 = rows.find((r) => r.id === "w1")!;
     expect(w1.label).toBe("研究员");
+    expect(w1.title).toBe("行业数据");
     expect(w1.statusText).toBe(STATUS_LABELS.searching);
     expect(w1.elapsedText).toBe("5 秒");
 
     const w2 = rows.find((r) => r.id === "w2")!;
     expect(w2.statusText).toBe(STATUS_LABELS.done);
+    expect(w2.title).toBeNull();
     expect(w2.elapsedText).toBe("5 秒");
     expect(w2.resultSummary).toBe("已完成摘要");
     expect(w2.sourceCount).toBe(3);

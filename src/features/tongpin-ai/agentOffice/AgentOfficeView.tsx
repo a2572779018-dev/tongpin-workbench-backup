@@ -251,6 +251,7 @@ export function AgentOfficeView({ snapshot, height = WORLD_HEIGHT }: AgentOffice
         <div className="tp-ai-office-card" role="note">
           <div className="tp-ai-office-card__head">
             <strong>{activeRow.label}</strong>
+            {activeRow.title ? <span className="tp-ai-office-card__title">{activeRow.title}</span> : null}
             <span>{activeRow.statusText}</span>
             {activeRow.elapsedText ? <span className="tp-ai-office-card__elapsed">{activeRow.elapsedText}</span> : null}
           </div>

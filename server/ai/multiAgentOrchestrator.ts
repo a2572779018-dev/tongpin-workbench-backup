@@ -137,8 +137,9 @@ export type MultiAgentPlan =
   | { kind: "plan"; subtasks: AiSubagentPlanItem[]; dropped: number; repaired: boolean }
   /** Not a plan at all: prose, a tool envelope or another JSON object. */
   | { kind: "none" }
-  /** Looked like a plan but no usable subtask survived validation. */
-  | { kind: "invalid"; reason: "json" | "shape" | "empty" };
+  /** Looked like a plan but no usable subtask survived validation, or fewer
+   * than two genuinely different subtasks did ("duplicate"). */
+  | { kind: "invalid"; reason: "json" | "shape" | "empty" | "duplicate" };
 
 const PLAN_KEY = /\{\s*"(?:subtasks|tasks)"\s*:/;
 
@@ -225,6 +226,35 @@ function readBoolean(value: unknown): boolean {
   return value === true || value === "true" || value === 1;
 }
 
+/** The sub-agent's own assignment: the 「你负责：」 sentence when the task
+ * follows the documented layout, else the whole task. */
+export function subtaskAssignment(task: string): string {
+  const match = /^\s*(?:你负责|负责|你的任务|任务)\s*[:：]\s*([^\n]+)/u.exec(task);
+  return (match ? match[1] : task).trim();
+}
+
+function bigrams(text: string): Set<string> {
+  const chars = [...text.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase()];
+  const grams = new Set<string>();
+  if (chars.length === 1) grams.add(chars[0]);
+  for (let index = 0; index + 1 < chars.length; index += 1) grams.add(chars[index] + chars[index + 1]);
+  return grams;
+}
+
+/** Character-bigram Jaccard similarity (Chinese has no word boundaries). */
+export function textSimilarity(left: string, right: string): number {
+  const a = bigrams(left), b = bigrams(right);
+  if (!a.size || !b.size) return a.size === b.size ? 1 : 0;
+  let shared = 0;
+  for (const gram of a) if (b.has(gram)) shared += 1;
+  return shared / (a.size + b.size - shared);
+}
+
+/** Two subtasks this alike are the same job handed out twice. */
+const DUPLICATE_SIMILARITY = 0.8;
+/** A subtask this close to the whole request just restates it. */
+const RESTATED_SIMILARITY = 0.85;
+
 /**
  * Parses the coordinator's plan. Accepts the documented object, a fenced
  * block, stray prose around an embedded plan, trailing commas, curly quotes
@@ -232,7 +262,7 @@ function readBoolean(value: unknown): boolean {
  * `maxSubtasks` subtasks survive (plan order); search is kept for at most
  * `maxSearchAgents` of them and only when `searchAllowed`.
  */
-export function parseMultiAgentPlan(content: string, options: { maxSubtasks?: number; searchAllowed: boolean; maxSearchAgents?: number }): MultiAgentPlan {
+export function parseMultiAgentPlan(content: string, options: { maxSubtasks?: number; searchAllowed: boolean; maxSearchAgents?: number; request?: string }): MultiAgentPlan {
   const text = content.trim();
   if (!text) return { kind: "invalid", reason: "empty" };
   const candidate = planCandidate(text);
@@ -255,7 +285,9 @@ export function parseMultiAgentPlan(content: string, options: { maxSubtasks?: nu
   const maxSearchAgents = Math.max(0, Math.min(options.maxSearchAgents ?? L.maxSearchAgents, L.maxSearchAgents));
   const seen = new Set<string>();
   const accepted: Array<Omit<AiSubagentPlanItem, "id">> = [];
-  let usable = 0;
+  const assignments: string[] = [];
+  const request = options.request?.trim() ?? "";
+  let usable = 0, duplicates = 0;
   for (const raw of items) {
     if (!isRecord(raw)) continue;
     const task = boundedMultilineText(firstString(raw.task, raw.description, raw.prompt, raw.instruction, raw.instructions), L.taskCodePoints);
@@ -263,17 +295,32 @@ export function parseMultiAgentPlan(content: string, options: { maxSubtasks?: nu
     const identity = task.replace(/\s+/g, "").toLowerCase();
     if (seen.has(identity)) continue;
     seen.add(identity);
+    // The same job handed out twice, or the whole request passed on as one
+    // "subtask", is not a split: it never reaches a sub-agent.
+    const assignment = subtaskAssignment(task);
+    if (assignments.some(other => textSimilarity(other, assignment) >= DUPLICATE_SIMILARITY) ||
+      (request && [...assignment].length >= 8 && textSimilarity(assignment, request) >= RESTATED_SIMILARITY)) {
+      duplicates += 1;
+      continue;
+    }
+    assignments.push(assignment);
     usable += 1;
     if (accepted.length >= maxSubtasks) continue;
     const wantsSearch = readBoolean(raw.search ?? raw.needsSearch ?? raw.webSearch ?? raw.web_search);
     const search = options.searchAllowed && wantsSearch && accepted.filter(item => item.search).length < maxSearchAgents;
     const roleCandidate = boundedText(firstString(raw.role, raw.agent, raw.type), 64);
     const role = roleCandidate && validSubagentRole(roleCandidate) ? roleCandidate : wantsSearch ? "研究员" : "分析员";
-    const title = boundedText(firstString(raw.title, raw.name, raw.summary), L.titleCodePoints) ?? boundedText(task, 16)!;
+    // Titles name each agent's own part and are unique within the plan.
+    const given = boundedText(firstString(raw.title, raw.name, raw.summary), L.titleCodePoints);
+    const base = given && !accepted.some(item => item.title === given) ? given : boundedText(assignment, 16) ?? boundedText(task, 16)!;
+    let title = base, suffix = 2;
+    while (accepted.some(item => item.title === title)) title = `${boundedText(base, L.titleCodePoints - 3)}（${suffix++}）`;
     accepted.push({ role, title, task, search });
   }
-  if (!accepted.length) return { kind: "invalid", reason: items.length ? "shape" : "empty" };
-  return { kind: "plan", subtasks: accepted.map((item, index) => ({ id: `agent-${index + 1}`, ...item })), dropped: usable - accepted.length, repaired };
+  if (!accepted.length) return { kind: "invalid", reason: duplicates ? "duplicate" : items.length ? "shape" : "empty" };
+  // A split needs at least two different parts; one survivor is answered directly.
+  if (accepted.length < 2 && items.length >= 2) return { kind: "invalid", reason: "duplicate" };
+  return { kind: "plan", subtasks: accepted.map((item, index) => ({ id: `agent-${index + 1}`, ...item })), dropped: usable - accepted.length + duplicates, repaired };
 }
 
 // ---------------------------------------------------------------------------

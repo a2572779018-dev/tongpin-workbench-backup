@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { readAiSubagentUpdate } from "../../shared/aiMultiAgent";
 import {
   combineAbortSignals, MultiAgentSources, parseMultiAgentPlan, runIsolatedSubagent, runWithConcurrencyLimit, subagentSummary,
+  subtaskAssignment, textSimilarity,
 } from "./multiAgentOrchestrator";
+import { coordinatorProtocol } from "./multiAgentPrompts";
 import { fitJsonString, utf8Bytes } from "./multiAgentPrompts";
 
 const plan = (subtasks: unknown[]) => JSON.stringify({ subtasks });
@@ -47,6 +49,53 @@ describe("multi-agent plan parsing", () => {
     expect(parsed.subtasks.filter(item => item.search)).toHaveLength(3);
     expect(parsed.subtasks[0]).toMatchObject({ role: "研究员", title: "任务 0" });
     expect(parseMultiAgentPlan(plan([task(1, { search: true })]), { searchAllowed: false })).toMatchObject({ subtasks: [{ search: false }] });
+  });
+
+  it("never hands the same job to several agents or passes the whole request on as a subtask", () => {
+    const background = "\n背景：用户想为家人准备中秋节礼物，家里有父母、爷爷奶奶、妻子和两个孩子，总预算三千元。\n输出：给出 3–5 个具体建议。";
+    const request = "帮我准备中秋节送家人的礼物方案";
+    // Three agents, one job (the reported bug): nothing is dispatched.
+    const same = [1, 2, 3].map(index => ({ role: "分析员", title: `礼物方案${index}`, task: `你负责：为家人准备中秋节送礼方案${background}` }));
+    expect(parseMultiAgentPlan(plan(same), { searchAllowed: false, request })).toEqual({ kind: "invalid", reason: "duplicate" });
+    // The request restated as the only other subtask does not make a split either.
+    const restated = [
+      { title: "整体方案", task: `你负责：帮我准备中秋节送家人的礼物方案${background}` },
+      { title: "长辈礼物", task: `你负责：为父母和爷爷奶奶挑选适合长辈的中秋礼物${background}` },
+    ];
+    expect(parseMultiAgentPlan(plan(restated), { searchAllowed: false, request })).toEqual({ kind: "invalid", reason: "duplicate" });
+    // Different parts sharing the same background are a real split.
+    const split = [
+      { role: "研究员", title: "长辈礼物", task: `你负责：为父母和爷爷奶奶挑选适合长辈的中秋礼物${background}` },
+      { role: "分析员", title: "伴侣和孩子", task: `你负责：为妻子和两个孩子挑选各自喜欢的礼物${background}` },
+      { role: "策划员", title: "预算与购买", task: `你负责：把三千元预算分配到各人，并安排购买渠道和送达时间${background}` },
+      { role: "分析员", title: "长辈礼物二", task: `你负责：为父母和爷爷奶奶挑选适合长辈的中秋礼物。${background}` },
+    ];
+    const parsed = parseMultiAgentPlan(plan(split), { searchAllowed: false, request });
+    expect(parsed).toMatchObject({ kind: "plan", dropped: 1 });
+    if (parsed.kind === "plan") expect(parsed.subtasks.map(item => item.title)).toEqual(["长辈礼物", "伴侣和孩子", "预算与购买"]);
+  });
+
+  it("gives every agent its own title, taken from its assignment when missing or repeated", () => {
+    const parsed = parseMultiAgentPlan(plan([
+      { title: "礼物", task: "你负责：挑选长辈的礼物\n背景：……" },
+      { title: "礼物", task: "你负责：挑选孩子的礼物\n背景：……" },
+      { task: "你负责：安排预算和购买渠道\n背景：……" },
+    ]), { searchAllowed: false });
+    expect(parsed.kind).toBe("plan");
+    if (parsed.kind === "plan") expect(parsed.subtasks.map(item => item.title)).toEqual(["礼物", "挑选孩子的礼物", "安排预算和购买渠道"]);
+    expect(subtaskAssignment("你负责：比较两款手机的续航\n背景：……")).toBe("比较两款手机的续航");
+    expect(subtaskAssignment("比较两款手机的续航")).toBe("比较两款手机的续航");
+    expect(textSimilarity("为父母挑选礼物", "为父母挑选礼物。")).toBe(1);
+    expect(textSimilarity("为父母挑选礼物", "安排预算和渠道")).toBeLessThan(0.2);
+  });
+
+  it("asks the coordinator for distinct parts, each task leading with its own assignment", () => {
+    const protocol = coordinatorProtocol({ maxSubtasks: 3, searchAvailable: true, needsSearch: false, maxSearchAgents: 2 });
+    expect(protocol).toContain("每个负责请求的一个不同方面");
+    expect(protocol).toContain("不要给多个子 Agent 同一个问题");
+    expect(protocol).toContain("必须以「你负责：」开头");
+    expect(protocol).toContain("title 必填");
+    expect(protocol.match(/"title":/g)).toHaveLength(3);
   });
 
   it("separates prose, tool envelopes and broken plans", () => {

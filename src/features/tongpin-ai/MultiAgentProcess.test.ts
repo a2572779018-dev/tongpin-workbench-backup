@@ -164,6 +164,18 @@ describe("多 Agent 协作 persisted process", () => {
     expect(agents).toMatchObject({ phase: "cancelled", agents: [{ status: "cancelled", error: "已停止" }] });
   });
 
+  it("keeps what differs between the agents' tasks when they open with the same background", () => {
+    const background = "用户想为家人准备中秋节礼物，家里有父母、爷爷奶奶、妻子和两个孩子，总预算三千元。".repeat(3);
+    const subtasks = [["长辈礼物", "为父母和爷爷奶奶挑选礼物"], ["伴侣和孩子", "为妻子和孩子挑选礼物"], ["预算与购买", "分配预算并安排购买渠道"]]
+      .map(([title, own], index) => ({ id: `agent-${index + 1}`, role: "分析员", title, task: `${background}\n你负责：${own}。`, search: false }));
+    const live = fold([update(1, { phase: "planning" }), update(2, { phase: "plan", maxConcurrency: 3, subtasks })]);
+    const agents = (settleReplyProcess(live, { outcome: "stopped" })!.steps[0] as AiReplyProcessAgentsStep).agents;
+    expect(agents.map(agent => agent.task)).toEqual(["…你负责：为父母和爷爷奶奶挑选礼物。", "…你负责：为妻子和孩子挑选礼物。", "…你负责：分配预算并安排购买渠道。"]);
+    // Tasks that already differ early are kept from their start.
+    const distinct = fold([update(1, { phase: "planning" }), update(2, { phase: "plan", maxConcurrency: 3, subtasks: subtasks.map(item => ({ ...item, task: item.task.replace(background, "").trim() })) })]);
+    expect((settleReplyProcess(distinct, { outcome: "stopped" })!.steps[0] as AiReplyProcessAgentsStep).agents[0].task).toBe("你负责：为父母和爷爷奶奶挑选礼物。");
+  });
+
   it.each([
     ["an unknown sub-agent id", (step: AiReplyProcessAgentsStep) => ({ ...step, agents: [{ ...step.agents[0], id: "agent-9" }] })],
     ["a duplicated sub-agent id", (step: AiReplyProcessAgentsStep) => ({ ...step, agents: [step.agents[0], step.agents[0]] })],

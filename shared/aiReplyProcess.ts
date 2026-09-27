@@ -424,13 +424,33 @@ function applySubagentUpdate(state: AiReplyProcessLive, update: AiSubagentUpdate
   }
 }
 
+/** Code points of an opening shared by every sub-agent's task (a background
+ * the coordinator repeated in each); at least a sentence long to matter. */
+const OPENING_BREAKS = new Set(["\n", "。", "；", ";", "！", "？", "!", "?"]);
+
+/** Code points of the background every task opens with, cut back to the last
+ * line or sentence break so the excerpt starts at the agent's own line. */
+function sharedTaskOpening(tasks: readonly string[]): number {
+  if (tasks.length < 2) return 0;
+  const chars = tasks.map(task => [...task]);
+  const shortest = Math.min(...chars.map(item => item.length));
+  let length = 0;
+  while (length < shortest && chars.every(item => item[length] === chars[0][length])) length += 1;
+  while (length > 0 && !OPENING_BREAKS.has(chars[0][length - 1])) length -= 1;
+  return length >= 12 ? length : 0;
+}
+
 function settleAgentsStep(step: AiReplyProcessLiveAgents, outcome: AiReplyProcessOutcome): AiReplyProcessAgentsStep | undefined {
   if (!step.agents.length || step.maxConcurrency === undefined) return undefined;
+  // The saved excerpt keeps what differs between the agents' tasks: with a
+  // long shared background first, 200 code points would read the same.
+  const opening = sharedTaskOpening(step.agents.map(agent => agent.task));
   const phase: AiReplyProcessAgentsStep["phase"] = TERMINAL_PHASES.has(step.phase) ? step.phase as AiReplyProcessAgentsStep["phase"]
     : outcome === "stopped" ? "cancelled" : outcome === "failed" ? "failed" : "done";
   const agents = step.agents.map((live): AiReplyProcessAgent => {
     const agent = terminalAgent(live, phase, undefined);
-    const task = boundedMultilineText(agent.task, AI_MULTI_AGENT_LIMITS.persistedTaskCodePoints) ?? agent.title;
+    const own = opening ? `…${[...agent.task].slice(opening).join("").trimStart()}` : agent.task;
+    const task = boundedMultilineText(own, AI_MULTI_AGENT_LIMITS.persistedTaskCodePoints) ?? boundedMultilineText(agent.task, AI_MULTI_AGENT_LIMITS.persistedTaskCodePoints) ?? agent.title;
     const durationMs = validReplyProcessDuration(agent.durationMs) ?? (agent.startedAt !== undefined && agent.finishedAt !== undefined && agent.finishedAt >= agent.startedAt ? validReplyProcessDuration(agent.finishedAt - agent.startedAt) : undefined);
     return { id: agent.id, role: agent.role, title: agent.title, task, status: agent.status as AiReplyProcessAgent["status"],
       ...(agent.summary ? { summary: agent.summary } : {}), ...(agent.error ? { error: agent.error } : {}),

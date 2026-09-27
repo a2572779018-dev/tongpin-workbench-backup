@@ -28,6 +28,8 @@ export interface AgentOfficeWorker {
   id: string;
   /** Chinese role label as supplied by the run data, e.g. "研究员". Rendered verbatim. */
   role: string;
+  /** The aspect this worker owns (the plan's subtask title), e.g. "长辈的礼物". */
+  title?: string;
   task: string;
   status: AgentOfficeStatus;
   activity?: string;

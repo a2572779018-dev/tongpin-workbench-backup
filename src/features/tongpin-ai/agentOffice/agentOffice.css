@@ -107,6 +107,7 @@
 }
 .tp-ai-office-card__head strong { color: #292a25; font-size: 12.5px; }
 .tp-ai-office-card__head span { color: #8a8c83; font-size: 11.5px; }
+.tp-ai-office-card__head .tp-ai-office-card__title { color: #4c5a3a; font-weight: 600; }
 .tp-ai-office-card__elapsed { margin-left: auto; font-variant-numeric: tabular-nums; }
 .tp-ai-office-card__task { margin: 0; color: #55574f; font-size: 11.5px; line-height: 1.5; }
 .tp-ai-office-card__result { margin: 0; color: #3f4038; font-size: 11.5px; line-height: 1.5; }
@@ -140,7 +141,8 @@
   image-rendering: crisp-edges;
 }
 .tp-ai-office-fallback__row-head strong { color: #292a25; font-size: 12px; }
-.tp-ai-office-fallback__status { color: #8a8c83; font-size: 11px; }
+.tp-ai-office-fallback__title { color: #4c5a3a; font-size: 11.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-ai-office-fallback__status { color: #8a8c83; font-size: 11px; flex: none; }
 .tp-ai-office-fallback__elapsed { margin-left: auto; color: #8a8c83; font-size: 11px; font-variant-numeric: tabular-nums; }
 .tp-ai-office-fallback__task { margin: 0; color: #55574f; font-size: 11.5px; line-height: 1.5; }
 .tp-ai-office-fallback__result { margin: 0; color: #3f4038; font-size: 11.5px; line-height: 1.5; }

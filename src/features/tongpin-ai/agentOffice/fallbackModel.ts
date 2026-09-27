@@ -35,6 +35,8 @@ export function formatElapsed(startedAt?: number, finishedAt?: number, now: numb
 export interface FallbackRow {
   id: string;
   label: string;
+  /** The worker's own aspect of the request; null for the coordinator. */
+  title: string | null;
   task: string;
   statusText: string;
   elapsedText: string | null;
@@ -50,6 +52,7 @@ export function buildFallbackRows(snapshot: AgentOfficeSnapshot, now: number = D
     {
       id: "__coordinator__",
       label: "协调员",
+      title: null,
       task: snapshot.coordinator.activity?.trim() || PHASE_LABELS[snapshot.phase],
       statusText: STATUS_LABELS[snapshot.coordinator.status],
       elapsedText: null,
@@ -61,6 +64,7 @@ export function buildFallbackRows(snapshot: AgentOfficeSnapshot, now: number = D
     rows.push({
       id: worker.id,
       label: worker.role,
+      title: worker.title?.trim() || null,
       task: worker.task,
       statusText: STATUS_LABELS[worker.status],
       elapsedText: formatElapsed(worker.startedAt, worker.finishedAt, now),

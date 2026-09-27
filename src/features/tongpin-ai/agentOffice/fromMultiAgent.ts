@@ -48,6 +48,7 @@ export function agentOfficeSnapshotFromMessage(message: OfficeMessage): AgentOff
   const workers = part.agents.map((agent): AgentOfficeWorker => ({
     id: agent.id,
     role: agent.role,
+    ...(agent.title ? { title: agent.title } : {}),
     task: agent.task,
     status: agent.status,
     ...(agent.activity ? { activity: agent.activity } : {}),

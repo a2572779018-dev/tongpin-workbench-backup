@@ -339,6 +339,15 @@ const TOOL_LABELS: Record<Exclude<AiDispatchDecision["kind"], "text">, string> =
 const PLAN_MARKER = /"(?:subtasks|tasks)"\s*:/;
 const ANSWER_DECISION_CHARACTERS = 48;
 
+/** The member's latest message, which a subtask must not merely restate. */
+function lastUserText(messages: AiChatRequest["messages"]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "user" && typeof message.content === "string") return message.content;
+  }
+  return "";
+}
+
 function tailPreview(text: string): string | undefined {
   const clean = text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
   if (!clean) return undefined;
@@ -522,7 +531,7 @@ class MultiAgentRun {
     try {
       const outcome = await this.call({ label: "coordinator", model: tierModel, mode: this.mode, request, instructions: coordinator.instructions(this.search), reserve: coordinator.reserve, search: false, signal: timed.signal, onText: delta => visible.feed(delta) });
       const explanation = supportsPublicExplanation(this.input.request) ? parsePublicExplanation(outcome.content, this.mode) : { content: outcome.content };
-      const plan = parseMultiAgentPlan(explanation.content, { searchAllowed: this.search });
+      const plan = parseMultiAgentPlan(explanation.content, { searchAllowed: this.search, request: lastUserText(this.input.request.messages) });
       return { outcome, content: explanation.content, ...(explanation.analysisSummary ? { analysisSummary: explanation.analysisSummary } : {}), plan };
     } finally { timed.cleanup(); }
   }

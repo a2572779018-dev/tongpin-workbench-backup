@@ -48,6 +48,7 @@ export function AgentOfficeFallback({ snapshot, reason }: AgentOfficeFallbackPro
               height={20}
             />
             <strong>{row.label}</strong>
+            {row.title ? <span className="tp-ai-office-fallback__title">{row.title}</span> : null}
             <span className="tp-ai-office-fallback__status">{row.statusText}</span>
             {row.elapsedText ? <span className="tp-ai-office-fallback__elapsed">{row.elapsedText}</span> : null}
           </div>
