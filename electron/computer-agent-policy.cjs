@@ -711,55 +711,66 @@ function landingView(elements, popupElements) {
   return popup.length ? [...main, ...popup] : main;
 }
 
-/**
- * A dropdown window's top edge lies between this far above a search box's top
- * (a window that also covers the box, shadow included)…
- */
-const ANCHOR_ABOVE = 12;
-/** …and this far below the box's bottom edge. */
-const ANCHOR_BELOW = 48;
-/** A list is at least this tall (points); a tooltip under the box is not. */
-const ANCHOR_MIN_HEIGHT = 60;
+/** A search list hangs from the top band of the target window, where search
+ * boxes sit: its top edge lies at most this far below the window's top
+ * (points), or a quarter of the window's height when that is smaller. */
+const LIST_TOP_BAND = 160;
+/** A list is at least this tall and this wide (points); a tooltip is not. */
+const LIST_MIN_HEIGHT = 60;
+const LIST_MIN_WIDTH = 150;
 
 /**
  * Search box suggestion or result lists that the app draws as windows of
- * their own (WeChat): same-app windows whose top edge sits at a visible search
- * box of the target window (from just above its top to just below its
- * bottom), that are about as wide as the box or wider, cover at least half of
- * it horizontally and are tall enough to be a list. `popups`:
- * [{ windowId, bounds, hash, read }] in screen points, like element frames.
+ * their own (WeChat): floating same-app windows hanging from the top band of
+ * the target window and big enough to be a list. Judged from WindowServer
+ * geometry only — WeChat's accessibility frame for its search box does not
+ * match the screen, so it cannot anchor anything. A popup over a message box
+ * (low in the window), a tooltip or a badge is never one. `windowBounds`: the
+ * target window; `popups`: [{ windowId, bounds, hash, read }], screen points.
  * Returns [{ windowId, hash, read }].
  */
-function anchoredSearchLists(elements, popups) {
-  const boxes = (Array.isArray(elements) ? elements : []).filter((element) => element && element.searchLike && element.frame);
+function anchoredSearchLists(windowBounds, popups) {
+  if (!windowBounds || !(windowBounds.width > 0 && windowBounds.height > 0)) return [];
+  const band = Math.min(LIST_TOP_BAND, windowBounds.height / 4);
   const lists = [];
   for (const popup of Array.isArray(popups) ? popups : []) {
     const bounds = popup && popup.bounds;
-    if (!bounds || !(bounds.width > 0 && bounds.height >= ANCHOR_MIN_HEIGHT)) continue;
-    const anchored = boxes.some(({ frame }) => {
-      const overlap = Math.min(bounds.x + bounds.width, frame.x + frame.width) - Math.max(bounds.x, frame.x);
-      return bounds.width >= frame.width * 0.8 && overlap >= frame.width / 2 &&
-        bounds.y >= frame.y - ANCHOR_ABOVE && bounds.y <= frame.y + frame.height + ANCHOR_BELOW;
-    });
+    if (!bounds || !(bounds.width >= LIST_MIN_WIDTH && bounds.height >= LIST_MIN_HEIGHT)) continue;
+    if (bounds.y < windowBounds.y - 8 || bounds.y > windowBounds.y + band) continue;
     // `read`: the window's own capture succeeded (its rows, if any, are known).
-    if (anchored) lists.push({ windowId: String(popup.windowId), hash: typeof popup.hash === "string" && popup.hash ? popup.hash : null, read: popup.read !== false });
+    lists.push({ windowId: String(popup.windowId), hash: typeof popup.hash === "string" && popup.hash ? popup.hash : null, read: popup.read !== false });
   }
   return lists;
 }
 
 /**
  * What one capture knows about search lists. `looked` only when the app's
- * floating windows could be listed and a search box of the target window has
- * a frame to hang a list from — otherwise "no list" means "could not look".
- * `lists`: the anchored lists; `ids`: every floating window listed.
+ * floating windows could be listed (and the target window's bounds are
+ * known) — otherwise "no list" means "could not look". `lists`: the search
+ * lists; `ids`: every floating window listed.
  */
-function searchListState({ looked, elements, popups }) {
-  const hasBox = (Array.isArray(elements) ? elements : []).some((element) => element && element.searchLike && element.frame);
+function searchListState({ looked, windowBounds, popups }) {
   const windows = Array.isArray(popups) ? popups : [];
   return {
-    looked: Boolean(looked) && hasBox,
-    lists: anchoredSearchLists(elements, windows),
+    looked: Boolean(looked) && Boolean(windowBounds),
+    lists: anchoredSearchLists(windowBounds, windows),
     ids: windows.map((popup) => String(popup.windowId)),
+  };
+}
+
+/**
+ * Window-local geometry of the floating windows and of the search box's
+ * accessibility frame, rounded, for the run panel (checking a new app's
+ * layout by eye). Never used for any decision.
+ */
+function floatingGeometry(windowBounds, popups, lists, elements) {
+  if (!windowBounds) return null;
+  const local = (rect) => ({ x: Math.round(rect.x - windowBounds.x), y: Math.round(rect.y - windowBounds.y), w: Math.round(rect.width), h: Math.round(rect.height) });
+  const listIds = new Set((Array.isArray(lists) ? lists : []).map((list) => list.windowId));
+  const box = (Array.isArray(elements) ? elements : []).find((element) => element && element.searchLike && element.frame);
+  return {
+    popups: (Array.isArray(popups) ? popups : []).slice(0, 2).map((popup) => ({ ...local(popup.bounds), list: listIds.has(String(popup.windowId)) })),
+    searchBox: box ? local(box.frame) : null,
   };
 }
 
@@ -937,8 +948,12 @@ function nextTracker(tracker, candidate, status, { task }) {
   const backgroundMiss = (status === "failed" || status === "no_effect") && candidate.delivery === "background";
   if (backgroundMiss && ["key", "hotkey", "type", "point", "click"].includes(candidate.kind)) {
     // Focus believed from background input may be wrong (those keys may have
-    // gone nowhere): the foreground rung starts from unknown focus.
-    Object.assign(next, { delivery: "foreground", focus: "none", searchText: null, searchMoved: false });
+    // gone nowhere): the foreground rung starts from unknown focus. An
+    // element-addressed action Cua refused outright never touched the app,
+    // so it leaves the focus belief as it was (a search box opened by ⌘F
+    // keeps keyboard focus; the next step can type into it).
+    const untouched = status === "failed" && Boolean(candidate.elementIdentity);
+    Object.assign(next, untouched ? { delivery: "foreground" } : { delivery: "foreground", focus: "none", searchText: null, searchMoved: false });
   }
   // The same element is not offered again in the background; a foreground
   // position click for it becomes a distinct candidate instead.
@@ -1113,6 +1128,7 @@ module.exports = {
   extraConsentDialog,
   extractTreeTexts,
   facts,
+  floatingGeometry,
   labelRisk,
   landingView,
   modelElements,

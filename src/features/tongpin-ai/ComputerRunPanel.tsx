@@ -41,7 +41,12 @@ function mergeStep(steps: ComputerTimelineStep[], next: ComputerTimelineStep): C
 function popupText(observation: NonNullable<ComputerTimelineStep["observation"]>): string {
   if (!observation.popupCount) return "";
   const what = observation.searchListShown ? "搜索列表" : "浮层窗口";
-  return observation.popupElementCount ? ` · ${what} ${observation.popupElementCount} 项` : ` · ${what}（读不到内容）`;
+  const count = observation.popupElementCount ? ` ${observation.popupElementCount} 项` : "（读不到内容）";
+  // Where it hangs in the window (and where the app says its search box is).
+  const where = observation.floating
+    ? `〔${observation.floating.popups.map(item => `${item.list ? "列表" : "浮层"} ${item.x},${item.y} ${item.w}×${item.h}`).join("；")}${observation.floating.searchBox ? `；搜索框 ${observation.floating.searchBox.x},${observation.floating.searchBox.y} ${observation.floating.searchBox.w}×${observation.floating.searchBox.h}` : ""}〕`
+    : "";
+  return ` · ${what}${count}${where}`;
 }
 
 function StepChain({ step }: { step: ComputerTimelineStep & { verifiedEffect?: number } }) {

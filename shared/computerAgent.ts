@@ -203,9 +203,15 @@ export interface ComputerObserveResult {
   /**
    * `popupCount`/`popupElementCount`: same-app windows floating over the
    * target (read while a search is open) and how many of their items were
-   * readable; `searchListShown`: one of them is the list under the search box.
+   * readable; `searchListShown`: one of them is the list under the search box;
+   * `floating`: their window-local geometry and the search box's
+   * accessibility frame, shown for checking an app's layout by eye.
    */
-  display: { app: string | null; title: string | null; elementCount: number; axSparse: boolean; screenshotUsed: boolean; popupCount?: number; popupElementCount?: number; searchListShown?: boolean };
+  display: {
+    app: string | null; title: string | null; elementCount: number; axSparse: boolean; screenshotUsed: boolean;
+    popupCount?: number; popupElementCount?: number; searchListShown?: boolean;
+    floating?: { popups: Array<{ x: number; y: number; w: number; h: number; list: boolean }>; searchBox: { x: number; y: number; w: number; h: number } | null } | null;
+  };
 }
 
 export type ComputerExecuteStatus = "delivered" | "unverified" | "no_effect" | "failed" | "blocked" | "unknown";

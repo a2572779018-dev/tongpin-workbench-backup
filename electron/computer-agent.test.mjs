@@ -70,7 +70,8 @@ function wechatApp(options = {}) {
       });
     };
     // `hideSearchValue`: like WeChat, the search box never exposes its text.
-    push({ role: "AXTextArea", label: "Search", value: options.hideSearchValue ? "" : app.search, frame: { x: 110, y: 70, w: 180, h: 24 }, selected: Boolean(options.focusVisible && app.focus === "search") });
+    // `searchFrameOff`: like WeChat, the search box's accessibility frame does not match the screen.
+    push({ role: "AXTextArea", label: "Search", value: options.hideSearchValue ? "" : app.search, frame: options.searchFrameOff ? { x: 220, y: 140, w: 360, h: 48 } : { x: 110, y: 70, w: 180, h: 24 }, selected: Boolean(options.focusVisible && app.focus === "search") });
     // `searchResults`: a results popover lists matching contacts and web hits while searching.
     if (options.searchResults && app.search && app.focus === "search") {
       contacts.filter((name) => name.includes(app.search)).forEach((name, index) => push({ role: "AXStaticText", label: name, frame: { x: 110, y: 100 + index * 40, w: 200, h: 36 } }));
@@ -680,6 +681,21 @@ describe("computer agent WeChat keyboard path", () => {
     expect(popupCaptures.every((input) => input.maxDimension === 320 && input.maxElements === 200)).toBe(true);
   });
 
+  it("finds the search list by where it hangs in the window even when the search box's frame is off", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque", searchFrameOff: true }), sdkOptions: { clearsSearchOnBlur: true } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const view = await observe(agent);
+    expect(view.display).toMatchObject({
+      popupCount: 1, searchListShown: true,
+      floating: { popups: [{ x: 5, y: 40, w: 260, h: 420, list: true }], searchBox: { x: 120, y: 90, w: 360, h: 48 } },
+    });
+    expect(view.facts.typedLanding).toEqual({ field: "search", text: "姐姐", landed: "expected" });
+    await agent.controller.execute({ observationId: view.observationId, candidateId: "key_return_fg" });
+    expect(agent.app.chat).toBe("姐姐");
+  });
+
   it("keeps Return risky when the list under the box does not react to the keystrokes", async () => {
     const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, dropsTyping: true } });
     await step(agent, "open_search");
@@ -1086,6 +1102,8 @@ describe("computer agent foreground element escalation (WeChat virtual AX nodes)
     const typed = await step(agent, (candidate) => candidate.kind === "type" && candidate.label === "在搜索框「Search」输入「姐姐」");
     expect(typed.result).toMatchObject({ status: "failed", code: "element_outside_target_window" });
     const view = await observe(agent);
+    // The refused write never touched the app: the focus belief stays as it was.
+    expect(view.facts.focus).toBe("none");
     // No element-addressed background candidate is left: they would all be refused the same way.
     expect(view.candidates.filter((candidate) => /^(?:click_|type_p\d_e|scroll_)/.test(candidate.id))).toEqual([]);
     expect(view.candidates.some((candidate) => candidate.id === "open_search_fg")).toBe(true);
@@ -1094,6 +1112,22 @@ describe("computer agent foreground element escalation (WeChat virtual AX nodes)
     const other = await started({ app: wechatApp(), sdkOptions: { refuseElementBackground: true } });
     await step(other, (candidate) => candidate.kind === "type" && candidate.label === "在搜索框「Search」输入「姐姐」");
     expect((await observe(other)).candidates.some((candidate) => candidate.kind === "click" && candidate.label === "点击「姐姐」")).toBe(true);
+  });
+
+  it("keeps the search open after Cua refuses an element write into it, so the next step types by keys", async () => {
+    const agent = await started({ app: wechatApp({ refuseBackground: true, hideSearchValue: true, popupList: "opaque" }), sdkOptions: { clearsSearchOnBlur: true, refuseElementBackground: "ancestry" } });
+    await step(agent, "open_search");
+    await step(agent, "open_search_fg");
+    const refused = await step(agent, (candidate) => candidate.kind === "type" && candidate.label === "在搜索框「Search」输入「姐姐」");
+    expect(refused.result).toMatchObject({ status: "failed", code: "element_outside_target_window" });
+    const view = await observe(agent);
+    expect(view.facts.focus).toBe("search");
+    // No second ⌘F is needed: typing by keys is offered right away.
+    await agent.controller.execute({ observationId: view.observationId, candidateId: "type_p1_focus_fg" });
+    expect(agent.app.search).toBe("姐姐");
+    // A refused key press (not element-addressed) still resets focus.
+    const policyTracker = policy.nextTracker({ ...policy.emptyTracker(), focus: "search" }, { id: "key_return", kind: "key", key: "return", risk: "none", delivery: "background" }, "failed", { task: policy.validateTaskSpec(TASK).task });
+    expect(policyTracker.focus).toBe("none");
   });
 
   it("offers no position clicks without Screen Recording, only foreground keyboard candidates", async () => {
@@ -1410,32 +1444,37 @@ describe("computer agent policy units", () => {
     expect(policy.typedLanding(check("search", [search(""), item("姐姐")]), [search(""), item("姐姐"), item("[草稿] 姐姐")])).toBe("unknown");
   });
 
-  it("takes a same-app window as the search list only when it hangs from a visible search box", () => {
-    const box = { searchLike: true, frame: { x: 110, y: 70, width: 180, height: 24 } };
-    const lists = (bounds, hash = "h1") => policy.anchoredSearchLists([box], [{ windowId: 77, bounds, hash }]);
-    expect(lists({ x: 105, y: 90, width: 260, height: 420 })).toEqual([{ windowId: "77", hash: "h1", read: true }]);
-    // A window that also covers the box (its shadow starts just above it).
-    expect(lists({ x: 100, y: 58, width: 260, height: 420 })).toHaveLength(1);
-    expect(lists({ x: 100, y: 57, width: 260, height: 420 })).toEqual([]);
-    // Up to 48 points below the box's bottom edge (70 + 24 + 48 = 142).
-    expect(lists({ x: 105, y: 142, width: 260, height: 420 })).toHaveLength(1);
-    expect(lists({ x: 105, y: 143, width: 260, height: 420 })).toEqual([]);
-    // Too short or too narrow for a list (a tooltip), or beside the box.
-    expect(lists({ x: 105, y: 90, width: 260, height: 59 })).toEqual([]);
-    expect(lists({ x: 110, y: 90, width: 143, height: 300 })).toEqual([]);
-    expect(lists({ x: 110, y: 90, width: 144, height: 300 })).toHaveLength(1);
-    expect(lists({ x: 201, y: 90, width: 260, height: 300 })).toEqual([]);
-    expect(lists({ x: 200, y: 90, width: 260, height: 300 })).toHaveLength(1);
-    // Only a search box anchors it; no picture means no hash.
-    expect(policy.anchoredSearchLists([{ ...box, searchLike: false }], [{ windowId: 77, bounds: { x: 105, y: 90, width: 260, height: 420 }, hash: "h" }])).toEqual([]);
-    expect(lists({ x: 105, y: 90, width: 260, height: 420 }, null)).toEqual([{ windowId: "77", hash: null, read: true }]);
-    // A window whose own read failed still hangs there, marked unread.
-    expect(policy.anchoredSearchLists([box], [{ windowId: 77, bounds: { x: 105, y: 90, width: 260, height: 420 }, hash: null, read: false }])).toEqual([{ windowId: "77", hash: null, read: false }]);
-    // "Looked" needs both a listing and a search box to hang a list from.
-    const popups = [{ windowId: 77, bounds: { x: 105, y: 90, width: 260, height: 420 }, hash: "h" }];
-    expect(policy.searchListState({ looked: true, elements: [box], popups })).toEqual({ looked: true, lists: [{ windowId: "77", hash: "h", read: true }], ids: ["77"] });
-    expect(policy.searchListState({ looked: false, elements: [box], popups }).looked).toBe(false);
-    expect(policy.searchListState({ looked: true, elements: [{ ...box, frame: null }], popups })).toEqual({ looked: false, lists: [], ids: ["77"] });
+  it("takes a floating window as the search list only when it hangs from the window's top band and is list-sized", () => {
+    // The target window: 1000×800 at (100, 50); its top band is min(160, 800/4) = 160 points.
+    const win = { x: 100, y: 50, width: 1000, height: 800 };
+    const lists = (bounds, hash = "h1") => policy.anchoredSearchLists(win, [{ windowId: 77, bounds, hash }]);
+    // WeChat: 368 wide, 35 points under the window's top edge.
+    expect(lists({ x: 148, y: 85, width: 368, height: 922 })).toEqual([{ windowId: "77", hash: "h1", read: true }]);
+    expect(lists({ x: 148, y: 42, width: 368, height: 400 })).toHaveLength(1);
+    expect(lists({ x: 148, y: 41, width: 368, height: 400 })).toEqual([]);
+    expect(lists({ x: 148, y: 210, width: 368, height: 400 })).toHaveLength(1);
+    expect(lists({ x: 148, y: 211, width: 368, height: 400 })).toEqual([]);
+    // A popup over the message box, a tooltip, or a narrow badge is not a list.
+    expect(lists({ x: 380, y: 560, width: 300, height: 70 })).toEqual([]);
+    expect(lists({ x: 148, y: 85, width: 368, height: 59 })).toEqual([]);
+    expect(lists({ x: 148, y: 85, width: 149, height: 400 })).toEqual([]);
+    expect(lists({ x: 148, y: 85, width: 150, height: 60 })).toHaveLength(1);
+    // A short window's band is a quarter of its height.
+    expect(policy.anchoredSearchLists({ ...win, height: 400 }, [{ windowId: 77, bounds: { x: 148, y: 151, width: 368, height: 200 } }])).toEqual([]);
+    expect(policy.anchoredSearchLists({ ...win, height: 400 }, [{ windowId: 77, bounds: { x: 148, y: 150, width: 368, height: 200 } }])).toHaveLength(1);
+    // No picture means no hash; a failed read stays listed, marked unread; no window, no lists.
+    expect(lists({ x: 148, y: 85, width: 368, height: 400 }, null)).toEqual([{ windowId: "77", hash: null, read: true }]);
+    expect(policy.anchoredSearchLists(win, [{ windowId: 77, bounds: { x: 148, y: 85, width: 368, height: 400 }, hash: null, read: false }])).toEqual([{ windowId: "77", hash: null, read: false }]);
+    expect(policy.anchoredSearchLists(null, [{ windowId: 77, bounds: { x: 148, y: 85, width: 368, height: 400 } }])).toEqual([]);
+    // "Looked" needs a listing and the target window.
+    const popups = [{ windowId: 77, bounds: { x: 148, y: 85, width: 368, height: 400 }, hash: "h" }];
+    expect(policy.searchListState({ looked: true, windowBounds: win, popups })).toEqual({ looked: true, lists: [{ windowId: "77", hash: "h", read: true }], ids: ["77"] });
+    expect(policy.searchListState({ looked: false, windowBounds: win, popups }).looked).toBe(false);
+    expect(policy.searchListState({ looked: true, windowBounds: null, popups })).toEqual({ looked: false, lists: [], ids: ["77"] });
+    // Geometry for the run panel, window-local and rounded.
+    const box = { searchLike: true, frame: { x: 288.4, y: 180, width: 384, height: 60 } };
+    expect(policy.floatingGeometry(win, popups, [{ windowId: "77" }], [box])).toEqual({ popups: [{ x: 48, y: 35, w: 368, h: 400, list: true }], searchBox: { x: 188, y: 130, w: 384, h: 60 } });
+    expect(policy.floatingGeometry(win, popups, [], [])).toEqual({ popups: [{ x: 48, y: 35, w: 368, h: 400, list: false }], searchBox: null });
   });
 
   it("proves search typing by a search list that appeared or redrew, never by an unchanged one", () => {

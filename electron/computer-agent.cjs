@@ -775,11 +775,11 @@ function createComputerAgentController({
   }
 
   /**
-   * Reads the floating windows (read only) and, against the target's search
-   * box in `elements`, which of them is its search list. A window whose read
+   * Reads the floating windows (read only) and which of them is the target's
+   * search list (from where it hangs in `windowBounds`). A window whose read
    * fails still counts by its position, with no picture.
    */
-  async function readFloating(state, floating, elements) {
+  async function readFloating(state, floating, elements, windowBounds) {
     const popups = [];
     for (const window of floating.windows) {
       const popup = await capturePopup(state, window);
@@ -795,7 +795,7 @@ function createComputerAgentController({
         popupElements.push({ ...element, token: null, popup: true, popupWindowId: popup.windowId });
       }
     }
-    const searchList = policy.searchListState({ looked: floating.looked, elements, popups });
+    const searchList = policy.searchListState({ looked: floating.looked, windowBounds, popups });
     const listIds = new Set(searchList.lists.map((list) => list.windowId));
     return { popups, popupElements, searchList, searchRows: popupElements.filter((element) => listIds.has(element.popupWindowId)) };
   }
@@ -806,9 +806,11 @@ function createComputerAgentController({
     try {
       const windows = await listAppWindows(state, { running: true, pid: observation.target.pid });
       if (state.stopped) return null;
-      const floating = await floatingWindows(state, observation.chosenWindow, windows);
+      // The target window as it is now (it may have moved since the capture).
+      const chosen = windows.find((window) => window.windowId === observation.chosenWindow.windowId) || observation.chosenWindow;
+      const floating = await floatingWindows(state, chosen, windows);
       if (state.stopped) return null;
-      return await readFloating(state, floating, elements);
+      return await readFloating(state, floating, elements, chosen.bounds);
     } catch {
       return null;
     }
@@ -881,9 +883,10 @@ function createComputerAgentController({
       const axSparse = snapshot ? isSparse(snapshot.elements) : false;
       const windowBounds = snapshot ? snapshot.windowBounds : null;
       const elements = snapshot ? policy.modelElements(snapshot.elements, windowBounds) : [];
+      const listBounds = chosenWindow ? chosenWindow.bounds : null;
       const read = snapshot && floating.windows.length
-        ? await readFloating(state, floating, elements)
-        : { popups: [], popupElements: [], searchList: policy.searchListState({ looked: floating.looked, elements, popups: [] }), searchRows: [] };
+        ? await readFloating(state, floating, elements, listBounds)
+        : { popups: [], popupElements: [], searchList: policy.searchListState({ looked: floating.looked, windowBounds: listBounds, popups: [] }), searchRows: [] };
       if (!read || state.stopped) return failure("stopped");
       const { popups, popupElements, searchList, searchRows } = read;
       const landingElements = policy.landingView(elements, searchRows);
@@ -961,7 +964,7 @@ function createComputerAgentController({
         facts,
         display: {
           app: appName, title: windowTitle, elementCount: elements.length, axSparse, screenshotUsed,
-          ...(popups.length ? { popupCount: popups.length, popupElementCount: popupElements.length } : {}),
+          ...(popups.length ? { popupCount: popups.length, popupElementCount: popupElements.length, floating: policy.floatingGeometry(listBounds, popups, searchList.lists, elements) } : {}),
           ...(searchList.lists.length ? { searchListShown: true } : {}),
         },
       });

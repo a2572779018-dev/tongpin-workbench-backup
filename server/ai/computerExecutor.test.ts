@@ -183,6 +183,8 @@ describe("computer executor server (task spec, Jev decisions, billing)", () => {
     const shown = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
     expect(shown.state.executor_facts).toMatchObject({ searchListShown: true });
     expect(JSON.stringify(shown.questions.next_action.instructions)).toContain("executor_facts.searchListShown");
+    // Right after the search shortcut, Jev is told to type rather than press it again.
+    expect(JSON.stringify(shown.questions.next_action.instructions)).toContain("type the search text next instead of pressing the shortcut again");
     await runtime.service.computer.decide("member", created.run.runId, decisionBody({ step: 2, observationId: "obs_fixture_0002", facts: { focus: "search", irreversibleDone: false, searchListShown: "yes" as never } }));
     const malformed = JSON.parse(jevCalls().at(-1)![1].body!) as JevBody;
     expect(malformed.state.executor_facts).not.toHaveProperty("searchListShown");
