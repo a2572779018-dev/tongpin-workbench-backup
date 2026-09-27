@@ -8,7 +8,7 @@ import { applyReplyProcessEvent, EMPTY_REPLY_PROCESS_LIVE, replyProcessFromRunEv
 import type { AiRunEvent } from "../../shared/aiRunEvents";
 import { readAiChatStream } from "../../src/lib/aiRunStream";
 import { createChatStreamResponse } from "./chatStream";
-import { MULTI_AGENT_SEARCH_INPUT_RESERVE, multiAgentTiming, setMultiAgentPendingGuidance } from "./multiAgentRun";
+import { MULTI_AGENT_SEARCH_INPUT_RESERVE, multiAgentSettingsFor, multiAgentTiming, setMultiAgentPendingGuidance } from "./multiAgentRun";
 import { createNodeAi } from "./node";
 import type { AiTransport, AiTransportInit } from "./provider";
 
@@ -456,3 +456,17 @@ describe("Pro 多 Agent 协作", () => {
     expect(events.filter(event => event.type === "subagent_update").length).toBeGreaterThanOrEqual(6);
   });
 });
+
+describe("multiAgentSettingsFor", () => {
+  const settings: AiMultiAgentSettings = { maxConcurrency: 3, subAgentMaxOutputTokens: 2048 };
+  const route = { legacy: false, multiAgent: settings } as unknown as Parameters<typeof multiAgentSettingsFor>[0];
+  const request = (extra: Partial<AiChatRequest> = {}): AiChatRequest => ({ requestId: "request-multi-1", mode: "pro", messages: [{ role: "user", content: "对比三种方案" }], ...extra } as AiChatRequest);
+  it("routes an ordinary Pro text turn to 多 Agent 协作", () => {
+    expect(multiAgentSettingsFor(route, request())).toBe(settings);
+  });
+  it("leaves a turn auto-routed to code execution on the single-agent path, where the tool runs", () => {
+    expect(multiAgentSettingsFor(route, request({ codeInterpreter: true }))).toBeUndefined();
+    expect(multiAgentSettingsFor(route, request({ codeInterpreter: false }))).toBe(settings);
+  });
+});
+

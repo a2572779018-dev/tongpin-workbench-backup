@@ -123,6 +123,10 @@ export function multiAgentSettingsFor(route: ResolvedHarnessRoute, request: AiCh
   if (route.legacy || !route.multiAgent) return undefined;
   if (request.outputFormat !== undefined && request.outputFormat !== "text" && request.outputFormat !== "dispatch") return undefined;
   if (request.workflowId || request.retryMode === "continue" || request.skillIds?.includes("agent-continuation-v1")) return undefined;
+  // Sub-agents never get the hosted code_interpreter tool: a turn that was
+  // auto-routed to code execution (computation wording or a data file) takes
+  // the ordinary single-agent path, where the tool actually runs.
+  if (request.codeInterpreter) return undefined;
   return route.multiAgent;
 }
 
