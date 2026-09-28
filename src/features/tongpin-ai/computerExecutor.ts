@@ -333,6 +333,9 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
   let run: ComputerRunStart | null = null;
   let steps = 0;
   let actions = 0;
+  /** Actions of this run that entered something (clicks, typing, keys) — not switching apps or scrolling. */
+  let inputActions = 0;
+  let doneBeforeInput = 0;
   let points = 0;
   let irreversibleAttempted = false;
   let appName = "";
@@ -480,6 +483,22 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       });
       checkStopped();
 
+      /* A task that asks for something to be entered is not done before this run
+       * entered anything: a screen left over from an earlier run (a calculator
+       * already showing the result) only looks done. Jev is told once; if it
+       * insists, a calculation still counts when the screen shows its correct result. */
+      if (choice.id === "done" && inputActions === 0 && spec.parameters.some(parameter => parameter.role === "text")) {
+        doneBeforeInput += 1;
+        const expected = calculationResult(spec);
+        const showsResult = expected !== null && readout.some(value => { const number = numberOf(value); return number !== null && Math.abs(number - expected) <= 1e-9 * Math.max(1, Math.abs(expected)); });
+        if (doneBeforeInput < 2 || (expected !== null && !showsResult)) {
+          history.push({ step, action: "Chose done before entering anything in this run; the task asks to enter its input now (an earlier run may have left the screen looking done).", result: "reobserved" });
+          lastAction = undefined;
+          callbacks.onStep?.({ step, phase: "verify", note: "还没有按任务要求输入，先完成输入" });
+          if (doneBeforeInput >= 3) throw new RunStop("refuted", "goal_refuted", `${REASON_TEXT.goal_refuted}：${spec.successCheck}`);
+          continue;
+        }
+      }
       /* Verification of the goal (executor evidence + Jev goal_done). */
       if (choice.id === "done" || (verification.goalDone >= AUTO_DONE_THRESHOLD && view.facts.irreversibleDone)) {
         const verdict = evaluateComputerDone(spec, view.facts, verification.goalDone);
@@ -584,6 +603,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       const outcome = executed.value;
       memberConfirmedSend = false;
       if (outcome.status !== "blocked") { actions += 1; valuesBeforeAction = new Set(screenValues(view.observation)); }
+      if (outcome.status !== "blocked" && outcome.status !== "failed" && choice.kind !== "activate_app" && choice.kind !== "scroll" && choice.kind !== "reserved") inputActions += 1;
       if (choice.risk !== "none" && outcome.status !== "blocked" && outcome.status !== "failed") irreversibleAttempted = true;
       callbacks.onStep?.({ step, phase: outcome.status === "blocked" ? "authorize" : "verify", authorization: outcome.authorization, execution: { status: outcome.status, message: outcome.message, ...(outcome.delivery ? { delivery: outcome.delivery } : {}) } });
       history.push({ step, action: choice.description, result: outcome.status });

@@ -585,6 +585,41 @@ describe("computer executor read-back tasks", () => {
     expect(summary).not.toContain("100%");
   });
 
+  it("does not take a result left on screen by an earlier run as done before entering the calculation", async () => {
+    // Real run: Calculator still showed 4,608, and Jev chose done at once (51%).
+    const h = harness({
+      runTask: CALC,
+      views: [
+        calcView(0, "4,608", [candidate("click_clear", "点击「全部清除」", "none", "click")]),
+        calcView(1, "4,608", [candidate("click_clear", "点击「全部清除」", "none", "click")]),
+        calcView(2, "0", [candidate("type_p1", "输入「128×36」", "none", "type")]),
+        calcView(3, "4,608", []),
+      ],
+      decisions: [{ id: "done", goalDone: 0.7 }, { id: "click_clear" }, { id: "type_p1" }, { id: "done", goalDone: 0.95 }],
+    });
+    const result = await run(h);
+    expect(h.calls.execute.map(item => item.candidateId)).toEqual(["click_clear", "type_p1"]);
+    expect(h.calls.decide[1].history.at(-1)?.action).toContain("before entering anything");
+    expect(result).toMatchObject({ outcome: "verified" });
+    expect(result.summary).toContain("显示的结果：4,608。");
+  });
+
+  it("accepts an insisted done without input only when the screen shows the calculation's correct result", async () => {
+    const insisting = (display: string) => harness({
+      runTask: CALC,
+      views: [(() => {
+        const shown = calcView(0, display, [candidate("click_clear", "点击「全部清除」", "none", "click")]);
+        return { ...shown, observation: { ...shown.observation, texts: [display] } };
+      })()],
+      decisions: [{ id: "done", goalDone: 0.9 }, { id: "done", goalDone: 0.9 }, { id: "done", goalDone: 0.9 }],
+    });
+    const right = insisting("4,608");
+    expect(await run(right)).toMatchObject({ outcome: "verified" });
+    expect(right.calls.execute).toEqual([]);
+    const wrong = insisting("12");
+    expect(await run(wrong)).toMatchObject({ outcome: "refuted" });
+  });
+
   it("reports the result even when Jev re-reads the screen before choosing done", async () => {
     const h = harness({
       runTask: CALC,
