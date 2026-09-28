@@ -10,10 +10,15 @@ export interface VoicePreferences {
   autoRead: boolean;
   /** Speaking rate for read-aloud (1 = normal). */
   rate: number;
+  /** "" = the administrator's default voice, "system" = this computer's free
+   * system voice, otherwise an opaque voice key from the member settings. */
+  voice: string;
 }
 
 export const SPEECH_RATES = [0.8, 1, 1.25, 1.5] as const;
-export const DEFAULT_VOICE_PREFERENCES: VoicePreferences = Object.freeze({ conversationMode: false, autoSend: false, autoRead: false, rate: 1 });
+export const DEFAULT_VOICE_PREFERENCES: VoicePreferences = Object.freeze({ conversationMode: false, autoSend: false, autoRead: false, rate: 1, voice: "" });
+/** The free system voice of this computer, whatever the administrator chose. */
+export const SYSTEM_VOICE = "system";
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
 
@@ -33,6 +38,7 @@ export function normalizeVoicePreferences(value: unknown): VoicePreferences {
     autoSend: input.autoSend === true,
     autoRead: input.autoRead === true,
     rate,
+    voice: typeof input.voice === "string" && /^(?:system|v[0-9a-z]{1,13})$/.test(input.voice) ? input.voice : "",
   };
 }
 
@@ -64,4 +70,14 @@ export function effectiveVoicePreferences(preferences: VoicePreferences): { auto
     autoRead: preferences.conversationMode || preferences.autoRead,
     stopOnSilence: preferences.conversationMode,
   };
+}
+
+/** Which engine and voice read aloud for this member right now. A voice the
+ * administrator no longer offers falls back to the default one. */
+export function speechChoice(
+  speech: { engine: "browser" | "external"; voices?: ReadonlyArray<{ id: string }> },
+  preferences: Pick<VoicePreferences, "voice">,
+): { engine: "browser" | "external"; voice?: string } {
+  if (speech.engine !== "external" || preferences.voice === SYSTEM_VOICE) return { engine: "browser" };
+  return speech.voices?.some(option => option.id === preferences.voice) ? { engine: "external", voice: preferences.voice } : { engine: "external" };
 }

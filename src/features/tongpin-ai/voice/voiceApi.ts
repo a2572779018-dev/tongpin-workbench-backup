@@ -37,6 +37,10 @@ function normalizeSettings(value: unknown): AiVoiceMemberSettings {
       engine: speech.engine === "external" ? "external" : "browser",
       pointsPer1kChars: count(speech.pointsPer1kChars, 0),
       maxCharacters: Math.min(count(speech.maxCharacters, AI_VOICE_LIMITS.maxSpeechCharacters) || AI_VOICE_LIMITS.maxSpeechCharacters, AI_VOICE_LIMITS.maxSpeechCharacters),
+      ...(speech.engine === "external" && Array.isArray(speech.voices) ? {
+        voices: speech.voices.filter((option): option is { id: string; label: string } => Boolean(option) && typeof option.id === "string" && typeof option.label === "string" && option.id.length <= 16 && option.label.length <= 80).slice(0, 16),
+        ...(typeof speech.defaultVoice === "string" ? { defaultVoice: speech.defaultVoice } : {}),
+      } : {}),
     },
   };
 }
@@ -94,9 +98,9 @@ export async function transcribeRecording(api: VoiceApi, accountId: string, reco
 }
 
 /** One synthesized chunk as a playable Blob (bounded, cancellable). */
-export async function synthesizeSpeech(api: VoiceApi, accountId: string, text: string, signal?: AbortSignal): Promise<Blob> {
+export async function synthesizeSpeech(api: VoiceApi, accountId: string, text: string, signal?: AbortSignal, voice?: string): Promise<Blob> {
   const response = await api<Response>(AI_VOICE_SPEECH_PATH, {
-    method: "POST", body: JSON.stringify({ requestId: newVoiceRequestId(), text }), headers: { "X-Tongpin-Account": accountId }, signal,
+    method: "POST", body: JSON.stringify({ requestId: newVoiceRequestId(), text, ...(voice ? { voice } : {}) }), headers: { "X-Tongpin-Account": accountId }, signal,
   }, 90_000, "stream");
   const type = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
   if (!type.startsWith("audio/") || !response.body) {

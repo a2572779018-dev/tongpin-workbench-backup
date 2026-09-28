@@ -1,4 +1,4 @@
-import { ChevronUp, LoaderCircle, Mic, Square, X } from "lucide-react";
+import { ChevronUp, LoaderCircle, Mic, Square, Volume2, X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { AI_VOICE_LIMITS } from "../../../../shared/aiVoice";
 import { formatAiPoints } from "../quotaFormatting";
@@ -7,11 +7,13 @@ import { speechPlayer } from "./speechPlayer";
 import { hasChineseVoice, type SpeechVoiceLike } from "./speechText";
 import { useVoiceRecorder, type VoiceRecording } from "./useVoiceRecorder";
 import { transcribeRecording, voiceErrorMessage } from "./voiceApi";
-import { useOptionalAuth, useSpeechSupported, useVoicePreferences, useVoiceSettings } from "./voiceHooks";
-import { effectiveVoicePreferences, SPEECH_RATES, writeVoicePreferences, type VoicePreferences } from "./voicePreferences";
+import { startReading, useOptionalAuth, useSpeechPlayback, useSpeechSupported, useVoicePreferences, useVoiceSettings } from "./voiceHooks";
+import { effectiveVoicePreferences, SPEECH_RATES, speechChoice, SYSTEM_VOICE, writeVoicePreferences, type VoicePreferences } from "./voicePreferences";
 import "./voice.css";
 
 const RATE_LABELS: Record<number, string> = { 0.8: "较慢 0.8×", 1: "正常 1×", 1.25: "较快 1.25×", 1.5: "快 1.5×" };
+const PREVIEW_KEY = "voice-preview";
+const PREVIEW_TEXT = "你好，我是同频。以后我就用这个声音为你朗读和通话。";
 
 function useChineseSystemVoice(active: boolean): boolean | null {
   const [available, setAvailable] = useState<boolean | null>(null);
@@ -47,7 +49,9 @@ export function VoiceInputControl({ disabled = false, onTranscript }: {
   const effective = effectiveVoicePreferences(preferences);
   const speechSupported = useSpeechSupported();
   const [open, setOpen] = useState(false);
-  const chineseVoice = useChineseSystemVoice(open && settings.speech.engine === "browser");
+  const choice = speechChoice(settings.speech, preferences);
+  const chineseVoice = useChineseSystemVoice(open && choice.engine === "browser");
+  const preview = useSpeechPlayback(PREVIEW_KEY);
   const rootRef = useRef<HTMLDivElement>(null);
   const popoverId = useId();
   const latest = useRef({ api, accountId, onTranscript, autoSend: effective.autoSend });
@@ -161,10 +165,25 @@ export function VoiceInputControl({ disabled = false, onTranscript }: {
           {SPEECH_RATES.map(rate => <option key={rate} value={rate}>{RATE_LABELS[rate]}</option>)}
         </select>
       </label>
+      {settings.speech.engine === "external" && settings.speech.voices?.length ? <div className="tp-ai-voice-choice">
+        <label className="tp-ai-voice-rate">朗读音色（通话也用）
+          <select value={choice.engine === "browser" ? SYSTEM_VOICE : choice.voice ?? settings.speech.defaultVoice ?? ""}
+            onChange={event => update({ voice: event.target.value === settings.speech.defaultVoice ? "" : event.target.value })}>
+            {settings.speech.voices.map(option => <option key={option.id} value={option.id}>{option.label}{option.id === settings.speech.defaultVoice ? "（默认）" : ""}</option>)}
+            <option value={SYSTEM_VOICE}>这台电脑的系统声音（免费）</option>
+          </select>
+        </label>
+        <button type="button" className="tp-ai-voice-preview" disabled={preview.status === "loading"}
+          onClick={() => preview.status === "idle" ? void startReading({ key: PREVIEW_KEY, content: PREVIEW_TEXT, api, accountId }) : speechPlayer.stop()}>
+          {preview.status === "loading" ? <LoaderCircle size={14} className="tp-ai-voice-spin" aria-hidden="true" /> : preview.status === "speaking" ? <Square size={11} fill="currentColor" aria-hidden="true" /> : <Volume2 size={14} aria-hidden="true" />}
+          {preview.status === "speaking" ? "停止" : "试听"}
+        </button>
+      </div> : null}
+      {preview.error ? <p className="tp-ai-voice-preview-error" role="alert">{preview.error}</p> : null}
       <hr />
       {settings.input.enabled ? <p>语音输入按录音时长计费：每分钟 {formatAiPoints(settings.input.pointsPerMinute)}（按秒计），单次最长 {settings.input.maxSeconds} 秒。</p> : null}
-      <p>{settings.speech.engine === "external" ? `朗读使用外部语音服务：每千字 ${formatAiPoints(settings.speech.pointsPer1kChars)}。` : "朗读使用本机系统语音，不消耗同频点。"}</p>
-      {settings.speech.engine === "browser" && chineseVoice === false ? <p>这台电脑没有中文系统语音，朗读中文可能不自然。macOS 可在 系统设置 → 辅助功能 → 朗读内容 中添加中文声音；Windows 可在 设置 → 时间和语言 → 语音 中添加。</p> : null}
+      <p>{choice.engine === "external" ? `朗读使用外部语音服务：每千字 ${formatAiPoints(settings.speech.pointsPer1kChars)}（试听也按字计）。` : "朗读使用这台电脑的系统声音，不消耗同频点。"}</p>
+      {choice.engine === "browser" && chineseVoice === false ? <p>这台电脑没有中文系统语音，朗读中文可能不自然。macOS 可在 系统设置 → 辅助功能 → 朗读内容 中添加中文声音；Windows 可在 设置 → 时间和语言 → 语音 中添加。</p> : null}
     </div> : null}
     {state.phase === "error" && state.issue ? <div className="tp-ai-voice-alert" role="alert">
       <p>{state.issue.message}</p>

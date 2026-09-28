@@ -5,8 +5,8 @@ import { classifyMicrophoneError, ensureMicrophoneAccess, microphoneIssue } from
 import { speechPlayer } from "../speechPlayer";
 import { holdVoiceCapture } from "../useVoiceRecorder";
 import { synthesizeSpeech, transcribeRecording, voiceErrorMessage } from "../voiceApi";
-import { useOptionalAuth, useVoiceSettings } from "../voiceHooks";
-import { readVoicePreferences } from "../voicePreferences";
+import { useOptionalAuth, useVoicePreferences, useVoiceSettings } from "../voiceHooks";
+import { readVoicePreferences, speechChoice, SYSTEM_VOICE, writeVoicePreferences } from "../voicePreferences";
 import { CallSpeaker } from "./callSpeaker";
 import { CALL_AUDIO_CONSTRAINTS, createCallVad, utteranceWav } from "./sileroVad";
 import { VoiceCallController, type CallPhase, type CallReplyLike, type VoiceCallTurnResult } from "./voiceCallController";
@@ -65,16 +65,19 @@ export function VoiceCallPanel({ messages, onSubmitTurn, onStopReply, onClose, m
   const api = auth?.api;
   const accountId = auth?.session?.user.id;
   const settings = useVoiceSettings(api, accountId);
-  const latest = useRef({ api, accountId, engine: settings.speech.engine, onSubmitTurn, onStopReply });
-  latest.current = { api, accountId, engine: settings.speech.engine, onSubmitTurn, onStopReply };
+  const preferences = useVoicePreferences(accountId);
+  const latest = useRef({ api, accountId, speech: settings.speech, onSubmitTurn, onStopReply });
+  latest.current = { api, accountId, speech: settings.speech, onSubmitTurn, onStopReply };
   const orbRef = useRef<HTMLSpanElement>(null);
 
   const [controller] = useState(() => {
     let call: VoiceCallController;
+    // The member's voice is read at each sentence, so a change during the call applies to the next one.
+    const choice = () => speechChoice(latest.current.speech, readVoicePreferences(latest.current.accountId));
     const speaker = new CallSpeaker({
-      get engine() { return latest.current.engine === "external" && latest.current.api && latest.current.accountId ? "external" : "browser"; },
+      get engine() { return choice().engine === "external" && latest.current.api && latest.current.accountId ? "external" : "browser"; },
       get rate() { return readVoicePreferences(latest.current.accountId).rate; },
-      synthesize: (text, signal) => synthesizeSpeech(latest.current.api!, latest.current.accountId!, text, signal),
+      synthesize: (text, signal) => synthesizeSpeech(latest.current.api!, latest.current.accountId!, text, signal, choice().voice),
       onSpeaking: sentence => call.speaking(sentence),
       onDrained: () => call.drained(),
     });
@@ -167,6 +170,14 @@ export function VoiceCallPanel({ messages, onSubmitTurn, onStopReply, onClose, m
       {view.fatal?.canOpenSettings ? <button type="button" className="tp-ai-call__settings" onClick={() => { void window.tongpin?.microphone?.openSettings(); }}>打开麦克风设置</button> : null}
     </div>
     <div className="tp-ai-call__actions">
+      {settings.speech.engine === "external" && settings.speech.voices?.length ? <label className="tp-ai-call__mode" title="AI 说话的声音">
+        <select aria-label="AI 的声音" value={speechChoice(settings.speech, preferences).engine === "browser" ? SYSTEM_VOICE : speechChoice(settings.speech, preferences).voice ?? settings.speech.defaultVoice ?? ""}
+          onChange={event => writeVoicePreferences(accountId, { ...preferences, voice: event.target.value === settings.speech.defaultVoice ? "" : event.target.value })}>
+          {settings.speech.voices.map(option => <option key={option.id} value={option.id}>{option.label.split(" · ")[0]}</option>)}
+          <option value={SYSTEM_VOICE}>系统声音</option>
+        </select>
+        <ChevronDown size={12} aria-hidden="true" />
+      </label> : null}
       {mode && onModeChange ? <label className="tp-ai-call__mode" title="快速、标准模式回答更快；深度、Pro 更慢">
         <select aria-label="通话使用的模式" value={mode} disabled={busy || view.phase === "speaking"} onChange={event => onModeChange(event.target.value as CallMode)}>
           {MODES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}

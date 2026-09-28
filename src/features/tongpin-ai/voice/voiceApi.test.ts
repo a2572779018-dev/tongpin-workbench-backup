@@ -7,6 +7,7 @@ import { ChatMessageRow } from "../ChatMessageRow";
 import { aiUsageDescription } from "../usageFormatting";
 import { ReadAloudButton } from "./ReadAloudButton";
 import { VoiceInputControl } from "./VoiceInputControl";
+import { speechChoice } from "./voicePreferences";
 import {
   ensureVoiceSettings, invalidateVoiceSettings, newVoiceRequestId, synthesizeSpeech, transcribeRecording, voiceErrorMessage,
   voiceSettingsSnapshot, type VoiceApi,
@@ -63,8 +64,30 @@ describe("voice API client", () => {
     const [, init, , mode] = api.mock.calls[0];
     expect(mode).toBe("stream");
     expect(JSON.parse(init.body as string)).toMatchObject({ text: "你好", requestId: expect.stringMatching(/^voice-/) });
+    expect(JSON.parse(init.body as string)).not.toHaveProperty("voice");
+    await synthesizeSpeech(api, "member-1", "你好", undefined, "v1k3m9");
+    expect(JSON.parse(api.mock.calls[1][1].body as string)).toMatchObject({ text: "你好", voice: "v1k3m9" });
     const html = vi.fn(async () => new Response("<html></html>", { headers: { "content-type": "text/html" } })) as unknown as VoiceApi;
     await expect(synthesizeSpeech(html, "member-1", "你好")).rejects.toMatchObject({ code: "AI_VOICE_SPEECH_INVALID" });
+  });
+
+  it("keeps the offered voices of an external engine and drops malformed ones", async () => {
+    const api = vi.fn(async () => ({ settings: { ...MEMBER, speech: { ...MEMBER.speech, defaultVoice: "va", voices: [
+      { id: "va", label: "Anna · 沉稳女声" }, { id: 7, label: "bad" }, { id: "vb" }, { id: "vc", label: "Claire · 温柔女声" },
+    ] } } })) as unknown as VoiceApi;
+    expect((await ensureVoiceSettings(api, "member-voices")).speech).toEqual({ engine: "external", pointsPer1kChars: 20, maxCharacters: 1000,
+      defaultVoice: "va", voices: [{ id: "va", label: "Anna · 沉稳女声" }, { id: "vc", label: "Claire · 温柔女声" }] });
+    const browser = vi.fn(async () => ({ settings: { ...MEMBER, speech: { engine: "browser", voices: [{ id: "va", label: "Anna" }] } } })) as unknown as VoiceApi;
+    expect((await ensureVoiceSettings(browser, "member-browser")).speech).not.toHaveProperty("voices");
+  });
+
+  it("reads with the member's voice only while the administrator still offers it", () => {
+    const speech = { engine: "external" as const, voices: [{ id: "va" }, { id: "vb" }] };
+    expect(speechChoice(speech, { voice: "vb" })).toEqual({ engine: "external", voice: "vb" });
+    expect(speechChoice(speech, { voice: "" })).toEqual({ engine: "external" });
+    expect(speechChoice(speech, { voice: "vgone" })).toEqual({ engine: "external" });
+    expect(speechChoice(speech, { voice: "system" })).toEqual({ engine: "browser" });
+    expect(speechChoice({ engine: "browser" }, { voice: "vb" })).toEqual({ engine: "browser" });
   });
 
   it("explains transport failures in Chinese and passes server messages through", () => {

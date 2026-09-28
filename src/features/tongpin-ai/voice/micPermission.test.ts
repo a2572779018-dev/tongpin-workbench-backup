@@ -61,13 +61,14 @@ describe("voice preferences", () => {
 
   it("persists per account and normalizes unknown values", () => {
     const storage = memoryStorage();
-    writeVoicePreferences("member-a", { conversationMode: true, autoSend: false, autoRead: true, rate: 1.25 }, storage);
-    expect(readVoicePreferences("member-a", storage)).toEqual({ conversationMode: true, autoSend: false, autoRead: true, rate: 1.25 });
+    writeVoicePreferences("member-a", { conversationMode: true, autoSend: false, autoRead: true, rate: 1.25, voice: "v1a2b3" }, storage);
+    expect(readVoicePreferences("member-a", storage)).toEqual({ conversationMode: true, autoSend: false, autoRead: true, rate: 1.25, voice: "v1a2b3" });
     expect(readVoicePreferences("member-b", storage)).toEqual(DEFAULT_VOICE_PREFERENCES);
     expect(voicePreferencesKey(undefined)).toBe("tongpin.ai.voice.v1:guest");
     storage.values.set(voicePreferencesKey("member-c"), "{not json");
     expect(readVoicePreferences("member-c", storage)).toEqual(DEFAULT_VOICE_PREFERENCES);
-    expect(normalizeVoicePreferences({ rate: 3, autoSend: "yes", conversationMode: 1 })).toEqual(DEFAULT_VOICE_PREFERENCES);
+    expect(normalizeVoicePreferences({ rate: 3, autoSend: "yes", conversationMode: 1, voice: "FunAudioLLM/CosyVoice2-0.5B:anna" })).toEqual(DEFAULT_VOICE_PREFERENCES);
+    expect(normalizeVoicePreferences({ voice: "system" }).voice).toBe("system");
   });
 
   it("survives storage that throws and still notifies listeners", () => {

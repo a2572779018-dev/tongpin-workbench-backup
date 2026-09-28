@@ -10,7 +10,7 @@ import {
 } from "./voiceApi";
 import {
   DEFAULT_VOICE_PREFERENCES, effectiveVoicePreferences, normalizeVoicePreferences, readVoicePreferences,
-  subscribeVoicePreferences, type VoicePreferences,
+  speechChoice, subscribeVoicePreferences, type VoicePreferences,
 } from "./voicePreferences";
 
 /** The workspace can render without an AuthProvider (static rendering in
@@ -54,17 +54,18 @@ function shouldFallBackToLocalSpeech(error: unknown): boolean {
   return error instanceof ApiRequestError && ["AI_VOICE_SPEECH_LOCAL", "AI_VOICE_NOT_CONFIGURED"].includes(error.code);
 }
 
-/** Reads one reply with the member's rate and the engine the administrator chose. */
+/** Reads one reply with the member's rate and voice, on the engine the administrator allows. */
 export async function startReading({ key, content, api, accountId }: { key: string; content: string; api?: VoiceApi; accountId?: string }): Promise<void> {
   const ticket = speechPlayer.prepare(key);
   const preferences = readVoicePreferences(accountId);
   let settings = voiceSettingsSnapshot(accountId);
   if (api && accountId) settings = await ensureVoiceSettings(api, accountId).catch(() => settings);
-  const external = settings.speech.engine === "external" && Boolean(api && accountId);
+  const choice = speechChoice(settings.speech, preferences);
+  const external = choice.engine === "external" && Boolean(api && accountId);
   const result = await speechPlayer.play(key, content, {
     engine: external ? "external" : "browser",
     rate: preferences.rate,
-    ...(external ? { synthesize: (text: string, signal: AbortSignal) => synthesizeSpeech(api!, accountId!, text, signal) } : {}),
+    ...(external ? { synthesize: (text: string, signal: AbortSignal) => synthesizeSpeech(api!, accountId!, text, signal, choice.voice) } : {}),
   }, ticket);
   // The administrator switched back to system voices after this view loaded.
   if (result.outcome === "failed" && external && shouldFallBackToLocalSpeech(result.error)) {

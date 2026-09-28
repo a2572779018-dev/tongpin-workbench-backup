@@ -179,6 +179,31 @@
   color: inherit;
   font: inherit;
 }
+.tp-ai-voice-popover .tp-ai-voice-choice {
+  display: grid;
+  gap: 0.4rem;
+}
+.tp-ai-voice-popover .tp-ai-voice-choice select {
+  max-width: 11.5rem;
+}
+.tp-ai-voice-popover .tp-ai-voice-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 0.35rem;
+  min-height: 1.8rem;
+  padding: 0 0.7rem;
+  border: 1px solid #d9d0b8;
+  border-radius: 8px;
+  background: #fffaf0;
+  color: inherit;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.tp-ai-voice-popover .tp-ai-voice-preview:disabled { opacity: 0.6; cursor: default; }
+.tp-ai-voice-popover .tp-ai-voice-preview-error { color: #8e3b28; }
 .tp-ai-voice-popover hr {
   width: 100%;
   margin: 0.1rem 0;
