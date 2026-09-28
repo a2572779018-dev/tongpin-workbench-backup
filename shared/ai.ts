@@ -398,6 +398,10 @@ export interface AiChatRequest {
    * reply was still running. The server adds a short framing line for the
    * model only; the UI never shows it. */
   supplement?: true;
+  /** The turn was spoken in a 语音通话 (voice call) and its reply is read aloud
+   * sentence by sentence: the server asks for short spoken-style text without
+   * Markdown and keeps the turn on the single-agent path. */
+  voiceCall?: true;
   /** Server-owned: whether this turn requests the hosted code_interpreter tool.
    * Never read from the client body; decided from tier capability, admin
    * config and a computation heuristic after route resolution. */

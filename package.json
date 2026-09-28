@@ -149,6 +149,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260728.1",
+    "@ricky0123/vad-web": "0.0.31",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",

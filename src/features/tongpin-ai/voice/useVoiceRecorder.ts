@@ -30,6 +30,13 @@ interface ActiveRecording {
 /** True while any composer holds the microphone, so read-aloud never plays into it. */
 let captures = 0;
 export function isVoiceCaptureActive(): boolean { return captures > 0; }
+/** A 语音通话 holds the microphone for its whole duration and speaks its own
+ * replies, so read-aloud of finished replies stays silent until it ends. */
+export function holdVoiceCapture(): () => void {
+  captures += 1;
+  let held = true;
+  return () => { if (held) { held = false; captures = Math.max(0, captures - 1); } };
+}
 
 const TICK_MS = 100;
 const SILENCE_STOP_MS = 1800;

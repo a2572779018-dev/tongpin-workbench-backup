@@ -1,0 +1,130 @@
+/* 语音通话 — Open WebUI call overlay layout (circle, status line, end call)
+   in 同频's warm paper and ink style; it takes the composer's place. */
+.tp-ai-page .tp-ai-call-button {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 2.2rem;
+  height: 2.2rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0.6rem;
+  background: transparent;
+  box-shadow: none;
+  color: #5d5646;
+}
+.tp-ai-page .tp-ai-call-button:hover:not(:disabled) { background: #eee5cb; color: #302b1b; }
+.tp-ai-page .tp-ai-call-button:disabled { opacity: 0.4; }
+
+.tp-ai-call {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  min-height: 7.25rem;
+  padding: 0.9rem 1.1rem;
+  border: 2px solid #2d2a22;
+  border-radius: 1.1rem;
+  background: #fffaf0;
+  box-shadow: 0 4px 0 #2d2a22;
+  animation: tp-ai-call-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.tp-ai-page .tp-ai-call__orb-button {
+  display: grid;
+  place-items: center;
+  width: 5.25rem;
+  height: 5.25rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  color: #2d2a22;
+}
+.tp-ai-page .tp-ai-call__orb-button:disabled { opacity: 1; cursor: default; }
+.tp-ai-call__orb {
+  --call-level: 0;
+  display: grid;
+  place-items: center;
+  width: 3.6rem;
+  height: 3.6rem;
+  border: 2px solid #2d2a22;
+  border-radius: 50%;
+  background: #2d2a22;
+  color: #fffaf0;
+  transform: scale(calc(1 + var(--call-level) * 0.38));
+  transition: transform 90ms linear, background-color 200ms ease;
+}
+.tp-ai-call[data-phase="hearing"] .tp-ai-call__orb { background: #e0a82e; color: #2d2a22; }
+.tp-ai-call[data-phase="speaking"] .tp-ai-call__orb {
+  background: #f3c94d;
+  color: #2d2a22;
+  animation: tp-ai-call-speak 1.2s ease-in-out infinite;
+}
+.tp-ai-call[data-phase="starting"] .tp-ai-call__orb,
+.tp-ai-call[data-phase="failed"] .tp-ai-call__orb { background: #d9d1bd; border-color: #8a8271; }
+.tp-ai-call__dots { width: 3.6rem; height: 3.6rem; fill: #2d2a22; }
+.tp-ai-call__dots circle { animation: tp-ai-call-dot 1.05s infinite; }
+.tp-ai-call__dots circle:nth-child(2) { animation-delay: 0.1s; }
+.tp-ai-call__dots circle:nth-child(3) { animation-delay: 0.2s; }
+.tp-ai-call__body { min-width: 0; }
+.tp-ai-call__status { margin: 0; font-weight: 700; color: #2d2a22; }
+.tp-ai-call[data-phase="failed"] .tp-ai-call__status { font-weight: 600; color: #8e3b28; }
+.tp-ai-call__caption {
+  display: -webkit-box;
+  margin: 0.35rem 0 0;
+  overflow: hidden;
+  color: #4f4632;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.tp-ai-call__caption b {
+  margin-right: 0.45rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 0.35rem;
+  background: #eee5cb;
+  font-size: 0.78rem;
+}
+.tp-ai-call__notice { margin: 0.3rem 0 0; color: #8e3b28; font-size: 0.85rem; }
+.tp-ai-page .tp-ai-call__settings {
+  margin-top: 0.4rem;
+  padding: 0.3rem 0.7rem;
+  border: 1.5px solid #2d2a22;
+  border-radius: 0.55rem;
+  background: #fff;
+  font-size: 0.85rem;
+}
+.tp-ai-call__actions { display: flex; flex-direction: column; gap: 0.5rem; }
+.tp-ai-page .tp-ai-call__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-width: 5.5rem;
+  height: 2.3rem;
+  margin: 0;
+  padding: 0 0.9rem;
+  border: 2px solid #2d2a22;
+  border-radius: 0.7rem;
+  background: #fff;
+  box-shadow: 0 2px 0 #2d2a22;
+  color: #2d2a22;
+  font-weight: 700;
+}
+.tp-ai-page .tp-ai-call__actions button:disabled { opacity: 0.4; box-shadow: none; }
+.tp-ai-page .tp-ai-call__actions .tp-ai-call__hangup { background: #d9553b; color: #fff; }
+@keyframes tp-ai-call-in { from { opacity: 0; transform: translateY(6px); } }
+@keyframes tp-ai-call-speak { 50% { transform: scale(1.12); } }
+@keyframes tp-ai-call-dot {
+  0%, 57.14% { transform: translate(0); animation-timing-function: cubic-bezier(0.33, 0.66, 0.66, 1); }
+  28.57% { transform: translateY(-6px); animation-timing-function: cubic-bezier(0.33, 0, 0.66, 0.33); }
+  100% { transform: translate(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tp-ai-call, .tp-ai-call__dots circle, .tp-ai-call[data-phase="speaking"] .tp-ai-call__orb { animation: none; }
+  .tp-ai-call__orb { transition: none; }
+}

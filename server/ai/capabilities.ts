@@ -65,9 +65,16 @@ function dispatchInstruction(request: AiChatRequest): string {
   const closedNote = closed.length ? `本档位未开放${closed.join("、")}，不得请求这些工具；联网查询、打开网页等需求不属于电脑操作，直接用已有知识或已提供的搜索结果回答。` : "";
   return `${base}只有用户明确要求${labels}时，才单独输出 <tool_request>{"kind":"${kinds.join("|")}","prompt":"保留用户原意的完整任务"}</tool_request>。${closedNote}${computerDispatchHint(request, kinds)}如缺少不可推断的核心信息，在工具对象中额外加入 "clarification":"只问一个必要问题"。工具对象仅包含以上字段，不夹带正文、工具参数或隐藏推理；这是待授权的请求，不是已执行结果，不得声称已生成或已控制电脑。`;
 }
-export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRequest, "skillIds" | "workflowId" | "projectContext" | "attachments" | "outputFormat" | "toolPlanRequestId" | "videoParameters" | "webSearch" | "webSearchMode" | "supplement"> {
+/**
+ * Spoken-reply contract for 语音通话 turns. The idea follows the voice-mode
+ * system prompt of Open WebUI's call mode (answers are heard, not read): short
+ * conversational sentences, the quickest helpful answer first, no formatting.
+ */
+export const VOICE_CALL_STYLE = "这是语音通话：你的回复会被逐句朗读给用户听，用户看不到任何排版。用自然口语直接回答，先说最有用的结论；一般一到三句话、约一百字以内，需要细节时也拆成几句短句。不要使用 Markdown、标题、列表、表格、代码块、公式、链接、表情或特殊符号，数字、日期和单位写成便于朗读的形式。内容较多时先说要点，再问用户要不要展开。用户的话来自语音转写，可能有同音错字或漏字，按最合理的意思理解；确实听不明白时，用一句话请用户再说一遍。";
+export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRequest, "skillIds" | "workflowId" | "projectContext" | "attachments" | "outputFormat" | "toolPlanRequestId" | "videoParameters" | "webSearch" | "webSearchMode" | "supplement" | "voiceCall"> {
   if (p.webSearchMode !== undefined && p.webSearchMode !== "auto") throw new AiError(400, "AI_INPUT_INVALID", "搜索模式不正确");
   if (p.supplement !== undefined && p.supplement !== true) throw new AiError(400, "AI_INPUT_INVALID", "补充消息标记不正确");
+  if (p.voiceCall !== undefined && (p.voiceCall !== true || (p.outputFormat !== undefined && p.outputFormat !== "text" && p.outputFormat !== "dispatch"))) throw new AiError(400, "AI_INPUT_INVALID", "语音通话标记不正确");
   if (p.skillIds !== undefined && (!Array.isArray(p.skillIds) || p.skillIds.length > 3 || p.skillIds.some(id => typeof id !== "string" || !Object.hasOwn(AI_SKILL_INSTRUCTIONS, id)))) throw new AiError(400, "AI_SKILL_INVALID", "请选择已上架的 Skill，每次最多三个");
   const workflow = p.workflowId === undefined ? undefined : aiWorkflowTemplate(p.workflowId);
   if (p.workflowId !== undefined && !workflow) throw new AiError(400, "AI_WORKFLOW_INVALID", "Hub 工作流不存在或未经审核");
@@ -128,6 +135,7 @@ export function parseChatCapabilities(p: Record<string, unknown>): Pick<AiChatRe
     ...(p.webSearch === true ? { webSearch: true } : {}),
     ...(p.webSearchMode === "auto" ? { webSearchMode: "auto" as const } : {}),
     ...(p.supplement === true ? { supplement: true as const } : {}),
+    ...(p.voiceCall === true ? { voiceCall: true as const } : {}),
   };
 }
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
@@ -148,7 +156,8 @@ export function chatInstructions(request: AiChatRequest, persona?: AiPersonaProf
   // Ordinary answers (plain text and the main-chat dispatch path) share one
   // formatting contract; tool plans and PPT JSON must not see it.
   const ordinaryAnswer = !request.outputFormat || request.outputFormat === "text" || request.outputFormat === "dispatch";
-  return [SAFETY, ordinaryAnswer && !request.skillIds?.includes("agent-continuation-v1") ? `${RESPONSE_STYLE}${RICH_BLOCKS}` : "", options.providerPublicSummary ? "" : publicExplanationInstruction(request), identity, preferences, memberMemoryInstruction(persona), openSquillaInstruction(request), workflow, ...(request.skillIds ?? []).map(id => AI_SKILL_INSTRUCTIONS[id]), request.outputFormat === "presentation" ? PRESENTATION : toolPlan, request.webSearch ? "此次用户要求联网查询。使用已提供的联网工具，并在回答中以实际返回的来源支持时效性信息；把相关问题合并到同一次搜索里，尽量 1–2 次完成；搜索失败时如实说明，不编造来源。" : "未开启联网搜索，不声称获得了实时检索结果。"].filter(Boolean).join("\n\n");
+  const answerStyle = request.voiceCall ? VOICE_CALL_STYLE : `${RESPONSE_STYLE}${RICH_BLOCKS}`;
+  return [SAFETY, ordinaryAnswer && !request.skillIds?.includes("agent-continuation-v1") ? answerStyle : "", options.providerPublicSummary ? "" : publicExplanationInstruction(request), identity, preferences, memberMemoryInstruction(persona), openSquillaInstruction(request), workflow, ...(request.skillIds ?? []).map(id => AI_SKILL_INSTRUCTIONS[id]), request.outputFormat === "presentation" ? PRESENTATION : toolPlan, request.webSearch ? "此次用户要求联网查询。使用已提供的联网工具，并在回答中以实际返回的来源支持时效性信息；把相关问题合并到同一次搜索里，尽量 1–2 次完成；搜索失败时如实说明，不编造来源。" : "未开启联网搜索，不声称获得了实时检索结果。"].filter(Boolean).join("\n\n");
 }
 /** Project and attachment content never enter the trusted instructions string. */
 export function chatMessages(request: AiChatRequest): AiChatRequest["messages"] {

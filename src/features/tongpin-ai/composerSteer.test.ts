@@ -226,7 +226,7 @@ describe("steer styles and wiring", () => {
     expect(page).toContain("pendingSupplements={steer.bubbles(activeConversation?.id)}");
     expect(page).toContain("onSteer={steerAllowed && activeConversation ? text => addSupplement(activeConversation.id, text) : undefined}");
     expect(page).toContain("...(continuation?.supplement ? { supplement: true as const } : {}),");
-    expect(page).toContain('continuation?.supplement ? "text" : composerTool');
+    expect(page).toContain('continuation?.supplement || continuation?.voiceCall ? "text" : composerTool');
     const v2 = readFileSync(new URL("./TongpinAIWorkspaceV2.tsx", import.meta.url), "utf8");
     expect(v2).toContain("pendingSupplements={steer.bubbles(activeId)}");
     expect(v2).toContain("...(supplement ? { supplement: true as const } : {})");

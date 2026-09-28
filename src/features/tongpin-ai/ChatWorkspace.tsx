@@ -63,6 +63,7 @@ import { usePersonalSkillMentions } from "./memberLearningClient";
 import { ToolPlanRequestGate, toolPlanClientContextKey } from "./toolPlanState";
 import { videoReferencesFromAttachments, type LocalVideoReferenceImage } from "./videoReferenceAttachments";
 import { VoiceInputControl, useVoiceAutoRead, useVoiceTranscriptInsert } from "./voice/VoiceInputControl";
+import { VoiceCallButton, VoiceCallPanel, type VoiceCallTurnResult } from "./voice/call/VoiceCallPanel";
 import "./skill-mentions.css";
 
 const EMPTY_PROJECT_DOCUMENTS: AiWorkspaceDocument[] = [];
@@ -152,6 +153,8 @@ interface ChatWorkspaceProps {
   onCancelSupplement?: (id: string) => void;
   /** Live unified computer executor panel; replaces the composer while a task runs. */
   computerPanel?: ReactNode;
+  /** 语音通话: sends one spoken turn. Given only where calls are supported. */
+  onVoiceCallTurn?: (text: string) => VoiceCallTurnResult;
 }
 
 /** The send button's glyphs, always all present in every state (the three
@@ -242,6 +245,7 @@ export function ChatWorkspace({
   onSteer,
   onCancelSupplement,
   computerPanel,
+  onVoiceCallTurn,
 }: ChatWorkspaceProps) {
   const chatRef = useRef<HTMLElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -279,6 +283,15 @@ export function ChatWorkspace({
   const [videoInitial, setVideoInitial] = useState<VideoChatRequest | undefined>();
   const [videoAttachmentReferences, setVideoAttachmentReferences] = useState<LocalVideoReferenceImage[]>([]);
   const [videoBusy, setVideoBusy] = useState(false);
+  const [callOpen, setCallOpen] = useState(false);
+  // Switching to another conversation ends the call; the first spoken turn of a
+  // new chat creating its conversation does not.
+  const callConversationRef = useRef(conversationId);
+  useEffect(() => {
+    const previous = callConversationRef.current;
+    callConversationRef.current = conversationId;
+    if (previous && conversationId && previous !== conversationId) setCallOpen(false);
+  }, [conversationId]);
 
   // The message log is deliberately NOT auto-animated: every streamed delta
   // resizes the last row, and auto-animate would keep an observer + position
@@ -943,7 +956,9 @@ export function ChatWorkspace({
           </p>
         )}
         <div className="tp-ai-beam-wrap">
-          {computerRequest && computerPanel ? computerPanel : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑操作执行器未接入，已停止流程。</p> : (
+          {computerRequest && computerPanel ? computerPanel : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑操作执行器未接入，已停止流程。</p> : callOpen && onVoiceCallTurn ? (
+            <VoiceCallPanel messages={messages} onSubmitTurn={onVoiceCallTurn} onStopReply={onStop} onClose={() => { setCallOpen(false); requestAnimationFrame(() => composerRef.current?.focus()); }} />
+          ) : (
           <form className="tp-ai-composer" onSubmit={submitMessage}>
             {videoOpen && onSubmitVideo && onPlanTool ? <AiVideoComposer ref={videoComposerRef} tier={mode} initialRequest={videoInitial} initialReferenceImages={videoAttachmentReferences} prompt={draft} onPlan={request => onPlanTool("video", request.prompt, request)} onSubmit={onSubmitVideo} onSubmitTask={onSubmitVideoTask} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }} /> : null}
             <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={composerTool === "image" ? AI_IMAGE_ACCEPT : visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
@@ -1161,6 +1176,7 @@ export function ChatWorkspace({
                 <ChevronDown size={12} />
               </label>}
               <VoiceInputControl key={conversationId ?? "new"} disabled={videoBusy} onTranscript={insertVoiceTranscript} />
+              {onVoiceCallTurn ? <VoiceCallButton disabled={videoBusy || videoOpen} onStart={() => setCallOpen(true)} /> : null}
               {sendMode === "stop" ? (
                 <button
                   type="button"
@@ -1194,7 +1210,7 @@ export function ChatWorkspace({
           </form>
           )}
         </div>
-        <p className="tp-ai-composer-hint">{computerRequest ? "本次电脑操作已一次授权，超出范围的动作会再次询问；按 Esc 或点「停止」可随时中止" : composerHintText({ responding, steerAvailable, draft, escapeStops })}</p>
+        <p className="tp-ai-composer-hint">{computerRequest ? "本次电脑操作已一次授权，超出范围的动作会再次询问；按 Esc 或点「停止」可随时中止" : callOpen && onVoiceCallTurn ? "语音通话中：说完停顿一下，AI 会用声音回答；它说话时麦克风暂停，点「打断」可以插话" : composerHintText({ responding, steerAvailable, draft, escapeStops })}</p>
       </footer>
     </section>
   );
