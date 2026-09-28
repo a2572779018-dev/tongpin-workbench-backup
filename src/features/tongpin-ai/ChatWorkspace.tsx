@@ -957,7 +957,12 @@ export function ChatWorkspace({
         )}
         <div className="tp-ai-beam-wrap">
           {computerRequest && computerPanel ? computerPanel : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑操作执行器未接入，已停止流程。</p> : callOpen && onVoiceCallTurn ? (
-            <VoiceCallPanel messages={messages} onSubmitTurn={onVoiceCallTurn} onStopReply={onStop} onClose={() => { setCallOpen(false); requestAnimationFrame(() => composerRef.current?.focus()); }} />
+            <VoiceCallPanel messages={messages} onSubmitTurn={text => {
+              const result = onVoiceCallTurn(text);
+              // A spoken turn is the member's own action: follow it and its reply.
+              if (result.ok) { followResponseRef.current = true; scheduleFollowScroll(); }
+              return result;
+            }} onStopReply={onStop} onClose={() => { setCallOpen(false); requestAnimationFrame(() => composerRef.current?.focus()); }} />
           ) : (
           <form className="tp-ai-composer" onSubmit={submitMessage}>
             {videoOpen && onSubmitVideo && onPlanTool ? <AiVideoComposer ref={videoComposerRef} tier={mode} initialRequest={videoInitial} initialReferenceImages={videoAttachmentReferences} prompt={draft} onPlan={request => onPlanTool("video", request.prompt, request)} onSubmit={onSubmitVideo} onSubmitTask={onSubmitVideoTask} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }} /> : null}
