@@ -189,7 +189,7 @@ function parseChat(value: unknown): AiChatRequest {
   try {
     return { requestId: p.requestId, mode: p.mode as AiChatRequest["mode"], conversationId: validConversationId(p.conversationId, p.requestId), messages: fitAiChatMessages(messages, textContext), ...capabilities, ...(p.retryOf ? { retryOf: p.retryOf as string, retryMode: p.retryMode as "regenerate" | "continue" } : {}),
       // Only a strictly valid decision is kept; null records that an invalid one was sent.
-      ...(p.mode === "quick" && p.openSquillaRoute !== undefined ? { openSquillaRoute: parseOpenSquillaRouteDecision(p.openSquillaRoute) } : {}) };
+      ...((p.mode === "quick" || p.mode === "standard") && p.openSquillaRoute !== undefined ? { openSquillaRoute: parseOpenSquillaRouteDecision(p.openSquillaRoute) } : {}) };
   } catch (error) {
     if (error instanceof AiCurrentContextTooLongError) throw new AiError(400, "AI_CONTEXT_TOO_LONG", error.message);
     throw error;

@@ -2,8 +2,9 @@
  * Contract between the desktop OpenSquilla router (Electron worker), the
  * renderer and the AI service. The desktop client runs OpenSquilla's V4.2
  * Phase 3 router locally and attaches only this bounded decision to a
- * quick-tier chat request; the server re-validates it, maps it to an admin
- * configured behaviour and clamps it to what the quick tier allows.
+ * quick- or standard-tier chat request; the server re-validates it, maps it
+ * to the behaviour the administrator chose for that tier and clamps it to
+ * what the tier allows.
  */
 
 export const OPENSQUILLA_ROUTER_VERSION = "v4.2-phase3" as const;
@@ -122,46 +123,71 @@ export function parseOpenSquillaRouteDecision(value: unknown): AiOpenSquillaRout
 }
 
 // ---------------------------------------------------------------------------
-// Admin mapping (AI 管理 → 服务与模型 → OpenSquilla 快速档路由)
+// Admin mapping (AI 管理 → 服务与模型 → OpenSquilla 路由, 快速档与标准档)
 // ---------------------------------------------------------------------------
+
+/** Business tiers OpenSquilla routes; each has its own C0–C3 mapping. */
+export const OPENSQUILLA_BUSINESS_TIERS = ["quick", "standard"] as const;
+export type AiOpenSquillaBusinessTier = typeof OPENSQUILLA_BUSINESS_TIERS[number];
+export function isOpenSquillaBusinessTier(mode: unknown): mode is AiOpenSquillaBusinessTier {
+  return mode === "quick" || mode === "standard";
+}
 
 export const OPENSQUILLA_ACTIONS = ["direct", "search", "reasoning", "suggest_upgrade"] as const;
 export type AiOpenSquillaAction = typeof OPENSQUILLA_ACTIONS[number];
+/** Tier-neutral: the same action runs on the model of the tier being routed. */
 export const OPENSQUILLA_ACTION_LABELS: Record<AiOpenSquillaAction, string> = {
-  direct: "快速模型直接回答",
-  search: "快速模型 + 按需联网核实",
-  reasoning: "快速模型加深推理",
-  suggest_upgrade: "快速模型先回答，建议切换更高档位",
+  direct: "直接回答",
+  search: "按需联网核实",
+  reasoning: "加深推理",
+  suggest_upgrade: "先回答，建议切换更高档位",
 };
 
-export interface AiOpenSquillaRoutingSettings {
-  /** Use desktop OpenSquilla decisions for quick-tier turns. */
+export interface AiOpenSquillaTierRouting {
+  /** Use desktop OpenSquilla decisions for this tier's turns. */
   enabled: boolean;
   /** Apply OpenSquilla's P0 "answer directly" response policy. */
   applyPromptPolicy: boolean;
   tiers: Record<AiOpenSquillaTier, AiOpenSquillaAction>;
+}
+
+/** The top-level fields are the 快速档 mapping (as saved before 0.1.50);
+ * `standard` is the 标准档 mapping. */
+export interface AiOpenSquillaRoutingSettings extends AiOpenSquillaTierRouting {
+  standard: AiOpenSquillaTierRouting;
   updatedAt: string | null;
 }
 
 /** Defaults follow OpenSquilla's tier semantics (router.runtime.yaml
- * tier_explanations): C0/C1 are direct-answer tiers, C2/C3 are reasoning /
- * highest-quality tiers the quick model should not silently stand in for. */
+ * tier_explanations): C0/C1 are direct-answer tiers; C2/C3 are reasoning /
+ * highest-quality tiers. The quick model should not silently stand in for
+ * them; the standard model reasons harder on C2 and suggests a higher tier on C3. */
 export const DEFAULT_OPENSQUILLA_ROUTING: AiOpenSquillaRoutingSettings = Object.freeze({
   enabled: true,
   applyPromptPolicy: true,
   tiers: Object.freeze({ c0: "direct", c1: "direct", c2: "suggest_upgrade", c3: "suggest_upgrade" }) as Record<AiOpenSquillaTier, AiOpenSquillaAction>,
+  standard: Object.freeze({
+    enabled: true,
+    applyPromptPolicy: true,
+    tiers: Object.freeze({ c0: "direct", c1: "direct", c2: "reasoning", c3: "suggest_upgrade" }) as Record<AiOpenSquillaTier, AiOpenSquillaAction>,
+  }) as AiOpenSquillaTierRouting,
   updatedAt: null,
 }) as AiOpenSquillaRoutingSettings;
+
+/** The mapping of one routed tier. */
+export function openSquillaTierRouting(settings: AiOpenSquillaRoutingSettings, tier: AiOpenSquillaBusinessTier): AiOpenSquillaTierRouting {
+  return tier === "quick" ? { enabled: settings.enabled, applyPromptPolicy: settings.applyPromptPolicy, tiers: settings.tiers } : settings.standard;
+}
 
 /** Server-owned result of mapping one decision; never read from a client body. */
 export interface AiOpenSquillaPlan {
   source: "opensquilla" | "builtin";
-  /** Why the built-in quick routing was used. */
+  /** Why the built-in routing was used. */
   fallback?: "missing" | "invalid" | "disabled";
   decision?: AiOpenSquillaRouteDecision;
   /** Admin-mapped action for the decision's tier. */
   action?: AiOpenSquillaAction;
-  /** What was actually applied after clamping to the quick tier's capabilities. */
+  /** What was actually applied after clamping to the routed tier's capabilities. */
   applied?: AiOpenSquillaAction;
   /** Why `applied` differs from `action`, in member-facing Chinese. */
   clampNote?: string;

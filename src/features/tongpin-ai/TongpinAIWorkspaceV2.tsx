@@ -95,8 +95,8 @@ export function TongpinAIWorkspaceV2({ user, initial, status, persona }: {
   const [nameDialog, setNameDialog] = useState<{ kind: "new" | "rename"; conversationId?: string; projectId?: string } | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [mode, setMode] = useState<TongpinAIMode>(initial.manifest.base.mode);
-  // Desktop only: load OpenSquilla's quick-tier router before the first quick send.
-  useEffect(() => { if (mode === "quick") warmOpenSquillaRouter(); }, [mode]);
+  // Desktop only: load the OpenSquilla router before the first quick or standard send.
+  useEffect(() => { if (mode === "quick" || mode === "standard") warmOpenSquillaRouter(); }, [mode]);
   const [aiStatus, setAiStatus] = useState(status);
   const [focusRequest, setFocusRequest] = useState(0);
   const mountedRef = useRef(true);

@@ -471,7 +471,7 @@ export class AiHarness {
         : `先形成有界执行计划，再逐步执行，最多 ${maxToolSteps} 个工具步骤。`;
     const workflow = request.workflowId ? aiWorkflowTemplate(request.workflowId) : undefined;
     const strategyStep: AiHarnessStep = { id: crypto.randomUUID(), kind: "strategy", capability, title: "执行策略", summary: strategySummary, status: "succeeded", createdAt: now, updatedAt: now, strategy, maxToolSteps, ...(workflow ? { workflowId: workflow.id, workflowVersion: AI_WORKFLOW_VERSION } : {}) };
-    // Quick-tier turns record how OpenSquilla (or the built-in fallback) routed them.
+    // Quick- and standard-tier turns record how OpenSquilla (or the built-in fallback) routed them.
     const routeNote = openSquillaRouteStep(request);
     const routeStep: AiHarnessStep = { id: crypto.randomUUID(), kind: "route", capability, title: routeNote?.title ?? `${AI_BUSINESS_TIER_LABELS[request.mode]}档位`, summary: routeNote?.summary ?? "已按管理员配置选择业务档位；具体服务商与模型仅管理员可见。", status: "succeeded", createdAt: now, updatedAt: now };
     const workflowSteps: AiHarnessStep[] = workflow?.steps.map((step, index) => ({

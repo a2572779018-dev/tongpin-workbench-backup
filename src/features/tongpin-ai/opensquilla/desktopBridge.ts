@@ -2,7 +2,7 @@
 // ported to TypeScript and modified for Tongpin. See THIRD_PARTY_NOTICES.md.
 import type { AiChatRequest, AiUsage } from "../../../../shared/ai";
 import {
-  OPENSQUILLA_INPUT_LIMITS, parseOpenSquillaRouteDecision,
+  isOpenSquillaBusinessTier, OPENSQUILLA_INPUT_LIMITS, parseOpenSquillaRouteDecision,
   type AiOpenSquillaRouteDecision, type AiOpenSquillaRouteInput,
 } from "../../../../shared/aiOpenSquilla";
 import { pyStrip, pyTail } from "./pyCodePoints";
@@ -10,7 +10,7 @@ import { pyStrip, pyTail } from "./pyCodePoints";
 /*
  * Renderer side of the desktop OpenSquilla router. The web build has no
  * bridge and simply sends no decision; the server then keeps the built-in
- * quick-tier routing. A slow or failed local router never blocks a send.
+ * routing. A slow or failed local router never blocks a send.
  */
 
 export type OpenSquillaBridgeResult = { ok: true; decision: unknown } | { ok: false; code: string };
@@ -82,8 +82,8 @@ export async function requestOpenSquillaRoute(bridge: OpenSquillaDesktopBridge |
 }
 
 /**
- * Adds the local decision to a quick-tier conversational turn. Tool
- * executions, other tiers and the web build are left untouched.
+ * Adds the local decision to a quick- or standard-tier conversational turn.
+ * Tool executions, the deep and Pro tiers and the web build are left untouched.
  */
 export async function attachOpenSquillaRoute(
   request: AiChatRequest,
@@ -91,7 +91,7 @@ export async function attachOpenSquillaRoute(
   messages: readonly OpenSquillaTranscriptMessage[],
   bridge: OpenSquillaDesktopBridge | undefined = typeof window === "undefined" ? undefined : window.tongpin?.openSquilla,
 ): Promise<AiChatRequest> {
-  if (request.mode !== "quick" || !bridge || request.retryOf) return request;
+  if (!isOpenSquillaBusinessTier(request.mode) || !bridge || request.retryOf) return request;
   if (request.outputFormat && request.outputFormat !== "text" && request.outputFormat !== "dispatch") return request;
   const current = messages.at(-1);
   if (!current || current.role !== "user" || !current.content.trim() || current.content.length > OPENSQUILLA_INPUT_LIMITS.messageCharacters) return request;
@@ -100,7 +100,7 @@ export async function attachOpenSquillaRoute(
   return request;
 }
 
-/** Loads the model before the first quick-tier send; failures stay silent. */
+/** Loads the model before the first quick- or standard-tier send; failures stay silent. */
 export function warmOpenSquillaRouter(bridge: OpenSquillaDesktopBridge | undefined = typeof window === "undefined" ? undefined : window.tongpin?.openSquilla): void {
   if (!bridge?.warmup) return;
   void bridge.warmup().catch(() => undefined);

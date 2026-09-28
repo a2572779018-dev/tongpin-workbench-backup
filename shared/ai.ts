@@ -414,10 +414,10 @@ export interface AiChatRequest {
   /** Server-owned: tool kinds the resolved tier actually permits. Never read
    * from the client body; set after route resolution. Undefined = legacy (all). */
   dispatchKinds?: AiDispatchToolKind[];
-  /** Desktop OpenSquilla router decision for a quick-tier turn, strictly validated
-   * by the server; null means the client sent one that failed validation. */
+  /** Desktop OpenSquilla router decision for a quick- or standard-tier turn, strictly
+   * validated by the server; null means the client sent one that failed validation. */
   openSquillaRoute?: AiOpenSquillaRouteDecision | null;
-  /** Server-owned: how the quick tier applied (or fell back from) OpenSquilla. Never read from the client body. */
+  /** Server-owned: how the tier applied (or fell back from) OpenSquilla. Never read from the client body. */
   openSquillaPlan?: AiOpenSquillaPlan;
 }
 export type AiChatPreflightReason = null | "quota_exhausted" | "search_quota_insufficient" | "quota_insufficient" | "request_in_progress";

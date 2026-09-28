@@ -37,16 +37,17 @@ describe("OpenSquilla router input from a conversation", () => {
 });
 
 describe("attaching the desktop decision to a chat request", () => {
-  it("adds a validated decision to quick-tier conversational turns only", async () => {
+  it("adds a validated decision to quick- and standard-tier conversational turns only", async () => {
     const route = vi.fn(async () => ({ ok: true as const, decision }));
     const messages = [turn("user", "hi"), turn("assistant", "hello"), turn("user", "帮我写周报")];
     const quick = await attachOpenSquillaRoute(request(), "conversation-a", messages, bridge(route));
     expect(quick.openSquillaRoute).toEqual(decision);
     expect(route).toHaveBeenCalledWith({ conversationId: "conversation-a", message: "帮我写周报", historyUserTexts: ["hi"], prevAssistantText: "hello", prevAssistantOutputTokens: null });
-    for (const skipped of [request({ mode: "standard" }), request({ outputFormat: "image_plan" }), request({ retryOf: "request-original-000", retryMode: "regenerate" })]) {
+    expect((await attachOpenSquillaRoute(request({ mode: "standard" }), "conversation-a", messages, bridge(route))).openSquillaRoute).toEqual(decision);
+    for (const skipped of [request({ mode: "deep" }), request({ mode: "pro" }), request({ outputFormat: "image_plan" }), request({ retryOf: "request-original-000", retryMode: "regenerate" })]) {
       expect((await attachOpenSquillaRoute(skipped, "conversation-a", messages, bridge(route))).openSquillaRoute).toBeUndefined();
     }
-    expect(route).toHaveBeenCalledTimes(1);
+    expect(route).toHaveBeenCalledTimes(2);
     expect((await attachOpenSquillaRoute(request(), "conversation-a", messages, undefined)).openSquillaRoute).toBeUndefined();
   });
 

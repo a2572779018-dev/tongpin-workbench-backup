@@ -170,8 +170,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const [view, setView] = useState<TongpinAIWorkspaceView>(initialSession.view);
   const [personaSettingsOpen, setPersonaSettingsOpen] = useState(false);
   const [mode, setMode] = useState<TongpinAIMode>(initialSession.mode);
-  // Desktop only: load OpenSquilla's quick-tier router before the first quick send.
-  useEffect(() => { if (mode === "quick") warmOpenSquillaRouter(); }, [mode]);
+  // Desktop only: load the OpenSquilla router before the first quick or standard send.
+  useEffect(() => { if (mode === "quick" || mode === "standard") warmOpenSquillaRouter(); }, [mode]);
   const [conversations, setConversations] = useState<TongpinAIConversation[]>(
     () => recoverInterruptedMessages(initialSession.conversations),
   );
@@ -2126,7 +2126,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
           if (!current()) return;
           request.attachments = toolAttachmentContext(origin.attachments, origin.project?.contextDocuments ?? [], continuation ? messages : origin.conversation?.messages ?? [], visual);
         }
-        // Quick-tier text turns carry the local OpenSquilla decision to preflight and send alike.
+        // Quick- and standard-tier text turns carry the local OpenSquilla decision to preflight and send alike.
         await attachOpenSquillaRoute(request, conversationId, messages);
         if (!current()) return;
         const result = await api<AiChatPreflight>("/api/ai/preflight", {

@@ -29,7 +29,7 @@ export type ReplyProcessExecStatus = AiCodeExecStatus | "incomplete" | "unsuppor
 export type ReplyProcessToolKind = "image" | "video" | "presentation" | "computer" | "file";
 
 export type ReplyProcessPart =
-  /** How the quick tier was routed (OpenSquilla or the built-in fallback), from the trace's route step. */
+  /** How a quick or standard turn was routed (OpenSquilla or the built-in fallback), from the trace's route step. */
   | { kind: "route"; key: "route"; label: string; detail: string; state: "done" }
   /** Harness trace steps; while a step-by-step Hub streams, its live step list
    * with `activity` naming the step now running. */
@@ -162,7 +162,7 @@ function execState(status: ReplyProcessExecStatus): ReplyProcessPartState {
 
 const ROUTE_TITLE_PREFIX = "路由：";
 
-/** Only a quick-tier turn routed by OpenSquilla carries a "路由：" route step;
+/** Only a quick- or standard-tier turn routed by OpenSquilla carries a "路由：" route step;
  * built-in fallbacks and older traces keep the plain "快速档位" step and show nothing. */
 export function replyProcessRoutePart(trace: AiHarnessTrace | undefined): Extract<ReplyProcessPart, { kind: "route" }> | undefined {
   const step = trace?.steps.find(item => item.kind === "route" && item.title.startsWith(ROUTE_TITLE_PREFIX));
