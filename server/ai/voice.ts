@@ -103,6 +103,10 @@ const WHISPER_STOCK_PHRASES = [
   "請不吝點贊 訂閱 轉發 打賞支持明鏡與點點欄目", "字幕由Amara.org社區提供", "優優獨播劇場——YoYo Television Series Exclusive",
   "Thank you for watching", "Thanks for watching",
 ];
+/** Video outros Whisper appends after real speech ("帮我生成一张图片。感谢观看"). */
+const WHISPER_OUTROS = ["感谢观看", "谢谢观看", "感谢收看", "谢谢收看", "欢迎订阅", "感謝觀看", "謝謝觀看", "感謝收看", "謝謝收看", "歡迎訂閱", "thank you for watching", "thanks for watching"];
+/** A cough transcribed as speech ("咳咳咳"). */
+const WHISPER_COUGH = /^咳+$/u;
 /** "字幕志愿者 杨茜茜": the volunteer credit followed by at most a short name. */
 const WHISPER_CREDIT_PREFIXES = ["字幕志愿者", "字幕志願者"];
 const WHISPER_CREDIT_NAME_MAX = 6;
@@ -130,16 +134,35 @@ export function isWhisperHallucination(transcript: string): boolean {
   if (!text) return transcript.trim().length > 0;
   if (WHISPER_STOCK.some(phrase => text.length % phrase.length === 0 && phrase.repeat(text.length / phrase.length) === text)) return true;
   if (WHISPER_CREDITS.some(prefix => text.startsWith(prefix) && [...text.slice(prefix.length)].length <= WHISPER_CREDIT_NAME_MAX)) return true;
+  if (WHISPER_COUGH.test(text)) return true;
   for (const match of text.matchAll(WHISPER_RUNAWAY_REPEAT)) if (/\p{L}/u.test(match[1])) return true;
   return false;
+}
+
+/** Real speech with a stock video outro appended at its very end loses the outro. */
+export function withoutWhisperOutro(transcript: string): string {
+  let text = transcript;
+  for (let changed = true; changed;) {
+    changed = false;
+    const trimmed = text.replace(/[\s\p{P}]+$/u, "");
+    for (const outro of WHISPER_OUTROS) {
+      if (trimmed.length > outro.length && trimmed.toLowerCase().endsWith(outro)) {
+        text = trimmed.slice(0, trimmed.length - outro.length).replace(/[\s,，、]+$/u, "");
+        changed = true;
+        break;
+      }
+    }
+  }
+  return text;
 }
 
 /** The transcript of a Workers AI Whisper answer; "" when there was no clear speech. */
 function whisperTranscript(output: unknown): string {
   const value = output && typeof output === "object" && !Array.isArray(output) ? (output as { text?: unknown }).text : undefined;
   if (typeof value !== "string") throw new AiError(502, "AI_VOICE_TRANSCRIPT_INVALID", "语音转写没有返回可用文字，请稍后重试");
-  const text = value.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
-  if (isWhisperHallucination(text)) return "";
+  const raw = value.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
+  if (isWhisperHallucination(raw)) return "";
+  const text = withoutWhisperOutro(raw);
   if (text.length > AI_VOICE_LIMITS.maxTranscriptCharacters) throw new AiError(502, "AI_VOICE_TRANSCRIPT_INVALID", "语音转写返回的文字过长，请分段录制后重试");
   return text;
 }

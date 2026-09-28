@@ -23,6 +23,13 @@ export function supportsOfficialPublicSummary(provider: StoredProvider, request:
   catch { return false; }
 }
 
+/** The deep/Pro tier's thinking effort for one turn. A 语音通话 turn is heard
+ * while the member waits on the line, so it thinks briefly ("low"): same tier,
+ * model and tools, a much shorter wait before the first spoken words. */
+export function tierReasoningEffort(request: Pick<AiChatRequest, "voiceCall">, effort: string): string {
+  return request.voiceCall ? "low" : effort;
+}
+
 export interface AiTransportInit {
   method: "GET" | "POST";
   headers: Record<string, string>;
@@ -245,7 +252,7 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
         : message),
       max_output_tokens: maxOutputTokens, stream: true, store: false,
       ...(tools.length ? { tools, ...(maxToolCalls > 0 ? { max_tool_calls: maxToolCalls } : {}), tool_choice: request.webSearch && request.webSearchMode !== "auto" ? "required" : "auto", include } : {}),
-      ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: provider.reasoningEffort, ...(providerPublicSummary ? { summary: "auto" } : {}) } } : {}),
+      ...((request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning: { effort: tierReasoningEffort(request, provider.reasoningEffort), ...(providerPublicSummary ? { summary: "auto" } : {}) } } : {}),
       // Quick tier: only an admin-mapped OpenSquilla "reasoning" turn on a Responses route.
       ...(openSquillaReasoningEffort(request) ? { reasoning: { effort: openSquillaReasoningEffort(request) } } : {}),
     };
@@ -256,6 +263,6 @@ export function providerBody(provider: StoredProvider, request: AiChatRequest, m
       ? { role: message.role, content: [{ type: "text", text: message.content }, ...images.map(item => ({ type: "image_url", image_url: { url: item.dataUrl, detail: "low" } }))] }
       : message)], ...(isBaiChat ? { max_tokens: maxOutputTokens } : { max_completion_tokens: maxOutputTokens }), stream: options.stream === true,
     ...(options.stream ? { stream_options: { include_usage: true } } : {}),
-    ...(!isBaiChat && (request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning_effort: provider.reasoningEffort } : {}),
+    ...(!isBaiChat && (request.mode === "deep" || request.mode === "pro") && provider.reasoningEffort ? { reasoning_effort: tierReasoningEffort(request, provider.reasoningEffort) } : {}),
   };
 }

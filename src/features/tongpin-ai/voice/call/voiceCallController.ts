@@ -1,5 +1,5 @@
 import type { VoiceIssue } from "../recorderState";
-import { newSpeechParts } from "./callSentences";
+import { newSpeechParts, NO_SPEECH_PROGRESS, type SpeechProgress } from "./callSentences";
 
 /**
  * The 语音通话 state machine, ported from Open WebUI v0.6.5 (BSD-3-Clause,
@@ -37,7 +37,14 @@ export interface CallViewState {
   fatal: VoiceIssue | null;
 }
 
-export interface CallReplyLike { id: string; role: "user" | "assistant"; content: string; status?: "thinking" | "typing" | "ready" | "error" | "stopped" }
+export interface CallReplyLike {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  status?: "thinking" | "typing" | "ready" | "error" | "stopped";
+  /** A task card (image, video, PPT…) that the reply handed over to. */
+  artifactId?: string;
+}
 
 export interface CallMicrophone {
   resume(): Promise<void> | void;
@@ -63,7 +70,11 @@ export interface CallHost {
 
 const BUSY_RETRY_MS = 300;
 const BUSY_WAIT_MS = 5000;
+/** A sent turn whose reply never appears (the composer refused it) gives the microphone back. */
+const NO_REPLY_MS = 8000;
 const APOLOGY = "抱歉，这次没有回答成功，请再说一遍。";
+/** Said when a spoken request became a task card that waits for the member's click. */
+const TASK_CARD = "好的，任务已经放到对话里了，需要确认的话请在屏幕上点一下。";
 
 function join(first: string, second: string): string {
   if (!first) return second.trim();
@@ -77,7 +88,7 @@ function lastAssistantId(messages: readonly CallReplyLike[]): string | null {
   return null;
 }
 
-interface Follow { baseline: string | null; id: string | null; queued: number; finished: boolean }
+interface Follow { baseline: string | null; id: string | null; progress: SpeechProgress; spoken: boolean; finished: boolean }
 
 export class VoiceCallController {
   private state: CallViewState = { phase: "starting", heard: "", saying: "", notice: "", fatal: null };
@@ -89,6 +100,9 @@ export class VoiceCallController {
   private transcriptions: Promise<void> = Promise.resolve();
   private pendingTranscriptions = 0;
   private closed = false;
+  /** Assistant messages already present or already spoken; anything newer is announced. */
+  private readonly seen = new Set<string>();
+  private primed = false;
 
   constructor(private readonly host: CallHost, private readonly speaker: CallSpeakerLike, private readonly wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))) {}
 
@@ -111,6 +125,8 @@ export class VoiceCallController {
     this.closed = false;
     this.follow = null;
     this.carry = "";
+    this.seen.clear();
+    this.primed = false;
     this.set({ phase: "starting", heard: "", saying: "", notice: "", fatal: null });
   }
 
@@ -181,15 +197,43 @@ export class VoiceCallController {
       await this.wait(BUSY_RETRY_MS);
     }
     // Open WebUI mutes detection from `chat:start` until the reply has been spoken.
-    this.follow = { baseline, id: null, queued: 0, finished: false };
+    const follow: Follow = { baseline, id: null, progress: NO_SPEECH_PROGRESS, spoken: false, finished: false };
+    this.follow = follow;
     this.set({ phase: "thinking" });
     void this.microphone?.pause();
     this.track();
+    void this.wait(NO_REPLY_MS).then(() => { if (this.follow === follow && !follow.id) this.notSent("这句话没有发出去，请再说一遍。"); });
+  }
+
+  /** The turn was not sent after all (the composer showed why): listen again. */
+  notSent(reason: string): void {
+    if (this.closed || !this.follow || this.follow.id) return;
+    this.follow = null;
+    this.set({ notice: reason });
+    this.listen();
   }
 
   /** The conversation's messages as rendered (streamed text included). */
   updateMessages(messages: readonly CallReplyLike[]): void {
     this.messages = messages;
+    if (!this.primed) {
+      this.primed = true;
+      for (const message of messages) if (message.role === "assistant") this.seen.add(message.id);
+    }
+    this.track();
+    this.announce();
+  }
+
+  /** A reply that arrives on its own while the call listens (an operation's
+   * result, a finished task) is read out too. */
+  private announce(): void {
+    if (this.closed || this.follow || !this.microphone || this.state.phase !== "listening") return;
+    const reply = this.messages.find(message => message.role === "assistant" && !this.seen.has(message.id) && message.status !== "thinking" && message.content.trim());
+    if (!reply) return;
+    this.follow = { baseline: null, id: reply.id, progress: NO_SPEECH_PROGRESS, spoken: false, finished: false };
+    this.seen.add(reply.id);
+    this.speaker.start(reply.id);
+    void this.microphone.pause();
     this.track();
   }
 
@@ -202,19 +246,24 @@ export class VoiceCallController {
       const id = lastAssistantId(this.messages);
       if (!id || id === follow.baseline) return;
       follow.id = id;
+      this.seen.add(id);
       this.speaker.start(id);
       reply = this.messages.find(message => message.id === id);
     }
     if (!reply || follow.finished) return;
     const done = reply.status !== "thinking";
     // A failed reply's text is an error notice for the screen, not an answer to read out.
-    const parts = reply.status === "error" ? [] : newSpeechParts(reply.content, follow.queued, done);
-    for (const part of parts) this.speaker.push(reply.id, part);
-    follow.queued += parts.length;
+    if (reply.status !== "error") {
+      const next = newSpeechParts(reply.content, follow.progress, done);
+      for (const part of next.parts) this.speaker.push(reply.id, part);
+      follow.progress = next.progress;
+      if (next.parts.length) follow.spoken = true;
+    }
     if (!done) return;
     follow.finished = true;
-    if (!follow.queued && (reply.status === "error" || reply.status === "stopped")) {
-      this.speaker.push(reply.id, APOLOGY);
+    if (!follow.spoken) {
+      if (reply.status === "error" || reply.status === "stopped") this.speaker.push(reply.id, APOLOGY);
+      else if (reply.artifactId) this.speaker.push(reply.id, TASK_CARD);
       if (reply.status === "error" && reply.content.trim()) this.set({ notice: reply.content.trim().slice(0, 120) });
     }
     this.speaker.finish(reply.id);
@@ -230,6 +279,7 @@ export class VoiceCallController {
     if (this.closed) return;
     this.follow = null;
     this.listen();
+    this.announce();
   }
 
   // ------------------------------------------------------------ member actions

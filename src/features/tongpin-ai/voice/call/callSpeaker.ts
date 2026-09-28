@@ -30,6 +30,8 @@ export interface CallSpeakerOptions {
 
 const PAUSE_AFTER_SENTENCE_MS = 120;
 const POLL_MS = 60;
+/** Sentences fetched ahead from the speech service (the server allows 3 pending voice requests per member). */
+const MAX_PREFETCH = 2;
 
 const wait = (ms: number, signal: AbortSignal) => new Promise<void>(resolve => {
   if (signal.aborted) { resolve(); return; }
@@ -68,6 +70,7 @@ export class CallSpeaker {
   private audio: HTMLAudioElement | null = null;
   private audioUrl: string | null = null;
   private externalFailed = false;
+  private inflight = 0;
 
   constructor(private readonly options: CallSpeakerOptions) {}
 
@@ -76,6 +79,8 @@ export class CallSpeaker {
     if (this.currentMessageId === id) return;
     this.stopAll();
     this.currentMessageId = id;
+    // Each reply tries the administrator's voice again after an earlier failure.
+    this.externalFailed = false;
     const loop = new AbortController();
     this.loop = loop;
     void this.monitorAndPlayAudio(id, loop.signal);
@@ -109,12 +114,28 @@ export class CallSpeaker {
     this.audioCache.clear();
   }
 
+  private get external(): boolean {
+    return this.options.engine === "external" && !this.externalFailed && Boolean(this.options.synthesize);
+  }
+
+  /** Open WebUI `fetchAudio`, bounded: at most MAX_PREFETCH sentences are requested ahead. */
   private fetchAudio(content: string): void {
-    if (this.options.engine !== "external" || this.externalFailed || !this.options.synthesize || this.audioCache.has(content)) return;
+    if (!this.external || this.audioCache.has(content) || this.inflight >= MAX_PREFETCH) return;
+    this.startFetch(content);
+  }
+
+  private startFetch(content: string): Promise<Blob | null> | undefined {
     const signal = this.loop?.signal;
-    if (!signal) return;
-    const pending = this.options.synthesize(content, signal).catch(() => null);
+    if (!signal || !this.external) return undefined;
+    this.inflight += 1;
+    const pending = this.options.synthesize!(content, signal).catch(() => null).finally(() => {
+      this.inflight -= 1;
+      // Keep the next queued sentences coming.
+      const queue = this.currentMessageId ? this.messages.get(this.currentMessageId) : undefined;
+      for (const next of queue ?? []) if (!this.audioCache.has(next)) { this.fetchAudio(next); break; }
+    });
     this.audioCache.set(content, pending);
+    return pending;
   }
 
   private async monitorAndPlayAudio(id: string, signal: AbortSignal): Promise<void> {
@@ -123,7 +144,7 @@ export class CallSpeaker {
       if (queue?.length) {
         const content = queue.shift()!;
         this.options.onSpeaking(content);
-        const cached = this.audioCache.get(content);
+        const cached = this.audioCache.get(content) ?? this.startFetch(content);
         const blob = cached ? await cached : null;
         this.audioCache.delete(content);
         if (signal.aborted) break;

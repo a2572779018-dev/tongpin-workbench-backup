@@ -148,9 +148,7 @@ type TaskContinuation = { conversationId: string; messageId: string; originalPro
    * preflight with it and awaits it before persisting the reply or calling a model. */
   recorded?: Promise<boolean>;
   /** Steer follow-up: text typed while the previous reply ran (always a text turn). */
-  supplement?: boolean;
-  /** 语音通话 turn: a spoken, plain-text reply (always a text turn). */
-  voiceCall?: boolean };
+  supplement?: boolean };
 type ComputerUseRequest = {
   id: string;
   conversationId: string;
@@ -207,6 +205,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const pendingCancelledRef = useRef(new Set<string>());
   const imageSelectionBusyRef = useRef(new Set<string>());
   const draftConversationIdsRef = useRef(new Map<string, string>());
+  /** True while a 语音通话 is open in the composer: its turns are sent like typed ones, marked voiceCall. */
+  const voiceCallActiveRef = useRef(false);
+  const voiceCallSupport = useMemo(() => ({ onActiveChange: (active: boolean) => { voiceCallActiveRef.current = active; } }), []);
   const fileImportRef = useRef(new Set<string>());
   const deletingConversationRef = useRef(new Set<string>());
   const deletionTasksRef = useRef(new Map<string, Promise<boolean>>());
@@ -1929,68 +1930,6 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     return true;
   }
 
-  /** 语音通话: one spoken turn (Open WebUI call mode's `submitPrompt(text)`), sent
-   * like a plain text task but marked `voiceCall`. It never consumes the typed
-   * draft or its attachments, and returns as soon as the turn exists: the reply
-   * keeps streaming and the call panel follows it. `reason: "busy"` means the
-   * previous reply has not released the conversation yet. */
-  function submitVoiceCallTurn(prompt: string): { ok: true } | { ok: false; reason: string } {
-    const text = prompt.trim();
-    if (!text) return { ok: false, reason: "没听清，请再说一遍。" };
-    if (!persona.profile.onboardingComplete || !serviceConnected || connectionError || availabilityBlocked) return { ok: false, reason: "同频 AI 暂时连不上，请稍后再试。" };
-    if (quotaInsufficient) return { ok: false, reason: "AI 额度不足，请联系管理员增加额度。" };
-    if (persistenceRef.current.status === "conflict" || persistenceRef.current.status === "error") return { ok: false, reason: "请先完成记录同步，再继续通话。" };
-    if (computerRequest) return { ok: false, reason: "电脑操作进行中，请结束后再通话。" };
-    const conversationId = requestConversationId();
-    if (conversationBusy(conversationId)) return { ok: false, reason: "busy" };
-    const snapshot = captureSubmission({ conversationId, draftKey, conversation: activeConversation, project: activeProject, attachments: [], mode, skillIds: [...enabledSkillIds], webSearch: false });
-    const messageId = createLocalId("assistant");
-    const conversation: TongpinAIConversation = {
-      ...(snapshot.conversation ?? { id: conversationId, projectId: snapshot.project?.id, title: Array.from(text).slice(0, 28).join("") }),
-      timeLabel: "刚刚",
-      messages: [...(snapshot.conversation?.messages ?? []),
-        { id: createLocalId("user"), role: "user", content: text, time: currentTimeLabel() },
-        { id: messageId, role: "assistant", content: "", status: "thinking", taskPhase: "queued", startedAt: Date.now(), time: currentTimeLabel() }],
-    };
-    const latest = workspaceRef.current;
-    const prepared = withPreparedChatSend({ ...persistentStateRef.current,
-      conversations: latest.conversations, projects: latest.projects, artifacts: latest.artifacts, drafts: latest.drafts,
-      draftAttachments: latest.draftAttachments, videoDraftSettings: latest.videoDraftSettings,
-      activeConversationId: latest.activeConversationId, activeProjectId: latest.activeProjectId, view: latest.view,
-    }, conversation, snapshot.draftKey);
-    // The typed draft and its attachments stay untouched.
-    const next = { ...prepared, drafts: latest.drafts, draftAttachments: latest.draftAttachments, videoDraftSettings: latest.videoDraftSettings };
-    try { ensureAttachmentWorkspaceCapacity(next, "reply"); }
-    catch (error) { return { ok: false, reason: error instanceof Error ? error.message : "保存空间不足，本次未发送。" }; }
-    submissionSnapshotsRef.current.set(messageId, snapshot);
-    pendingGenerationRef.current.add(conversationId);
-    pendingCancelledRef.current.delete(conversationId);
-    setReplyActivity(conversationId, messageId, "waiting");
-    workspaceRef.current = { ...latest, conversations: next.conversations, activeConversationId: conversationId, view: "chat" };
-    persistentStateRef.current = next;
-    setConversations(next.conversations);
-    setActiveConversationId(conversationId); setView("chat"); draftConversationIdsRef.current.delete(snapshot.draftKey);
-    const recorded = persistenceRef.current.saveNow(next);
-    void (async () => {
-      try {
-        updateReply(conversationId, messageId, { taskPhase: "planning" });
-        await sendMessage(undefined, { conversationId, messageId, originalPrompt: text, snapshot, recorded, voiceCall: true });
-        // sendMessage may bail out before any request: never leave the turn spinning.
-        const owner = liveConversation(workspaceRef.current, deletingConversationRef.current, conversationId);
-        if (mountedRef.current && owner && !owner.messages.find(item => item.id === messageId)?.requestId) {
-          setConversations(current => current.find(item => item.id === conversationId)?.messages.some(item => item.id === messageId && !item.requestId && item.status === "thinking")
-            ? replaceChatMessage(current, conversationId, messageId, { status: "stopped", content: "语音消息未发送，本次未调用模型。" }) : current);
-        }
-      } catch (error) {
-        if (mountedRef.current) updateReply(conversationId, messageId, { status: "error", content: error instanceof Error ? error.message : "语音消息发送失败，请重试" });
-      } finally {
-        pendingGenerationRef.current.delete(conversationId); pendingCancelledRef.current.delete(conversationId);
-        if (mountedRef.current && !requestRef.current.has(conversationId)) clearReplyActivity(conversationId, messageId);
-      }
-    })();
-    return { ok: true };
-  }
-
   /** Steer: supplements typed while this conversation's reply ran, sent as ONE
    * follow-up text turn marked `supplement` (framed for the model server-side).
    * Owned by that conversation, never by the focused composer: consumes no
@@ -2010,7 +1949,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       // Read-only check first: a turn that cannot be sent leaves no trace in the conversation.
       const probe: AiChatRequest = { ...buildChatRequest(crypto.randomUUID(), mode, [...conversation.messages, userMessage]), conversationId,
         ...mentionedCapabilityRequest(text, [...enabledSkillIds]), projectContext: project?.instructions || undefined,
-        attachments: toolAttachmentContext([], project?.contextDocuments ?? [], conversation.messages), outputFormat: "dispatch", webSearchMode: "auto", supplement: true };
+        attachments: toolAttachmentContext([], project?.contextDocuments ?? [], conversation.messages), outputFormat: "dispatch", webSearchMode: "auto", supplement: true,
+        ...(voiceCallActiveRef.current ? { voiceCall: true as const } : {}) };
       const preflight = await api<AiChatPreflight>("/api/ai/preflight", { method: "POST", headers: { "X-Tongpin-Account": user.id }, body: JSON.stringify(probe) });
       statusGenerationRef.current += 1;
       if (mountedRef.current) setAiStatus(current => current ? { ...current, quota: preflight.quota } : current);
@@ -2058,7 +1998,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   }
 
   async function sendMessage(approvedPlan?: AiToolPlan & { originalPrompt: string }, continuation?: TaskContinuation) {
-    const generationTool = approvedPlan?.kind === "image" || approvedPlan?.kind === "presentation" ? approvedPlan.kind : continuation?.supplement || continuation?.voiceCall ? "text" : composerTool;
+    const generationTool = approvedPlan?.kind === "image" || approvedPlan?.kind === "presentation" ? approvedPlan.kind : continuation?.supplement ? "text" : composerTool;
     if (!persona.profile.onboardingComplete || !continuation && (!draft.trim() && !attachments.length || preflightGate.busy || fileImportRef.current.has(draftKey)) || quotaInsufficient || !serviceConnected || connectionError || availabilityBlocked) return;
     const originId = continuation?.conversationId ?? activeConversationId;
     if (originId && !liveConversation(workspaceRef.current, deletingConversationRef.current, originId)) {
@@ -2107,11 +2047,13 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         ...buildChatRequest(requestId, origin.mode, requestMessages), conversationId,
         ...capabilityRequest,
         projectContext: origin.project?.instructions || undefined,
-        // A 语音通话 turn is a plain spoken answer: no tool dispatch envelope, so its text streams at once.
-        attachments: documentPayload, outputFormat: continuation?.voiceCall ? "text" : generationTool === "presentation" ? "presentation" : generationTool === "text" ? "dispatch" : "text",
+        // A 语音通话 turn is a text turn too: plain answers stream at once, and a spoken
+        // “帮我生成一张图片” still reaches the same tool plan and confirmation.
+        attachments: documentPayload, outputFormat: generationTool === "presentation" ? "presentation" : generationTool === "text" ? "dispatch" : "text",
         ...(generationTool === "presentation" ? { toolPlanRequestId: approvedPlan!.planRequestId } : {}), webSearchMode: "auto",
         ...(continuation?.supplement ? { supplement: true as const } : {}),
-        ...(continuation?.voiceCall ? { voiceCall: true as const } : {}),
+        // Sent while a 语音通话 is open (the call types its turns into this composer): reply in spoken style.
+        ...(voiceCallActiveRef.current && generationTool === "text" ? { voiceCall: true as const } : {}),
       };
     } catch (error) { showAnnouncement(error instanceof Error ? error.message : "内容超出限制"); return; }
     // Check before saving a sent message, clearing the draft or calling a provider.
@@ -2525,7 +2467,7 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
             onFinish={result => recordComputerResult(result.summary)} onClose={closeComputerUse}
             sideSlot={computerSideOpen ? computerSideSlot : null} panelOpen={computerPanelOpen} onPanelOpenChange={openComputerPanel} /> : undefined}
           onStop={stopResponse}
-          onVoiceCallTurn={submitVoiceCallTurn}
+          voiceCall={voiceCallSupport}
           pendingSupplements={steer.bubbles(activeConversation?.id)}
           onSteer={steerAllowed && activeConversation ? text => addSupplement(activeConversation.id, text) : undefined}
           onCancelSupplement={id => steer.cancel(id)}

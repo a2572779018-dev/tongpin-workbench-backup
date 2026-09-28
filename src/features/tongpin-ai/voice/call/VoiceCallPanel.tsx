@@ -1,4 +1,4 @@
-import { Mic, Phone, PhoneOff, Square } from "lucide-react";
+import { ChevronDown, Mic, Phone, PhoneOff, Square } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AI_VOICE_LIMITS } from "../../../../../shared/aiVoice";
 import { classifyMicrophoneError, ensureMicrophoneAccess, microphoneIssue } from "../micPermission";
@@ -43,14 +43,24 @@ export function VoiceCallButton({ disabled, onStart }: { disabled?: boolean; onS
   </button>;
 }
 
+type CallMode = "quick" | "standard" | "deep" | "pro";
+const MODES: Array<{ value: CallMode; label: string }> = [
+  { value: "quick", label: "快速" }, { value: "standard", label: "标准" }, { value: "deep", label: "深度" }, { value: "pro", label: "Pro" },
+];
+
 interface VoiceCallPanelProps {
   messages: readonly CallReplyLike[];
   onSubmitTurn: (text: string) => VoiceCallTurnResult;
   onStopReply?: () => void;
   onClose: () => void;
+  /** The chat tier each spoken turn uses (faster tiers answer sooner). */
+  mode?: CallMode;
+  onModeChange?: (mode: CallMode) => void;
+  /** Why the composer refused the last turn (the same notice typing would show). */
+  composerNotice?: string;
 }
 
-export function VoiceCallPanel({ messages, onSubmitTurn, onStopReply, onClose }: VoiceCallPanelProps) {
+export function VoiceCallPanel({ messages, onSubmitTurn, onStopReply, onClose, mode, onModeChange, composerNotice }: VoiceCallPanelProps) {
   const auth = useOptionalAuth();
   const api = auth?.api;
   const accountId = auth?.session?.user.id;
@@ -85,6 +95,7 @@ export function VoiceCallPanel({ messages, onSubmitTurn, onStopReply, onClose }:
   const view = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
 
   useEffect(() => { controller.updateMessages(messages); }, [controller, messages]);
+  useEffect(() => { if (composerNotice) controller.notSent(composerNotice); }, [controller, composerNotice]);
 
   useEffect(() => {
     let cancelled = false;
@@ -156,6 +167,12 @@ export function VoiceCallPanel({ messages, onSubmitTurn, onStopReply, onClose }:
       {view.fatal?.canOpenSettings ? <button type="button" className="tp-ai-call__settings" onClick={() => { void window.tongpin?.microphone?.openSettings(); }}>打开麦克风设置</button> : null}
     </div>
     <div className="tp-ai-call__actions">
+      {mode && onModeChange ? <label className="tp-ai-call__mode" title="快速、标准模式回答更快；深度、Pro 更慢">
+        <select aria-label="通话使用的模式" value={mode} disabled={busy || view.phase === "speaking"} onChange={event => onModeChange(event.target.value as CallMode)}>
+          {MODES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+        <ChevronDown size={12} aria-hidden="true" />
+      </label> : null}
       <button type="button" className="tp-ai-call__interrupt" onClick={() => controller.interrupt()} disabled={!canInterrupt}><Square size={12} fill="currentColor" />打断</button>
       <button type="button" className="tp-ai-call__hangup" onClick={hangUp}><PhoneOff size={16} />挂断</button>
     </div>

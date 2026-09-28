@@ -289,7 +289,8 @@ export class AiHarness {
     if (!response.ok) throw await readProviderHttpError(response, "models");
     const root = object(await readBoundedJson(response, 512_000));
     if (!Array.isArray(root.data)) throw new AiError(502, "AI_MODELS_UNAVAILABLE", "服务商未返回模型列表");
-    const models = [...new Set(root.data.map(item => object(item).id).filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 160))].sort().slice(0, 1000);
+    const listed = [...root.data, ...await this.audioModels(snapshot.baseUrl, key)];
+    const models = [...new Set(listed.map(item => object(item).id).filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 160))].sort().slice(0, 1000);
     const verifiedAt = new Date().toISOString();
     this.store.sql.transaction(() => {
       const persisted = this.store.harness();
@@ -306,6 +307,20 @@ export class AiHarness {
       if (persisted) this.store.saveHarness(current);
     });
     return { provider: publicProvider({ ...snapshot, availableModels: models, modelsVerifiedAt: verifiedAt, verifiedConfigVersion: snapshot.configVersion, verifiedKeyVersion: snapshot.keyVersion }), models };
+  }
+
+  /** SiliconFlow lists its speech models (e.g. the open-source CosyVoice2) only
+   * under `?type=audio`; read them too so they can be chosen for 朗读. Best effort. */
+  private async audioModels(baseUrl: string, key: string): Promise<unknown[]> {
+    let host = "";
+    try { host = new URL(baseUrl).hostname; } catch { return []; }
+    if (host !== "api.siliconflow.cn" && host !== "api.siliconflow.com") return [];
+    try {
+      const response = await this.transport(`${baseUrl}/models?type=audio`, { method: "GET", headers: { Authorization: `Bearer ${key}`, Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) return [];
+      const root = object(await readBoundedJson(response, 512_000));
+      return Array.isArray(root.data) ? root.data : [];
+    } catch { return []; }
   }
 
   resolve(tier: AiMode, legacy: StoredProvider | null, capability: AiHarnessCapability): ResolvedHarnessRoute {

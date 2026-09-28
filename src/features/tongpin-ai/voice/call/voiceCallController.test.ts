@@ -18,10 +18,13 @@ function harness(overrides: Partial<CallHost> = {}) {
     ...overrides,
   };
   const microphone = { resume: vi.fn(), pause: vi.fn(), destroy: vi.fn() };
-  const call = new VoiceCallController(host, speaker, async () => undefined);
+  // Busy retries pass at once; the no-reply watchdog fires only when a test releases it.
+  const watchdogs: Array<() => void> = [];
+  const wait = (ms: number) => ms >= 8000 ? new Promise<void>(resolve => { watchdogs.push(resolve); }) : Promise.resolve();
+  const call = new VoiceCallController(host, speaker, wait);
   call.open();
   call.attach(microphone);
-  return { call, host, speaker, microphone, spoken, events };
+  return { call, host, speaker, microphone, spoken, events, watchdogs };
 }
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -102,6 +105,45 @@ describe("语音通话 controller (Open WebUI call-mode flow)", () => {
     call.updateMessages([{ id: "a1", role: "assistant", content: "服务暂时不可用", status: "error" }]);
     expect(spoken).toEqual(["抱歉，这次没有回答成功，请再说一遍。"]);
     expect(call.getState().notice).toBe("服务暂时不可用");
+  });
+
+  it("says a short cue when a spoken request became a task card waiting for a click", async () => {
+    const { call, spoken } = harness();
+    call.updateMessages(history);
+    call.speechStarted(); call.speechEnded(new Float32Array(16000));
+    await flush(); await flush();
+    call.updateMessages([...history, { id: "a1", role: "assistant", content: "", status: "thinking" }]);
+    call.updateMessages([...history, { id: "a1", role: "assistant", content: "", status: "ready", artifactId: "artifact-1" }]);
+    expect(spoken).toEqual(["好的，任务已经放到对话里了，需要确认的话请在屏幕上点一下。"]);
+  });
+
+  it("reads out a reply that arrives on its own while listening (an operation's result), never old history", () => {
+    const { call, spoken, microphone } = harness();
+    call.updateMessages(history);
+    expect(spoken).toEqual([]);
+    call.updateMessages([...history, { id: "c1", role: "assistant", content: "已完成：计算器显示的结果是 4608。", status: "ready" }]);
+    expect(spoken).toEqual(["已完成：计算器显示的结果是 4608。"]);
+    expect(microphone.pause).toHaveBeenCalled();
+    call.speaking("已完成：计算器显示的结果是 4608。");
+    call.drained();
+    call.updateMessages([...history, { id: "c1", role: "assistant", content: "已完成：计算器显示的结果是 4608。", status: "ready" }]);
+    expect(spoken).toHaveLength(1);
+  });
+
+  it("gives the microphone back when a sent turn never produces a reply, or the composer refuses it", async () => {
+    const { call, watchdogs } = harness();
+    call.updateMessages(history);
+    call.speechStarted(); call.speechEnded(new Float32Array(16000));
+    await flush(); await flush();
+    expect(call.getState().phase).toBe("thinking");
+    watchdogs.forEach(release => release());
+    await flush();
+    expect(call.getState()).toMatchObject({ phase: "listening", notice: "这句话没有发出去，请再说一遍。" });
+
+    call.speechStarted(); call.speechEnded(new Float32Array(16000));
+    await flush(); await flush();
+    call.notSent("图片生成尚未启用，请联系管理员配置。");
+    expect(call.getState()).toMatchObject({ phase: "listening", notice: "图片生成尚未启用，请联系管理员配置。" });
   });
 
   it("an empty transcript asks to repeat without sending", async () => {

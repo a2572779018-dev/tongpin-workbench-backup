@@ -58,7 +58,9 @@ const TOOL_CLARIFICATION = '如果本次提供的历史和当前请求中都缺�
 const DISPATCH_KIND_LABELS: Record<AiDispatchToolKind, string> = { image: "图片", video: "视频", presentation: "PPT", computer: "操作电脑" };
 function dispatchInstruction(request: AiChatRequest): string {
   const kinds = request.dispatchKinds ?? AI_DISPATCH_TOOL_KINDS;
-  const base = "普通问答、写作、分析、讨论生成功能、排错、询价，以及“帮我写图片/视频/PPT 提示词”，直接用自然语言回答，可在必要时使用 Markdown；不要把整篇回答包装成 JSON。";
+  const base = request.voiceCall
+    ? "普通问答、写作、分析、讨论生成功能、排错、询价，以及“帮我写图片/视频/PPT 提示词”，直接用口语回答；不要把回答包装成 JSON。"
+    : "普通问答、写作、分析、讨论生成功能、排错、询价，以及“帮我写图片/视频/PPT 提示词”，直接用自然语言回答，可在必要时使用 Markdown；不要把整篇回答包装成 JSON。";
   if (!kinds.length) return `${base}本档位没有开放任何生成或电脑操作工具：始终用自然语言回答，不输出 <tool_request>，不声称可以生成产物或控制电脑。`;
   const labels = kinds.map(kind => DISPATCH_KIND_LABELS[kind]).join("、");
   const closed = AI_DISPATCH_TOOL_KINDS.filter(kind => !kinds.includes(kind)).map(kind => DISPATCH_KIND_LABELS[kind]);

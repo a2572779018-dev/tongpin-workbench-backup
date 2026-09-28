@@ -21,10 +21,22 @@ describe("语音通话 sentence parts (Open WebUI split rule with Chinese ends)"
   });
 
   it("holds back the growing tail while streaming and never skips a finished part", () => {
-    expect(newSpeechParts("明天上午有雨，", 0, false)).toEqual([]);
+    const start = { queued: 0, clause: "" };
+    expect(newSpeechParts("明天上午有", start, false).parts).toEqual([]);
     // One chunk finishing two sentences queues both (Open WebUI queued only the newest).
-    expect(newSpeechParts("明天上午有雨。下午转晴，气温回升。晚", 0, false)).toEqual(["明天上午有雨。", "下午转晴，气温回升。"]);
-    expect(newSpeechParts("明天上午有雨。下午转晴，气温回升。晚上有风。", 2, false)).toEqual([]);
-    expect(newSpeechParts("明天上午有雨。下午转晴，气温回升。晚上有风。", 2, true)).toEqual(["晚上有风。"]);
+    expect(newSpeechParts("明天上午有雨。下午转晴，气温回升。晚", start, false)).toEqual({ parts: ["明天上午有雨。", "下午转晴，气温回升。"], progress: { queued: 2, clause: "" } });
+    expect(newSpeechParts("明天上午有雨。下午转晴，气温回升。晚上有风。", { queued: 2, clause: "" }, false).parts).toEqual([]);
+    expect(newSpeechParts("明天上午有雨。下午转晴，气温回升。晚上有风。", { queued: 2, clause: "" }, true).parts).toEqual(["晚上有风。"]);
+  });
+
+  it("starts the first sentence at its first comma, then says only the rest of it", () => {
+    const first = newSpeechParts("明天上午有小雨，下午", { queued: 0, clause: "" }, false);
+    expect(first).toEqual({ parts: ["明天上午有小雨，"], progress: { queued: 0, clause: "明天上午有小雨，" } });
+    const second = newSpeechParts("明天上午有小雨，下午转晴。记得", first.progress, false);
+    expect(second).toEqual({ parts: ["下午转晴。"], progress: { queued: 1, clause: "" } });
+    // A short opening clause waits for the whole sentence.
+    expect(newSpeechParts("好的，下", { queued: 0, clause: "" }, false).parts).toEqual([]);
+    // Only the very first part starts early.
+    expect(newSpeechParts("第一句说完了。第二句还在说，没", { queued: 1, clause: "" }, false).parts).toEqual([]);
   });
 });

@@ -99,6 +99,27 @@
   font-size: 0.85rem;
 }
 .tp-ai-call__actions { display: flex; flex-direction: column; gap: 0.5rem; }
+.tp-ai-call__mode {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tp-ai-page .tp-ai-call__mode select {
+  width: 5.5rem;
+  height: 2rem;
+  margin: 0;
+  padding: 0 1.5rem 0 0.7rem;
+  border: 1.5px solid #2d2a22;
+  border-radius: 0.6rem;
+  background: #fff6d8;
+  color: #2d2a22;
+  font-size: 0.85rem;
+  font-weight: 700;
+  appearance: none;
+}
+.tp-ai-call__mode svg { position: absolute; right: 0.55rem; pointer-events: none; color: #5d5646; }
+.tp-ai-page .tp-ai-call__mode select:disabled { opacity: 0.5; }
 .tp-ai-page .tp-ai-call__actions button {
   display: inline-flex;
   align-items: center;

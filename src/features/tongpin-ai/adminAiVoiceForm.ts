@@ -16,6 +16,13 @@ export interface AiVoiceSettingsDraft {
 }
 
 export const OPENAI_TTS_VOICES = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"] as const;
+/** SiliconFlow's preset voices of the open-source CosyVoice2 model (women first). */
+export const COSYVOICE2_VOICES = ["anna", "bella", "claire", "diana", "alex", "benjamin", "charles", "david"] as const;
+
+/** Voice suggestions for the chosen speech model: CosyVoice2 voices are "<model>:<name>". */
+export function ttsVoiceSuggestions(model: string): string[] {
+  return /cosyvoice2/i.test(model) ? COSYVOICE2_VOICES.map(voice => `${model}:${voice}`) : [...OPENAI_TTS_VOICES];
+}
 
 export function voiceDraftFromSettings(settings: AiVoiceSettings | null): AiVoiceSettingsDraft {
   return {

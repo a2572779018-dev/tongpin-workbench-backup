@@ -27,13 +27,20 @@ describe("voice wiring in the chat workspace", () => {
     expect(controls).toContain("<ReadAloudButton messageId={message.id} content={message.content} />");
   });
 
-  it("offers 语音通话 only where a workspace can send a spoken turn, in the composer's place", () => {
+  it("sends each spoken turn through the composer's own send, the same channel as typing", () => {
     const workspace = source("../ChatWorkspace.tsx");
-    expect(workspace).toContain("{onVoiceCallTurn ? <VoiceCallButton ");
-    expect(workspace).toContain(": callOpen && onVoiceCallTurn ? (");
+    expect(workspace).toContain("{voiceCall ? <VoiceCallButton ");
+    // The call has one stable slot above the composer / computer panel, so an operation never ends it.
+    expect(workspace).toContain("{callActive ? (\n            <VoiceCallPanel ");
+    expect(workspace).toContain(": callActive ? null : (");
+    // A spoken turn becomes the draft and is sent by submitMessage (tools, mentions, attachments, steer).
+    const spoken = workspace.slice(workspace.indexOf("function submitSpokenTurn("), workspace.indexOf("  function submitMessage(event"));
+    expect(spoken).toContain("onDraftChange(text);");
+    expect(spoken).toContain("submitMessage();");
     const page = source("../../../pages/TongpinAIPage.tsx");
-    expect(page).toContain("onVoiceCallTurn={submitVoiceCallTurn}");
-    expect(page).toContain("...(continuation?.voiceCall ? { voiceCall: true as const } : {}),");
+    expect(page).toContain("voiceCall={voiceCallSupport}");
+    expect(page).not.toContain("submitVoiceCallTurn");
+    expect(page).toContain("...(voiceCallActiveRef.current && generationTool === \"text\" ? { voiceCall: true as const } : {}),");
   });
 
   it("never records before the member presses the microphone", () => {

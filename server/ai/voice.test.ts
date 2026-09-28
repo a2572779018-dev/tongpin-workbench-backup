@@ -6,7 +6,7 @@ import type { AiTransport, AiTransportInit } from "./provider";
 import { AiError, createSecretBox } from "./security";
 import { AiService } from "./service";
 import { AiStore, type AiSql } from "./storage";
-import { isWhisperHallucination, type AiWhisperRunner } from "./voice";
+import { isWhisperHallucination, withoutWhisperOutro, type AiWhisperRunner } from "./voice";
 import type { VoiceTranscriptionUpload } from "./voiceAudio";
 import { bytesFromBase64, chromeLikeWebm, FFMPEG_LIVE_WEBM_1200MS, MP3_BYTES, pcmWav } from "../testSupport/voiceFixtures";
 
@@ -526,6 +526,18 @@ describe("Whisper hallucination guard", () => {
     for (const text of ["我我我我我我我我", "谢谢谢谢谢谢谢谢谢谢谢谢谢谢谢谢", "嗯，嗯，嗯，嗯，嗯，嗯，嗯，嗯", "你好你好你好你好你好你好你好你好", "ha ha ha ha ha ha ha ha", "今天开会啊啊啊啊啊啊啊啊啊"]) {
       expect(isWhisperHallucination(text), text).toBe(true);
     }
+  });
+
+  it("treats a transcribed cough as no speech", () => {
+    for (const text of ["咳咳咳", "咳，咳。", "咳"]) expect(isWhisperHallucination(text), text).toBe(true);
+    expect(isWhisperHallucination("咳嗽了一整天")).toBe(false);
+  });
+
+  it("drops a video outro appended to real speech, and nothing else", () => {
+    expect(withoutWhisperOutro("帮我生成一张图片。 感谢观看")).toBe("帮我生成一张图片。");
+    expect(withoutWhisperOutro("帮我生成一张图片，谢谢观看！")).toBe("帮我生成一张图片");
+    expect(withoutWhisperOutro("明天开会 Thanks for watching.")).toBe("明天开会");
+    for (const text of ["今天感谢观看直播的朋友们", "今天就到这里，谢谢大家", "感谢观看", "你好"]) expect(withoutWhisperOutro(text), text).toBe(text);
   });
 
   it("keeps real speech, including sentences that merely contain a stock phrase, numbers and short repeats", () => {

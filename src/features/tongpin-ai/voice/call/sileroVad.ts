@@ -7,8 +7,13 @@ import type { MicVAD } from "@ricky0123/vad-web";
  * Web. It replaces the loudness threshold of Open WebUI's call mode, so room
  * noise alone does not open or keep a turn open. The model, the audio worklet
  * and the ONNX Runtime WebAssembly files are emitted next to the app under
- * `vad/` (see vite.config.ts); the library's own frame settings are kept.
+ * `vad/` (see vite.config.ts). The library's speech thresholds are kept; the
+ * end-of-turn silence is shorter than its 1.4 s default so replies start
+ * sooner (a pause that turns out to be mid-thought is joined back by the call
+ * controller), and a one-word answer such as “好” is not dropped as too short.
  */
+const END_OF_TURN_SILENCE_MS = 900;
+const MIN_UTTERANCE_MS = 250;
 export const VAD_ASSET_DIRECTORY = "vad/";
 
 export interface CallVadHandlers {
@@ -42,6 +47,8 @@ export async function createCallVad(stream: MediaStream, handlers: CallVadHandle
     baseAssetPath: base,
     onnxWASMBasePath: base,
     startOnLoad: false,
+    redemptionMs: END_OF_TURN_SILENCE_MS,
+    minSpeechMs: MIN_UTTERANCE_MS,
     ortConfig: ort => {
       ort.env.logLevel = "error";
       // file:// pages are not cross-origin isolated: one thread, no proxy worker.

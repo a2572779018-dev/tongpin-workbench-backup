@@ -6,7 +6,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { ApiRequestError } from "../../lib/api";
 import { AdminAiModelSelect } from "./AdminAiModelSelect";
 import { adminAiErrorMessage } from "./adminAiForms";
-import { OPENAI_TTS_VOICES, voiceDraftFromSettings, voiceInputFromDraft, voiceModelWarning, type AiVoiceSettingsDraft } from "./adminAiVoiceForm";
+import { ttsVoiceSuggestions, voiceDraftFromSettings, voiceInputFromDraft, voiceModelWarning, type AiVoiceSettingsDraft } from "./adminAiVoiceForm";
 
 interface Readiness { ready: boolean; message: string }
 interface VoiceAdminView { settings: AiVoiceSettings; readiness: { input: Readiness; speech: Readiness } }
@@ -118,14 +118,14 @@ export function AdminAiVoiceSettings({ harnessConfig = null }: { harnessConfig?:
           <AdminAiModelSelect label="朗读模型" value={draft.ttsModelId} models={preferredModels(modelsFor(draft.ttsProviderId), TTS_MODEL)} allowCustom
             emptyMessage="先选择服务连接，并在「服务与模型」读取模型列表" onChange={model => change({ ttsModelId: model })} />
           <label className="tp-ai-admin-field" htmlFor={`${id}-tts-voice`}>音色
-            <input id={`${id}-tts-voice`} list={`${id}-tts-voices`} maxLength={128} placeholder="例如 alloy" value={draft.ttsVoice} onChange={event => change({ ttsVoice: event.target.value })} />
-            <datalist id={`${id}-tts-voices`}>{OPENAI_TTS_VOICES.map(voice => <option key={voice} value={voice} />)}</datalist>
+            <input id={`${id}-tts-voice`} list={`${id}-tts-voices`} maxLength={128} placeholder={/cosyvoice2/i.test(draft.ttsModelId) ? `例如 ${draft.ttsModelId}:anna` : "例如 alloy"} value={draft.ttsVoice} onChange={event => change({ ttsVoice: event.target.value })} />
+            <datalist id={`${id}-tts-voices`}>{ttsVoiceSuggestions(draft.ttsModelId).map(voice => <option key={voice} value={voice} />)}</datalist>
           </label>
           <label className="tp-ai-admin-field" htmlFor={`${id}-tts-points`}>每千字朗读折算 · 同频点
             <input id={`${id}-tts-points`} type="text" inputMode="numeric" maxLength={8} placeholder="例如 20" value={draft.ttsPointsPer1kChars} onChange={event => change({ ttsPointsPer1kChars: event.target.value })} />
           </label>
           {ttsWarning ? <p className="tp-ai-admin-hint is-wide" role="note">{ttsWarning}</p> : null}
-          <p className="tp-ai-admin-hint is-wide">朗读前会去掉代码、公式、链接和引用角标；长回复按句分段请求，每段单独计费（向上取整）。调用服务商的 /audio/speech 接口（如 tts-1、gpt-4o-mini-tts）。</p>
+          <p className="tp-ai-admin-hint is-wide">朗读前会去掉代码、公式、链接和引用角标；长回复按句分段请求，每段单独计费（向上取整）。调用服务商的 /audio/speech 接口（如 tts-1、gpt-4o-mini-tts；硅基流动的开源中文模型 FunAudioLLM/CosyVoice2-0.5B，音色如 FunAudioLLM/CosyVoice2-0.5B:anna）。语音通话也用这里的声音。</p>
         </> : null}
       </fieldset>
       {!providers.length && (providerStt || draft.ttsEngine === "external") ? <p className="tp-ai-admin-hint">还没有服务连接：请先在「服务与模型」接入服务并读取模型列表。</p> : null}

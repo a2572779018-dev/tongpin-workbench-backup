@@ -153,8 +153,10 @@ interface ChatWorkspaceProps {
   onCancelSupplement?: (id: string) => void;
   /** Live unified computer executor panel; replaces the composer while a task runs. */
   computerPanel?: ReactNode;
-  /** 语音通话: sends one spoken turn. Given only where calls are supported. */
-  onVoiceCallTurn?: (text: string) => VoiceCallTurnResult;
+  /** 语音通话 support. Each spoken turn goes through this composer's own send
+   * (exactly as if typed and sent); the parent marks turns sent while a call is
+   * open so replies come back as short spoken text. */
+  voiceCall?: { onActiveChange(active: boolean): void };
 }
 
 /** The send button's glyphs, always all present in every state (the three
@@ -245,7 +247,7 @@ export function ChatWorkspace({
   onSteer,
   onCancelSupplement,
   computerPanel,
-  onVoiceCallTurn,
+  voiceCall,
 }: ChatWorkspaceProps) {
   const chatRef = useRef<HTMLElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -284,6 +286,12 @@ export function ChatWorkspace({
   const [videoAttachmentReferences, setVideoAttachmentReferences] = useState<LocalVideoReferenceImage[]>([]);
   const [videoBusy, setVideoBusy] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
+  const callActive = callOpen && Boolean(voiceCall);
+  const voiceCallRef = useRef(voiceCall); voiceCallRef.current = voiceCall;
+  useEffect(() => {
+    voiceCallRef.current?.onActiveChange(callActive);
+    return () => { if (callActive) voiceCallRef.current?.onActiveChange(false); };
+  }, [callActive]);
   // Switching to another conversation ends the call; the first spoken turn of a
   // new chat creating its conversation does not.
   const callConversationRef = useRef(conversationId);
@@ -676,6 +684,44 @@ export function ChatWorkspace({
     return false;
   }, [artifactById, messages]);
 
+  // 语音通话: a spoken turn is put into this composer and sent by submitMessage,
+  // the same send as typing (tools, @mentions, attachments, follow-ups).
+  const savedDraftRef = useRef("");
+  const spokenTurnRef = useRef<{ text: string; expires: number } | null>(null);
+  function openCall() {
+    savedDraftRef.current = draft;
+    if (draft) onDraftChange("");
+    if (videoOpen) { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }
+    if (composerTool !== "text") onComposerToolChange?.("text");
+    setMenu(null);
+    setFileError("");
+    setCallOpen(true);
+  }
+  function closeCall() {
+    setCallOpen(false);
+    spokenTurnRef.current = null;
+    const saved = savedDraftRef.current;
+    savedDraftRef.current = "";
+    if (saved && !draft.trim()) onDraftChange(saved);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }
+  function submitSpokenTurn(text: string): VoiceCallTurnResult {
+    if (computerRequest) return { ok: false, reason: "电脑操作进行中，请等它结束后再说。" };
+    if (responding || checkingQuota || imagePlanning || readingFiles || fileReadingRef.current || spokenTurnRef.current) return { ok: false, reason: "busy" };
+    setFileError("");
+    followResponseRef.current = true;
+    spokenTurnRef.current = { text, expires: Date.now() + 3000 };
+    onDraftChange(text);
+    return { ok: true };
+  }
+  useEffect(() => {
+    const pending = spokenTurnRef.current;
+    if (!pending) return;
+    if (!callActive || Date.now() > pending.expires) { spokenTurnRef.current = null; return; }
+    if (draft !== pending.text) return;
+    spokenTurnRef.current = null;
+    submitMessage();
+  });
   function submitMessage(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
     if (responding) {
@@ -956,14 +1002,11 @@ export function ChatWorkspace({
           </p>
         )}
         <div className="tp-ai-beam-wrap">
-          {computerRequest && computerPanel ? computerPanel : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑操作执行器未接入，已停止流程。</p> : callOpen && onVoiceCallTurn ? (
-            <VoiceCallPanel messages={messages} onSubmitTurn={text => {
-              const result = onVoiceCallTurn(text);
-              // A spoken turn is the member's own action: follow it and its reply.
-              if (result.ok) { followResponseRef.current = true; scheduleFollowScroll(); }
-              return result;
-            }} onStopReply={onStop} onClose={() => { setCallOpen(false); requestAnimationFrame(() => composerRef.current?.focus()); }} />
-          ) : (
+          {/* One stable slot: the call keeps running while a spoken request operates the computer. */}
+          {callActive ? (
+            <VoiceCallPanel messages={messages} mode={mode} onModeChange={onModeChange} composerNotice={fileError} onSubmitTurn={submitSpokenTurn} onStopReply={onStop} onClose={closeCall} />
+          ) : null}
+          {computerRequest && computerPanel ? computerPanel : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑操作执行器未接入，已停止流程。</p> : callActive ? null : (
           <form className="tp-ai-composer" onSubmit={submitMessage}>
             {videoOpen && onSubmitVideo && onPlanTool ? <AiVideoComposer ref={videoComposerRef} tier={mode} initialRequest={videoInitial} initialReferenceImages={videoAttachmentReferences} prompt={draft} onPlan={request => onPlanTool("video", request.prompt, request)} onSubmit={onSubmitVideo} onSubmitTask={onSubmitVideoTask} onUseHistory={onUseVideoHistory} onBusy={setVideoBusy} onClose={() => { setVideoOpen(false); setVideoBusy(false); setVideoInitial(undefined); setVideoAttachmentReferences([]); }} /> : null}
             <input ref={fileInputRef} type="file" aria-label="选择附件文件" accept={composerTool === "image" ? AI_IMAGE_ACCEPT : visionEnabled ? ATTACHMENT_ACCEPT : TEXT_ATTACHMENT_ACCEPT} multiple hidden onChange={event => {
@@ -1181,7 +1224,7 @@ export function ChatWorkspace({
                 <ChevronDown size={12} />
               </label>}
               <VoiceInputControl key={conversationId ?? "new"} disabled={videoBusy} onTranscript={insertVoiceTranscript} />
-              {onVoiceCallTurn ? <VoiceCallButton disabled={videoBusy || videoOpen} onStart={() => setCallOpen(true)} /> : null}
+              {voiceCall ? <VoiceCallButton disabled={videoBusy} onStart={openCall} /> : null}
               {sendMode === "stop" ? (
                 <button
                   type="button"
@@ -1215,7 +1258,7 @@ export function ChatWorkspace({
           </form>
           )}
         </div>
-        <p className="tp-ai-composer-hint">{computerRequest ? "本次电脑操作已一次授权，超出范围的动作会再次询问；按 Esc 或点「停止」可随时中止" : callOpen && onVoiceCallTurn ? "语音通话中：说完停顿一下，AI 会用声音回答；它说话时麦克风暂停，点「打断」可以插话" : composerHintText({ responding, steerAvailable, draft, escapeStops })}</p>
+        <p className="tp-ai-composer-hint">{computerRequest ? "本次电脑操作已一次授权，超出范围的动作会再次询问；按 Esc 或点「停止」可随时中止" : callActive ? "语音通话中：说的话和打字发送完全一样（生成、操作电脑、追问都可以），AI 用声音回答；它说话时麦克风暂停，点「打断」可以插话" : composerHintText({ responding, steerAvailable, draft, escapeStops })}</p>
       </footer>
     </section>
   );

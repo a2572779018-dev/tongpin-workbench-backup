@@ -79,13 +79,37 @@ export function getMessageContentParts(content: string): string[] {
   return extractSentencesForAudio(markdownToSpeechText(content));
 }
 
+/** Where a reply's speech queue stands: whole parts queued, and a first clause spoken early. */
+export interface SpeechProgress { queued: number; clause: string }
+export const NO_SPEECH_PROGRESS: SpeechProgress = Object.freeze({ queued: 0, clause: "" });
+
+/** The first clause of a reply (up to a comma), long enough to be worth saying on its own. */
+const FIRST_CLAUSE = /^(.+?[，,、：:])/u;
+const MIN_FIRST_CLAUSE = 6;
+
 /**
- * The parts to queue now for a reply whose first `queued` parts were already
- * queued. While the reply streams, its last part may still grow and waits;
- * once it is done everything left is queued.
+ * The parts to queue now for a reply at `progress`. While the reply streams,
+ * its last part may still grow and waits; once it is done everything left is
+ * queued. So the member hears the answer sooner, the very first part may start
+ * at its first comma (“明天上午有小雨，”) while the rest of that sentence is
+ * still arriving; the rest is queued when the sentence completes.
  */
-export function newSpeechParts(content: string, queued: number, done: boolean): string[] {
+export function newSpeechParts(content: string, progress: SpeechProgress, done: boolean): { parts: string[]; progress: SpeechProgress } {
   const parts = getMessageContentParts(content);
   const ready = done ? parts : parts.slice(0, -1);
-  return ready.slice(queued);
+  const out: string[] = [];
+  let { queued, clause } = progress;
+  for (; queued < ready.length; queued += 1) {
+    const part = ready[queued];
+    if (clause && part.startsWith(clause)) {
+      const rest = part.slice(clause.length).trim();
+      if (rest) out.push(rest);
+    } else out.push(part);
+    clause = "";
+  }
+  if (queued === 0 && !clause && !done && parts.length) {
+    const early = FIRST_CLAUSE.exec(parts[0])?.[1];
+    if (early && Array.from(early.replace(/[\p{P}\p{S}\s]/gu, "")).length >= MIN_FIRST_CLAUSE) { clause = early; out.push(early); }
+  }
+  return { parts: out, progress: { queued, clause } };
 }
