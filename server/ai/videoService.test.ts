@@ -132,6 +132,50 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(runtime.service.quota("a")).toMatchObject({ reservedTokens: 0, usedTokens: 0 });
     expect(runtime.service.video.list("a").settings).toMatchObject({ availableModels: ["sd-2-c6"], defaultModel: "sd-2-c6" });
   });
+  it("keeps video open when the tier default is quarantined, and keeps that quarantine until the key changes", async () => {
+    const route = {
+      providerId: "video-provider", modelId: "minimax_h3", protocol: "chat_completions" as const,
+      maxOutputTokens: 1024, reasoningEffort: "" as const, capabilities: ["chat", "video"] as const,
+      enabled: true, videoProviderId: "video-provider", videoModelId: "minimax_h3",
+    };
+    const harness = (apiKey?: string, name = "75API") => ({
+      providers: [{ id: "video-provider", name, baseUrl: "https://www.75api.com/v1", protocol: "chat_completions" as const, ...(apiKey ? { apiKey } : {}), enabled: true }],
+      tiers: { quick: route, standard: route, deep: route, pro: route },
+      policy: { strategy: "plan_execute" as const, maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
+    });
+    const listing = () => Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] });
+    await runtime.service.saveHarness(harness("harness-video-key"));
+    transport.mockResolvedValueOnce(listing());
+    await runtime.service.discoverHarnessProvider("video-provider");
+    // The tier default is listed, but the gateway has no channel for it.
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "model_not_found" } }, { status: 503 }));
+    await expect(runtime.service.video.submit("a", input("a", "品牌视频", { model: "minimax_h3" }))).resolves.toMatchObject({ status: "failed", reserved: false });
+
+    const replaced = runtime.service.video.list("a").settings;
+    expect(replaced).toMatchObject({ apiKeyConfigured: true, modelsVerified: true, availableModels: ["sd-2-c6"], defaultModel: "sd-2-c6" });
+    expect(replaced.defaultNotice).toBe("档位默认模型「MiniMax H3」当前不可用（服务商未开通或已暂停），本次将使用「SD 2.0」");
+    // An omitted choice binds the verified replacement; an explicit unverified pick is still rejected.
+    expect(runtime.service.video.bindPlanModel("quick", undefined)).toBe("sd-2-c6");
+    expect(() => runtime.service.video.bindPlanModel("quick", "minimax_h3")).toThrow(expect.objectContaining({ code: "AI_VIDEO_MODEL_NOT_AUTHORIZED" }));
+    transport.mockResolvedValueOnce(task());
+    await expect(runtime.service.video.submit("a", input("a", "替代模型", { model: "sd-2-c6", resolution: "720p" }))).resolves.toMatchObject({ status: "queued" });
+    expect(JSON.parse(transport.mock.calls.at(-1)![1].body!)).toMatchObject({ model: "sd-2-c6" });
+
+    // The gateway still lists the model: re-reading keeps it out, and so does a rename.
+    transport.mockResolvedValueOnce(listing());
+    expect((await runtime.service.discoverHarnessProvider("video-provider")).models).toEqual(["sd-2-c6"]);
+    await runtime.service.saveHarness(harness(undefined, "75API 视频"));
+    transport.mockResolvedValueOnce(listing());
+    expect((await runtime.service.discoverHarnessProvider("video-provider")).models).toEqual(["sd-2-c6"]);
+    expect(runtime.service.video.list("a").settings).toMatchObject({ availableModels: ["sd-2-c6"], defaultModel: "sd-2-c6" });
+    // A new key is a new connection version: the quarantine no longer applies.
+    await runtime.service.saveHarness(harness("rotated-video-key"));
+    transport.mockResolvedValueOnce(listing());
+    expect((await runtime.service.discoverHarnessProvider("video-provider")).models).toEqual(["minimax_h3", "sd-2-c6"]);
+    const restored = runtime.service.video.list("a").settings;
+    expect(restored).toMatchObject({ availableModels: ["minimax_h3", "sd-2-c6"], defaultModel: "minimax_h3" });
+    expect(restored.defaultNotice).toBeUndefined();
+  });
   it("returns a server profile for every available model and names a replaced tier default", async () => {
     const route = {
       providerId: "video-provider", modelId: "minimax_h3", protocol: "chat_completions" as const,

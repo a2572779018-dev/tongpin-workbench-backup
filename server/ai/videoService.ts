@@ -56,6 +56,12 @@ const verifiedModels = (settings: Settings): VideoModelId[] | null => {
 // model-list check; this prevents a member from discovering a bad mapping via a
 // paid generation attempt.
 const availableModels = (settings: Settings): VideoModelId[] => verifiedModels(settings) ?? [];
+/** The tier's default while it is verified, otherwise a verified replacement
+ * (which members are told about via defaultNotice). Never an unverified model. */
+function defaultVideoModel(models: readonly VideoModelId[], tierDefault: string | undefined, fallback: VideoModelId | undefined): VideoModelId | undefined {
+  if (tierDefault && models.includes(tierDefault as VideoModelId)) return tierDefault as VideoModelId;
+  return fallback && models.includes(fallback) ? fallback : models[0];
+}
 /** Member-safe generation constraints for one catalogue model. The server
  * catalogue is authoritative; clients use this instead of their bundled copy. */
 export function memberVideoProfile(id: string): AiVideoModelProfile | undefined {
@@ -105,9 +111,11 @@ export class AiVideoService {
     const access = this.harnessVideoAccess(tier);
     const legacy = this.saved();
     const allowed = access?.models ?? availableModels(legacy);
-    const fallback = access?.route.modelId ?? configuredDefaultModel(legacy.defaultModel);
+    // An omitted choice gets what members are shown as the default: the tier
+    // default, or its verified replacement while that default is unavailable.
+    const fallback = access ? defaultVideoModel(access.models, access.route.modelId, configuredDefaultModel(legacy.defaultModel)) : configuredDefaultModel(legacy.defaultModel);
     const candidate = typeof requested === "string" && requested ? requested : fallback;
-    const spec = videoModel(candidate);
+    const spec = candidate ? videoModel(candidate) : undefined;
     if (!spec?.generationEnabled || !allowed.includes(spec.id)) throw new AiError(403, "AI_VIDEO_MODEL_NOT_AUTHORIZED", "当前视频服务未验证此模型，请重新选择");
     return spec.id;
   }
@@ -154,8 +162,7 @@ export class AiVideoService {
       return { enabled: admin.enabled, quotaPoints: admin.quotaPoints, apiKeyConfigured: false, availableModels: [], modelsVerified: false };
     }
     const models = access?.models ?? admin.availableModels;
-    const selected = (access?.route.modelId && models.includes(access.route.modelId as VideoModelId) ? access.route.modelId as VideoModelId : undefined)
-      ?? (admin.defaultModel && models.includes(admin.defaultModel) ? admin.defaultModel : models[0]);
+    const selected = defaultVideoModel(models, access?.route.modelId, admin.defaultModel);
     const spec = selected ? videoModel(selected) : undefined;
     const profiles = Object.fromEntries(models.flatMap(id => { const profile = memberVideoProfile(id); return profile ? [[id, profile]] : []; }));
     const configured = access?.route.modelId;
@@ -481,7 +488,12 @@ export class AiVideoService {
     const harness = this.store.harness();
     const provider = harness?.providers.find(item => item.id === providerId);
     if (!harness || !provider?.availableModels.includes(modelId)) return;
-    this.store.saveHarness({ ...harness, providers: harness.providers.map(item => item.id === providerId ? { ...item, availableModels: item.availableModels.filter(id => id !== modelId) } : item) });
+    // Recorded against this connection version, so re-reading the (unchanged)
+    // model list keeps the model out; a new key or address lifts it.
+    const previous = provider.modelQuarantine;
+    const current = previous && previous.configVersion === provider.configVersion && previous.keyVersion === provider.keyVersion ? previous.models : [];
+    const modelQuarantine = { configVersion: provider.configVersion, keyVersion: provider.keyVersion, models: [...new Set([...current, modelId])] };
+    this.store.saveHarness({ ...harness, providers: harness.providers.map(item => item.id === providerId ? { ...item, availableModels: item.availableModels.filter(id => id !== modelId), modelQuarantine } : item) });
     console.warn("[video-model-quarantine]", JSON.stringify({ provider: providerId, model: modelId }));
   }
   private applyTask(userId: string, id: string, task: H3VideoTask): Job {

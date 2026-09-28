@@ -52,6 +52,10 @@ export type StoredHarnessProvider = PublicHarnessProvider & {
   keyVersion: string;
   verifiedConfigVersion?: string;
   verifiedKeyVersion?: string;
+  /** Models the gateway lists but answered model_not_found for, bound to the
+   * connection version that produced them. Re-reading models keeps them out;
+   * a new key or address lifts the quarantine. */
+  modelQuarantine?: { configVersion: string; keyVersion: string; models: string[] };
 };
 export interface StoredHarnessConfig extends Omit<AiHarnessConfig, "providers"> {
   providers: StoredHarnessProvider[];

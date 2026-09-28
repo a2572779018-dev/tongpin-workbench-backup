@@ -132,6 +132,8 @@ export interface ResolvedHarnessMediaRoute {
   providerName: string;
   baseUrl: string;
   encryptedKey: string;
+  /** Image: the tier's verified model. Video: the tier's configured default,
+   * which may be unavailable; the video service binds a verified model. */
   modelId: string;
   legacy: boolean;
   imageEditCapability?: AiImageEditCapability;
@@ -276,6 +278,7 @@ export class AiHarness {
         modelsVerified: false, availableModels: configChanged || keyChanged ? [] : previous!.availableModels,
         modelsVerifiedAt: configChanged || keyChanged ? null : previous!.modelsVerifiedAt,
         ...(configChanged || keyChanged ? {} : { verifiedConfigVersion: previous!.verifiedConfigVersion, verifiedKeyVersion: previous!.verifiedKeyVersion }),
+        ...(configChanged || keyChanged || !previous?.modelQuarantine ? {} : { modelQuarantine: previous.modelQuarantine }),
       });
     }
     const tiersObject = object(input.tiers);
@@ -317,6 +320,7 @@ export class AiHarness {
     const listed = [...root.data, ...await this.audioModels(snapshot.baseUrl, key)];
     const models = [...new Set(listed.map(item => object(item).id).filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 160))].sort().slice(0, 1000);
     const verifiedAt = new Date().toISOString();
+    let usable = models;
     this.store.sql.transaction(() => {
       const persisted = this.store.harness();
       const current = persisted ?? this.draft();
@@ -324,14 +328,20 @@ export class AiHarness {
       if (!current || !target || target.configVersion !== snapshot.configVersion || target.keyVersion !== snapshot.keyVersion || target.encryptedKey !== snapshot.encryptedKey) {
         throw new AiError(409, "AI_CONFIG_CHANGED", "服务连接已修改，请重新获取模型列表");
       }
-      target.availableModels = models;
+      // The gateway keeps listing a model it answered model_not_found for; that
+      // quarantine holds for this connection version, so a re-read does not
+      // silently reopen it. A new key or address starts a clean version.
+      const quarantine = target.modelQuarantine;
+      if (quarantine && quarantine.configVersion === target.configVersion && quarantine.keyVersion === target.keyVersion) usable = models.filter(id => !quarantine.models.includes(id));
+      else delete target.modelQuarantine;
+      target.availableModels = usable;
       target.modelsVerifiedAt = verifiedAt;
       target.verifiedConfigVersion = target.configVersion;
       target.verifiedKeyVersion = target.keyVersion;
       // Reading models must not activate the migration or change live routing.
       if (persisted) this.store.saveHarness(current);
     });
-    return { provider: publicProvider({ ...snapshot, availableModels: models, modelsVerifiedAt: verifiedAt, verifiedConfigVersion: snapshot.configVersion, verifiedKeyVersion: snapshot.keyVersion }), models };
+    return { provider: publicProvider({ ...snapshot, availableModels: usable, modelsVerifiedAt: verifiedAt, verifiedConfigVersion: snapshot.configVersion, verifiedKeyVersion: snapshot.keyVersion }), models: usable };
   }
 
   /** SiliconFlow lists its speech models (e.g. the open-source CosyVoice2) only
@@ -401,7 +411,12 @@ export class AiHarness {
     const provider = stored.providers.find(item => item.id === providerId);
     if (!provider?.enabled) throw new AiError(503, "AI_HARNESS_PROVIDER_DISABLED", "该业务档位的媒体服务暂未启用");
     const verified = provider.verifiedConfigVersion === provider.configVersion && provider.verifiedKeyVersion === provider.keyVersion;
-    if (!verified || !provider.availableModels.includes(modelId)) throw new AiError(503, "AI_HARNESS_MODEL_UNVERIFIED", "该业务档位的媒体模型尚未完成当前密钥校验，请管理员重新获取模型列表", true);
+    // A video tier whose default model is unavailable (e.g. quarantined after
+    // model_not_found) stays open while its connection has verified models:
+    // the video service binds a verified replacement and names it to the
+    // member, and still rejects an explicitly chosen unverified model.
+    const usable = verified && (provider.availableModels.includes(modelId) || capability === "video" && provider.availableModels.length > 0);
+    if (!usable) throw new AiError(503, "AI_HARNESS_MODEL_UNVERIFIED", "该业务档位的媒体模型尚未完成当前密钥校验，请管理员重新获取模型列表", true);
     if (capability === "video") {
       const url = new URL(provider.baseUrl);
       if (url.hostname !== "www.75api.com" || url.pathname.replace(/\/$/, "") !== "/v1") {
