@@ -241,7 +241,9 @@ export class AiHarness {
       const suppliedKey = typeof item.apiKey === "string" && item.apiKey.trim() ? requiredText(item.apiKey, "API 密钥", 4096) : "";
       if (!suppliedKey && (!previous?.encryptedKey || previous.baseUrl !== baseUrl)) throw new AiError(400, "AI_KEY_REQUIRED", "首次接入或更换 API 地址时，请填写 API 密钥");
       const encryptedKey = suppliedKey ? await (await this.box()).encrypt(suppliedKey) : previous!.encryptedKey;
-      const configChanged = !previous || previous.baseUrl !== baseUrl || previous.protocol !== protocol || previous.name !== item.name;
+      // Only what a model-list read depends on invalidates it. The connection's
+      // name and protocol are labels: every request uses the tier's protocol.
+      const configChanged = !previous || previous.baseUrl !== baseUrl;
       const keyChanged = Boolean(suppliedKey);
       prepared.push({
         id, name: requiredText(item.name, "服务名称", 80), baseUrl, protocol, enabled: item.enabled,

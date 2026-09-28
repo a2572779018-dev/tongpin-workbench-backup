@@ -283,17 +283,29 @@ describe("AI Harness", () => {
     expect(runtime.service.quota("member").reservedTokens).toBe(0);
   });
 
-  it("invalidates model verification after a config or key change", async () => {
+  it("keeps model verification across a rename, and invalidates it after a key or address change", async () => {
     await configure();
-    const changed = harnessInput("");
-    changed.providers[0].name = "Renamed";
-    const saved = await runtime.service.saveHarness(changed);
-    expect(saved.providers[0]).toMatchObject({ modelsVerified: false, availableModels: [] });
     runtime.service.setQuota("member", "admin", { limitTokens: 20_000 });
-    expect(() => runtime.service.preflight("member", {
+    const preflight = () => runtime.service.preflight("member", {
       requestId: crypto.randomUUID(), conversationId: "unverified", mode: "quick", messages: [{ role: "user", content: "你好" }],
-    })).toThrow(expect.objectContaining({ code: "AI_HARNESS_MODEL_UNVERIFIED" }));
-    expect(transport).toHaveBeenCalledTimes(1);
+    });
+    // Name and connection-level protocol are labels no request uses.
+    const renamed = harnessInput("");
+    renamed.providers[0].name = "Renamed";
+    renamed.providers[0].protocol = "responses";
+    const kept = await runtime.service.saveHarness(renamed);
+    expect(kept.providers[0]).toMatchObject({ name: "Renamed", protocol: "responses", modelsVerified: true, availableModels: MODELS.slice().sort() });
+    expect(preflight().canSend).toBe(true);
+
+    const rotated = await runtime.service.saveHarness({ ...renamed, providers: [{ ...renamed.providers[0], apiKey: "rotated-harness-key" }] });
+    expect(rotated.providers[0]).toMatchObject({ modelsVerified: false, availableModels: [] });
+    expect(preflight).toThrow(expect.objectContaining({ code: "AI_HARNESS_MODEL_UNVERIFIED" }));
+
+    await runtime.service.discoverHarnessProvider("primary");
+    const moved = await runtime.service.saveHarness({ ...renamed, providers: [{ ...renamed.providers[0], baseUrl: "https://gateway-2.example.com/v1", apiKey: "moved-harness-key" }] });
+    expect(moved.providers[0]).toMatchObject({ modelsVerified: false, availableModels: [] });
+    expect(preflight).toThrow(expect.objectContaining({ code: "AI_HARNESS_MODEL_UNVERIFIED" }));
+    expect(transport.mock.calls.filter(([url]) => url.endsWith("/models"))).toHaveLength(2);
   });
 
   it("persists concise member-safe reasoning and approval lifecycle without prompts or private chain-of-thought", async () => {
