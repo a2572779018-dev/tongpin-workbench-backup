@@ -707,15 +707,23 @@ export class AiService {
     const quota = this.store.quota(userId);
     return { requestId, status: request.status, ...(request.result ? { result: { ...memberChatResult(request.result), model: AI_BUSINESS_TIER_LABELS[request.mode], quota } } : {}), ...(request.imageResult ? { imageResult: { ...request.imageResult, model: "图片生成", quota } } : {}), ...(request.error ? { error: request.error } : {}) };
   }
+  /** `{ limitTokens }` sets the total limit. `{ addTokens }` adds to the limit
+   * current at write time, inside the same transaction, so two administrators
+   * (or a stale client snapshot) cannot overwrite each other's grant. */
   setQuota(userId: string, actorId: string, body: unknown): AiQuota {
     const p = object(body);
-    if (!Number.isSafeInteger(p.limitTokens) || Number(p.limitTokens) < 0 || Number(p.limitTokens) > MAX_TOKEN_LIMIT) throw new AiError(400, "AI_QUOTA_INVALID", "同频点总限额必须为 0 到 10 亿之间的整数");
-    const reason = typeof p.reason === "string" ? p.reason.trim().slice(0, 240) : "管理员调整额度";
+    const additive = p.addTokens !== undefined;
+    if (additive && p.limitTokens !== undefined) throw new AiError(400, "AI_QUOTA_INVALID", "请只提交追加额度或总限额其中一项");
+    if (additive && (!Number.isSafeInteger(p.addTokens) || Number(p.addTokens) < 1 || Number(p.addTokens) > MAX_TOKEN_LIMIT)) throw new AiError(400, "AI_QUOTA_INVALID", "追加同频点必须为 1 到 10 亿之间的整数");
+    if (!additive && (!Number.isSafeInteger(p.limitTokens) || Number(p.limitTokens) < 0 || Number(p.limitTokens) > MAX_TOKEN_LIMIT)) throw new AiError(400, "AI_QUOTA_INVALID", "同频点总限额必须为 0 到 10 亿之间的整数");
+    const reason = typeof p.reason === "string" ? p.reason.trim().slice(0, 240) : additive ? "管理员追加额度" : "管理员调整额度";
     this.recover(userId);
     return this.store.sql.transaction(() => {
       const q = this.store.quota(userId);
-      if (Number(p.limitTokens) < q.usedTokens + q.reservedTokens) throw new AiError(409, "AI_QUOTA_BELOW_USED", "总额度不能低于已用与正在使用的额度之和");
-      q.limitTokens = Number(p.limitTokens);
+      const limitTokens = additive ? q.limitTokens + Number(p.addTokens) : Number(p.limitTokens);
+      if (limitTokens > MAX_TOKEN_LIMIT) throw new AiError(400, "AI_QUOTA_INVALID", "追加后同频点总限额不能超过 10 亿");
+      if (limitTokens < q.usedTokens + q.reservedTokens) throw new AiError(409, "AI_QUOTA_BELOW_USED", "总额度不能低于已用与正在使用的额度之和");
+      q.limitTokens = limitTokens;
       this.store.saveQuota(userId, q);
       this.store.addUsage({ id: crypto.randomUUID(), userId, actorId, requestId: null, kind: "quota", status: "adjusted", model: null, mode: null, createdAt: new Date().toISOString(), reason, limitTokens: q.limitTokens, inputTokens: 0, outputTokens: 0, totalTokens: 0, estimated: false });
       return this.store.quota(userId);
