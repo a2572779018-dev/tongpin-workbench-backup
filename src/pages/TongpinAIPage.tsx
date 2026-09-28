@@ -31,7 +31,7 @@ import { computerUseConversationRequestMessage } from "../features/tongpin-ai/co
 import { ComputerRunPanel } from "../features/tongpin-ai/ComputerRunPanel";
 import { ComputerRunLinkContext, type ComputerRunLink } from "../features/tongpin-ai/computerRunLink";
 import { prefersReducedMotion } from "../features/tongpin-ai/motion";
-import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "../features/tongpin-ai/chatRequests";
+import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage, stoppedPlanningReply } from "../features/tongpin-ai/chatRequests";
 import { conversationsForPersistence, typewriterDuration } from "../features/tongpin-ai/chatPerformance";
 import { computerTierNotice } from "../features/tongpin-ai/computerTier";
 import { AI_DOWNLOAD_FEEDBACK_EVENT, saveBlobWithFeedback, type AiDownloadFeedback } from "../features/tongpin-ai/downloadFeedback";
@@ -203,6 +203,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
   const submissionSnapshotsRef = useRef(new Map<string, SubmissionSnapshot>());
   const pendingGenerationRef = useRef(new Set<string>());
   const pendingCancelledRef = useRef(new Set<string>());
+  /** Browser-side abort of a tool-planning request, by conversation (stop or unmount). */
+  const planningRef = useRef(new Map<string, AbortController>());
   const imageSelectionBusyRef = useRef(new Set<string>());
   const draftConversationIdsRef = useRef(new Map<string, string>());
   /** True while a 语音通话 is open in the composer: its turns are sent like typed ones, marked voiceCall. */
@@ -338,6 +340,8 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       window.removeEventListener("focus", onFocus);
       for (const request of requestRef.current.values()) request.controller.abort();
       requestRef.current.clear();
+      for (const planning of planningRef.current.values()) planning.abort();
+      planningRef.current.clear();
       preflightGate.cancel();
       for (const typing of typingRef.current.values()) window.clearTimeout(typing.timer);
       typingRef.current.clear();
@@ -1271,6 +1275,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         if (computerReady) beginComputerUse(originalPrompt, conversationId, decision.prompt, messageId);
         return;
       }
+      if (typeof request === "string" && !("images" in response) && response.toolPlan && !response.presentation) {
+        // A planning request read back after a reload has no input snapshot:
+        // report the plan, never start its tool from a read.
+        const kind = { image: "图片", video: "视频", presentation: " PPT " }[response.toolPlan.kind];
+        acceptGeneration(conversationId, messageId, { ...response, content: `已恢复原任务：同频 AI 已整理${kind}方案，本次未自动生成。请重新发送任务后再生成。` });
+        updateReply(conversationId, messageId, { taskPhase: "awaiting_input" });
+        return;
+      }
       acceptGeneration(conversationId, messageId, response, harnessPlanRequestId, liveContent);
     } catch (error) {
       if (!mountedRef.current) return;
@@ -1327,8 +1339,9 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     // A dispatch continuation plans from the model's rewritten prompt; the
     // member's @Skill / @Hub choice lives in the original turn.
     const capabilityRequest = mentionedCapabilityRequest(continuation?.originalPrompt ?? prompt, origin.skillIds);
+    const planningRequestId = crypto.randomUUID();
     const request: AiChatRequest = {
-      ...buildChatRequest(crypto.randomUUID(), origin.mode, messages),
+      ...buildChatRequest(planningRequestId, origin.mode, messages),
       conversationId,
       ...capabilityRequest,
       projectContext: origin.project?.instructions || undefined,
@@ -1346,11 +1359,40 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
       ...(presentationAttachments.length ? { attachments: presentationAttachments } : {}),
     };
     const headers = { "X-Tongpin-Account": user.id };
-    const preflight = await api<AiChatPreflight>("/api/ai/preflight", { method: "POST", headers, body: JSON.stringify(request) });
-    statusGenerationRef.current += 1;
-    if (mountedRef.current) setAiStatus(current => current ? { ...current, quota: preflight.quota } : current);
-    if (!preflight.canSend) throw new Error(preflightNotice(preflight).message);
-    const response = await api<AiChatResponse>("/api/ai/chat", { method: "POST", headers, body: JSON.stringify(request) }, 130_000);
+    const planning = new AbortController();
+    planningRef.current.set(conversationId, planning);
+    let sent = false;
+    let response: AiChatResponse;
+    try {
+      const preflight = await api<AiChatPreflight>("/api/ai/preflight", { method: "POST", headers, body: JSON.stringify(request), signal: planning.signal });
+      statusGenerationRef.current += 1;
+      if (mountedRef.current) setAiStatus(current => current ? { ...current, quota: preflight.quota } : current);
+      if (!preflight.canSend) throw new Error(preflightNotice(preflight).message);
+      if (continuation) {
+        // Persist this planning request ID on the reply before the POST, so a
+        // reload or page switch reads this exact request instead of losing it.
+        const latest = workspaceRef.current;
+        const owner = mountedRef.current ? liveConversation(latest, deletingConversationRef.current, conversationId, continuation.messageId) : undefined;
+        if (!owner) return null;
+        const next = mergeContinuation({ ...persistentStateRef.current, conversations: latest.conversations }, { ...owner,
+          messages: owner.messages.map(message => message.id === continuation.messageId ? { ...message, requestId: planningRequestId } : message) });
+        workspaceRef.current = { ...latest, conversations: next.conversations };
+        persistentStateRef.current = next;
+        setConversations(next.conversations);
+        if (!await persistenceRef.current.saveNow(next)) throw new Error("任务记录尚未保存，未调用模型。请恢复同步后重试。");
+        planning.signal.throwIfAborted();
+      }
+      sent = true;
+      response = await api<AiChatResponse>("/api/ai/chat", { method: "POST", headers, body: JSON.stringify(request), signal: planning.signal }, 130_000);
+    } catch (error) {
+      if (!planning.signal.aborted) throw error;
+      // Stopped by the member (or the page closed): a stopped reply, never a
+      // planning failure. After a reload the saved request ID is read instead.
+      if (continuation && mountedRef.current) updateReply(conversationId, continuation.messageId, stoppedPlanningReply(kind, sent));
+      return null;
+    } finally {
+      if (planningRef.current.get(conversationId) === planning) planningRef.current.delete(conversationId);
+    }
     if (mountedRef.current) setAiStatus(current => current ? { ...current, quota: response.quota } : current);
     const clarification = response.toolClarification?.trim();
     if (clarification) {
@@ -1917,10 +1959,14 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
         return true;
       }
       if (!await recorded) throw new Error("任务记录尚未保存，未调用模型。请恢复同步后重试。");
-      if (!mountedRef.current || pendingCancelledRef.current.has(conversationId)) return true;
+      if (!mountedRef.current) return true;
+      if (pendingCancelledRef.current.has(conversationId)) { updateReply(conversationId, messageId, stoppedPlanningReply(kind, false)); return true; }
       updateReply(conversationId, messageId, { taskPhase: "planning" });
       const plan = await planTool(kind, prompt, videoRequest, continuation);
-      if (plan && mountedRef.current && !pendingCancelledRef.current.has(conversationId)) await sendMessage({ ...plan, originalPrompt: prompt }, continuation);
+      if (!plan || !mountedRef.current) return true;
+      // Stopped after the plan arrived: the plan is not carried out.
+      if (pendingCancelledRef.current.has(conversationId)) { updateReply(conversationId, messageId, stoppedPlanningReply(kind, true)); return true; }
+      await sendMessage({ ...plan, originalPrompt: prompt }, continuation);
     } catch (error) {
       if (mountedRef.current) updateReply(conversationId, messageId, { status: "error", content: error instanceof Error ? error.message : "任务规划失败，请重试" });
     } finally {
@@ -2214,8 +2260,11 @@ function TongpinAIWorkspace({ user, initialSnapshot, initialStatus, persona, onP
     const typing = typingRef.current.get(activeConversationId);
     if (typing) { typing.finish(); return; }
     const request = requestRef.current.get(activeConversationId);
-    if (pendingGenerationRef.current.has(activeConversationId) && !request) {
-      pendingCancelledRef.current.add(activeConversationId);
+    const planning = planningRef.current.get(activeConversationId);
+    if (!request && (pendingGenerationRef.current.has(activeConversationId) || planning)) {
+      if (pendingGenerationRef.current.has(activeConversationId)) pendingCancelledRef.current.add(activeConversationId);
+      // A tool-planning request is aborted too; its reply is marked stopped.
+      planning?.abort();
       return;
     }
     // 多 Agent 协作 also stops its in-flight sub-agents on the server.

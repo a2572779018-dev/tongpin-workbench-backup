@@ -3,7 +3,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { AI_CHAT_CONTEXT_LIMITS, AI_CONTEXT_WINDOW_PREFIX, aiChatTextContextBytes, fitAiChatMessages } from "../../../shared/aiContext";
-import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage } from "./chatRequests";
+import { buildChatRequest, canRecoverChatRequest, completedReply, interruptedChatRequests, recoverInterruptedMessages, replaceChatMessage, stoppedPlanningReply } from "./chatRequests";
+import { messageTaskStatus } from "./conversationTaskStatus";
 import { ReplyWaiting } from "./ReplyWaiting";
 import { waitForReply } from "./waitForReply";
 import type { TongpinAIConversation, TongpinAIMessage } from "./types";
@@ -76,6 +77,23 @@ describe("real AI chat request state", () => {
     expect(next[1]).toBe(history[1]);
     expect(history[0].messages[2].status).toBe("thinking");
     expect(replaceChatMessage([history[1]], "a", "t", { content: "回答" })).toEqual([history[1]]);
+  });
+  it("settles a stopped tool planning reply, and reads a saved planning request back after a reload", () => {
+    const planning: TongpinAIConversation[] = [{ id: "ppt", title: "PPT", timeLabel: "刚刚", messages: [
+      { id: "user-ppt", role: "user", content: "做一份周报 PPT", time: "12:00" },
+      { id: "reply-ppt", role: "assistant", content: "", status: "thinking", taskPhase: "queued", time: "12:00" },
+    ] }];
+    const stopped = replaceChatMessage(planning, "ppt", "reply-ppt", stoppedPlanningReply("presentation", false));
+    expect(stopped[0].messages[1]).toEqual({ id: "reply-ppt", role: "assistant", content: "已取消发送，本次未调用模型。", status: "stopped", time: "12:00" });
+    // Not queued/running any more, and never turned into "未保存有效任务编号" after a reload.
+    expect(messageTaskStatus(stopped[0].messages[1])).toBeUndefined();
+    expect(recoverInterruptedMessages(stopped)).toEqual(stopped);
+    expect(stoppedPlanningReply("presentation", true).content).toBe("已停止，本次未生成 PPT。整理方案的请求可能已计费。");
+    const requestId = "plan-7f1c2c1e-5d0e-4a44-9d4e-0c8f5f0d9b21";
+    const saved = replaceChatMessage(planning, "ppt", "reply-ppt", { taskPhase: "planning" })
+      .map(item => ({ ...item, messages: item.messages.map(message => message.id === "reply-ppt" ? { ...message, requestId } : message) }));
+    expect(interruptedChatRequests(saved)).toEqual([{ conversationId: "ppt", messageId: "reply-ppt", requestId }]);
+    expect(recoverInterruptedMessages(saved)[0].messages[1]).toMatchObject({ status: "thinking", requestId });
   });
   it("does not invent a recoverable request ID for interrupted legacy work", () => {
     const recovered = recoverInterruptedMessages(history);

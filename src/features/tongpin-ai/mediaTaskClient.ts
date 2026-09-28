@@ -16,6 +16,8 @@ export interface MediaTaskRun {
   createdAt: number;
   updatedAt: number;
   deadlineAt: number;
+  /** Next server step; null when nothing is scheduled. */
+  dueAt?: number | null;
   authorization?: { grantId: string };
   freeQuestion?: { questionId: string; prompt: string; deadlineAt: number; answer?: string };
   tool?: {
@@ -116,8 +118,35 @@ export function mediaTaskImageIds(task: MediaTaskRun): string[] {
   return [...new Set((ids ?? []).filter(id => typeof id === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(id)))];
 }
 
+/** A confirmed grant the server is still carrying out. A grant the server
+ * paused (budget, grant or sources changed) has no next step scheduled and
+ * needs a fresh confirmation; older servers kept such a grant on the task. */
+export function mediaTaskGrantActive(task: MediaTaskRun): boolean {
+  return task.status === "awaiting_authorization" && Boolean(task.authorization) && task.dueAt !== null;
+}
+
 export function mediaTaskAuthorizationAmount(task: MediaTaskRun): number | null {
   const amount = task.tool?.estimatedPoints;
-  return task.status === "awaiting_authorization" && !task.authorization && typeof amount === "number" &&
+  return task.status === "awaiting_authorization" && !mediaTaskGrantActive(task) && typeof amount === "number" &&
     Number.isSafeInteger(amount) && amount > 0 && amount <= 10_000_000 ? amount : null;
+}
+
+const AUTHORIZATION_NOTICES: Record<string, string> = {
+  AI_MEDIA_GRANT_BUDGET_CHANGED: "额度有变化，请重新确认生成",
+  AI_MEDIA_GRANT_NOT_AUTHORIZED: "上次确认已失效，请重新确认生成",
+  AI_MEDIA_GRANT_CONFIGURATION_CHANGED: "生成设置已变化，请重新发送任务",
+  AI_MEDIA_GRANT_SOURCE_UNAVAILABLE: "参考素材已变化，请重新发送任务",
+  // The paid step was refused before anything was sent or charged.
+  AI_REQUEST_IN_PROGRESS: "对话正忙，稍后再确认生成",
+  AI_CAPACITY_BUSY: "生成任务较多，稍后再确认生成",
+  AI_VIDEO_BUSY: "生成任务较多，稍后再确认生成",
+  AI_QUOTA_EXHAUSTED: "额度不足，补充后再确认生成",
+  AI_QUOTA_INSUFFICIENT: "额度不足，补充后再确认生成",
+  AI_ASSET_CAPACITY: "图片空间已满，删除旧图后再确认生成",
+};
+
+/** Why a task is waiting for confirmation again, when the server said why. */
+export function mediaTaskAuthorizationNotice(task: MediaTaskRun): string | null {
+  if (task.status !== "awaiting_authorization" || mediaTaskGrantActive(task) || !task.errorCode) return null;
+  return AUTHORIZATION_NOTICES[task.errorCode] ?? null;
 }

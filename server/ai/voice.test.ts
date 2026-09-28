@@ -228,6 +228,38 @@ describe("AI voice service", () => {
     expect(store.quota("member")).toMatchObject({ usedTokens: 6, reservedTokens: 0 });
   });
 
+  it("releases a stale voice reservation on the member's next quota read, not only on the next voice call", async () => {
+    await service.voice.configure(VOICE);
+    let release!: () => void;
+    transport.mockImplementationOnce(async () => { await new Promise<void>(resolve => { release = resolve; }); return Response.json({ text: "迟到的结果" }); });
+    const upload = recording();
+    const pending = service.voice.transcribe("member", upload);
+    await vi.waitFor(() => expect(store.quota("member").reservedTokens).toBe(3));
+    database.prepare("UPDATE ai_voice_requests SET expires_at=?, data=json_set(data,'$.expiresAt',?)").run(Date.now() - 1, Date.now() - 1);
+    // No further voice call: the member's ordinary quota/status read settles it.
+    expect(service.quota("member")).toMatchObject({ usedTokens: 3, reservedTokens: 0 });
+    expect(store.usage("member").find(entry => entry.requestId === upload.requestId)).toMatchObject({ status: "uncertain", totalTokens: 3 });
+    expect(service.status("member").quota).toMatchObject({ usedTokens: 3, reservedTokens: 0 });
+    release();
+    expect((await pending).text).toBe("迟到的结果");
+    expect(store.quota("member")).toMatchObject({ usedTokens: 3, reservedTokens: 0 });
+    expect(store.usage("member").filter(entry => entry.requestId === upload.requestId)).toHaveLength(1);
+  });
+
+  it("reads quota on a store that never used voice without failing", () => {
+    const fresh = new DatabaseSync(":memory:");
+    try {
+      const sql: AiSql = {
+        exec(query, ...bindings) { if (bindings.length) fresh.prepare(query).run(...bindings); else fresh.exec(query); },
+        all<T>(query: string, ...bindings: Array<string | number | null>): T[] { return fresh.prepare(query).all(...bindings) as T[]; },
+        transaction<T>(action: () => T): T { fresh.exec("BEGIN"); try { const result = action(); fresh.exec("COMMIT"); return result; } catch (error) { fresh.exec("ROLLBACK"); throw error; } },
+      };
+      const freshStore = new AiStore(sql); freshStore.initialize();
+      expect(sql.all("SELECT name FROM sqlite_master WHERE name='ai_voice_requests'")).toEqual([]);
+      expect(new AiService(freshStore, () => createSecretBox("voice-service-test-secret-with-32-bytes"), transport).quota("member")).toMatchObject({ reservedTokens: 0 });
+    } finally { fresh.close(); }
+  });
+
   it("synthesizes speech only for the external engine, returns audio and bills per 1,000 characters", async () => {
     await service.voice.configure({ ...VOICE, ttsEngine: "browser" });
     const local = await failure(service.voice.speech("member", { requestId: requestId(), text: "你好" }));

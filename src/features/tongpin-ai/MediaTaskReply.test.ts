@@ -42,6 +42,17 @@ describe("media task reply remount", () => {
     expect(source).toContain("mediaTaskReadPath(requestId), { headers, signal: controller.signal }");
   });
 
+  it("decides the confirmation card from the grant the server is still carrying out", () => {
+    const source = readFileSync(new URL("./MediaTaskReply.tsx", import.meta.url), "utf8");
+    // A paused grant (nothing scheduled) must offer the confirmation again,
+    // not claim forever that the amount was already confirmed.
+    expect(source).toContain("const grantActive = task ? mediaTaskGrantActive(task) : false;");
+    expect(source).toContain('<p>{grantActive ? "额度已确认，服务端正在接续原任务；不会重复确认。"');
+    expect(source).not.toContain('task.authorization ? "额度已确认');
+    expect(source).toContain('{authorizationNotice && !authorizationUncertain ? <p role="status">{authorizationNotice}</p> : null}');
+    expect(source).toContain("disabled={busy || amount === null || authorizationUncertain}");
+  });
+
   it("does not warm a fresh login or an unfinished task", () => {
     const first = session(); auth.session = first;
     mediaTaskSnapshotCache.put(mediaCacheScope(first), expected, task("completed"));

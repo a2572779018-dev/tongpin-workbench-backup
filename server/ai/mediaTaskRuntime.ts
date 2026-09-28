@@ -612,12 +612,14 @@ export class MediaTaskRuntime {
     });
   }
   /** A stale explicit grant cannot keep a scheduler hot-looping. The tool
-   * remains a draft until the member confirms a fresh bound authorization. */
+   * remains a draft until the member confirms a fresh bound authorization;
+   * the stale grant is dropped so the card offers that confirmation again. */
   pauseAuthorization(userId: string, runId: string, reason: string): MediaTaskRun {
     validVersion(reason, "授权暂停原因");
     return this.store.sql.transaction(() => {
       const run = this.required(userId, runId);
       if (run.status !== "awaiting_authorization") return clone(run);
+      delete run.authorization;
       run.errorCode = reason;
       run.dueAt = null;
       return this.update(run);
@@ -714,9 +716,29 @@ export class MediaTaskRuntime {
     return this.store.sql.transaction(() => {
       const run = this.required(userId, runId);
       if (run.tool?.toolCallId !== toolCallId || !["running", "partial", "unknown"].includes(run.status)) conflict("工具调用状态不匹配");
+      // Re-reading the same unresolved outcome (e.g. every GET of an unknown
+      // video) records nothing new, so reads never write in a loop.
+      if (run.status === outcome && run.errorCode === errorCode && run.tool.errorCode === errorCode && run.dueAt === null) return clone(run);
       run.tool.errorCode = errorCode;
       run.status = outcome;
       run.errorCode = errorCode;
+      run.dueAt = null;
+      return this.update(run);
+    });
+  }
+  /** Only for a call the paid entry refused before recording anything for it
+   * (no journal row, so nothing was sent or reserved). The call is released
+   * and its grant spent: the task waits for a fresh confirmation with the
+   * reason, or ends cancelled if a stop was requested meanwhile. */
+  releaseUnsentTool(userId: string, runId: string, toolCallId: string, reason: string): MediaTaskRun {
+    validId(toolCallId, "工具调用标识"); validVersion(reason, "错误代码");
+    return this.store.sql.transaction(() => {
+      const run = this.required(userId, runId);
+      if (run.status !== "running" || run.tool?.toolCallId !== toolCallId || run.tool.serviceRequestId) conflict("工具调用状态不匹配");
+      run.tool = toolSpec(run.tool);
+      delete run.authorization;
+      run.status = run.cancelRequested ? "cancelled" : "awaiting_authorization";
+      run.errorCode = reason;
       run.dueAt = null;
       return this.update(run);
     });

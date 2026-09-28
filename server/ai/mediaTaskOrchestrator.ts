@@ -29,6 +29,12 @@ const MAX_CONTEXT_MESSAGES = 12;
 const MAX_CONTEXT_CHARACTERS = 6000;
 const MAX_CONTEXT_MESSAGE_CHARACTERS = 1200;
 const URL_IN_HISTORY = /(?:https?:\/\/|file:\/\/|ftp:\/\/|data:|javascript:|www\.)[^\s<>()\[\]{}"']+/gi;
+/** Paid-entry refusals that clear up on their own or after the member acts:
+ * conversation busy / three tasks running, tenant capacity, quota, storage. */
+const RETRYABLE_REFUSALS = new Set([
+  "AI_REQUEST_IN_PROGRESS", "AI_CAPACITY_BUSY", "AI_VIDEO_BUSY",
+  "AI_QUOTA_EXHAUSTED", "AI_QUOTA_INSUFFICIENT", "AI_ASSET_CAPACITY",
+]);
 
 export interface SubmitMediaTask {
   requestId: string;
@@ -576,11 +582,28 @@ export class AiServiceMediaTaskOrchestrator {
       const request = this.service.store.request(userId, toolCallId);
       if (request?.imageResult?.images.length) return this.runtime.completeTool(userId, runId, toolCallId, request.imageResult.images.map(item => item.assetId));
       if (request?.status === "failed") return this.runtime.failTool(userId, runId, toolCallId, request.error?.code ?? safeErrorCode(error), "failed");
-      return this.runtime.failTool(userId, runId, toolCallId, safeErrorCode(error), request ? "unknown" : "failed");
+      // generateImage journals the request in the transaction that reserves
+      // quota and claims the plan; no row means it refused before sending.
+      if (!request) return this.releaseUnsent(userId, runId, toolCallId, error);
+      return this.runtime.failTool(userId, runId, toolCallId, safeErrorCode(error), "unknown");
     }
     const job = this.service.video.list(userId, snapshot.tier).jobs.find(item => item.id === toolCallId);
     if (job) return this.applyVideoJob(userId, runId, toolCallId, job);
+    if (!this.service.video.hasJob(userId, toolCallId)) return this.releaseUnsent(userId, runId, toolCallId, error);
     return this.runtime.failTool(userId, runId, toolCallId, safeErrorCode(error), "unknown");
+  }
+
+  /** Nothing was recorded, reserved or sent for this call. A busy, capacity,
+   * quota or storage refusal waits for the member to confirm again later;
+   * any other refusal is final, with nothing charged. */
+  private releaseUnsent(userId: string, runId: string, toolCallId: string, error: unknown): MediaTaskRun {
+    const code = safeErrorCode(error);
+    // A run the deadline sweep froze, or one past its deadline, cannot be
+    // confirmed again; nothing was sent, so it simply fails.
+    const run = this.runtime.get(userId, runId);
+    return RETRYABLE_REFUSALS.has(code) && run?.status === "running" && run.deadlineAt > this.now()
+      ? this.runtime.releaseUnsentTool(userId, runId, toolCallId, code)
+      : this.runtime.failTool(userId, runId, toolCallId, code, "failed");
   }
 
   private async reconcile(userId: string, runId: string): Promise<MediaTaskRun> {

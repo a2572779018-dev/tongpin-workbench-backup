@@ -10,8 +10,10 @@ import { mediaTaskReadInvalidatesSnapshot, mediaTaskSnapshotCache } from "./medi
 import {
   mediaTaskAnswerPath,
   mediaTaskAuthorizationAmount,
+  mediaTaskAuthorizationNotice,
   mediaTaskAuthorizePath,
   mediaTaskCancelPath,
+  mediaTaskGrantActive,
   mediaTaskImageIds,
   mediaTaskIsSettled,
   mediaTaskNeedsPolling,
@@ -221,6 +223,8 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
 
   const task = shown.task;
   const amount = task ? mediaTaskAuthorizationAmount(task) : null;
+  const grantActive = task ? mediaTaskGrantActive(task) : false;
+  const authorizationNotice = task ? mediaTaskAuthorizationNotice(task) : null;
   const imageIds = task ? mediaTaskImageIds(task) : [];
   const videoJobId = task?.status === "completed" && intent === "video" ? task.tool?.serviceRequestId : undefined;
   const freeQuestion = task?.status === "awaiting_input" ? task.freeQuestion : undefined;
@@ -236,7 +240,8 @@ export function MediaTaskReply({ requestId, conversationId, runId, intent, submi
       ? <FreeQuestionForm key={freeQuestion.questionId} question={freeQuestion} busy={busy} onAnswer={answer => updateTask(mediaTaskAnswerPath(task.runId), { questionId: freeQuestion.questionId, answer })} />
       : null}
     {task?.status === "awaiting_authorization" ? <div className="tp-ai-media-task-authorization">
-      <p>{task.authorization ? "额度已确认，服务端正在接续原任务；不会重复确认。" : authorizationUncertain ? "确认结果待核对，请只查询原任务，不要再次确认生成。" : amount === null ? "无法核对预计额度，请重新查询原任务。" : `本次预计最多使用 ${amount} 点；确认后才会开始生成，最终扣费由服务端核对。`}</p>
+      {authorizationNotice && !authorizationUncertain ? <p role="status">{authorizationNotice}</p> : null}
+      <p>{grantActive ? "额度已确认，服务端正在接续原任务；不会重复确认。" : authorizationUncertain ? "确认结果待核对，请只查询原任务，不要再次确认生成。" : amount === null ? "无法核对预计额度，请重新查询原任务。" : `本次预计最多使用 ${amount} 点；确认后才会开始生成，最终扣费由服务端核对。`}</p>
       <button type="button" disabled={busy || amount === null || authorizationUncertain} onClick={() => {
         if (amount !== null) void updateTask(mediaTaskAuthorizePath(task.runId), { confirmed: true, maxPointsPerTool: amount }, true);
       }}>{busy ? "正在确认…" : "确认额度并生成"}</button>

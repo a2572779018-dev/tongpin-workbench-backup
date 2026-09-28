@@ -345,6 +345,43 @@ describe("AI Harness", () => {
     expect(runtime.service.cancelHarnessRun("member", requestId)).toMatchObject({ status: "cancelled" });
   });
 
+  it("settles a valid plan whose caption spans lines or carries emoji joiners at actual usage", async () => {
+    await configure();
+    runtime.service.setQuota("member", "admin", { limitTokens: 20_000 });
+    const prompt = "蓝色科技海报\n保留 Logo 👨‍💻";
+    for (const [index, plan] of [
+      { kind: "image", summary: "第一行\n\t第二行 🙋‍♀️", prompt },
+      { kind: "image", prompt },
+    ].entries()) {
+      transport.mockResolvedValueOnce(complete(JSON.stringify(plan)));
+      const requestId = crypto.randomUUID();
+      const response = await runtime.service.chat("member", {
+        requestId, conversationId: `caption-${index}`, mode: "quick", outputFormat: "image_plan",
+        messages: [{ role: "user", content: "生成一张海报" }],
+      });
+      expect(response.toolPlan).toEqual({ kind: "image", summary: index === 0 ? "第一行 第二行 🙋♀️" : "蓝色科技海报 保留 Logo 👨💻", prompt });
+      expect(response.trace).toMatchObject({ status: "waiting_approval", nextAction: "approve_tool" });
+      expect(runtime.store.request("member", requestId)?.status).toBe("completed");
+      expect(runtime.store.usage("member").find(entry => entry.requestId === requestId)).toMatchObject({ status: "completed", totalTokens: 10 });
+      expect(runtime.store.harnessRun("member", requestId)?.goalSummary).toBe(`完成已校验计划：${response.toolPlan!.summary}`);
+    }
+    expect(runtime.service.quota("member")).toMatchObject({ usedTokens: 20, reservedTokens: 0 });
+  });
+
+  it("sanitizes rather than throws for a tool caption while settling a run", async () => {
+    await configure();
+    runtime.service.setQuota("member", "admin", { limitTokens: 20_000 });
+    transport.mockResolvedValueOnce(complete(JSON.stringify({ kind: "image", summary: "海报", prompt: "蓝色科技海报" })));
+    const requestId = crypto.randomUUID();
+    await runtime.service.chat("member", { requestId, conversationId: "legacy-caption", mode: "quick", outputFormat: "image_plan", messages: [{ role: "user", content: "生成海报" }] });
+    // e.g. a caption saved before parseToolPlan normalized it
+    expect(() => runtime.service.harness.finishRun("member", requestId, "succeeded", { capability: "image", summary: `旧方案\n第二行\u200d${"长".repeat(300)}` })).not.toThrow();
+    const goal = runtime.store.harnessRun("member", requestId)!.goalSummary;
+    expect(goal).toBe(`完成已校验计划：旧方案 第二行${"长".repeat(233)}`);
+    expect(() => runtime.service.harness.finishRun("member", requestId, "succeeded", { capability: "image", summary: "\u200b\n" })).not.toThrow();
+    expect(runtime.store.harnessRun("member", requestId)!.goalSummary).toBe(goal);
+  });
+
   it("gives direct, react, and plan-execute distinct persisted state graphs", async () => {
     for (const strategy of ["direct", "react", "plan_execute"] as const) {
       await runtime.service.saveHarness(harnessInput(strategy === "direct" ? "direct-key" : "", strategy, 3));

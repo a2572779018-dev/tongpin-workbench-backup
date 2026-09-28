@@ -179,6 +179,20 @@ describe("real AiService media orchestration", () => {
     },
   );
 
+  it("stages a valid media plan whose caption spans lines instead of freezing the task as unknown", async () => {
+    transport.mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: JSON.stringify({ kind: "image", summary: "蓝色海报\n\t👨‍💻 程序员", prompt: "蓝色科技海报\n程序员 👨‍💻" }) } }],
+      usage: { prompt_tokens: 20, completion_tokens: 20, total_tokens: 40 },
+    }));
+    const run = await orchestrator.submit("member", input());
+    const planned = await orchestrator.advance("member", run.runId);
+    expect(planned).toMatchObject({ status: "awaiting_authorization", tool: { capability: "image", estimatedPoints: 1000 } });
+    expect(planned.errorCode).toBeUndefined();
+    expect(node.store.request("member", `plan-${run.stepId}`)).toMatchObject({ status: "completed", result: { toolPlan: { summary: "蓝色海报 👨💻 程序员" } } });
+    expect(node.service.quota("member")).toMatchObject({ usedTokens: 40, reservedTokens: 0 });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the Send grant through clarification and a raised limit; pauses only when the balance no longer covers the task", async () => {
     await node.service.saveProvider({ ...provider, imageQuotaTokens: 15_000 });
     const generated = () => transport.mock.calls.filter(([url]) => url.endsWith("/images/generations")).length;
@@ -210,6 +224,10 @@ describe("real AiService media orchestration", () => {
     transport.mockResolvedValueOnce(planResponse("image", "一只蓝色的猫"));
     const paused = await orchestrator.advance("member-2", lowered.runId);
     expect(paused).toMatchObject({ status: "awaiting_authorization", dueAt: null, errorCode: "AI_MEDIA_GRANT_BUDGET_CHANGED" });
+    // The stale grant is gone, so the card asks for a fresh confirmation
+    // instead of claiming the amount was already confirmed.
+    expect(paused.authorization).toBeUndefined();
+    expect(await orchestrator.advance("member-2", lowered.runId)).toMatchObject({ status: "awaiting_authorization", version: paused.version });
     expect(generated()).toBe(1);
     node.service.setQuota("member-2", "admin", { limitTokens: 40_000 });
     transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
@@ -494,6 +512,120 @@ describe("real AiService media orchestration", () => {
     expect(await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 })).toMatchObject({ status: "unknown" });
     expect(transport).toHaveBeenCalledTimes(2);
     expect(node.store.usage("member").filter(item => item.kind === "image")).toHaveLength(1);
+  });
+
+  describe("a paid entry that refuses before recording anything", () => {
+    const busyRequest = (conversationId: string) => ({
+      requestId: "busy-chat-request-000001", userId: "member", hash: "fixture", status: "pending" as const,
+      createdAt: new Date().toISOString(), expiresAt: Date.now() + 120_000,
+      inputReserve: 0, outputReserve: 0, model: "text-model", mode: "quick" as const, conversationId, kind: "chat" as const,
+    });
+    const videoPosts = () => transport.mock.calls.filter(([url, init]) => url === "https://www.75api.com/v1/videos" && init.method === "POST");
+    const configureVideo = async () => {
+      await node.service.video.configure({ enabled: true, quotaPoints: 3000, apiKey: "fixture-video-key", defaultModel: "minimax_h3" });
+      const row = node.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0];
+      const settings = JSON.parse(row.data);
+      node.store.sql.exec("UPDATE ai_settings SET data=? WHERE id='video'", JSON.stringify({ ...settings,
+        verifiedConfigVersion: settings.configVersion, verifiedKeyVersion: settings.keyVersion, verifiedModels: ["minimax_h3"] }));
+    };
+    const videoInput = () => ({
+      requestId: crypto.randomUUID(), conversationId: "conversation-v", entrypoint: "mention_video" as const, tier: "quick" as const,
+      intent: "video" as const, requestText: "生成品牌视频", sourceAssetIds: [],
+      videoParameters: { model: "minimax_h3" as const, seconds: 15, resolution: "768p" as const, aspectRatio: "16:9" as const, referenceIds: [] },
+    });
+
+    it("returns a busy image call to a fresh confirmation with the reason, uncharged, then generates once", async () => {
+      transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+      const run = await orchestrator.submit("member", input());
+      await orchestrator.advance("member", run.runId);
+      const busy = busyRequest("conversation-a");
+      node.store.saveRequest(busy);
+      const released = await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 });
+      expect(released).toMatchObject({ status: "awaiting_authorization", dueAt: null, errorCode: "AI_REQUEST_IN_PROGRESS", tool: { capability: "image", estimatedPoints: 1000 } });
+      expect(released.tool?.toolCallId).toBeUndefined();
+      expect(released.authorization).toBeUndefined();
+      expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(0);
+      expect(node.store.usage("member").filter(item => item.kind === "image")).toHaveLength(0);
+      expect(node.service.quota("member")).toMatchObject({ usedTokens: 40, reservedTokens: 0 });
+      // A scheduler pass or read neither resends nor writes.
+      expect(await orchestrator.advance("member", run.runId)).toMatchObject({ status: "awaiting_authorization", version: released.version });
+      node.store.saveRequest({ ...busy, status: "failed" });
+      transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+      expect((await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 })).status).toBe("completed");
+      expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
+      expect(node.store.usage("member").filter(item => item.kind === "image")).toHaveLength(1);
+    });
+
+    it("returns a busy video call to a fresh confirmation instead of freezing it as unknown", async () => {
+      await configureVideo();
+      transport.mockResolvedValueOnce(planResponse("video", "品牌视频"));
+      const run = await orchestrator.submit("member", videoInput());
+      expect((await orchestrator.advance("member", run.runId)).status).toBe("awaiting_authorization");
+      const busy = busyRequest("conversation-v");
+      node.store.saveRequest(busy);
+      const released = await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 3000 });
+      expect(released).toMatchObject({ status: "awaiting_authorization", dueAt: null, errorCode: "AI_REQUEST_IN_PROGRESS" });
+      expect(released.tool?.toolCallId).toBeUndefined();
+      expect(videoPosts()).toHaveLength(0);
+      expect(node.service.video.list("member").jobs).toEqual([]);
+      expect(node.service.quota("member").reservedTokens).toBe(0);
+      node.store.saveRequest({ ...busy, status: "failed" });
+      transport.mockResolvedValueOnce(Response.json({ id: "task_fixture_12345678", status: "queued", progress: 0 }));
+      expect(await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 3000 }))
+        .toMatchObject({ status: "running", tool: { serviceRequestId: expect.any(String) } });
+      expect(videoPosts()).toHaveLength(1);
+    });
+
+    it("fails a video whose refusal is final without charge instead of leaving it unknown", async () => {
+      await configureVideo();
+      transport.mockResolvedValueOnce(planResponse("video", "品牌视频"));
+      const run = await orchestrator.submit("member", videoInput());
+      const planned = await orchestrator.advance("member", run.runId);
+      const plan = node.store.request("member", planned.tool!.planRequestId!)!;
+      node.store.saveRequest({ ...plan, toolPlanExpiresAt: Date.now() - 1 });
+      const result = await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 3000 });
+      expect(result).toMatchObject({ status: "failed", errorCode: "AI_TOOL_PLAN_EXPIRED", dueAt: null });
+      expect(videoPosts()).toHaveLength(0);
+      expect(node.service.quota("member").reservedTokens).toBe(0);
+    });
+
+    it("fails rather than re-offers a refused call whose task deadline passed meanwhile", async () => {
+      let clock = Date.now();
+      orchestrator = new AiServiceMediaTaskOrchestrator(node.service, () => clock);
+      transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+      const run = await orchestrator.submit("member", { ...input(), deadlineAt: clock + 60_000 });
+      await orchestrator.advance("member", run.runId);
+      node.store.saveRequest(busyRequest("conversation-a"));
+      const generate = node.service.generateImage.bind(node.service);
+      vi.spyOn(node.service, "generateImage").mockImplementationOnce(async (userId, value) => { clock = run.deadlineAt; return generate(userId, value); });
+      const result = await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 });
+      expect(result).toMatchObject({ status: "failed", errorCode: "AI_REQUEST_IN_PROGRESS", dueAt: null });
+      expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(0);
+      expect(node.service.quota("member").reservedTokens).toBe(0);
+    });
+
+    it("never writes on repeated reads of an unknown video whose job was never recorded", async () => {
+      await configureVideo();
+      const run = await orchestrator.submit("member", { ...videoInput(), confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 3000 } });
+      const claimed = orchestrator.runtime.claimPlanning("member", run.runId)!;
+      const staged = orchestrator.runtime.stageTool("member", run.runId, {
+        capability: "video", operationKey: `plan-${claimed.stepId}`, estimatedPoints: 3000,
+        sourceAssetIds: [], planRequestId: `plan-${claimed.stepId}`,
+      });
+      const started = orchestrator.runtime.beginTool("member", run.runId, {
+        modelConfigVersion: orchestrator.runtime.snapshot("member", run.runId)!.modelConfigVersion,
+        budgetVersion: staged.authorization!.budgetVersion, availablePoints: 20_000, sourceAssetsValid: true,
+      });
+      // Frozen as unknown by an earlier version although nothing was recorded.
+      orchestrator.runtime.failTool("member", run.runId, started.run.tool!.toolCallId!, "AI_REQUEST_IN_PROGRESS", "unknown");
+      // GET by request advances an unknown video on every read.
+      const first = await orchestrator.advance("member", run.runId);
+      expect(first).toMatchObject({ status: "unknown", errorCode: "AI_MEDIA_TASK_UNRECORDED", dueAt: null });
+      for (let read = 0; read < 3; read += 1) {
+        expect(await orchestrator.advance("member", run.runId)).toMatchObject({ status: "unknown", version: first.version, updatedAt: first.updatedAt });
+      }
+      expect(transport).not.toHaveBeenCalled();
+    });
   });
 
   it("keeps a video queued and polls only its provider task; it never sends the paid POST twice", async () => {

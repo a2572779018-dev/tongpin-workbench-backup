@@ -448,6 +448,14 @@ export class AiVoiceService {
     return usage;
   }
 
+  /** Settles this member's expired voice reservations from any quota read, so
+   * a stale one stops holding quota before the member's next voice call.
+   * Opens its own transaction: never call it inside another one. */
+  recoverExpired(userId: string): void {
+    this.ensureSchema();
+    this.recover(userId);
+  }
+
   /** An interrupted request is settled once, conservatively, like chat. */
   private recover(userId: string): void {
     this.store.sql.transaction(() => {

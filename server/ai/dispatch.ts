@@ -3,11 +3,15 @@ import { AiError } from "./security";
 import { parsePublicAnalysisSummary } from "./publicExplanation";
 
 const TOOL_KINDS = new Set<AiDispatchDecision["kind"]>(["image", "video", "presentation", "computer"]);
+// Model prose legitimately carries format characters: emoji ZWJ sequences
+// (👨‍💻), ZWNJ, variation selectors, soft hyphens, a BOM. Only reject what
+// changes how the text reads: C0/C1 controls (prose keeps \t \n \r), bidi
+// embeddings/overrides/isolates and lone surrogates. trim() drops a BOM.
+const UNSAFE_PROSE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\p{Cs}]/u;
+const UNSAFE_LINE = /[\p{Cc}\u202a-\u202e\u2066-\u2069\p{Cs}]/u;
 
 function clean(value: unknown, label: string, max: number, multiline = false): string {
-  const unsafe = multiline
-    ? /[\p{Cf}\p{Cs}\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u
-    : /[\p{Cc}\p{Cf}\p{Cs}]/u;
+  const unsafe = multiline ? UNSAFE_PROSE : UNSAFE_LINE;
   if (typeof value !== "string" || !value.trim() || value.trim().length > max || unsafe.test(value)) {
     throw new AiError(502, "AI_DISPATCH_INVALID", `AI 返回的${label}不完整`);
   }

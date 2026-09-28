@@ -94,6 +94,32 @@ describe("conversational tool planning boundary", () => {
     expect(dispatch).toContain("await sendMessage({ ...plan, originalPrompt }, continuation)");
   });
 
+  it("saves the PPT planning request ID before the POST, and a stop aborts it and settles the reply", () => {
+    const planning = section(page, "async function planTool(", "function recordMediaTask(");
+    const persisted = planning.indexOf("requestId: planningRequestId");
+    const saved = planning.indexOf("await persistenceRef.current.saveNow(next)");
+    const posted = planning.indexOf('api<AiChatResponse>("/api/ai/chat"');
+    expect(planning).toContain("buildChatRequest(planningRequestId, origin.mode, messages)");
+    expect(persisted).toBeGreaterThan(0);
+    expect(persisted).toBeLessThan(saved);
+    expect(saved).toBeLessThan(posted);
+    expect(planning).toContain('api<AiChatResponse>("/api/ai/chat", { method: "POST", headers, body: JSON.stringify(request), signal: planning.signal }, 130_000)');
+    expect(planning).toContain('api<AiChatPreflight>("/api/ai/preflight", { method: "POST", headers, body: JSON.stringify(request), signal: planning.signal })');
+    expect(planning).toContain("updateReply(conversationId, continuation.messageId, stoppedPlanningReply(kind, sent))");
+    const stop = section(page, "function stopResponse()", "// Steer: supplements");
+    expect(stop).toContain("planning?.abort()");
+    const unmount = section(page, "mountedRef.current = false;", "}, [refreshStatus, preflightGate]);");
+    expect(unmount).toContain("planning.abort()");
+    const submit = section(page, "async function submitToolTask(", "async function sendSupplementTurn(");
+    expect(submit).toContain("updateReply(conversationId, messageId, stoppedPlanningReply(kind, false))");
+    expect(submit).toContain("updateReply(conversationId, messageId, stoppedPlanningReply(kind, true))");
+    expect(submit).not.toContain("if (!mountedRef.current || pendingCancelledRef.current.has(conversationId)) return true;");
+    // A planning request read back after a reload reports its plan and never runs the tool.
+    const recovered = section(page, 'if (typeof request === "string" && !("images" in response) && response.toolPlan', "acceptGeneration(conversationId, messageId, response, harnessPlanRequestId, liveContent)");
+    expect(recovered).toContain("本次未自动生成");
+    expect(recovered).not.toMatch(/sendMessage|planTool|submitMediaTask/);
+  });
+
   it("requires a bound video plan before persisting, uploading references or posting generation", () => {
     const send = section(page, "async function sendVideo(", "async function useVideoHistory(");
     const guard = send.indexOf("!request.planRequestId");

@@ -6,7 +6,7 @@ import type { AiChatRequest, AiProviderInput } from "../../shared/ai";
 import { createNodeAi } from "./node";
 import { type AiTransport, parseProviderResult } from "./provider";
 import { REVIEWED_SKILL_IDS } from "../../src/features/tongpin-ai/skills";
-import { chatInputReserve, MEMBER_SKILL_IDS, memberMentionCapabilities, parseChatCapabilities, parsePresentation, parseToolPlan, parseToolClarification, safeSource, validateImageBase64 } from "./capabilities";
+import { chatInputReserve, MEMBER_SKILL_IDS, memberMentionCapabilities, oneLineSummary, parseChatCapabilities, parsePresentation, parseToolPlan, parseToolClarification, safeSource, validateImageBase64 } from "./capabilities";
 import { AiPersonaRepository } from "./persona";
 import { AI_CHAT_CONTEXT_LIMITS, AI_CONTEXT_WINDOW_PREFIX } from "../../shared/aiContext";
 import { toolPlanContextFingerprint } from "./toolPlans";
@@ -574,6 +574,23 @@ describe("Reviewed AI capabilities through transactional service", () => {
     expect(transport).not.toHaveBeenCalled();
     expect(runtime.service.quota("member").reservedTokens).toBe(0);
   });
+  it("reserves storage for the member's other in-flight images before a paid image call", async () => {
+    await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
+    // 44 MiB used: room for one more largest (4 MiB) image, not for two.
+    runtime.store.sql.exec("INSERT INTO ai_assets(id,user_id,mime_type,byte_length,created_at) VALUES(?,?,?,?,?)", "filled", "member", "image/png", 44 * 1024 * 1024, new Date().toISOString());
+    const inFlight = { requestId: "inflight-own-image", userId: "member", kind: "image" as const, hash: "h", status: "pending" as const, createdAt: new Date().toISOString(), expiresAt: Date.now() + 60_000, inputReserve: 0, outputReserve: 0, convertedReserve: 1000, model: "image", mode: "quick" as const, conversationId: "other-conversation" };
+    runtime.store.saveRequest(inFlight);
+    const request = imageRequest("member", "图片");
+    await expect(runtime.service.generateImage("member", request)).rejects.toMatchObject({ code: "AI_ASSET_CAPACITY" });
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.store.request("member", request.requestId)).toBeUndefined();
+    expect(runtime.store.usage("member").filter(entry => entry.kind === "image")).toHaveLength(0);
+    // Once the other image settles, the same unconsumed plan generates normally.
+    runtime.store.saveRequest({ ...inFlight, status: "failed" });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    expect((await runtime.service.generateImage("member", { ...request, requestId: crypto.randomUUID() })).images).toHaveLength(1);
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("bounds simultaneous image buffering across members before sending paid requests", async () => {
     await runtime.service.saveProvider({ ...provider, imageModel: "image-model", imageQuotaTokens: 1000 });
     for (let index = 0; index < 3; index++) runtime.store.saveRequest({ requestId: `inflight-image-${index}`, userId: `other-${index}`, kind: "image", hash: "h", status: "pending", createdAt: new Date().toISOString(), expiresAt: Date.now() + 10000, inputReserve: 0, outputReserve: 0, convertedReserve: 1000, model: "image", mode: "quick" });
@@ -647,6 +664,30 @@ describe("Capability input and provider output limits", () => {
     expect(parsed).toEqual({ kind, summary: "展示说明".repeat(60), prompt });
     expect(parseToolPlan(JSON.stringify({ kind, summary: "\u0001不安全说明", prompt }), kind).summary).toBe(prompt);
     expect(() => parseToolPlan(JSON.stringify({ kind, summary: "正常", prompt: "x".repeat(kind === "video" ? 4001 : 12001) }), kind)).toThrow(expect.objectContaining({ code: "AI_TOOL_PLAN_INVALID" }));
+  });
+  it("normalizes a tool plan caption into the Harness summary charset instead of failing the paid plan", () => {
+    const harnessCharset = (summary: string) => {
+      expect(summary.trim()).toBe(summary);
+      expect(summary.length).toBeGreaterThan(0);
+      expect(summary.length).toBeLessThanOrEqual(240);
+      expect(summary).not.toMatch(/[\p{Cc}\p{Cf}\p{Cs}]/u);
+    };
+    const prompt = "蓝色科技海报\n\t保留 Logo 👨‍💻\n不要文字";
+    const multiline = parseToolPlan(JSON.stringify({ kind: "image", summary: "第一行\r\n\t第二行 👨‍💻\u00ad\u200b\u007f\u0085", prompt }), "image");
+    expect(multiline).toEqual({ kind: "image", summary: "第一行 第二行 👨💻", prompt });
+    harnessCharset(multiline.summary);
+    // No caption: the fallback is the prompt on one line, cut at 120 UTF-16 units.
+    const fallback = parseToolPlan(JSON.stringify({ kind: "video", prompt: `${"镜头\n".repeat(50)}收尾` }), "video");
+    expect(fallback.summary).toBe(`${"镜头 ".repeat(40)}`.trim());
+    harnessCharset(fallback.summary);
+    // Never splits an astral character into a lone surrogate.
+    const emoji = parseToolPlan(JSON.stringify({ kind: "presentation", summary: `a${"👨‍💻".repeat(200)}`, prompt: "汇报" }), "presentation");
+    harnessCharset(emoji.summary);
+    expect(emoji.summary).toBe(`a${"👨💻".repeat(59)}👨`);
+    // Nothing displayable left in caption or prompt: a fixed label.
+    expect(parseToolPlan(JSON.stringify({ kind: "image", summary: "\u200b\u200d", prompt: "\u200b" }), "image").summary).toBe("图片生成任务");
+    expect(oneLineSummary(undefined)).toBe("");
+    expect(oneLineSummary(" \n\t ")).toBe("");
   });
   it("accepts bounded clarification questions without creating executable plans", () => {
     expect(parseToolClarification('{"kind":"clarification","question":"想生成什么主题的图片？"}')).toBe("想生成什么主题的图片？");

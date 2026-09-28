@@ -738,6 +738,9 @@ export class AiService {
         }
       }
     });
+    // Voice reservations hold the same member quota; settle expired ones on
+    // every quota read too, in their own transaction (these never nest).
+    this.voice.recoverExpired(userId);
   }
   private settle(request: StoredRequest, usage: AiUsage, status: "completed" | "failed" | "uncertain", reason: string, content?: string, error?: AiError, extras?: Pick<AiChatResponse, "completion" | "attempt" | "analysisSummary" | "presentation" | "toolPlan" | "toolClarification" | "dispatch" | "computerPlan" | "computerTask" | "sources" | "citations" | "trace">, images?: AiImageResponse["images"]): boolean {
     if (this.store.request(request.userId, request.requestId)?.status !== "pending") return false;
@@ -798,7 +801,9 @@ export class AiService {
       parentAttempt = this.store.request(userId, request.retryOf);
       if (!parentAttempt || parentAttempt.conversationId !== request.conversationId) throw new AiError(404, "AI_RETRY_NOT_FOUND", "没有找到本对话的原请求");
       const snapshot = this.store.requestSnapshot(userId, request.retryOf);
-      if (!snapshot || parentAttempt.kind !== "chat" || parentAttempt.status === "pending" || parentAttempt.status === "uncertain" && (!parentAttempt.result || parentAttempt.result.usage.estimated)) throw new AiError(409, "AI_RETRY_UNSAFE", parentAttempt.status === "pending" ? "原请求仍在处理，请稍候查看结果，不要重复生成" : "上一次回复被中断，用量还在核对，不能直接重新生成；请把问题重新发送一次（按新请求计费）");
+      // Search and code-execution fees are administrator-set estimates; the
+      // retry is unsafe only when the provider's token counts are unknown.
+      if (!snapshot || parentAttempt.kind !== "chat" || parentAttempt.status === "pending" || parentAttempt.status === "uncertain" && (!parentAttempt.result || (parentAttempt.result.usage.tokenUsageEstimated ?? parentAttempt.result.usage.estimated))) throw new AiError(409, "AI_RETRY_UNSAFE", parentAttempt.status === "pending" ? "原请求仍在处理，请稍候查看结果，不要重复生成" : "上一次回复被中断，用量还在核对，不能直接重新生成；请把问题重新发送一次（按新请求计费）");
       const original = parseChat(snapshot);
       if (original.outputFormat && !["text", "dispatch"].includes(original.outputFormat) || original.skillIds?.includes("agent-continuation-v1") || parentAttempt.result?.dispatch && parentAttempt.result.dispatch.kind !== "text") throw new AiError(409, "AI_RETRY_UNSAFE", "工具任务需要重新确认，不能作为文字回复重试");
       if (request.retryMode === "continue" && !parentAttempt.result?.completion?.canContinue) throw new AiError(409, "AI_RETRY_UNSAFE", "这条回复当前不能续写");
@@ -1172,8 +1177,11 @@ export class AiService {
       if (this.store.activeImageCount() >= 3) throw new AiError(429, "AI_CAPACITY_BUSY", "图片生成任务较多，请稍后重试，本次未扣除额度");
       const quota = this.store.quota(userId);
       if (quota.remainingTokens < provider.imageQuotaTokens!) throw new AiError(402, "AI_QUOTA_EXHAUSTED", "可用额度不足以生成一张图片，请联系管理员增加额度");
-      // Reserve room for the largest accepted image before sending a potentially paid generation.
-      this.store.assertAssetCapacity(userId, 4 * 1024 * 1024);
+      // Reserve room for the largest accepted image before sending a potentially
+      // paid generation, counting this member's images still in flight, so a
+      // concurrent image cannot fill the store after this one was charged.
+      const inFlightImages = pendingForUser.filter(item => item.kind === "image").length;
+      this.store.assertAssetCapacity(userId, 4 * 1024 * 1024, inFlightImages * 4 * 1024 * 1024);
       const pending: StoredRequest = { requestId: request.requestId, userId, hash, kind: "image", status: "pending", createdAt: new Date().toISOString(), expiresAt: Date.now() + AI_TIMEOUT_MS + 30_000, inputReserve: 0, outputReserve: 0, convertedReserve: provider.imageQuotaTokens!, model, mode: tier, conversationId, providerId: mediaRoute?.providerId ?? (provider.imageBaseUrl ? "image" : "legacy"), toolPlanRequestId: request.planRequestId };
       quota.reservedTokens += totalReserved(pending);
       this.store.saveQuota(userId, quota); this.store.saveRequest(pending);

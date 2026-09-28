@@ -83,6 +83,33 @@ describe("recoverable chat output", () => {
     expect(transport).toHaveBeenCalledTimes(2);
     expect(runtime.store.quota("member").usedTokens).toBe(110);
   });
+  it.each([
+    { tool: "web search", enable: { webSearchEnabled: true, webSearchQuotaTokens: 100 }, request: { webSearch: true }, prompt: "查找官方资料并写方案",
+      call: { id: "search-0", type: "web_search_call", status: "completed", action: { type: "search", sources: [{ title: "Official", url: "https://example.com/docs" }] } },
+      usage: { searchCalls: 1, convertedTokens: 100, billingKind: "tokens_with_search" } },
+    { tool: "code execution", enable: { codeInterpreterEnabled: true, codeInterpreterQuotaTokens: 200 }, request: {}, prompt: "帮我计算一下这组数据的平均值并画个图",
+      call: { id: "exec-0", type: "code_interpreter_call", status: "completed", container_id: "container-fixture", code: "print(2)", outputs: [{ type: "logs", logs: "2" }] },
+      usage: { execCalls: 1, convertedTokens: 200, billingKind: "tokens_with_code_exec" } },
+  ])("continues a truncated reply that used $tool: its token counts are known, only the tool fee is estimated", async ({ enable, request: extra, prompt, call, usage }) => {
+    await runtime.service.saveProvider({ ...runtime.service.provider()!, protocol: "responses", ...enable });
+    const reply = (text: string, status: "completed" | "incomplete", calls: unknown[]) => Response.json({
+      status, ...(status === "incomplete" ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+      output_text: text, output: calls, usage: { input_tokens: 20, output_tokens: 30, total_tokens: 50 },
+    });
+    transport.mockResolvedValueOnce(reply("第一部分", "incomplete", [call]));
+    const original = { ...chat(), ...extra, messages: [{ role: "user", content: prompt }] };
+    const first = await runtime.service.chat("member", original);
+    expect(first).toMatchObject({ content: "第一部分", completion: { state: "partial", canContinue: true },
+      usage: { inputTokens: 20, outputTokens: 30, estimated: true, tokenUsageEstimated: false, totalTokens: 50 + usage.convertedTokens, ...usage } });
+    expect(runtime.service.getRequestResult("member", original.requestId).status).toBe("uncertain");
+    // The continuation of a web-search turn searches again, as the original did.
+    transport.mockResolvedValueOnce(reply("第二部分", "completed", extra.webSearch ? [call] : []));
+    const retry = { ...chat(), retryOf: original.requestId, retryMode: "continue" };
+    const second = await runtime.service.chat("member", retry);
+    expect(second).toMatchObject({ content: "第二部分", attempt: { parentAttemptId: original.requestId } });
+    expect(JSON.stringify(JSON.parse(transport.mock.calls[1][1].body!).input)).toContain("第一部分");
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
   it("rejects retry across accounts/conversations and unknown billing", async () => {
     transport.mockResolvedValueOnce(new Response('data: {"type":"response.output_text.delta","delta":"可读部分"}\n\n', { headers: { "content-type": "text/event-stream" } }));
     await runtime.service.saveProvider({ ...runtime.service.provider()!, protocol: "responses" });

@@ -262,9 +262,11 @@ export class AiStore {
     }
     return { assetId, mimeType };
   }
-  assertAssetCapacity(userId: string, incomingBytes: number): void {
+  /** `reservedBytes` is room already promised to this member's other
+   * in-flight images, which may be saved before this one. */
+  assertAssetCapacity(userId: string, incomingBytes: number, reservedBytes = 0): void {
     const used = this.sql.all<{ bytes: number }>("SELECT COALESCE(SUM(byte_length),0) AS bytes FROM ai_assets WHERE tenant_id=? AND user_id=?", this.tenantId, this.userKey(userId))[0]?.bytes ?? 0;
-    if (incomingBytes > 4 * 1024 * 1024 || used + incomingBytes > 50 * 1024 * 1024) throw new AiError(409, "AI_ASSET_CAPACITY", "图片存储空间不足，请删除不需要的图片后重试");
+    if (incomingBytes > 4 * 1024 * 1024 || used + reservedBytes + incomingBytes > 50 * 1024 * 1024) throw new AiError(409, "AI_ASSET_CAPACITY", "图片存储空间不足，请删除不需要的图片后重试");
   }
   asset(userId: string, assetId: string): AiImageAsset | null {
     const storedAssetId = tenantStorageKey(this.tenantId, assetId);

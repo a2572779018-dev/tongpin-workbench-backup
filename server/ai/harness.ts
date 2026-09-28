@@ -17,6 +17,7 @@ import {
   type AiReasoningEffort,
 } from "../../shared/ai";
 import { object, readBoundedJson, readProviderHttpError, type AiTransport } from "./provider";
+import { oneLineSummary } from "./capabilities";
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import type { AiStore, StoredHarnessConfig, StoredHarnessProvider, StoredProvider } from "./storage";
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
@@ -592,10 +593,12 @@ export class AiHarness {
     const now = new Date().toISOString();
     const steps = this.store.harnessSteps(userId, run.id);
     if (outcome === "succeeded" && tool?.summary) {
-      // parseToolPlan / parseComputerPlan already validated this member-visible
-      // summary. Re-apply a strict private-context bound before persisting it;
-      // never store the original user or provider request body here.
-      this.store.updateHarnessGoal(userId, requestId, tool.capability, `完成已校验计划：${safeSummary(tool.summary)}`);
+      // Re-apply the private-context charset and bound before persisting this
+      // member-visible caption; never store the original user or provider
+      // request body here. A caption (including one saved before parseToolPlan
+      // normalized it) is sanitized, never allowed to fail a valid settlement.
+      const summary = oneLineSummary(tool.summary);
+      if (summary) this.store.updateHarnessGoal(userId, requestId, tool.capability, `完成已校验计划：${summary}`);
     }
     if (outcome === "succeeded") this.advanceWorkflow(userId, run.id, Boolean(tool));
     else this.failCurrentWorkflowStep(userId, run.id);

@@ -152,6 +152,55 @@ describe("persisted media task runtime", () => {
     expect(tasks.beginTool("member", run.runId, guard).kind).toBe("unknown");
   });
 
+  describe("a started call that was never sent", () => {
+    const guard = { modelConfigVersion: "config-v1", budgetVersion: "budget-v1", availablePoints: 500, sourceAssetsValid: true };
+    const started = () => {
+      const run = tasks.submit("member", input());
+      tasks.claimPlanning("member", run.runId);
+      tasks.stageTool("member", run.runId, {
+        capability: "video", operationKey: "video-step-1", estimatedPoints: 250,
+        sourceAssetIds: ["asset-a"], planRequestId: "approved-plan-request-01",
+      });
+      tasks.grantAuthorization("member", run.runId, {
+        grantId: crypto.randomUUID(), capabilities: ["video"], sourceAssetIds: ["asset-a"],
+        maxPointsPerTool: 300, budgetVersion: "budget-v1", modelConfigVersion: "config-v1",
+        automaticChoice: false, expiresAt: Date.now() + 60_000,
+      });
+      const begun = tasks.beginTool("member", run.runId, guard);
+      expect(begun.kind).toBe("started");
+      return { runId: run.runId, toolCallId: begun.run.tool!.toolCallId! };
+    };
+
+    it("goes back to a fresh confirmation with its reason and a spent grant", () => {
+      const { runId, toolCallId } = started();
+      expect(() => tasks.releaseUnsentTool("member", runId, "another-call-id-000001", "AI_REQUEST_IN_PROGRESS")).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_CONFLICT" }));
+      const released = tasks.releaseUnsentTool("member", runId, toolCallId, "AI_REQUEST_IN_PROGRESS");
+      expect(released).toMatchObject({ status: "awaiting_authorization", dueAt: null, errorCode: "AI_REQUEST_IN_PROGRESS" });
+      expect(released.tool).toEqual({ capability: "video", operationKey: "video-step-1", estimatedPoints: 250, sourceAssetIds: ["asset-a"], planRequestId: "approved-plan-request-01" });
+      expect(released.authorization).toBeUndefined();
+      expect(tasks.due().some(item => item.runId === runId)).toBe(false);
+      expect(tasks.beginTool("member", runId, guard).kind).toBe("not_authorized");
+      expect(() => tasks.releaseUnsentTool("member", runId, toolCallId, "AI_REQUEST_IN_PROGRESS")).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_CONFLICT" }));
+    });
+
+    it("ends cancelled when a stop was requested meanwhile, and never releases an accepted submission", () => {
+      const stopped = started();
+      expect(tasks.cancel("member", stopped.runId)).toMatchObject({ status: "running", cancelRequested: true });
+      expect(tasks.releaseUnsentTool("member", stopped.runId, stopped.toolCallId, "AI_VIDEO_BUSY")).toMatchObject({ status: "cancelled", dueAt: null });
+      const accepted = started();
+      tasks.recordToolSubmission("member", accepted.runId, accepted.toolCallId, accepted.toolCallId, Date.now() + 1000);
+      expect(() => tasks.releaseUnsentTool("member", accepted.runId, accepted.toolCallId, "AI_VIDEO_BUSY")).toThrow(expect.objectContaining({ code: "AI_MEDIA_TASK_CONFLICT" }));
+      expect(tasks.get("member", accepted.runId)?.status).toBe("running");
+    });
+
+    it("records a repeated unknown outcome once", () => {
+      const { runId, toolCallId } = started();
+      const first = tasks.failTool("member", runId, toolCallId, "AI_MEDIA_TASK_UNRECORDED", "unknown");
+      expect(tasks.failTool("member", runId, toolCallId, "AI_MEDIA_TASK_UNRECORDED", "unknown").version).toBe(first.version);
+      expect(tasks.failTool("member", runId, toolCallId, "AI_VIDEO_UNCERTAIN", "unknown")).toMatchObject({ version: first.version + 1, errorCode: "AI_VIDEO_UNCERTAIN" });
+    });
+  });
+
   it("does not mark an accepted asynchronous submission completed without a ready artifact", async () => {
     const run = tasks.submit("member", input());
     tasks.claimPlanning("member", run.runId);

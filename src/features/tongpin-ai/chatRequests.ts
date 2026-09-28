@@ -87,6 +87,14 @@ export function recoverInterruptedMessages(conversations: TongpinAIConversation[
   }));
 }
 
+/** A tool planning the member stopped: nothing was generated. Clears the task
+ * phase so the conversation no longer reads as queued or planning. */
+export function stoppedPlanningReply(kind: "image" | "video" | "presentation", sent: boolean) {
+  const label = kind === "presentation" ? " PPT" : kind === "video" ? "视频" : "图片";
+  return { status: "stopped" as const, taskPhase: undefined,
+    content: sent ? `已停止，本次未生成${label}。整理方案的请求可能已计费。` : "已取消发送，本次未调用模型。" };
+}
+
 export function completedReply(response: AiChatResponse, options: { preserveExistingTrace?: boolean } = {}) {
   // Only markers verified against this exact content; replaceChatMessage clears older ones.
   const citations = sanitizeAiCitations(response.content, response.sources, response.citations);

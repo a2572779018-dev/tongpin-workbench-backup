@@ -3,8 +3,10 @@ import {
   mediaArtifactAwaitsTask,
   mediaTaskAnswerPath,
   mediaTaskAuthorizationAmount,
+  mediaTaskAuthorizationNotice,
   mediaTaskAuthorizePath,
   mediaTaskCancelPath,
+  mediaTaskGrantActive,
   mediaTaskImageIds,
   mediaTaskIsSettled,
   mediaTaskNeedsPolling,
@@ -59,6 +61,40 @@ describe("media task reply client boundary", () => {
     expect(mediaTaskNeedsPolling("partial")).toBe(true);
     expect(mediaTaskIsSettled("unknown")).toBe(true);
     expect(mediaTaskNeedsPolling("completed")).toBe(false);
+  });
+
+  it("offers the confirmation again for a grant the server paused, with the reason", () => {
+    const tool = { capability: "image" as const, estimatedPoints: 250 };
+    // Current server: the stale grant is dropped when the task pauses.
+    const dropped = task({ status: "awaiting_authorization", dueAt: null, errorCode: "AI_MEDIA_GRANT_NOT_AUTHORIZED", tool });
+    expect(mediaTaskGrantActive(dropped)).toBe(false);
+    expect(mediaTaskAuthorizationAmount(dropped)).toBe(250);
+    expect(mediaTaskAuthorizationNotice(dropped)).toBe("上次确认已失效，请重新确认生成");
+    // An older server kept the stale grant but scheduled nothing.
+    const kept = task({ status: "awaiting_authorization", authorization: { grantId: "stale" }, dueAt: null, errorCode: "AI_MEDIA_GRANT_BUDGET_CHANGED", tool });
+    expect(mediaTaskGrantActive(kept)).toBe(false);
+    expect(mediaTaskAuthorizationAmount(kept)).toBe(250);
+    expect(mediaTaskAuthorizationNotice(kept)).toBe("额度有变化，请重新确认生成");
+    // A grant the server is still carrying out is never offered twice.
+    const active = task({ status: "awaiting_authorization", authorization: { grantId: "live" }, dueAt: 150, errorCode: "AI_MEDIA_GRANT_BUDGET_CHANGED", tool });
+    expect(mediaTaskGrantActive(active)).toBe(true);
+    expect(mediaTaskAuthorizationAmount(active)).toBeNull();
+    expect(mediaTaskAuthorizationNotice(active)).toBeNull();
+    expect(mediaTaskAuthorizationNotice(task({ status: "failed", errorCode: "AI_MEDIA_GRANT_BUDGET_CHANGED", tool }))).toBeNull();
+    expect(mediaTaskAuthorizationNotice(task({ status: "awaiting_authorization", errorCode: "AI_SOMETHING_ELSE", tool }))).toBeNull();
+    expect(mediaTaskAuthorizationNotice(task({ status: "awaiting_authorization", tool }))).toBeNull();
+  });
+
+  it("says why a paid step that was refused before sending waits for confirmation again", () => {
+    const tool = { capability: "video" as const, estimatedPoints: 3000 };
+    const released = (errorCode: string) => task({ status: "awaiting_authorization", dueAt: null, errorCode, tool });
+    expect(mediaTaskAuthorizationNotice(released("AI_REQUEST_IN_PROGRESS"))).toBe("对话正忙，稍后再确认生成");
+    expect(mediaTaskAuthorizationNotice(released("AI_CAPACITY_BUSY"))).toBe("生成任务较多，稍后再确认生成");
+    expect(mediaTaskAuthorizationNotice(released("AI_VIDEO_BUSY"))).toBe("生成任务较多，稍后再确认生成");
+    expect(mediaTaskAuthorizationNotice(released("AI_QUOTA_INSUFFICIENT"))).toBe("额度不足，补充后再确认生成");
+    expect(mediaTaskAuthorizationNotice(released("AI_QUOTA_EXHAUSTED"))).toBe("额度不足，补充后再确认生成");
+    expect(mediaTaskAuthorizationNotice(released("AI_ASSET_CAPACITY"))).toBe("图片空间已满，删除旧图后再确认生成");
+    expect(mediaTaskAuthorizationAmount(released("AI_REQUEST_IN_PROGRESS"))).toBe(3000);
   });
 });
 

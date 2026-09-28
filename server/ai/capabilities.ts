@@ -204,6 +204,21 @@ export function parsePresentation(content: string): AiPresentation {
   });
   return { title, ...(subtitle ? { subtitle } : {}), slides };
 }
+/** A display-only caption in the Harness summary charset: format characters
+ * and lone surrogates dropped, whitespace and control runs collapsed to one
+ * space, cut at a code-point boundary within `max` UTF-16 units. Never throws;
+ * returns "" when nothing displayable is left. */
+export function oneLineSummary(value: unknown, max = 240): string {
+  if (typeof value !== "string") return "";
+  const text = value.replace(/[\p{Cf}\p{Cs}]/gu, "").replace(/[\s\p{Cc}]+/gu, " ").trim();
+  let summary = "";
+  for (const character of text) {
+    if (summary.length + character.length > max) break;
+    summary += character;
+  }
+  return summary.trim();
+}
+const TOOL_PLAN_LABELS: Record<AiToolPlanKind, string> = { image: "图片生成任务", video: "视频生成任务", presentation: "PPT 生成任务" };
 export function parseToolPlan(content: string, expected: AiToolPlanKind): AiToolPlan {
   let value: unknown;
   try { value = JSON.parse(content.replace(/^\s*\`\`\`(?:json)?\s*\n?/i, "").replace(/\n?\`\`\`\s*$/, "")); }
@@ -218,10 +233,9 @@ export function parseToolPlan(content: string, expected: AiToolPlanKind): AiTool
   const prompt = readPrompt(expected === "video" ? 4000 : 12000);
   // The caption is display-only. A provider's verbose or malformed caption
   // must not turn an otherwise valid, bounded executable prompt into a failed
-  // paid planning request.
-  const rawSummary = typeof root.summary === "string" ? root.summary.trim() : "";
-  const summary = rawSummary && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(rawSummary)
-    ? rawSummary.slice(0, 240) : prompt.slice(0, 120);
+  // paid planning request, nor fail the Harness settlement that stores it.
+  const rawSummary = typeof root.summary === "string" && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(root.summary) ? root.summary : "";
+  const summary = oneLineSummary(rawSummary, 240) || oneLineSummary(prompt, 120) || TOOL_PLAN_LABELS[expected];
   return { kind: expected, summary, prompt };
 }
 export function parseToolClarification(content: string): string | undefined {

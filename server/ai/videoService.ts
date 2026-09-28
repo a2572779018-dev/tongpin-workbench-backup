@@ -380,6 +380,11 @@ export class AiVideoService {
       }
     });
   }
+  /** A job row is written in the same transaction that reserves quota and
+   * claims the plan, before the provider POST: no row means nothing was sent. */
+  hasJob(userId: string, id: string): boolean {
+    return validId(id) && this.store.sql.all("SELECT 1 FROM ai_video_jobs WHERE tenant_id=? AND user_id=? AND id=?", this.store.tenantId, this.userKey(userId), id).length > 0;
+  }
   list(userId: string, tier: AiMode = "quick"): AiVideoList { this.store.assertAccess(userId); this.recover(userId); return { settings: this.memberSettings(tier), quota: this.store.quota(userId), jobs: this.store.sql.all<{ data: string }>("SELECT data FROM ai_video_jobs WHERE tenant_id=? AND user_id=? ORDER BY rowid DESC LIMIT 100", this.store.tenantId, this.userKey(userId)).map(r => this.public(JSON.parse(r.data))) }; }
   adminPending(): AiAdminVideoReconciliationJob[] {
     this.recover();
