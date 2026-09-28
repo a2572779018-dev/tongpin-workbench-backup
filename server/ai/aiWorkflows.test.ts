@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AI_WORKFLOW_TEMPLATES, aiWorkflowStepSearches, readAiWorkflowUpdate, workflowActivityText } from "./aiWorkflows";
+import { AI_WORKFLOW_TEMPLATES, aiWorkflowStepSearches, readAiWorkflowUpdate, workflowActivityText } from "../../shared/aiWorkflows";
 
 const valid = () => ({
   workflowId: "hub-research-brief",
