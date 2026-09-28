@@ -1,5 +1,5 @@
 import type { AiAdminVideoReconciliationJob, AiVideoJob, AiVideoList, AiVideoSettings, AiVideoModelCheck, AiVideoModelProfile } from "../../shared/aiVideo";
-import type { AiMode } from "../../shared/ai";
+import { AI_BUSINESS_TIERS, type AiMode } from "../../shared/ai";
 import { VIDEO_MODELS, videoModel, videoSeconds, type VideoModelId } from "../../shared/aiVideoModels";
 import { AiStore } from "./storage";
 import { AiError, type SecretBox } from "./security";
@@ -13,6 +13,13 @@ import { assertGeneratedReferenceJpeg, readGeneratedAssetReference, validateGene
 import { bindSourceVideoReference, validateSourceVideoReferenceBinding } from "./sourceVideoReference";
 
 const BASE = "https://www.75api.com/v1";
+/** The only paid video protocol executed today (AiHarness.resolveMedia fails closed on others). */
+function executesVideo(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return url.hostname === "www.75api.com" && url.pathname.replace(/\/$/, "") === "/v1";
+  } catch { return false; }
+}
 interface Settings {
   enabled: boolean;
   quotaPoints: number;
@@ -262,20 +269,12 @@ export class AiVideoService {
   }
   private async key(settings: Settings = this.saved()): Promise<string> { const key = settings.encryptedKey ? await (await this.box()).decrypt(settings.encryptedKey) : this.deploymentKey(); if (!key) throw new AiError(503, "AI_VIDEO_KEY_REQUIRED", "尚未配置视频密钥", true); return key; }
   async test(): Promise<AiVideoModelCheck> {
+    // Saved four-tier settings run every member video on the tiers' own
+    // connections. Checking the legacy or deployment key there would report
+    // models of a key no member request uses.
+    if (this.store.harness()) return this.testTierConnections();
     let snapshot = this.saved();
-    if (!snapshot.encryptedKey && !this.deploymentKey()) {
-      const harness = this.store.harness();
-      if (!harness) throw new AiError(503, "AI_VIDEO_KEY_REQUIRED", "尚未配置视频密钥", true);
-      const ids = new Set<string>();
-      for (const tier of Object.values(harness.tiers)) {
-        if (!tier.videoProviderId || !tier.videoModelId) continue;
-        const provider = harness.providers.find(item => item.id === tier.videoProviderId);
-        const verified = provider && provider.verifiedConfigVersion === provider.configVersion && provider.verifiedKeyVersion === provider.keyVersion;
-        if (verified && provider.availableModels.includes(tier.videoModelId)) ids.add(tier.videoModelId);
-      }
-      const available = VIDEO_MODELS.filter(model => model.generationEnabled && ids.has(model.id)).map(model => model.id);
-      return { ok: true, message: "已使用业务档位中绑定的模型列表；未进行生成。", models: VIDEO_MODELS.map(({ id, label }) => ({ id, label, listed: ids.has(id) })), availableModels: available };
-    }
+    if (!snapshot.encryptedKey && !this.deploymentKey()) throw new AiError(503, "AI_VIDEO_KEY_REQUIRED", "尚未配置视频密钥", true);
     if (!snapshot.configVersion || !snapshot.keyVersion) {
       const migrated: Settings = { ...snapshot, configVersion: crypto.randomUUID(), keyVersion: crypto.randomUUID() };
       this.store.sql.transaction(() => {
@@ -296,6 +295,36 @@ export class AiVideoService {
       this.writeSettings({ ...current, verifiedConfigVersion: current.configVersion, verifiedKeyVersion: current.keyVersion, verifiedModels: verified });
     });
     return { ok: true, message: "已读取并保存当前密钥可用的已接入模型；成员端只显示这些模型。不代表生成请求一定成功，未生成视频、未扣成员额度。", models: VIDEO_MODELS.map(({ id, label }) => ({ id, label, listed: ids.has(id) })), availableModels: verified };
+  }
+  /** Re-reads the model list (GET /models, never a generation) of each enabled
+   * connection an enabled video tier uses, then reports what they now offer. */
+  private async testTierConnections(): Promise<AiVideoModelCheck> {
+    const connections = () => {
+      const harness = this.store.harness();
+      const ids = new Set(AI_BUSINESS_TIERS.flatMap(tier => {
+        const route = harness?.tiers[tier];
+        return route?.enabled && route.capabilities.includes("video") && route.videoProviderId ? [route.videoProviderId] : [];
+      }));
+      return harness?.providers.filter(provider => provider.enabled && ids.has(provider.id)) ?? [];
+    };
+    const checked = connections();
+    for (const connection of checked) await this.harness?.discover(connection.id);
+    const listed = new Set<string>(), usable = new Set<string>();
+    for (const connection of connections()) {
+      if (connection.verifiedConfigVersion !== connection.configVersion || connection.verifiedKeyVersion !== connection.keyVersion) continue;
+      for (const id of connection.availableModels) {
+        listed.add(id);
+        if (executesVideo(connection.baseUrl)) usable.add(id);
+      }
+    }
+    return {
+      ok: true,
+      message: checked.length
+        ? `已读取业务档位使用的 ${checked.length} 个视频服务连接的模型列表并应用；成员端只显示这些连接可用的已接入模型。未生成视频、未扣成员额度。`
+        : "没有启用视频生成的业务档位，未读取模型列表；请先在「服务与模型」中为档位选择视频服务和模型。",
+      models: VIDEO_MODELS.map(({ id, label }) => ({ id, label, listed: listed.has(id) })),
+      availableModels: VIDEO_MODELS.filter(model => model.generationEnabled && usable.has(model.id)).map(model => model.id),
+    };
   }
   private raw(userId: string, id: string): Job {
     if (!validId(id)) throw new AiError(400, "AI_VIDEO_ID_INVALID", "视频任务编号无效");

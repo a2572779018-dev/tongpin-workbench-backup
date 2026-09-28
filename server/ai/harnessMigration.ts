@@ -4,9 +4,20 @@ import { BAI_QUICK_MODELS, isTongpinQuickAgent } from "../../shared/aiAuto";
 import type { AiStore, StoredHarnessConfig, StoredHarnessProvider } from "./storage";
 import { tenantStorageKey } from "./tenant";
 
+/** Stands in for the encrypted key of the draft's 75API connection when video
+ * runs on the deployment secret (TONGPIN_H3_API_KEY) instead of a stored key.
+ * Only the unsaved draft carries it: AiHarness reads models with the secret
+ * itself and stores it encrypted when the administrator saves the settings. */
+export const DEPLOYMENT_VIDEO_KEY = "deployment:video-key";
+
+export interface LegacyHarnessDraftOptions {
+  /** The deployment video secret is configured for this installation. */
+  deploymentVideoKey?: boolean;
+}
+
 /** Read-only migration draft. Credentials stay encrypted and the existing
  * routing stays active until the administrator saves the four-tier settings. */
-export function legacyHarnessDraft(store: AiStore): StoredHarnessConfig | null {
+export function legacyHarnessDraft(store: AiStore, options: LegacyHarnessDraftOptions = {}): StoredHarnessConfig | null {
   const legacy = store.provider();
   if (!legacy) return null;
   function connection(id: string, name: string, baseUrl: string, encryptedKey: string,
@@ -38,18 +49,25 @@ export function legacyHarnessDraft(store: AiStore): StoredHarnessConfig | null {
     enabled?: boolean; encryptedKey?: string; defaultModel?: string; configVersion?: string; keyVersion?: string;
     verifiedConfigVersion?: string; verifiedKeyVersion?: string; verifiedModels?: unknown;
   } : null;
-  const hasVideo = Boolean(video?.encryptedKey);
+  // Video runs on the stored video key, or else on the deployment secret. A
+  // stored key keeps its connection while video is off (as before); the
+  // deployment secret is carried over only for video that is actually enabled.
+  const videoKey = video?.encryptedKey || (video?.enabled && options.deploymentVideoKey ? DEPLOYMENT_VIDEO_KEY : "");
+  const hasVideo = Boolean(videoKey);
   if (hasVideo) {
     const videoVersion = video!.configVersion ?? "legacy-video";
     const videoKeyVersion = video!.keyVersion ?? videoVersion;
     const videoVerified = Boolean(video!.configVersion && video!.keyVersion && video!.verifiedConfigVersion === video!.configVersion && video!.verifiedKeyVersion === video!.keyVersion);
-    providers.push({ ...connection("legacy-video", "视频服务", "https://www.75api.com/v1", video!.encryptedKey!,
+    providers.push({ ...connection("legacy-video", "视频服务", "https://www.75api.com/v1", videoKey,
       videoVersion, videoKeyVersion, videoVerified, video!.verifiedModels, null), protocol: "chat_completions", enabled: true });
   }
   const tiers = Object.fromEntries(AI_BUSINESS_TIERS.map(tier => {
     const protocol = wasAuto ? (tier === "quick" || tier === "standard" ? "chat_completions" : "responses") : legacy.protocol;
-    // Hosted search runs only on a Responses text route; the four-tier settings reject it elsewhere.
-    const hostedTools = protocol === "responses" && legacy.webSearchEnabled ? ["web_search"] : [];
+    // Hosted search and code execution run only on a Responses text route;
+    // the four-tier settings reject them elsewhere.
+    const hostedTools = protocol === "responses"
+      ? [...(legacy.webSearchEnabled ? ["web_search"] : []), ...(legacy.codeInterpreterEnabled ? ["code_interpreter"] : [])]
+      : [];
     return [tier, {
       providerId: "legacy", modelId: tier === "quick" || tier === "standard" ? quickModel : legacy.deepModel,
       protocol, maxOutputTokens: legacy.maxOutputTokens,

@@ -102,6 +102,47 @@ describe("unified AI settings migration", () => {
     ]);
   });
 
+  it("carries enabled video on the deployment key and code execution into the draft, storing that key only on save", async () => {
+    const previous = process.env.TONGPIN_H3_API_KEY;
+    process.env.TONGPIN_H3_API_KEY = "deployment-video-key-fixture";
+    try {
+      const team = runtime.service.forTenant("deployment-team");
+      await team.saveProvider({ name: "已有服务", baseUrl: "https://ai.example.com/v1", apiKey: "team-text-key", protocol: "responses",
+        quickModel: "quick", deepModel: "deep", maxOutputTokens: 2048, reasoningEffort: "", enabled: true, codeInterpreterEnabled: true, codeInterpreterQuotaTokens: 100 });
+      // Video on, but no stored video key: it runs on the deployment secret.
+      await team.video.configure({ enabled: true, quotaPoints: 1000, defaultModel: "sd-2-c6" });
+      const settings = team.harness.settings()!;
+      expect(settings.providers.map(provider => provider.id)).toEqual(["legacy", "legacy-video"]);
+      expect(settings.providers[1]).toMatchObject({ baseUrl: "https://www.75api.com/v1", apiKeyConfigured: true, enabled: true });
+      for (const tier of AI_BUSINESS_TIERS) {
+        expect(settings.tiers[tier]).toMatchObject({ videoProviderId: "legacy-video", videoModelId: "sd-2-c6" });
+        expect(settings.tiers[tier].capabilities).toEqual(expect.arrayContaining(["video", "code_interpreter"]));
+      }
+      transport.mockClear();
+      await team.harness.discover("legacy-video");
+      expect(transport.mock.calls[0]).toEqual(["https://www.75api.com/v1/models", expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer deployment-video-key-fixture" }) })]);
+      expect(team.store.harness()).toBeNull();
+
+      const input = team.harness.settings()!;
+      await team.saveHarness({ ...input, providers: input.providers.map(({ id, name, baseUrl, protocol, enabled }) => ({ id, name, baseUrl, protocol, enabled })) });
+      const saved = team.store.harness()!.providers.find(provider => provider.id === "legacy-video")!;
+      expect(saved.encryptedKey).toMatch(/^v1\./);
+      expect(JSON.stringify(team.store.harness())).not.toContain("deployment-video-key-fixture");
+      transport.mockClear();
+      await team.harness.discover("legacy-video");
+      expect(transport.mock.calls[0][1].headers.Authorization).toBe("Bearer deployment-video-key-fixture");
+
+      // Video that is switched off does not pull the deployment secret into a draft.
+      const off = runtime.service.forTenant("video-off-team");
+      await off.saveProvider({ name: "已有服务", baseUrl: "https://ai.example.com/v1", apiKey: "off-text-key", protocol: "chat_completions",
+        quickModel: "quick", deepModel: "deep", maxOutputTokens: 2048, reasoningEffort: "", enabled: true });
+      await off.video.configure({ enabled: false, quotaPoints: 1000 });
+      expect(off.harness.settings()!.providers.map(provider => provider.id)).toEqual(["legacy"]);
+    } finally {
+      if (previous === undefined) delete process.env.TONGPIN_H3_API_KEY; else process.env.TONGPIN_H3_API_KEY = previous;
+    }
+  });
+
   it("rejects stale discovery when credentials change during the model request", async () => {
     let resolve!: (value: Response) => void;
     transport.mockImplementationOnce(() => new Promise<Response>(done => { resolve = done; }));

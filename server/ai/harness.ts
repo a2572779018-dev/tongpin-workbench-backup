@@ -20,7 +20,7 @@ import { object, readBoundedJson, readProviderHttpError, type AiTransport } from
 import { AiError, safeBaseUrl, type SecretBox } from "./security";
 import type { AiStore, StoredHarnessConfig, StoredHarnessProvider, StoredProvider } from "./storage";
 import { AI_WORKFLOW_VERSION, aiWorkflowTemplate } from "../../shared/aiWorkflows";
-import { legacyHarnessDraft } from "./harnessMigration";
+import { DEPLOYMENT_VIDEO_KEY, legacyHarnessDraft } from "./harnessMigration";
 import { parseImageEditCapability, parseImageGenerationCapability } from "./imageCapabilities";
 import { openSquillaRouteStep } from "./openSquillaRouting";
 import type { AiImageEditCapability, AiImageGenerationCapability } from "../../shared/aiImageCapabilities";
@@ -177,10 +177,23 @@ export function validConversationId(value: unknown, _requestId: string): string 
 }
 
 export class AiHarness {
-  constructor(private readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport) {}
+  /** `deploymentVideoKey` is the deployment video secret (TONGPIN_H3_API_KEY),
+   * used only to migrate video that runs on it into the four-tier settings. */
+  constructor(private readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly deploymentVideoKey: () => string = () => "") {}
+
+  private draft(): StoredHarnessConfig | null {
+    return legacyHarnessDraft(this.store, { deploymentVideoKey: Boolean(this.deploymentVideoKey()) });
+  }
+
+  /** The draft's deployment-secret video connection has no ciphertext yet. */
+  private deploymentKey(): string {
+    const key = this.deploymentVideoKey();
+    if (!key) throw new AiError(400, "AI_KEY_REQUIRED", "部署视频密钥已不可用，请为视频服务填写 API 密钥");
+    return key;
+  }
 
   settings(): AiHarnessConfig | null {
-    const value = this.store.harness() ?? legacyHarnessDraft(this.store);
+    const value = this.store.harness() ?? this.draft();
     return value ? publicHarness(value) : null;
   }
 
@@ -232,7 +245,7 @@ export class AiHarness {
   async save(value: unknown): Promise<AiHarnessConfig> {
     const input = object(value) as unknown as AiHarnessInput;
     if (!Array.isArray(input.providers) || !input.providers.length || input.providers.length > 8) throw new AiError(400, "AI_HARNESS_INVALID", "请配置 1 到 8 个模型服务连接");
-    const existing = this.store.harness() ?? legacyHarnessDraft(this.store);
+    const existing = this.store.harness() ?? this.draft();
     const ids = new Set<string>();
     const prepared: StoredHarnessProvider[] = [];
     for (const raw of input.providers as AiHarnessProviderInput[]) {
@@ -247,7 +260,10 @@ export class AiHarness {
       if (typeof item.enabled !== "boolean") throw new AiError(400, "AI_HARNESS_INVALID", "服务启用状态不正确");
       const suppliedKey = typeof item.apiKey === "string" && item.apiKey.trim() ? requiredText(item.apiKey, "API 密钥", 4096) : "";
       if (!suppliedKey && (!previous?.encryptedKey || previous.baseUrl !== baseUrl)) throw new AiError(400, "AI_KEY_REQUIRED", "首次接入或更换 API 地址时，请填写 API 密钥");
-      const encryptedKey = suppliedKey ? await (await this.box()).encrypt(suppliedKey) : previous!.encryptedKey;
+      // Migrating video that ran on the deployment secret stores that same key
+      // encrypted, like any administrator-entered key; it is not a new key.
+      const encryptedKey = suppliedKey ? await (await this.box()).encrypt(suppliedKey)
+        : previous!.encryptedKey === DEPLOYMENT_VIDEO_KEY ? await (await this.box()).encrypt(this.deploymentKey()) : previous!.encryptedKey;
       // Only what a model-list read depends on invalidates it. The connection's
       // name and protocol are labels: every request uses the tier's protocol.
       const configChanged = !previous || previous.baseUrl !== baseUrl;
@@ -284,10 +300,10 @@ export class AiHarness {
   }
 
   async discover(providerId: string): Promise<{ provider: AiHarnessProviderConfig; models: string[] }> {
-    const stored = this.store.harness() ?? legacyHarnessDraft(this.store);
+    const stored = this.store.harness() ?? this.draft();
     const snapshot = stored?.providers.find(provider => provider.id === providerId);
     if (!stored || !snapshot) throw new AiError(404, "AI_HARNESS_PROVIDER_NOT_FOUND", "没有找到该模型服务连接");
-    const key = await (await this.box()).decrypt(snapshot.encryptedKey);
+    const key = snapshot.encryptedKey === DEPLOYMENT_VIDEO_KEY ? this.deploymentKey() : await (await this.box()).decrypt(snapshot.encryptedKey);
     let response: Response;
     try {
       response = await this.transport(`${snapshot.baseUrl}/models`, { method: "GET", headers: { Authorization: `Bearer ${key}`, Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
@@ -303,7 +319,7 @@ export class AiHarness {
     const verifiedAt = new Date().toISOString();
     this.store.sql.transaction(() => {
       const persisted = this.store.harness();
-      const current = persisted ?? legacyHarnessDraft(this.store);
+      const current = persisted ?? this.draft();
       const target = current?.providers.find(provider => provider.id === providerId);
       if (!current || !target || target.configVersion !== snapshot.configVersion || target.keyVersion !== snapshot.keyVersion || target.encryptedKey !== snapshot.encryptedKey) {
         throw new AiError(409, "AI_CONFIG_CHANGED", "服务连接已修改，请重新获取模型列表");

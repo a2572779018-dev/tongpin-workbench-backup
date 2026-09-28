@@ -506,6 +506,33 @@ describe("durable H3 jobs and isolated quotas", () => {
       .toThrow(expect.objectContaining({ code: "AI_VIDEO_IMAGE_REQUIRED" }));
     expect(parseH3VideoInput({ model: "sd-2.0-fast", prompt: "海边日落", seconds: 5, resolution: "720p", aspectRatio: "16:9" })).toMatchObject({ model: "sd-2.0-fast" });
   });
+  it("checks the connections the four tiers use once they are saved, not the legacy video key", async () => {
+    const route = {
+      providerId: "text-provider", modelId: "text-model", protocol: "chat_completions" as const,
+      maxOutputTokens: 1024, reasoningEffort: "" as const, capabilities: ["chat", "video"] as const,
+      enabled: true, videoProviderId: "video-provider", videoModelId: "sd-2-c6",
+    };
+    await runtime.service.saveHarness({
+      providers: [
+        { id: "text-provider", name: "Text", baseUrl: "https://text.example.com/v1", protocol: "chat_completions", apiKey: "text-key", enabled: true },
+        { id: "video-provider", name: "75API", baseUrl: "https://www.75api.com/v1", protocol: "chat_completions", apiKey: "harness-video-key", enabled: true },
+      ],
+      tiers: { quick: route, standard: route, deep: route, pro: { ...route, capabilities: ["chat"] } },
+      policy: { strategy: "plan_execute", maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
+    });
+    // A stored legacy key (beforeEach) no longer decides what members can use.
+    transport.mockResolvedValueOnce(Response.json({ data: [{ id: "sd-2-c6" }, { id: "sd-2.0-fast" }, { id: "chat-model" }] }));
+    const check = await runtime.service.video.test();
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0][0]).toBe("https://www.75api.com/v1/models");
+    expect(transport.mock.calls[0][1]).toMatchObject({ method: "GET", headers: { Authorization: "Bearer harness-video-key" } });
+    expect(check).toMatchObject({ ok: true, availableModels: ["sd-2-c6", "sd-2.0-fast"] });
+    expect(check.models.filter(model => model.listed).map(model => model.id)).toEqual(["sd-2-c6", "sd-2.0-fast"]);
+    expect(check.message).toContain("1 个视频服务连接");
+    // The check applied the list: the tier connection is verified for members.
+    expect(runtime.service.video.list("a").settings).toMatchObject({ availableModels: ["sd-2-c6", "sd-2.0-fast"], defaultModel: "sd-2-c6", modelsVerified: true });
+    expect(runtime.service.quota("a").remainingTokens).toBe(10000);
+  });
   it("GET model test does not submit or reserve quota", async () => {
     transport.mockResolvedValue(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2.5-c1" }, { id: "unrelated" }] }));
     const check = await runtime.service.video.test();

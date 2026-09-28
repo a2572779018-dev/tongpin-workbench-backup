@@ -240,7 +240,7 @@ export class AiService {
   private readonly availabilityProbe: AvailabilityProbe;
   /** `whisper` is Workers AI Whisper for voice input; only the Worker has one. */
   constructor(readonly store: AiStore, private readonly box: () => Promise<SecretBox>, private readonly transport: AiTransport, private readonly videoKey: () => string = () => "", private readonly isBackgroundPrincipalActive: AiBackgroundPrincipalCheck = () => false, private readonly whisper?: AiWhisperRunner) {
-    this.harness = new AiHarness(store, box, transport);
+    this.harness = new AiHarness(store, box, transport, videoKey);
     this.video = new AiVideoService(store, box, transport, videoKey, this.harness);
     this.voice = new AiVoiceService(store, box, transport, whisper);
     this.availabilityProbe = new AvailabilityProbe(transport, box);
