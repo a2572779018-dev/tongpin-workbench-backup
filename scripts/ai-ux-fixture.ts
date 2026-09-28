@@ -130,7 +130,12 @@ const runtime = await createRuntime(config, {
       instructions.includes("情绪觉察") ? " persona-upstream=INJECTED" : "",
     ].join("");
     evidence(`transport ${method} ${url.pathname} stream=${String(body.stream)}${markers}`);
-    if (url.pathname.endsWith("/models")) return Response.json({ data: [{ id: "fixture-model", object: "model" }, { id: "fixture-image", object: "model" }, { id: "minimax_h3", object: "model" }, { id: "sd-2-c6", object: "model" }] });
+    if (url.pathname.endsWith("/models")) return Response.json({ data: [{ id: "fixture-model", object: "model" }, { id: "fixture-image", object: "model" }, { id: "minimax_h3", object: "model" }, { id: "sd-2-c6", object: "model" }, { id: "FunAudioLLM/CosyVoice2-0.5B", object: "model" }] });
+    // Simulated read-aloud: a tiny MP3 frame (enough for the server's audio check), and which voice was asked for.
+    if (url.pathname.endsWith("/audio/speech")) {
+      evidence(`speech voice=${String(body.voice)} chars=${String(body.input ?? "").length}`);
+      return new Response(new Uint8Array([0x49, 0x44, 0x33, 0x04, 0, 0, 0, 0, 0, 0, 0xff, 0xfb, 0x90, 0x64, 1, 2, 3, 4]), { headers: { "content-type": "audio/mpeg" } });
+    }
 
     // A provider-boundary "failure" switch. The product code that consumes this
     // must still go through the real task machine and settle as failed/cancelled;

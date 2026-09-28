@@ -150,7 +150,9 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
       }));
       const verified = Object.fromEntries(results.map(result => [result.id, result.models]));
       setDiscovered(verified); setProviderErrors(Object.fromEntries(results.map(result => [result.id, result.error])));
-      setSaved({ ...harness, providers: harness.providers.map(provider => results.find(result => result.id === provider.id)?.provider ?? provider) });
+      const checked = { ...harness, providers: harness.providers.map(provider => results.find(result => result.id === provider.id)?.provider ?? provider) };
+      // The other cards (语音, 视频) pick models from these verified lists.
+      setSaved(checked); onConfigured?.(checked);
       const missing = AI_BUSINESS_TIERS.filter(tier => {
         const route = harness.tiers[tier]; if (!route.enabled) return false;
         return !verified[route.providerId]?.includes(route.modelId)
@@ -174,8 +176,7 @@ export function AdminAiHarnessSettings({ onConfigured }: { onConfigured?: (confi
   };
   const providerOptions = draft.providers.map(provider => <option value={provider.id} key={provider.id}>{provider.name || provider.id}{provider.enabled ? "" : "（停用）"}</option>);
   return <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`} aria-busy={loading || Boolean(busy)}>
-    <header className="tp-ai-admin-heading"><div><h2 id={`${id}-title`}><Activity size={21} aria-hidden="true" />服务与模型</h2>
-      <p>先接入 API 服务，再为快速、标准、深度、Pro 分配模型。</p></div>
+    <header className="tp-ai-admin-heading"><div><h2 id={`${id}-title`}><Activity size={21} aria-hidden="true" />服务与模型</h2></div>
       <button className="tp-ai-admin-button" type="button" disabled={loading || Boolean(busy)} onClick={() => setVersion(value => value + 1)}><RefreshCw size={16} />刷新</button></header>
     {error ? <p className="tp-ai-admin-error" role="alert">{error}</p> : null}
     {notice ? <p className="tp-ai-admin-success" role="status">{notice}</p> : null}

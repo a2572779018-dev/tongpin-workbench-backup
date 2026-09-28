@@ -166,18 +166,21 @@ export function VoiceInputControl({ disabled = false, onTranscript }: {
         </select>
       </label>
       {settings.speech.engine === "external" && settings.speech.voices?.length ? <div className="tp-ai-voice-choice">
-        <label className="tp-ai-voice-rate">朗读音色（通话也用）
+        <label className="tp-ai-voice-rate">朗读音色
           <select value={choice.engine === "browser" ? SYSTEM_VOICE : choice.voice ?? settings.speech.defaultVoice ?? ""}
             onChange={event => update({ voice: event.target.value === settings.speech.defaultVoice ? "" : event.target.value })}>
             {settings.speech.voices.map(option => <option key={option.id} value={option.id}>{option.label}{option.id === settings.speech.defaultVoice ? "（默认）" : ""}</option>)}
             <option value={SYSTEM_VOICE}>这台电脑的系统声音（免费）</option>
           </select>
         </label>
-        <button type="button" className="tp-ai-voice-preview" disabled={preview.status === "loading"}
-          onClick={() => preview.status === "idle" ? void startReading({ key: PREVIEW_KEY, content: PREVIEW_TEXT, api, accountId }) : speechPlayer.stop()}>
-          {preview.status === "loading" ? <LoaderCircle size={14} className="tp-ai-voice-spin" aria-hidden="true" /> : preview.status === "speaking" ? <Square size={11} fill="currentColor" aria-hidden="true" /> : <Volume2 size={14} aria-hidden="true" />}
-          {preview.status === "speaking" ? "停止" : "试听"}
-        </button>
+        <div className="tp-ai-voice-choice__row">
+          <small>语音通话也用这个声音</small>
+          <button type="button" className="tp-ai-voice-preview" disabled={preview.status === "loading"}
+            onClick={() => preview.status === "idle" ? void startReading({ key: PREVIEW_KEY, content: PREVIEW_TEXT, api, accountId }) : speechPlayer.stop()}>
+            {preview.status === "loading" ? <LoaderCircle size={14} className="tp-ai-voice-spin" aria-hidden="true" /> : preview.status === "speaking" ? <Square size={11} fill="currentColor" aria-hidden="true" /> : <Volume2 size={14} aria-hidden="true" />}
+            {preview.status === "speaking" ? "停止" : "试听"}
+          </button>
+        </div>
       </div> : null}
       {preview.error ? <p className="tp-ai-voice-preview-error" role="alert">{preview.error}</p> : null}
       <hr />
