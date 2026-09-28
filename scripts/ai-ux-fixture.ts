@@ -125,8 +125,10 @@ const runtime = await createRuntime(config, {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
     const instructions = typeof body.instructions === "string" ? body.instructions : "";
+    const hubStep = /【Hub 工作流 · 第 (\d)\/\d 步】/.exec(instructions)?.[1];
     const markers = [
       instructions.includes("受限 Hub 工作流") ? " workflow=INJECTED" : "",
+      hubStep ? ` hub-step=${hubStep}` : instructions.includes("【Hub 工作流 · 最后一步】") ? " hub-final" : "",
       instructions.includes("情绪觉察") ? " persona-upstream=INJECTED" : "",
     ].join("");
     evidence(`transport ${method} ${url.pathname} stream=${String(body.stream)}${markers}`);
@@ -199,7 +201,10 @@ const runtime = await createRuntime(config, {
     const wantsVideo = /视频|影片|动起来|生成视频/i.test(lastUser);
     const wantsImage = /图片|图|画|海报|插画|照片|logo/i.test(lastUser);
     const wantsRich = /图表|chart|公式|数据可视化/i.test(lastUser);
-    const answerText = wantsRich
+    // A step of a step-by-step Hub returns working notes, not an answer.
+    const answerText = hubStep
+      ? `摘要：（本地模拟）第 ${hubStep} 步已完成，整理出三条要点。\n\n- 要点一：范围与时间已明确\n- 要点二：已区分事实与推断\n- 要点三：待确认信息已标出`
+      : wantsRich
       ? fixtureRichAnswer
       : wantsPpt
       ? `<tool_request>{"kind":"presentation","prompt":"本周进度汇报${failMark}"}</tool_request>`
