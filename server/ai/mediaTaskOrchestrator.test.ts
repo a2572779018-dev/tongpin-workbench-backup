@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AiHarnessCapability } from "../../shared/ai";
 import { createNodeAi } from "./node";
 import { AiServiceMediaTaskOrchestrator } from "./mediaTaskOrchestrator";
 import type { AiTransport } from "./provider";
@@ -178,26 +179,84 @@ describe("real AiService media orchestration", () => {
     },
   );
 
-  it("keeps the Send grant through clarification, but rechecks current budget before paid execution", async () => {
-    transport.mockResolvedValueOnce(Response.json({
-      choices: [{ message: { content: '{"kind":"clarification","question":"想画什么主题？"}' } }],
-      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
-    }));
+  it("keeps the Send grant through clarification and a raised limit; pauses only when the balance no longer covers the task", async () => {
+    await node.service.saveProvider({ ...provider, imageQuotaTokens: 15_000 });
+    const generated = () => transport.mock.calls.filter(([url]) => url.endsWith("/images/generations")).length;
+    const sendAndClarify = async (member: string) => {
+      transport.mockResolvedValueOnce(Response.json({
+        choices: [{ message: { content: '{"kind":"clarification","question":"想画什么主题？"}' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+      }));
+      const run = await orchestrator.submit(member, {
+        ...input(), requestText: "帮我生成一张动物图片", confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 15_000 },
+      });
+      const question = await orchestrator.advance(member, run.runId);
+      expect(question.status).toBe("awaiting_input");
+      orchestrator.answer(member, run.runId, question.freeQuestion!.questionId, "一只蓝色的猫");
+      return run;
+    };
+    // A raised limit leaves the member's consent standing: one paid call, no re-confirmation.
+    const raised = await sendAndClarify("member");
+    node.service.setQuota("member", "admin", { limitTokens: 30_000 });
     transport.mockResolvedValueOnce(planResponse("image", "一只蓝色的猫"));
     transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
-    const run = await orchestrator.submit("member", {
-      ...input(), requestText: "帮我生成一张动物图片", confirmedMediaExecution: { confirmed: true, maxPointsPerTool: 1000 },
-    });
-    const question = await orchestrator.advance("member", run.runId);
-    expect(question.status).toBe("awaiting_input");
-    orchestrator.answer("member", run.runId, question.freeQuestion!.questionId, "一只蓝色的猫");
-    node.service.setQuota("member", "admin", { limitTokens: 30_000 });
-    const paused = await orchestrator.advance("member", run.runId);
+    expect(await orchestrator.advance("member", raised.runId)).toMatchObject({ status: "completed" });
+    expect(generated()).toBe(1);
+
+    // A limit lowered below the task's cost pauses before the paid call.
+    node.service.setQuota("member-2", "admin", { limitTokens: 40_000 });
+    const lowered = await sendAndClarify("member-2");
+    node.service.setQuota("member-2", "admin", { limitTokens: 14_000 });
+    transport.mockResolvedValueOnce(planResponse("image", "一只蓝色的猫"));
+    const paused = await orchestrator.advance("member-2", lowered.runId);
     expect(paused).toMatchObject({ status: "awaiting_authorization", dueAt: null, errorCode: "AI_MEDIA_GRANT_BUDGET_CHANGED" });
-    expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(0);
-    const completed = await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 });
+    expect(generated()).toBe(1);
+    node.service.setQuota("member-2", "admin", { limitTokens: 40_000 });
+    transport.mockResolvedValueOnce(Response.json({ data: [{ b64_json: PNG }] }));
+    const completed = await orchestrator.authorizeAndExecute("member-2", lowered.runId, { confirmed: true, maxPointsPerTool: 15_000 });
     expect(completed.status).toBe("completed");
-    expect(transport.mock.calls.filter(([url]) => url.endsWith("/images/generations"))).toHaveLength(1);
+    expect(generated()).toBe(2);
+  });
+
+  it("keeps an approved image task across model re-reads and unrelated settings saves, but not a changed image route", async () => {
+    transport.mockImplementation(async url => url.endsWith("/models")
+      ? Response.json({ data: ["text-model", "deep-model", "deep-model-2", "image-model", "image-model-2"].map(id => ({ id })) })
+      : Response.json({ data: [{ b64_json: PNG }] }));
+    const route = (modelId: string, imageModelId = "image-model") => ({
+      providerId: "text", modelId, protocol: "chat_completions" as const, maxOutputTokens: 2048, reasoningEffort: "" as const, enabled: true,
+      capabilities: ["chat", "image"] as AiHarnessCapability[], imageProviderId: "images", imageModelId,
+    });
+    const settings = (options: { deepModel?: string; imageModelId?: string; imagesName?: string; keys?: boolean } = {}) => ({
+      providers: [
+        { id: "text", name: "Text", baseUrl: "https://api.example.com/v1", protocol: "chat_completions" as const, ...(options.keys ? { apiKey: "text-key" } : {}), enabled: true },
+        { id: "images", name: options.imagesName ?? "Images", baseUrl: "https://images.example.com/v1", protocol: "chat_completions" as const, ...(options.keys ? { apiKey: "image-key" } : {}), enabled: true },
+      ],
+      tiers: { quick: route("text-model", options.imageModelId), standard: route("text-model"), deep: route(options.deepModel ?? "deep-model"), pro: route(options.deepModel ?? "deep-model") },
+      policy: { strategy: "direct" as const, maxToolSteps: 1, requireApproval: true, autoWebSearch: false },
+    });
+    await node.service.saveHarness(settings({ keys: true }));
+    await node.service.discoverHarnessProvider("text");
+    await node.service.discoverHarnessProvider("images");
+    const planned = async () => {
+      transport.mockResolvedValueOnce(planResponse("image", "蓝色科技海报"));
+      const run = await orchestrator.submit("member", { ...input(), conversationId: `conversation-${crypto.randomUUID()}` });
+      expect(await orchestrator.advance("member", run.runId)).toMatchObject({ status: "awaiting_authorization" });
+      return run;
+    };
+    const generations = () => transport.mock.calls.filter(([url]) => url === "https://images.example.com/v1/images/generations").length;
+    const run = await planned();
+    // The administrator re-reads both model lists, changes another tier and renames the image connection.
+    await node.service.discoverHarnessProvider("images");
+    await node.service.discoverHarnessProvider("text");
+    await node.service.saveHarness(settings({ deepModel: "deep-model-2", imagesName: "Images renamed" }));
+    expect(await orchestrator.authorizeAndExecute("member", run.runId, { confirmed: true, maxPointsPerTool: 1000 })).toMatchObject({ status: "completed" });
+    expect(generations()).toBe(1);
+
+    // This tier's image model changing is a different route: the approval no longer applies.
+    const second = await planned();
+    await node.service.saveHarness(settings({ deepModel: "deep-model-2", imagesName: "Images renamed", imageModelId: "image-model-2" }));
+    await expect(orchestrator.authorizeAndExecute("member", second.runId, { confirmed: true, maxPointsPerTool: 1000 })).rejects.toMatchObject({ code: "AI_CONFIG_CHANGED" });
+    expect(generations()).toBe(1);
   });
 
   it("rejects a changed model or billing policy before beginning a paid step", async () => {

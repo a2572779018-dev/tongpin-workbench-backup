@@ -18,6 +18,7 @@ import {
 } from "./mediaTaskRuntime";
 import { AiError } from "./security";
 import type { AiService } from "./service";
+import type { AiStore } from "./storage";
 import { tenantStorageKey } from "./tenant";
 import { validateToolPlan } from "./toolPlans";
 import { readCurrentConversation } from "./workspaceCurrentReads";
@@ -68,6 +69,32 @@ function expectedRun(runtime: MediaTaskRuntime, userId: string, runId: string): 
   if (!run) throw new AiError(404, "AI_MEDIA_TASK_NOT_FOUND", "没有找到这条任务");
   return run;
 }
+/** What decides where a queued image task's paid call runs and what it costs.
+ * Discovery timestamps, other tiers and connection names are deliberately
+ * absent: re-reading models or saving unrelated settings keeps an approval. */
+function imageRoute(store: AiStore, tier: AiMode): Record<string, unknown> {
+  const legacy = store.provider();
+  const price = { quotaPoints: legacy?.imageQuotaTokens ?? 0, stream: legacy?.imageStream === true };
+  const harness = store.harness();
+  const route = harness?.tiers[tier];
+  if (harness && (!route?.enabled || !route.capabilities.includes("image"))) return { route: "tier", open: false, price };
+  if (harness && route?.imageProviderId && route.imageModelId) {
+    const connection = harness.providers.find(item => item.id === route.imageProviderId);
+    return {
+      route: "tier", open: true, price, providerId: route.imageProviderId, modelId: route.imageModelId,
+      modelVerified: Boolean(connection && connection.verifiedConfigVersion === connection.configVersion
+        && connection.verifiedKeyVersion === connection.keyVersion && connection.availableModels.includes(route.imageModelId)),
+      connection: connection ? { baseUrl: connection.baseUrl, enabled: connection.enabled, configVersion: connection.configVersion, keyVersion: connection.keyVersion } : null,
+      generation: route.imageGenerationCapability ?? null, edit: route.imageEditCapability ?? null,
+    };
+  }
+  // Single-provider (legacy) image route; the key is identified by its ciphertext.
+  return {
+    route: "legacy", price, enabled: legacy?.enabled === true, modelId: legacy?.imageModel ?? "",
+    baseUrl: legacy ? legacy.imageBaseUrl || legacy.baseUrl : "",
+    key: legacy ? (legacy.imageBaseUrl ? legacy.encryptedImageKey ?? "" : legacy.encryptedKey) : "",
+  };
+}
 function safeErrorCode(error: unknown): string {
   return error instanceof AiError && /^[a-zA-Z0-9._:-]{1,120}$/.test(error.code) ? error.code : "AI_MEDIA_TASK_FAILED";
 }
@@ -115,16 +142,20 @@ export class AiServiceMediaTaskOrchestrator {
     this.runtime = new MediaTaskRuntime(service.store, now);
   }
 
-  private async configurationVersion(intent: "image" | "video", tier: AiMode): Promise<string> {
-    if (intent === "video") return this.service.video.configurationVersion(tier);
-    // Include encrypted provider keys and verified model routes in the digest,
-    // but never expose either one in member-visible task state.
-    return digest({ tenantId: this.service.store.tenantId, tier, provider: this.service.store.provider(), harness: this.service.store.harness() });
+  /** Only this task's media route: its tier, capability, connection and model
+   * (for video, the task's own model) and price. The digest may cover an
+   * encrypted key but is never reversible into provider configuration. */
+  private async configurationVersion(task: { intent: "image" | "video"; tier: AiMode; videoParameters?: { model: string } }): Promise<string> {
+    if (task.intent === "video") return this.service.video.configurationVersion(task.tier, task.videoParameters?.model);
+    return digest({ tenantId: this.service.store.tenantId, tier: task.tier, capability: "image", route: imageRoute(this.service.store, task.tier) });
   }
 
+  /** The member consented to spend up to maxPointsPerTool of their balance.
+   * An administrator raising (or otherwise changing) the limit does not revoke
+   * that; the runtime still requires availablePoints to cover the task's cost
+   * at the paid boundary, which is what a limit drop below it trips. */
   private async budgetVersion(userId: string): Promise<string> {
-    const quota = this.service.store.quota(userId);
-    return digest({ tenantId: this.service.store.tenantId, userId, limitTokens: quota.limitTokens, access: this.service.store.hasAccess(userId) });
+    return digest({ tenantId: this.service.store.tenantId, userId, policy: "available-points-v2", access: this.service.store.hasAccess(userId) });
   }
 
   private async scopedSources(userId: string, input: { intent: "image" | "video"; conversationId: string; sourceAssetIds: string[] }): Promise<{ valid: true; attachments: AiAttachment[]; fingerprints: string[] }> {
@@ -180,7 +211,7 @@ export class AiServiceMediaTaskOrchestrator {
         : JSON.stringify(source.fingerprints) === JSON.stringify(snapshot.sourceFingerprints);
     } catch { /* A stale or foreign source never authorizes a paid call. */ }
     return {
-      modelConfigVersion: await this.configurationVersion(snapshot.intent, snapshot.tier),
+      modelConfigVersion: await this.configurationVersion(snapshot),
       budgetVersion: await this.budgetVersion(userId),
       availablePoints: this.service.store.quota(userId).remainingTokens,
       sourceAssetsValid,
@@ -242,7 +273,7 @@ export class AiServiceMediaTaskOrchestrator {
     const cost = this.estimatedPoints(userId, input.intent);
     if (input.intent === "video") this.service.video.bindPlanModel(input.tier, input.videoParameters!.model);
     const context = await frozenConversationContext(this.service, userId, input.conversationId, input.requestText);
-    const modelConfigVersion = await this.configurationVersion(input.intent, input.tier);
+    const modelConfigVersion = await this.configurationVersion(input);
     let authorizationScope: MediaTaskAuthorizationScope | null = null;
     if (submissionMayCarryGrant(input)) {
       const confirmed = input.confirmedMediaExecution!;
@@ -327,7 +358,7 @@ export class AiServiceMediaTaskOrchestrator {
     const snapshot = this.runtime.snapshot(userId, runId);
     if (!snapshot) rejected("AI_MEDIA_TASK_SNAPSHOT_MISSING", "任务快照不存在");
     try {
-      const currentConfig = await this.configurationVersion(snapshot.intent, snapshot.tier);
+      const currentConfig = await this.configurationVersion(snapshot);
       if (currentConfig !== snapshot.modelConfigVersion) rejected("AI_CONFIG_CHANGED", "任务配置已改变，请重新提交");
       const source = await this.scopedSources(userId, snapshot);
       if (snapshot.sourceAssetIds.length && snapshot.sourceFingerprints === undefined) {
@@ -382,7 +413,7 @@ export class AiServiceMediaTaskOrchestrator {
   private async applyPlanResponse(userId: string, runId: string, snapshot: MediaTaskSnapshot,
     response: Pick<AiChatResponse, "toolPlan" | "toolClarification">, planRequestId: string): Promise<MediaTaskRun> {
     if (this.now() >= snapshot.deadlineAt) return this.runtime.failPlanning(userId, runId, "AI_MEDIA_TASK_DEADLINE");
-    if (await this.configurationVersion(snapshot.intent, snapshot.tier) !== snapshot.modelConfigVersion) {
+    if (await this.configurationVersion(snapshot) !== snapshot.modelConfigVersion) {
       return this.runtime.failPlanning(userId, runId, "AI_CONFIG_CHANGED");
     }
     const source = await this.scopedSources(userId, snapshot);

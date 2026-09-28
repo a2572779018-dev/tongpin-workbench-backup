@@ -228,6 +228,40 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(await video.configurationVersion("quick")).not.toBe(before);
     expect(transport).not.toHaveBeenCalled();
   });
+  it("versions a video task by its own route: model re-reads and unrelated saves keep it, its model, price or key change it", async () => {
+    const route = (videoModelId: string, modelId = "text-model") => ({
+      providerId: "video-provider", modelId, protocol: "chat_completions" as const, maxOutputTokens: 1024, reasoningEffort: "" as const,
+      capabilities: ["chat", "video"] as const, enabled: true, videoProviderId: "video-provider", videoModelId,
+    });
+    const settings = (deepModel: string, apiKey?: string, name = "75API") => ({
+      providers: [{ id: "video-provider", name, baseUrl: "https://www.75api.com/v1", protocol: "chat_completions" as const, ...(apiKey ? { apiKey } : {}), enabled: true }],
+      tiers: { quick: route("minimax_h3"), standard: route("minimax_h3"), deep: route("sd-2-c6", deepModel), pro: route("sd-2-c6", deepModel) },
+      policy: { strategy: "plan_execute" as const, maxToolSteps: 3, requireApproval: true, autoWebSearch: true },
+    });
+    const listing = () => Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }, { id: "text-model" }, { id: "deep-model" }, { id: "deep-model-2" }] });
+    await runtime.service.saveHarness(settings("deep-model", "harness-video-key"));
+    transport.mockResolvedValueOnce(listing());
+    await runtime.service.discoverHarnessProvider("video-provider");
+    const version = () => runtime.service.video.configurationVersion("quick", "minimax_h3");
+    const before = await version();
+    transport.mockResolvedValueOnce(listing());
+    await runtime.service.discoverHarnessProvider("video-provider");
+    await runtime.service.saveHarness(settings("deep-model-2", undefined, "75API 视频"));
+    expect(await version()).toBe(before);
+    // Another model failing upstream (quarantine) does not touch this task's route.
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "model_not_found" } }, { status: 503 }));
+    await runtime.service.video.submit("a", input("a", "别的模型", { model: "sd-2-c6", resolution: "720p" }));
+    expect(await version()).toBe(before);
+    await runtime.service.video.configure({ enabled: true, quotaPoints: 1200 });
+    const priced = await version();
+    expect(priced).not.toBe(before);
+    transport.mockResolvedValueOnce(Response.json({ error: { code: "model_not_found" } }, { status: 503 }));
+    await runtime.service.video.submit("a", input("a", "本任务模型", { model: "minimax_h3" }));
+    const quarantined = await version();
+    expect(quarantined).not.toBe(priced);
+    await runtime.service.saveHarness(settings("deep-model-2", "rotated-video-key", "75API 视频"));
+    expect(await version()).not.toBe(quarantined);
+  });
   it("keeps reference images encrypted, account-bound and expiring; retries do not generate twice", async () => {
     const video = runtime.service.video;
     const dataUrl = "data:image/jpeg;base64,/9j/" + "AAAA".repeat(20000);

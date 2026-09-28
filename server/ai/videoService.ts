@@ -124,15 +124,36 @@ export class AiVideoService {
     const s = this.saved(), verified = verifiedModels(s);
     return { enabled: s.enabled, quotaPoints: s.quotaPoints, apiKeyConfigured: Boolean(s.encryptedKey || this.deploymentKey() || this.harnessVideoConfigured()), defaultModel: configuredDefaultModel(s.defaultModel), availableModels: verified ?? [], modelsVerified: verified !== null };
   }
-  /** Opaque version for a queued task. A key or tier-route change invalidates
-   * an old approval without returning any provider configuration to members. */
-  async configurationVersion(tier: AiMode): Promise<string> {
+  /** Opaque version for a queued task: only what decides where `modelId` (the
+   * task's model; default: what an omitted choice binds to) runs and what it
+   * costs — the connection's address and config/key versions, whether that
+   * model is still verified there, and the video price. Discovery timestamps,
+   * other tiers and connection names are left out, so re-reading models or
+   * saving unrelated settings does not invalidate an approved task. Never
+   * returns provider configuration to members. */
+  async configurationVersion(tier: AiMode, modelId?: string): Promise<string> {
+    const settings = this.saved();
     const harness = this.store.harness();
     const route = harness?.tiers[tier];
-    const provider = route?.videoProviderId ? harness?.providers.find(item => item.id === route.videoProviderId) : undefined;
+    let target: Record<string, unknown>;
+    if (harness && (!route?.enabled || !route.capabilities.includes("video"))) target = { route: "tier", open: false };
+    else if (harness && route?.videoProviderId && route.videoModelId) {
+      const connection = harness.providers.find(item => item.id === route.videoProviderId);
+      const listed = connection && connection.verifiedConfigVersion === connection.configVersion && connection.verifiedKeyVersion === connection.keyVersion ? connection.availableModels : [];
+      const models = VIDEO_MODELS.filter(model => model.generationEnabled && listed.includes(model.id)).map(model => model.id);
+      const chosen = modelId ?? defaultVideoModel(models, route.videoModelId, configuredDefaultModel(settings.defaultModel)) ?? null;
+      target = {
+        route: "tier", open: true, providerId: route.videoProviderId, modelId: chosen,
+        modelVerified: Boolean(chosen && models.includes(chosen as VideoModelId)),
+        connection: connection ? { baseUrl: connection.baseUrl, enabled: connection.enabled, configVersion: connection.configVersion, keyVersion: connection.keyVersion } : null,
+      };
+    } else {
+      const chosen = modelId ?? configuredDefaultModel(settings.defaultModel);
+      target = { route: "legacy", key: settings.encryptedKey ?? null, keyVersion: settings.keyVersion ?? null, modelId: chosen, modelVerified: availableModels(settings).includes(chosen as VideoModelId) };
+    }
     const bytes = new TextEncoder().encode(JSON.stringify({
-      tenantId: this.store.tenantId, tier, video: this.saved(),
-      route: route ?? null, provider: provider ?? null,
+      tenantId: this.store.tenantId, tier, capability: "video",
+      price: { enabled: settings.enabled, quotaPoints: settings.quotaPoints }, target,
     }));
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
