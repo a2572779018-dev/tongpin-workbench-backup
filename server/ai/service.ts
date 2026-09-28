@@ -407,7 +407,78 @@ export class AiService {
     };
   }
   harnessSettings(): AiHarnessConfig | null { return this.harness.settings(); }
-  saveHarness(value: unknown): Promise<AiHarnessConfig> { return this.harness.save(value); }
+  async saveHarness(value: unknown): Promise<AiHarnessConfig> {
+    this.assertVoiceConnectionsKept(value);
+    return this.harness.save(value);
+  }
+  /** A save must not remove or switch off a connection that 语音 is using
+   * right now: voice would silently fall back or fail for every member. */
+  private assertVoiceConnectionsKept(value: unknown): void {
+    const input = value && typeof value === "object" ? value as { providers?: unknown } : {};
+    if (!Array.isArray(input.providers)) return; // The harness rejects malformed input itself.
+    const stored = this.store.harness();
+    const voice = this.voice.settings();
+    const inUse: Array<[providerId: string, feature: string]> = [];
+    if (voice.ttsEngine === "external" && voice.ttsProviderId) inUse.push([voice.ttsProviderId, "语音朗读"]);
+    if (voice.inputEnabled && voice.sttEngine === "provider" && voice.sttProviderId) inUse.push([voice.sttProviderId, "语音输入"]);
+    for (const [providerId, feature] of inUse) {
+      const current = stored?.providers.find(provider => provider.id === providerId);
+      if (!current?.enabled) continue; // Already unusable: never block unrelated saves.
+      const next = input.providers.find(provider => provider && typeof provider === "object" && (provider as { id?: unknown }).id === providerId) as { enabled?: unknown } | undefined;
+      if (!next || next.enabled === false) {
+        throw new AiError(409, "AI_HARNESS_PROVIDER_IN_USE", `「${feature}」正在使用服务连接「${current.name}」。请先在「语音」里改用其他服务或关闭该功能，再移除或停用这个连接。`);
+      }
+    }
+  }
+  /** AI 管理 → 图片与视频 / 联网与代码: prices and switches of the tools that
+   * four-tier routing still reads from the settings row, saved on their own
+   * (no connection, key or model fields). Only the fields sent are changed. */
+  async saveCapabilities(value: unknown): Promise<AiProviderConfig> {
+    const harness = this.store.harness();
+    if (!harness) throw new AiError(409, "AI_HARNESS_REQUIRED", "请先在「服务与模型」接入服务并保存四个档位，再设置这里");
+    const p = object(value);
+    const allowed = ["imageQuotaTokens", "imageStream", "visionInputReserveTokens", "webSearchEnabled", "webSearchQuotaTokens", "webSearchProtocol", "codeInterpreterEnabled", "codeInterpreterQuotaTokens"];
+    if (Object.keys(p).some(key => !allowed.includes(key))) throw new AiError(400, "AI_INPUT_INVALID", "这里只能修改工具开关和折算额度");
+    const points = (key: string, label: string) => {
+      if (p[key] === undefined) return undefined;
+      const n = p[key];
+      if (!Number.isSafeInteger(n) || Number(n) < 0 || Number(n) > 10_000_000) throw new AiError(400, "AI_CAPABILITY_INVALID", `${label}需为 0 到 1000 万之间的整数`);
+      return Number(n);
+    };
+    const flag = (key: string) => {
+      if (p[key] === undefined) return undefined;
+      if (typeof p[key] !== "boolean") throw new AiError(400, "AI_CAPABILITY_INVALID", "能力开关格式不正确");
+      return p[key] as boolean;
+    };
+    const patch: Partial<AiProviderInput> = {};
+    const imageQuotaTokens = points("imageQuotaTokens", "每张图片折算的同频点"); if (imageQuotaTokens !== undefined) patch.imageQuotaTokens = imageQuotaTokens;
+    const webSearchQuotaTokens = points("webSearchQuotaTokens", "每次联网搜索折算的同频点"); if (webSearchQuotaTokens !== undefined) patch.webSearchQuotaTokens = webSearchQuotaTokens;
+    const codeInterpreterQuotaTokens = points("codeInterpreterQuotaTokens", "每次代码执行折算的同频点"); if (codeInterpreterQuotaTokens !== undefined) patch.codeInterpreterQuotaTokens = codeInterpreterQuotaTokens;
+    const imageStream = flag("imageStream"); if (imageStream !== undefined) patch.imageStream = imageStream;
+    const webSearchEnabled = flag("webSearchEnabled"); if (webSearchEnabled !== undefined) patch.webSearchEnabled = webSearchEnabled;
+    const codeInterpreterEnabled = flag("codeInterpreterEnabled"); if (codeInterpreterEnabled !== undefined) patch.codeInterpreterEnabled = codeInterpreterEnabled;
+    if (p.visionInputReserveTokens !== undefined) {
+      const reserve = p.visionInputReserveTokens;
+      if (!Number.isSafeInteger(reserve) || Number(reserve) < 256 || Number(reserve) > 131072) throw new AiError(400, "AI_VISION_CONFIG_INVALID", "每张图片的输入预留需为 256 到 131072 的整数估算值");
+      patch.visionInputReserveTokens = Number(reserve);
+    }
+    if (p.webSearchProtocol !== undefined) {
+      if (p.webSearchProtocol !== "standard" && p.webSearchProtocol !== "compatible") throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "请选择标准或兼容搜索协议");
+      patch.webSearchProtocol = p.webSearchProtocol;
+    }
+    const tiersWith = (capability: "image" | "web_search" | "code_interpreter") => AI_BUSINESS_TIERS.filter(tier => harness.tiers[tier].enabled && harness.tiers[tier].capabilities.includes(capability));
+    this.store.sql.transaction(() => {
+      const current = this.providerBaseline();
+      if (!current) throw new AiError(409, "AI_HARNESS_REQUIRED", "请先在「服务与模型」接入服务并保存四个档位，再设置这里");
+      const next: StoredProvider = { ...current, ...patch, updatedAt: new Date().toISOString() };
+      if (tiersWith("image").length && !next.imageQuotaTokens) throw new AiError(400, "AI_IMAGE_QUOTA_REQUIRED", `${tiersWith("image").map(tier => AI_BUSINESS_TIER_LABELS[tier]).join("、")}档开放了生成图片，请设置每张图片折算的同频点（大于 0）`);
+      if (next.webSearchEnabled && !next.webSearchQuotaTokens) throw new AiError(400, "AI_SEARCH_CONFIG_INVALID", "开启联网搜索前，请设置每次搜索折算的同频点（大于 0）");
+      if (next.codeInterpreterEnabled && !next.codeInterpreterQuotaTokens) throw new AiError(400, "AI_CODE_INTERPRETER_CONFIG_INVALID", "开启代码执行前，请设置每次执行折算的同频点（大于 0）");
+      // Keys, connection and model-verification versions stay exactly as they were.
+      this.store.saveProvider(next);
+    });
+    return this.provider()!;
+  }
   discoverHarnessProvider(providerId: string) { return this.harness.discover(providerId); }
   observability(windowMinutes?: number): AiObservabilityDashboard { return this.store.observability(windowMinutes); }
   acknowledgeObservabilityAlert(alertId: string, actorId: string) { return this.store.acknowledgeObservabilityAlert(alertId, actorId); }

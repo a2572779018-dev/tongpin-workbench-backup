@@ -7,7 +7,7 @@ import { wireRunGuidance } from "../../../server/ai/runGuidanceWiring";
 import type { AiWhisperRunner } from "../../../server/ai/voice";
 import { AI_VOICE_WHISPER_MODEL } from "../../../shared/aiVoice";
 
-const DEFAULT_AI_HOSTS = ["api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com", "api.moonshot.cn", "api.siliconflow.cn", "open.bigmodel.cn", "api.typesafe.ai"] as const;
+const DEFAULT_AI_HOSTS = ["api.openai.com", "api.deepseek.com", "dashscope.aliyuncs.com", "api.moonshot.cn", "api.siliconflow.cn", "api.siliconflow.com", "open.bigmodel.cn", "api.typesafe.ai"] as const;
 /** Exact deployment-owned domains close the DNS-rebinding gap: Worker fetch cannot pin IPs.
  * This allowlist is never read from an administrator's provider form or a member request.
  * Public DNS checks remain defense in depth and redirects never carry credentials elsewhere. */

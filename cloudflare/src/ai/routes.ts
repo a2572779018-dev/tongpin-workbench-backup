@@ -94,6 +94,7 @@ export async function handleAiRequest(request: Request, service: AiService, user
     const videoMatch = path.match(/^\/api\/ai\/videos\/([^/]+)(\/content)?$/);
     if (videoMatch && method === "GET") return videoMatch[2] ? await service.video.content(user.id, videoMatch[1]) : json({ job: await service.video.refresh(user.id, videoMatch[1]) });
     if (path === "/api/admin/ai/provider" && method === "GET") return json({ provider: service.provider() });
+    if (path === "/api/admin/ai/capabilities" && method === "PUT") return json({ provider: await service.saveCapabilities(await parseAiJson(request)) });
     if (path === "/api/admin/ai/provider" && method === "PUT") {
       const body = await parseAiJson<{ baseUrl?: unknown }>(request);
       if (typeof body.baseUrl === "string") {

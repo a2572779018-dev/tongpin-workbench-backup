@@ -281,13 +281,19 @@ export class AiVideoService {
     if (p.apiKey !== undefined && (typeof p.apiKey !== "string" || p.apiKey.length > 4096 || /[\s\x00-\x1f]/.test(p.apiKey))) throw new AiError(400, "AI_KEY_INVALID", "视频密钥格式不正确");
     const encryptedKey = p.apiKey ? await (await this.box()).encrypt(String(p.apiKey)) : existing.encryptedKey;
     if (p.enabled && !encryptedKey && !this.deploymentKey() && !this.harnessVideoConfigured()) throw new AiError(400, "AI_VIDEO_KEY_REQUIRED", "请先在业务档位中配置视频服务密钥，或填写视频专用密钥");
+    // Only a new key invalidates the model check: a price or on/off change keeps
+    // the verified models, so video does not close until a re-check succeeds.
+    const keepVerification = !p.apiKey && Boolean(existing.configVersion && existing.keyVersion);
     const next: Settings = {
       enabled: p.enabled,
       quotaPoints: Number(p.quotaPoints),
       defaultModel,
-      configVersion: crypto.randomUUID(),
+      configVersion: keepVerification ? existing.configVersion : crypto.randomUUID(),
       keyVersion: p.apiKey ? crypto.randomUUID() : existing.keyVersion ?? crypto.randomUUID(),
       ...(encryptedKey ? { encryptedKey } : {}),
+      ...(keepVerification && existing.verifiedConfigVersion ? {
+        verifiedConfigVersion: existing.verifiedConfigVersion, verifiedKeyVersion: existing.verifiedKeyVersion, verifiedModels: existing.verifiedModels,
+      } : {}),
     };
     this.store.sql.transaction(() => {
       if (!p.apiKey && this.saved().encryptedKey !== existing.encryptedKey) throw new AiError(409, "AI_CONFIG_CHANGED", "配置已被修改，请刷新后重试");

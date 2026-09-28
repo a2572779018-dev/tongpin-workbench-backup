@@ -95,17 +95,6 @@ function legacyRoute(provider: StoredProvider, tier: AiMode): AiHarnessTierRoute
   };
 }
 
-export function legacyHarness(provider: StoredProvider): AiHarnessConfig {
-  const tiers = Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, legacyRoute(provider, tier)])) as Record<AiMode, AiHarnessTierRoute>;
-  return {
-    providers: [{ id: "legacy", name: provider.name, baseUrl: provider.baseUrl, protocol: provider.protocol, enabled: provider.enabled, apiKeyConfigured: Boolean(provider.encryptedKey), modelsVerified: false, availableModels: [], modelsVerifiedAt: null }],
-    tiers,
-    policy: { strategy: "direct", maxToolSteps: 1, requireApproval: true, autoWebSearch: true },
-    updatedAt: provider.updatedAt,
-    migratedFromLegacy: true,
-  };
-}
-
 export interface ResolvedHarnessRoute {
   tier: AiMode;
   providerId: string;

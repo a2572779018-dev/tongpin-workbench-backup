@@ -467,34 +467,43 @@ describe("durable H3 jobs and isolated quotas", () => {
     expect(transport).toHaveBeenCalledTimes(1);
     expect(runtime.service.quota("a")).toEqual(quota);
   });
-  it("binds verified models to the saved config and key versions, then clears them on either change", async () => {
+  it("binds verified models to the saved key: a price or model change keeps them, a new key clears them", async () => {
     transport.mockResolvedValueOnce(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
     await runtime.service.video.test();
     const verified = JSON.parse(runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data);
     expect(verified).toMatchObject({ verifiedConfigVersion: verified.configVersion, verifiedKeyVersion: verified.keyVersion, verifiedModels: ["minimax_h3", "sd-2-c6"] });
 
+    // The key still sees the same models: video stays open instead of closing until a re-check.
     await runtime.service.video.configure({ enabled: true, quotaPoints: 1200, defaultModel: "sd-2-c6" });
     const changedConfig = JSON.parse(runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data);
-    expect(changedConfig.configVersion).not.toBe(verified.configVersion);
-    expect(changedConfig.keyVersion).toBe(verified.keyVersion);
-    expect(changedConfig).not.toHaveProperty("verifiedModels");
-    expect(runtime.service.video.settings()).toMatchObject({ availableModels: [], modelsVerified: false });
+    expect(changedConfig).toMatchObject({ configVersion: verified.configVersion, keyVersion: verified.keyVersion, verifiedModels: ["minimax_h3", "sd-2-c6"], quotaPoints: 1200 });
+    expect(runtime.service.video.settings()).toMatchObject({ availableModels: ["minimax_h3", "sd-2-c6"], modelsVerified: true });
 
     await runtime.service.video.configure({ enabled: true, quotaPoints: 1200, defaultModel: "sd-2-c6", apiKey: "rotated-video-key" });
     const changedKey = JSON.parse(runtime.store.sql.all<{ data: string }>("SELECT data FROM ai_settings WHERE id='video'")[0].data);
     expect(changedKey.keyVersion).not.toBe(changedConfig.keyVersion);
+    expect(changedKey.configVersion).not.toBe(changedConfig.configVersion);
     expect(changedKey).not.toHaveProperty("verifiedModels");
+    expect(runtime.service.video.settings()).toMatchObject({ availableModels: [], modelsVerified: false });
   });
-  it("does not apply a stale model check after the administrator changes configuration", async () => {
+  it("applies a model check that finishes after a price change, but not one that finishes after a new key", async () => {
     let finish!: (response: Response) => void;
     transport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const checking = runtime.service.video.test();
     await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
     await runtime.service.video.configure({ enabled: true, quotaPoints: 1300, defaultModel: "sd-2-c6" });
     finish(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
+    await expect(checking).resolves.toMatchObject({ availableModels: ["minimax_h3", "sd-2-c6"] });
+    expect(runtime.service.video.settings()).toMatchObject({ defaultModel: "sd-2-c6", availableModels: ["minimax_h3", "sd-2-c6"], modelsVerified: true });
 
-    await expect(checking).rejects.toMatchObject({ code: "AI_CONFIG_CHANGED" });
-    expect(runtime.service.video.settings()).toMatchObject({ defaultModel: "sd-2-c6", availableModels: [], modelsVerified: false });
+    let finishAgain!: (response: Response) => void;
+    transport.mockImplementationOnce(() => new Promise(resolve => { finishAgain = resolve; }));
+    const rechecking = runtime.service.video.test();
+    await vi.waitFor(() => expect(finishAgain).toBeTypeOf("function"));
+    await runtime.service.video.configure({ enabled: true, quotaPoints: 1300, defaultModel: "sd-2-c6", apiKey: "rotated-video-key" });
+    finishAgain(Response.json({ data: [{ id: "minimax_h3" }, { id: "sd-2-c6" }] }));
+    await expect(rechecking).rejects.toMatchObject({ code: "AI_CONFIG_CHANGED" });
+    expect(runtime.service.video.settings()).toMatchObject({ availableModels: [], modelsVerified: false });
   });
   it("automatically returns the reservation of a stale job without resubmitting", async () => {
     const req = input(); await runtime.service.video.submit("a", req);

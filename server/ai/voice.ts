@@ -1,8 +1,11 @@
 import type { AiQuota, AiUsage } from "../../shared/ai";
 import {
+  AI_VOICE_ID_PATTERN,
   AI_VOICE_LIMITS,
+  AI_VOICE_MAX_MEMBER_VOICES,
   AI_VOICE_WHISPER_MODEL,
   countSpeechCharacters,
+  speechVoiceLabel,
   voiceSpeechPoints,
   voiceTranscriptionPoints,
   type AiTranscriptionResponse,
@@ -44,7 +47,7 @@ import {
 
 const REQUEST_ID = /^[a-zA-Z0-9_-]{16,100}$/;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]{1,47}$/;
-const VOICE_ID = /^[A-Za-z0-9_.:/-]{1,128}$/;
+const VOICE_ID = AI_VOICE_ID_PATTERN;
 const MAX_POINTS = 10_000_000;
 const MAX_PENDING_PER_USER = 3;
 const TRANSCRIPTION_TIMEOUT_MS = 90_000;
@@ -62,9 +65,23 @@ const WHISPER_UNAVAILABLE = "Whisper 语音转写只能在云端服务使用，�
 
 const DEFAULT_SETTINGS: AiVoiceSettings = {
   inputEnabled: false, sttEngine: "whisper", sttProviderId: "", sttModelId: "", sttPointsPerMinute: 0,
-  ttsEngine: "browser", ttsProviderId: "", ttsModelId: "", ttsVoice: "", ttsPointsPer1kChars: 0,
+  ttsEngine: "browser", ttsProviderId: "", ttsModelId: "", ttsVoice: "", ttsMemberVoices: [], ttsPointsPer1kChars: 0,
   updatedAt: null,
 };
+
+/** Opaque, stable key members use for a voice, so the member view never names
+ * the provider's model or voice id (FNV-1a of the voice id). */
+export function memberVoiceKey(voice: string): string {
+  let hash = 0x811c9dc5;
+  for (const character of voice) { hash ^= character.codePointAt(0)!; hash = Math.imul(hash, 0x01000193) >>> 0; }
+  return `v${hash.toString(36)}`;
+}
+
+/** Valid, distinct voice ids, the default first, at most AI_VOICE_MAX_MEMBER_VOICES. */
+function memberVoiceList(defaultVoice: string, voices: readonly unknown[]): string[] {
+  const list = [defaultVoice, ...voices].filter((voice): voice is string => typeof voice === "string" && VOICE_ID.test(voice));
+  return [...new Set(list)].slice(0, AI_VOICE_MAX_MEMBER_VOICES);
+}
 
 /** Workers AI `@cf/openai/whisper-large-v3-turbo` input for one recording. */
 export interface AiWhisperInput {
@@ -312,7 +329,10 @@ export class AiVoiceService {
     try {
       const stored = { ...DEFAULT_SETTINGS, ...JSON.parse(row.data) as Partial<AiVoiceSettings> };
       // Settings saved before the engine choice existed (or anything unknown) mean Whisper.
-      return { ...stored, sttEngine: stored.sttEngine === "provider" ? "provider" : "whisper" };
+      // Settings saved before members could choose a voice offer the default one only.
+      const choices = Array.isArray(stored.ttsMemberVoices) ? stored.ttsMemberVoices : [];
+      return { ...stored, sttEngine: stored.sttEngine === "provider" ? "provider" : "whisper",
+        ttsMemberVoices: choices.length && stored.ttsVoice ? memberVoiceList(stored.ttsVoice, choices) : [] };
     } catch { return { ...DEFAULT_SETTINGS }; }
   }
 
@@ -363,10 +383,19 @@ export class AiVoiceService {
     const settings = this.settings();
     const readiness = this.readiness();
     const external = settings.ttsEngine === "external" && readiness.speech.ready;
+    const voices = external ? this.speechVoices(settings) : [];
     return {
       input: { enabled: readiness.input.ready, pointsPerMinute: readiness.input.ready ? settings.sttPointsPerMinute : 0, maxSeconds: AI_VOICE_LIMITS.maxAudioMs / 1000, maxBytes: AI_VOICE_LIMITS.maxAudioBytes },
-      speech: { engine: external ? "external" : "browser", pointsPer1kChars: external ? settings.ttsPointsPer1kChars : 0, maxCharacters: AI_VOICE_LIMITS.maxSpeechCharacters },
+      speech: {
+        engine: external ? "external" : "browser", pointsPer1kChars: external ? settings.ttsPointsPer1kChars : 0, maxCharacters: AI_VOICE_LIMITS.maxSpeechCharacters,
+        ...(external ? { voices: voices.map(id => ({ id: memberVoiceKey(id), label: speechVoiceLabel(id) })), defaultVoice: memberVoiceKey(settings.ttsVoice) } : {}),
+      },
     };
+  }
+
+  /** The voices members may choose, the default first (just the default when none were offered). */
+  private speechVoices(settings: AiVoiceSettings): string[] {
+    return settings.ttsMemberVoices.length ? memberVoiceList(settings.ttsVoice, settings.ttsMemberVoices) : [settings.ttsVoice];
   }
 
   async configure(value: unknown): Promise<AiVoiceSettings> {
@@ -377,6 +406,10 @@ export class AiVoiceService {
     if (sttEngine !== "whisper" && sttEngine !== "provider") invalid("请选择语音转写引擎");
     const ttsEngine = input.ttsEngine ?? "browser";
     if (ttsEngine !== "browser" && ttsEngine !== "external") invalid("请选择朗读方式");
+    // An administrator client that predates member voices keeps the saved list.
+    const memberVoices = input.ttsMemberVoices === undefined ? this.settings().ttsMemberVoices : input.ttsMemberVoices;
+    if (!Array.isArray(memberVoices) || memberVoices.length > AI_VOICE_MAX_MEMBER_VOICES + 1) invalid(`成员可选音色最多 ${AI_VOICE_MAX_MEMBER_VOICES} 个`);
+    for (const voice of memberVoices as unknown[]) if (typeof voice !== "string" || !VOICE_ID.test(voice)) invalid("成员可选音色只能包含字母、数字和 _ . : / -");
     const next: AiVoiceSettings = {
       inputEnabled: input.inputEnabled,
       sttEngine: sttEngine as AiVoiceSttEngine,
@@ -387,9 +420,12 @@ export class AiVoiceService {
       ttsProviderId: providerIdField(input.ttsProviderId, "朗读服务"),
       ttsModelId: textField(input.ttsModelId, "朗读模型", 160),
       ttsVoice: textField(input.ttsVoice, "音色", 128),
+      ttsMemberVoices: [],
       ttsPointsPer1kChars: pointsField(input.ttsPointsPer1kChars, "每千字折算同频点"),
       updatedAt: new Date().toISOString(),
     };
+    next.ttsMemberVoices = next.ttsVoice && (memberVoices as string[]).length ? memberVoiceList(next.ttsVoice, memberVoices as string[]) : [];
+    if (next.ttsMemberVoices.length > AI_VOICE_MAX_MEMBER_VOICES) invalid(`成员可选音色最多 ${AI_VOICE_MAX_MEMBER_VOICES} 个`);
     if (next.ttsVoice && !VOICE_ID.test(next.ttsVoice)) invalid("音色只能包含字母、数字和 _ . : / -");
     const providerIds = new Set(this.providers().map(provider => provider.id));
     if (next.inputEnabled) {
@@ -651,8 +687,10 @@ export class AiVoiceService {
     if (settings.ttsEngine !== "external") throw new AiError(409, "AI_VOICE_SPEECH_LOCAL", "当前使用本机系统语音朗读，无需请求服务器", true);
     if (settings.ttsPointsPer1kChars < 1 || !settings.ttsVoice) throw new AiError(503, "AI_VOICE_NOT_CONFIGURED", "管理员尚未完成外部朗读配置", true);
     const route = this.route(settings.ttsProviderId, settings.ttsModelId);
+    // A voice the administrator no longer offers (or never did) reads with the default one.
+    const voice = (typeof body.voice === "string" ? this.speechVoices(settings).find(item => memberVoiceKey(item) === body.voice) : undefined) ?? settings.ttsVoice;
     const points = voiceSpeechPoints(characters, settings.ttsPointsPer1kChars);
-    const hash = await sha256(JSON.stringify({ version: 1, kind: "speech", text, voice: settings.ttsVoice }));
+    const hash = await sha256(JSON.stringify({ version: 1, kind: "speech", text, voice }));
     // Synthesized audio is not kept, so a reused id is never replayed or billed twice.
     if (this.readRequest(userId, requestId)) throw new AiError(409, "AI_REQUEST_CONFLICT", "这段朗读请求已处理，请重新点击朗读");
 
@@ -668,7 +706,7 @@ export class AiVoiceService {
       const response = await this.transport(`${route.baseUrl}/audio/speech`, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", Accept: "audio/mpeg, audio/*", "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ model: route.modelId, input: text, voice: settings.ttsVoice, response_format: "mp3" }),
+        body: JSON.stringify({ model: route.modelId, input: text, voice, response_format: "mp3" }),
         signal: AbortSignal.timeout(SPEECH_TIMEOUT_MS), maxResponseBytes: AI_VOICE_LIMITS.maxSpeechResponseBytes,
       });
       if (!response.ok) { knownRejection = isProviderRejection(response.status); throw await readProviderHttpError(response, "audio"); }

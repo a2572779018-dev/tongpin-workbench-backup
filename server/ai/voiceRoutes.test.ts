@@ -74,7 +74,10 @@ describe("Node voice routes", () => {
     expect((await request(http!).get("/api/admin/ai/voice").set(as("admin")).expect(200)).body.settings.ttsVoice).toBe("alloy");
     await request(http!).get("/api/ai/voice").set(as("admin")).expect(403);
     const member = await request(http!).get("/api/ai/voice").set(as("member")).expect(200);
-    expect(member.body).toEqual({ settings: { input: { enabled: true, pointsPerMinute: 60, maxSeconds: 60, maxBytes: AI_VOICE_LIMITS.maxAudioBytes }, speech: { engine: "external", pointsPer1kChars: 20, maxCharacters: 1000 } } });
+    expect(member.body).toEqual({ settings: { input: { enabled: true, pointsPerMinute: 60, maxSeconds: 60, maxBytes: AI_VOICE_LIMITS.maxAudioBytes },
+      speech: { engine: "external", pointsPer1kChars: 20, maxCharacters: 1000, voices: [{ id: expect.stringMatching(/^v[0-9a-z]+$/), label: "Alloy" }], defaultVoice: expect.stringMatching(/^v[0-9a-z]+$/) } } });
+    // The member view names voices by display name and an opaque key, never the connection, model or voice id.
+    expect(JSON.stringify(member.body)).not.toMatch(/"alloy"|tts-1|whisper-1/);
     expect((await request(http!).put("/api/admin/ai/voice").set(as("admin")).send({ ...VOICE, sttProviderId: "nope" }).expect(400)).body.error.code).toBe("AI_VOICE_PROVIDER_MISSING");
   });
 

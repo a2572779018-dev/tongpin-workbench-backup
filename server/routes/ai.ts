@@ -89,6 +89,7 @@ export function createAiRouter(service: AiService, users: JsonStore, requireAuth
     router.post("/videos/:userId/:id/reconcile", (request, response) => response.json({ job: video(request).reconcile(request.params.userId, request.params.id, request.currentUser!.id, request.body) }));
     router.get("/provider", (request, response) => response.json({ provider: scoped(request).provider() }));
     router.put("/provider", async (request, response) => response.json({ provider: await scoped(request).saveProvider(request.body) }));
+    router.put("/capabilities", async (request, response) => response.json({ provider: await scoped(request).saveCapabilities(request.body) }));
     router.post("/provider/test", async (request, response) => response.json(await scoped(request).testProvider(request.body)));
     router.get("/harness", (request, response) => response.json({ harness: scoped(request).harnessSettings() }));
     router.put("/harness", async (request, response) => response.json({ harness: await scoped(request).saveHarness(request.body) }));

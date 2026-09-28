@@ -6,7 +6,7 @@ import type { AiTransport, AiTransportInit } from "./provider";
 import { AiError, createSecretBox } from "./security";
 import { AiService } from "./service";
 import { AiStore, type AiSql } from "./storage";
-import { isWhisperHallucination, withoutWhisperOutro, type AiWhisperRunner } from "./voice";
+import { isWhisperHallucination, memberVoiceKey, withoutWhisperOutro, type AiWhisperRunner } from "./voice";
 import type { VoiceTranscriptionUpload } from "./voiceAudio";
 import { bytesFromBase64, chromeLikeWebm, FFMPEG_LIVE_WEBM_1200MS, MP3_BYTES, pcmWav } from "../testSupport/voiceFixtures";
 
@@ -98,9 +98,57 @@ describe("AI voice service", () => {
     expect(service.voice.readiness()).toMatchObject({ input: { ready: true }, speech: { ready: true } });
     expect(service.voice.memberSettings()).toEqual({
       input: { enabled: true, pointsPerMinute: 60, maxSeconds: 60, maxBytes: 10 * 1024 * 1024 },
-      speech: { engine: "external", pointsPer1kChars: 20, maxCharacters: 1000 },
+      speech: { engine: "external", pointsPer1kChars: 20, maxCharacters: 1000,
+        voices: [{ id: memberVoiceKey("alloy"), label: "Alloy" }], defaultVoice: memberVoiceKey("alloy") },
     });
-    expect(JSON.stringify(service.voice.memberSettings())).not.toMatch(/primary|whisper|tts-1|alloy/);
+    // Members see opaque voice keys and display names, never the connection, model or voice id.
+    expect(JSON.stringify(service.voice.memberSettings())).not.toMatch(/primary|whisper|tts-1|"alloy"/);
+  });
+
+  it("lets members choose among the voices the administrator offers, and reads others with the default", async () => {
+    const cosy = "FunAudioLLM/CosyVoice2-0.5B";
+    models = ["chat-model", "whisper-1", cosy];
+    await service.discoverHarnessProvider("primary");
+    // The default voice is always offered, first, even when the list leaves it out.
+    const saved = await service.voice.configure({ ...VOICE, ttsModelId: cosy, ttsVoice: `${cosy}:anna`, ttsMemberVoices: [`${cosy}:claire`, `${cosy}:alex`, `${cosy}:claire`] });
+    expect(saved.ttsMemberVoices).toEqual([`${cosy}:anna`, `${cosy}:claire`, `${cosy}:alex`]);
+    const speech = service.voice.memberSettings().speech;
+    expect(speech.voices).toEqual([
+      { id: memberVoiceKey(`${cosy}:anna`), label: "Anna · 沉稳女声" },
+      { id: memberVoiceKey(`${cosy}:claire`), label: "Claire · 温柔女声" },
+      { id: memberVoiceKey(`${cosy}:alex`), label: "Alex · 沉稳男声" },
+    ]);
+    expect(speech.defaultVoice).toBe(memberVoiceKey(`${cosy}:anna`));
+    expect(JSON.stringify(speech)).not.toContain(cosy);
+    const voiceSent = () => JSON.parse(String(providerPosts().at(-1)!.init.body)).voice;
+    await service.voice.speech("member", { requestId: requestId(), text: "你好", voice: memberVoiceKey(`${cosy}:claire`) });
+    expect(voiceSent()).toBe(`${cosy}:claire`);
+    // A raw voice id, a voice no longer offered or nothing at all reads with the default.
+    for (const voice of [`${cosy}:claire`, memberVoiceKey(`${cosy}:david`), undefined]) {
+      await service.voice.speech("member", { requestId: requestId(), text: "你好", ...(voice ? { voice } : {}) });
+      expect(voiceSent()).toBe(`${cosy}:anna`);
+    }
+    // An administrator client that predates member voices keeps the saved list.
+    const { ttsMemberVoices: _omitted, ...older } = { ...VOICE, ttsModelId: cosy, ttsVoice: `${cosy}:anna`, ttsMemberVoices: [] as string[] };
+    expect((await service.voice.configure(older)).ttsMemberVoices).toEqual([`${cosy}:anna`, `${cosy}:claire`, `${cosy}:alex`]);
+    expect((await service.voice.configure({ ...older, ttsMemberVoices: [] })).ttsMemberVoices).toEqual([]);
+    expect(service.voice.memberSettings().speech.voices).toEqual([{ id: memberVoiceKey(`${cosy}:anna`), label: "Anna · 沉稳女声" }]);
+    expect((await failure(service.voice.configure({ ...older, ttsMemberVoices: ["bad voice"] }))).code).toBe("AI_VOICE_SETTINGS_INVALID");
+    expect((await failure(service.voice.configure({ ...older, ttsMemberVoices: "anna" }))).code).toBe("AI_VOICE_SETTINGS_INVALID");
+  });
+
+  it("does not let a harness save remove or switch off the connection voice is using", async () => {
+    await service.voice.configure(VOICE);
+    const input = harnessInput();
+    const second = { id: "second", name: "Second", baseUrl: "https://second.example.com/v1", protocol: "chat_completions" as const, apiKey: "second-key", enabled: true };
+    const moved = { ...input, providers: [second], tiers: Object.fromEntries(Object.entries(input.tiers).map(([tier, route]) => [tier, { ...route, providerId: "second" }])) as AiHarnessInput["tiers"] };
+    expect((await failure(service.saveHarness(moved))).code).toBe("AI_HARNESS_PROVIDER_IN_USE");
+    const switchedOff = { ...moved, providers: [second, { ...input.providers[0], enabled: false }] };
+    const refused = await failure(service.saveHarness(switchedOff));
+    expect([refused.status, refused.code, refused.message]).toEqual([409, "AI_HARNESS_PROVIDER_IN_USE", expect.stringContaining("「Primary」")]);
+    // Once voice no longer uses it, the same save goes through.
+    await service.voice.configure({ inputEnabled: false, ttsEngine: "browser" });
+    await expect(service.saveHarness(moved)).resolves.toMatchObject({ providers: [{ id: "second" }] });
   });
 
   it("fails closed until the chosen models are in the key's verified model list", async () => {
