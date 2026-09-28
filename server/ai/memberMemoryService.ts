@@ -32,6 +32,8 @@ import { tenantStorageValue } from "./tenant";
 export const MEMBER_MEMORY_MIN_REVIEW_INTERVAL_MS = 30_000;
 /** Hard ceiling on background reviews per member per rolling 24 hours. */
 export const MEMBER_MEMORY_DAILY_REVIEW_LIMIT = 40;
+/** Monitoring label for background memory reviews whose tier route is unusable. */
+export const MEMBER_MEMORY_REVIEW_PROVIDER = "memory-review";
 /** A captured prompt block stays frozen for this long within one conversation. */
 export const MEMBER_MEMORY_SNAPSHOT_TTL_MS = 6 * 60 * 60_000;
 const REVIEW_LEASE_MS = 3 * 60_000;
@@ -497,7 +499,19 @@ export class AiMemberMemoryService {
       if (!turns) return this.finish(userId, claimed, "skipped", "missing_turn", tier);
       let persona: AiPersonaProfile | undefined;
       try { persona = new AiPersonaRepository(this.deps.store.sql).read(userId, this.repository.tenantId).profile; } catch { persona = undefined; }
-      const target = this.reviewTarget(tier);
+      let target: ReviewTarget;
+      try { target = this.reviewTarget(tier); }
+      catch (error) {
+        // The tier was checked when memory settings were saved, but may since be
+        // disabled or have lost its verified model. Stay fail-closed (no other
+        // tier silently takes paid background work) and record it for the
+        // administrator's monitoring page, which alerts on repeated failures.
+        try {
+          this.deps.store.addObservability({ userId, tier, providerId: MEMBER_MEMORY_REVIEW_PROVIDER, capability: "chat", operation: "execution", success: false, latencyMs: 0,
+            errorCode: error instanceof AiError ? error.code : "AI_MEMORY_REVIEW_ROUTE_UNAVAILABLE" });
+        } catch { /* Monitoring must not change the review outcome. */ }
+        throw error;
+      }
       // Reserve the administrator-set price before any provider call.
       const reserved = this.deps.store.sql.transaction(() => {
         if (!settings.pricePoints) return true;

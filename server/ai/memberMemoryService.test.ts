@@ -276,6 +276,28 @@ describe("member memory learning loop (Hermes background review, adapted)", () =
     expect(reviewBodies).toHaveLength(1);
   });
 
+  it("alerts administrators when the saved review tier stops working, instead of failing every review silently", async () => {
+    // Memory settings were validated with the quick tier; four-tier settings later disable it.
+    const route = (enabled: boolean) => ({ providerId: "primary", modelId: "quick-model", protocol: "chat_completions" as const, maxOutputTokens: 1024, reasoningEffort: "" as const, capabilities: ["chat"] as const, enabled });
+    await runtime.service.saveHarness({
+      providers: [{ id: "primary", name: "Primary", baseUrl: "https://api.example.com", protocol: "chat_completions", apiKey: "harness-key-not-real", enabled: true }],
+      tiers: { quick: route(false), standard: route(true), deep: route(true), pro: route(true) },
+      policy: { strategy: "direct", maxToolSteps: 1, requireApproval: true, autoWebSearch: false },
+    });
+    transport.mockImplementationOnce(async () => Response.json({ data: [{ id: "quick-model" }] }));
+    await runtime.service.discoverHarnessProvider("primary");
+    for (const [index, content] of ["记住我负责 LORA Chain 的生态合作", "记住我每周五写周报", "记住我偏好先给结论"].entries()) {
+      await runtime.service.chat("member-a", { requestId: crypto.randomUUID(), mode: "standard", conversationId: `conv-alert-${index}`, messages: [{ role: "user", content }] });
+      await memberMemoryRuntime.idle();
+    }
+    // Fail-closed: no reviewer call, no charge.
+    expect(reviewBodies).toHaveLength(0);
+    expect(runtime.service.quota("member-a").reservedTokens).toBe(0);
+    const dashboard = runtime.service.observability();
+    expect(dashboard.slices.find(slice => slice.provider === "memory-review")).toMatchObject({ tier: "quick", capability: "chat", failures: 3, successes: 0, errors: [{ code: "AI_TIER_DISABLED", count: 3 }] });
+    expect(dashboard.alerts).toEqual(expect.arrayContaining([expect.objectContaining({ code: "PROVIDER_UNAVAILABLE", provider: "memory-review", tier: "quick" })]));
+  });
+
   it("skips a review the member cannot afford, before contacting the provider", async () => {
     memory().saveAdminSettings({ enabled: true, reviewTier: "quick", pricePoints: 100_000 });
     const response = await send("记住我负责 LORA Chain 的生态合作");
