@@ -49,7 +49,10 @@ export function AdminAiVoiceSettings({ harnessConfig = null, onHarnessChanged, o
   const [busy, setBusy] = useState<"save" | "connect" | null>(null);
   const busyRef = useRef(false);
   const [siliconFlowKey, setSiliconFlowKey] = useState("");
-  const providers = harnessConfig?.providers ?? [];
+  // Only saved connections count: an unsaved 「服务与模型」 draft (migrated from the
+  // old single-service settings) does not exist on the server yet.
+  const savedHarness = tiersManageRouting(harnessConfig) ? harnessConfig : null;
+  const providers = savedHarness?.providers ?? [];
   const providerIds = new Set(providers.map(provider => provider.id));
 
   useEffect(() => {
@@ -114,10 +117,10 @@ export function AdminAiVoiceSettings({ harnessConfig = null, onHarnessChanged, o
   </>;
   const modelsFor = (providerId: string) => providers.find(provider => provider.id === providerId)?.availableModels ?? [];
   const providerStt = draft.inputEnabled && draft.sttEngine === "provider";
-  const sttWarning = providerStt ? voiceModelWarning(harnessConfig, draft.sttProviderId, draft.sttModelId) : "";
-  const ttsWarning = draft.ttsEngine === "external" ? voiceModelWarning(harnessConfig, draft.ttsProviderId, draft.ttsModelId) : "";
+  const sttWarning = providerStt ? voiceModelWarning(savedHarness, draft.sttProviderId, draft.sttModelId) : "";
+  const ttsWarning = draft.ttsEngine === "external" ? voiceModelWarning(savedHarness, draft.ttsProviderId, draft.ttsModelId) : "";
   const presetVoices = ttsVoiceSuggestions(draft.ttsModelId);
-  const offersQuickSetup = draft.ttsEngine === "external" && !hasSpeechConnection(harnessConfig);
+  const offersQuickSetup = draft.ttsEngine === "external" && !hasSpeechConnection(savedHarness);
   const memberVoiceSet = new Set(draft.ttsMemberVoices);
   const toggleMemberVoice = (voice: string, on: boolean) => change({ ttsMemberVoices: on ? [...draft.ttsMemberVoices, voice] : draft.ttsMemberVoices.filter(item => item !== voice) });
 
