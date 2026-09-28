@@ -1220,14 +1220,42 @@ describe("computer agent one-stop send in apps that hide their text (WeChat)", (
     expect(send.result.authorization).toBe("extra_consent");
   });
 
-  it("does not take another chat's title for the recipient", async () => {
+  it("never types into a chat that search + Return opened when its title is not the recipient", async () => {
     const app = wechatApp({ hideTexts: true, hideInputValue: true });
-    // The run opened a chat whose title reads 妈妈: the screen does not prove 姐姐.
+    // Return opened something else: the chat pane's title reads 妈妈 (seen
+    // live: WeChat's Return opened 搜一搜, a web search, with a group chat open).
     const agent = await started({ app, foregroundFirstBundles: new Set(["com.tencent.xinwechat"]), recognizeText: screenReader(app, { title: () => "妈妈" }), extraConsent: false });
-    const send = await sendFlow(agent);
-    expect(send.view.facts.screenCheck).toEqual({ recipientInTitle: false, composerHoldsText: true });
-    expect(send.result).toMatchObject({ status: "blocked", authorization: "extra_consent" });
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    await step(agent, "key_return_fg");
+    const view = await observe(agent);
+    // Withdrawn before any typing: no message candidate, focus unknown, and Jev is told.
+    expect(view.candidates.map((candidate) => candidate.id)).not.toContain("type_p2_focus_fg");
+    expect(view.facts).toMatchObject({ focus: "none", screenCheck: { recipientInTitle: false, composerHoldsText: false } });
+    expect(view.facts).not.toHaveProperty("conversationOpenedFor");
+    expect(view.display.screenText).toMatchObject({ phase: "before", recipientInTitle: false });
+    // Searching again, Return is described as unreliable here.
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    const again = await observe(agent);
+    expect(again.candidates.find((candidate) => candidate.id === "key_return_fg").description).toContain("Earlier in this run Return on this search opened something other than the chat");
+    expect(agent.app.input).toBe("");
     expect(agent.app.sent).toEqual([]);
+  });
+
+  it("confirms a chat that search + Return opened from its title, once", async () => {
+    const app = wechatApp({ hideTexts: true, hideInputValue: true });
+    const recognizeText = screenReader(app);
+    const agent = await started({ app, foregroundFirstBundles: new Set(["com.tencent.xinwechat"]), recognizeText });
+    await step(agent, "open_search_fg");
+    await step(agent, "type_p1_focus_fg");
+    await step(agent, "key_return_fg");
+    const reads = recognizeText.mock.calls.length;
+    const view = await observe(agent);
+    // One read serves the check and the pre-typing baseline.
+    expect(recognizeText.mock.calls.length).toBe(reads + 1);
+    expect(view.facts).toMatchObject({ focus: "conversation", conversationOpenedFor: "姐姐" });
+    expect(view.candidates.map((candidate) => candidate.id)).toContain("type_p2_focus_fg");
   });
 
   it("reports the text still in the composer when the send did not go out", async () => {
@@ -1805,6 +1833,22 @@ describe("computer agent keypad tasks (macOS Calculator)", () => {
     expect(policy.keypadRelevance({ text: "加" }, task)).toBe(0);
     // Ranking only: = is not a risky control.
     expect(policy.labelRisk("等于")).toBe("none");
+  });
+
+  it("keeps the display in the observation ahead of the app's menu items", () => {
+    const task = policy.validateTaskSpec(CALC_TASK).task;
+    const item = (label, index, roleKey = "axmenuitem") => ({ ...button(label, index), role: roleKey === "axmenuitem" ? "AXMenuItem" : "AXStaticText", roleShort: roleKey === "axmenuitem" ? "menu_item" : "static_text", roleKey });
+    // Calculator's tree: ~120 menu items (closed menus) come before the window.
+    const elements = [
+      ...Array.from({ length: 120 }, (_, index) => item(`菜单项 ${index}`, index)),
+      item("128×36", 200, "axstatictext"), { ...item("", 201, "axstatictext"), value: "4,608", text: "4,608" },
+      ...KEYPAD.map((label, index) => button(label, 300 + index)),
+    ];
+    const observation = policy.projectObservation({ app: "计算器", windowTitle: "计算器", elements, treeTexts: [], axSparse: false, task });
+    expect(observation.elements.some((element) => element.value === "4,608")).toBe(true);
+    expect(policy.keypadRelevance({ text: "4,608", roleKey: "axstatictext" }, task)).toBe(10);
+    // Only in a calculation task.
+    expect(policy.keypadRelevance({ text: "4,608", roleKey: "axstatictext" }, policy.validateTaskSpec(TASK).task)).toBe(0);
   });
 
   it("leaves tasks without a calculation ranked as before", () => {

@@ -274,7 +274,9 @@ const KEYPAD_OPERATORS = Object.freeze([
   { symbols: /^[÷/／]$/u, labels: /^(?:÷|\/|除|除号|divide)$/iu },
 ]);
 const KEYPAD_EQUALS = /^(?:=|＝|等于|等号|equals?)$/iu;
-const KEYPAD_DECIMAL = /^(?:\.|．|小数点|decimal|point)$/iu;
+const KEYPAD_DECIMAL = /^(?:\.|．|点|小数点|decimal|point)$/iu;
+/** A display reading a plain number ("36", "4,608"). */
+const KEYPAD_DISPLAY = /^[-−]?\d[\d,，.．\s]*$/u;
 
 /**
  * Keypad buttons for a calculation the task spells out ("计算 128×36"). All
@@ -294,6 +296,10 @@ function keypadRelevance(element, task) {
   const expressions = task.parameters.filter((parameter) => parameter.role === "text" && ARITHMETIC_LITERAL.test(parameter.value)).map((parameter) => parameter.value);
   if (!expressions.length) return 0;
   if (KEYPAD_EQUALS.test(label)) return 70;
+  // The display (static text): kept in the observation ahead of the dozens
+  // of menu items (Calculator's tree has ~120), so Jev and the read-back see
+  // the result. Seen live: "4,608" was left out of the observation.
+  if (element.roleKey === "axstatictext" && KEYPAD_DISPLAY.test(label) && [...label].length > 1) return 10;
   if (/^\d$/u.test(label)) return expressions.some((value) => value.includes(label)) ? 50 : 0;
   if (KEYPAD_DECIMAL.test(label)) return expressions.some((value) => /\d[.．]\d/u.test(value)) ? 50 : 0;
   const operators = expressions.flatMap((value) => [...value.matchAll(OPERATOR_BETWEEN_DIGITS)].map((match) => match[1]));
@@ -366,6 +372,11 @@ function emptyTracker() {
     // before typing) or "list" (the list under the box appeared or redrew).
     // The proof is re-checked on every capture and before Return runs.
     focus: "none", searchText: null, searchMoved: false, searchByKeys: false, searchSeen: null, searchSeenBy: null, searchResultsBase: null, composerText: null, conversationTarget: null, conversationVia: null,
+    // conversationChecked: the window's recognized text showed the recipient
+    // as the title of the chat search + Return opened. searchReturnMissed: a
+    // Return on the search opened something else (another result, a web
+    // search), so the next Return there is described as unreliable.
+    conversationChecked: false, searchReturnMissed: false,
     sendCount: 0, irreversibleCounts: Object.freeze({}), typed: Object.freeze([]),
     delivery: "background", backgroundSuspect: false,
     // Element identities whose background click/type was refused or had no
@@ -534,7 +545,7 @@ function buildCandidates(context) {
       returnExpect = "The highlighted search result is open.";
     } else if (searchConfirmed) {
       returnRisk = "none";
-      returnDescription = `Press Return to open the highlighted search result${tracker.searchText ? ` for "${quote(tracker.searchText)}"` : ""}.`;
+      returnDescription = `Press Return to open the highlighted search result${tracker.searchText ? ` for "${quote(tracker.searchText)}"` : ""}.${tracker.searchReturnMissed ? " Earlier in this run Return on this search opened something other than the chat (another result or a web search): prefer clicking the exact result item if one is offered." : ""}`;
       returnLabel = `按回车打开搜索结果${tracker.searchText ? `「${quote(tracker.searchText)}」` : ""}`;
       returnExpect = tracker.searchText ? `The conversation or item "${quote(tracker.searchText)}" is open.` : "The highlighted search result is open.";
     } else if ((tracker.focus === "conversation" || tracker.focus === "field") && tracker.composerText) {
@@ -1018,9 +1029,32 @@ function screenSendFacts({ task, screen, windowBounds, before = null, composerAt
   return {
     anchored: Boolean(anchor),
     recipientInTitle,
+    titleLines: titles.length,
     composerLine: composerLine ? { x: composerLine.x, y: composerLine.y, w: composerLine.w, h: composerLine.h } : null,
     copies,
   };
+}
+
+/**
+ * After search + Return: what the window's recognized text says about the
+ * chat that opened. "confirmed": the chat title reads exactly the recipient;
+ * "other": the chat-title band reads something else (Return opened another
+ * result, a web search such as WeChat's 搜一搜, or left the old chat open);
+ * "unknown": no title could be read (no text recognition, nothing there).
+ */
+function openedChatCheck({ task, screen, windowBounds, elements = [] }) {
+  const read = screenSendFacts({ task, screen, windowBounds, elements });
+  if (!read) return "unknown";
+  if (read.recipientInTitle) return "confirmed";
+  return read.titleLines > 0 ? "other" : "unknown";
+}
+
+/** The chat believed open was another one: nothing is typed "into" it. */
+function withdrawConversation(tracker) {
+  return Object.freeze({
+    ...tracker, focus: "none", conversationTarget: null, conversationVia: null, conversationChecked: false, composerText: null,
+    searchText: null, searchMoved: false, searchReturnMissed: true, typed: tracker.typed.filter((entry) => !entry.field.startsWith("focus:")),
+  });
 }
 
 function sendEvidence({ task, tracker, observation }) {
@@ -1178,7 +1212,7 @@ function nextTracker(tracker, candidate, status, { task }) {
           // After ↓/↑ another result may be highlighted: the chat is opened,
           // but not known to be the searched one.
           const opened = !tracker.searchMoved && tracker.searchText && recipient && normalizeName(tracker.searchText) === normalizeName(recipient) ? tracker.searchText : null;
-          Object.assign(next, { focus: "conversation", conversationTarget: opened, conversationVia: opened ? "search" : null, composerText: null, searchText: null, searchMoved: false, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
+          Object.assign(next, { focus: "conversation", conversationTarget: opened, conversationVia: opened ? "search" : null, conversationChecked: false, composerText: null, searchText: null, searchMoved: false, typed: next.typed.filter((entry) => !entry.field.startsWith("focus:")) });
         }
       } else if (candidate.key === "escape") {
         Object.assign(next, { focus: tracker.focus === "search" ? "none" : tracker.focus, searchText: null, searchMoved: false });
@@ -1214,7 +1248,7 @@ function nextTracker(tracker, candidate, status, { task }) {
   return Object.freeze(next);
 }
 
-function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow, landing, searchListShown = false, screen = null, screenBaseline = null }) {
+function facts({ tracker, task, observation, sendBaseline, appName, appRunning, targetWindow, landing, searchListShown = false, screen = null, screenBaseline = null, chatRefuted = false }) {
   const content = task.irreversible && task.irreversible.content;
   let sendEvidenceFacts;
   if (tracker.sendCount > 0 && content && sendBaseline !== null && observation) {
@@ -1233,9 +1267,12 @@ function facts({ tracker, task, observation, sendBaseline, appName, appRunning, 
     }
   }
   // Before the send: what the screen shows about the chat and the composer.
-  const screenCheck = screen && tracker.sendCount === 0 && (screen.recipientInTitle || screen.composerLine)
-    ? { recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.anchored && screen.composerLine) }
-    : null;
+  // A chat search + Return opened that is not the recipient's (read off the
+  // screen this capture): said explicitly, so Jev does not type the message.
+  const screenCheck = chatRefuted ? { recipientInTitle: false, composerHoldsText: false }
+    : screen && tracker.sendCount === 0 && (screen.recipientInTitle || screen.composerLine)
+      ? { recipientInTitle: screen.recipientInTitle, composerHoldsText: Boolean(screen.anchored && screen.composerLine) }
+      : null;
   return {
     focus: tracker.focus,
     ...(tracker.searchText ? { typedIntoSearch: tracker.searchText } : {}),
@@ -1322,6 +1359,7 @@ module.exports = {
   nextTracker,
   normalizeName,
   occurrences,
+  openedChatCheck,
   projectObservation,
   publicCandidate,
   recipientNewlySelected,
@@ -1336,5 +1374,6 @@ module.exports = {
   typedTextSpots,
   validateLimits,
   validateTaskSpec,
+  withdrawConversation,
   withdrawSearch,
 };

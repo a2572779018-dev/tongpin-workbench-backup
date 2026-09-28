@@ -493,6 +493,13 @@ describe("computer executor read-back tasks", () => {
     // A result that equals the start value (7 − 7 = 0) or an operand (5 × 1).
     expect(readBackValues({ ...subtract, parameters: [{ ...subtract.parameters[0], value: "7-7" }] }, new Set(["0", "100%"]), shownOnly("0"))).toEqual(["0"]);
     expect(readBackValues({ ...subtract, parameters: [{ ...subtract.parameters[0], value: "5×1" }] }, new Set(["5", "100%"]), shownOnly("5"))).toEqual(["5"]);
+    // The display may fall outside the observation's elements: a plain value
+    // equal to the calculation's result is taken from the window's texts.
+    const textsOnly = { ...observation, elements: keypad, texts: ["128×36", "4,608", "转账 4608 元"] };
+    expect(readBackValues(CALC, new Set(), textsOnly)).toEqual(["4,608"]);
+    // …but only for a calculation, and only a value equal to its result.
+    expect(readBackValues({ ...CALC, goal: "读取页面上显示的金额并告诉我", parameters: [] }, new Set(), textsOnly)).toEqual([]);
+    expect(readBackValues(CALC, new Set(), { ...textsOnly, texts: ["4,609"] })).toEqual([]);
     // Nothing on screen matches the calculation, nothing new: nothing reported.
     expect(readBackValues(subtract, new Set(["3", "100%"]), shownOnly("3"))).toEqual([]);
     // Words, controls, inputs, tree texts, long card-like numbers and the task's own literal never count.

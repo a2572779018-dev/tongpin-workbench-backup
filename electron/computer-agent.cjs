@@ -992,6 +992,21 @@ function createComputerAgentController({
       // or results or text that disappeared mean the search box lost focus.
       const proof = snapshot ? policy.searchProof(state.tracker, landingElements, searchList) : "unknown";
       if (proof === "gone") state.tracker = policy.withdrawSearch(state.tracker);
+      // A chat opened by search + Return is believed only once the window's
+      // text shows the recipient as the chat title: WeChat's Return can open
+      // 搜一搜 (a web search) instead of the contact, leaving another chat
+      // open. A title that reads something else withdraws the belief before
+      // candidates are built, so the message is never typed into that chat.
+      let earlyScreen = null;
+      let chatRefuted = false;
+      const openedBySearch = state.tracker.conversationVia === "search" && !state.tracker.conversationChecked;
+      if (target && sendTask(state) && openedBySearch && state.tracker.composerText === null && state.tracker.sendCount === 0) {
+        earlyScreen = await readScreenText(state, target);
+        if (state.stopped) return failure("stopped");
+        const verdict = earlyScreen ? policy.openedChatCheck({ task: state.task, screen: earlyScreen, windowBounds: earlyScreen.windowBounds, elements }) : "unknown";
+        if (verdict === "confirmed") state.tracker = Object.freeze({ ...state.tracker, conversationChecked: true });
+        else if (verdict === "other") { state.tracker = policy.withdrawConversation(state.tracker); chatRefuted = true; }
+      }
       const treeTexts = snapshot ? policy.extractTreeTexts(snapshot.treeMarkdown) : [];
       const windowTitle = snapshot ? snapshot.windowTitle : null;
       const appName = targetApp ? targetApp.name : state.grantApps[0].name;
@@ -1041,18 +1056,19 @@ function createComputerAgentController({
       // it, whether a new copy appeared and the composer emptied.
       const tracker = state.tracker;
       const aroundSend = sendTask(state) && (tracker.sendCount > 0 ? Boolean(state.screenBaseline) : Boolean(tracker.conversationTarget || tracker.composerText));
-      const screenRead = target && aroundSend ? await readScreenText(state, target) : null;
+      const screenRead = target && (aroundSend || chatRefuted) ? (earlyScreen || await readScreenText(state, target)) : null;
       if (state.stopped) return failure("stopped");
       // Lines read after the chat opened and before the run typed its text:
       // what was already on screen (old bubbles, a draft) is told apart from
       // the line the typing brought up.
-      if (screenRead && tracker.sendCount === 0 && tracker.composerText === null) state.screenBeforeTyping = screenRead;
+      // (Not a read of a chat that turned out to be another one.)
+      if (screenRead && !chatRefuted && tracker.sendCount === 0 && tracker.composerText === null) state.screenBeforeTyping = screenRead;
       const screen = screenRead ? policy.screenSendFacts({
         task: state.task, screen: screenRead, windowBounds: screenRead.windowBounds, elements,
         before: state.screenBeforeTyping, composerAt: tracker.sendCount > 0 ? state.screenBaseline.composerLine : null,
       }) : null;
       state.observation.screen = screen;
-      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing, searchListShown: searchList.lists.length > 0, screen, screenBaseline: state.screenBaseline });
+      const facts = policy.facts({ tracker: state.tracker, task: state.task, observation: { elements, treeTexts }, sendBaseline: state.sendBaseline, appName, appRunning: Boolean(targetApp && targetApp.running), targetWindow, landing, searchListShown: searchList.lists.length > 0, screen, screenBaseline: state.screenBaseline, chatRefuted });
       return success({
         observationId,
         observation,

@@ -249,10 +249,14 @@ export function readBackValues(task: ComputerTaskSpec, beforeLastAction: Readonl
   const shown = screenValues(observation).filter(value => !literals.has(value.replace(/\s+/g, "")));
   const expected = calculationResult(task);
   if (expected !== null) {
-    const match = shown.find(value => {
+    // Equal to the calculation's own result: strong enough to take from the
+    // window's untyped texts too (a display can fall outside the elements).
+    const equalsResult = (value: string) => {
       const number = numberOf(value);
       return number !== null && Math.abs(number - expected) <= 1e-9 * Math.max(1, Math.abs(expected));
-    });
+    };
+    const texts = observation.texts.map(text => text.replace(/\s+/g, " ").trim()).filter(text => [...text].length <= 24 && SCREEN_VALUE.test(text) && (text.match(/\d/g)?.length ?? 0) <= MAX_VALUE_DIGITS);
+    const match = shown.find(equalsResult) ?? texts.find(value => !literals.has(value.replace(/\s+/g, "")) && equalsResult(value));
     if (match) return [match];
   }
   return shown.filter(value => !beforeLastAction.has(value)).slice(0, 3);
