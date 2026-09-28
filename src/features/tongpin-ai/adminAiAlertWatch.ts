@@ -1,6 +1,6 @@
 import {
   AI_BUSINESS_TIER_LABELS,
-  AI_HARNESS_CAPABILITY_LABELS,
+  AI_OBSERVABILITY_CAPABILITY_LABELS,
   type AiMode,
   type AiObservabilityAlert,
   type AiObservabilityDashboard,
@@ -84,8 +84,8 @@ export interface AdminAiAlertDescription { title: string; lines: string[]; body:
 
 /** Plain-Chinese alert summary: tier, service display name, capability, rate and error code. */
 export function describeAdminAiAlert(alert: AiObservabilityAlert, providerLabel: (providerId: string) => string = id => id): AdminAiAlertDescription {
-  const tier = alert.tier === "all" ? "全部档位" : `${AI_BUSINESS_TIER_LABELS[alert.tier as AiMode] ?? alert.tier}档`;
-  const capability = AI_HARNESS_CAPABILITY_LABELS[alert.capability] ?? alert.capability;
+  const tier = alert.tier === "all" ? "不分档位" : `${AI_BUSINESS_TIER_LABELS[alert.tier as AiMode] ?? alert.tier}档`;
+  const capability = AI_OBSERVABILITY_CAPABILITY_LABELS[alert.capability] ?? alert.capability;
   const kind = ADMIN_AI_ALERT_KIND_LABELS[alert.code] ?? alert.code;
   const severity = alert.severity === "critical" ? "严重告警" : "预警";
   const detail = alert.detail;

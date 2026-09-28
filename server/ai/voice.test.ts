@@ -331,6 +331,20 @@ describe("AI voice service", () => {
     expect(providerPosts()).toHaveLength(1);
   });
 
+  it("shows voice requests in 运行监控, outside any business tier", async () => {
+    await service.voice.configure(VOICE);
+    await service.voice.transcribe("member", recording());
+    await service.voice.speech("member", { requestId: requestId(), text: "你好" });
+    providerFailure = Response.json({ error: { message: PROVIDER_KEY, code: "invalid_api_key" } }, { status: 401 });
+    await failure(service.voice.transcribe("member", recording()));
+    const { slices } = store.observability(60);
+    expect(slices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tier: "all", provider: "primary", capability: "speech_input", operation: "execution", requests: 2, successes: 1, failures: 1, errors: [{ code: "AI_PROVIDER_AUTH", count: 1 }] }),
+      expect.objectContaining({ tier: "all", provider: "primary", capability: "speech_output", requests: 1, successes: 1, failures: 0 }),
+    ]));
+    expect(JSON.stringify(store.observability(60))).not.toContain(PROVIDER_KEY);
+  });
+
   it("does not pass a non-audio speech answer to the member", async () => {
     await service.voice.configure(VOICE);
     speechResponse = () => Response.json({ error: "not audio" });

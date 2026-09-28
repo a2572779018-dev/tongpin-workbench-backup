@@ -481,6 +481,12 @@ export class AiVoiceService {
       model: current.model, mode: null, createdAt: new Date().toISOString(), reason, limitTokens: null, ...usage,
       ...(extras.error?.diagnostic ? { diagnostic: extras.error.diagnostic } : {}),
     });
+    // 运行监控: voice belongs to no business tier; a failure raises the same alerts as chat.
+    this.store.addObservability({
+      userId: record.userId, tier: "all", providerId: current.providerId, capability: current.kind === "transcription" ? "speech_input" : "speech_output",
+      operation: "execution", success: status === "completed", latencyMs: Date.now() - Date.parse(current.createdAt),
+      ...(status === "completed" ? {} : { errorCode: extras.error?.code ?? "AI_REQUEST_UNCERTAIN" }),
+    });
     return usage;
   }
 

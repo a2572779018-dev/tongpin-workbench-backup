@@ -1,4 +1,4 @@
-import type { AiChatResponse, AiHarnessCapability, AiHarnessConfig, AiHarnessRunStatus, AiHarnessStep, AiImageAsset, AiImageMimeType, AiImageResponse, AiMode, AiObservabilityAlert, AiObservabilityDashboard, AiObservabilitySlice, AiProviderConfig, AiQuota, AiRequestResult, AiUsageEntry } from "../../shared/ai";
+import type { AiChatResponse, AiHarnessCapability, AiHarnessConfig, AiHarnessRunStatus, AiHarnessStep, AiImageAsset, AiImageMimeType, AiImageResponse, AiMode, AiObservabilityAlert, AiObservabilityCapability, AiObservabilityDashboard, AiObservabilitySlice, AiProviderConfig, AiQuota, AiRequestResult, AiUsageEntry } from "../../shared/ai";
 import { AiError } from "./security";
 import { DEFAULT_AI_TENANT_ID, normalizeAiTenantId, tenantStorageKey, tenantStorageValue } from "./tenant";
 import { aiLatencyThresholds } from "./observabilityThresholds";
@@ -371,7 +371,8 @@ export class AiStore {
   harnessSteps(userId: string, runId: string): AiHarnessStep[] {
     return this.sql.all<{ data: string }>("SELECT data FROM ai_harness_steps WHERE tenant_id=? AND user_id=? AND run_id=? ORDER BY json_extract(data,'$.createdAt'), rowid", this.tenantId, this.userKey(userId), runId).map(row => JSON.parse(row.data) as AiHarnessStep);
   }
-  addObservability(value: { userId: string; tier: AiMode; providerId: string; capability: AiHarnessCapability; operation?: "planning" | "execution"; success: boolean; latencyMs: number; firstVisibleMs?: number; errorCode?: string }): void {
+  /** `tier: "all"` marks a request that no business tier owns (voice). */
+  addObservability(value: { userId: string; tier: AiMode | "all"; providerId: string; capability: AiObservabilityCapability; operation?: "planning" | "execution"; success: boolean; latencyMs: number; firstVisibleMs?: number; errorCode?: string }): void {
     const id = crypto.randomUUID();
     const providerId = /^[a-zA-Z0-9._:-]{1,120}$/.test(value.providerId) ? value.providerId : "unknown-provider";
     const errorCode = value.success ? null : /^[A-Z][A-Z0-9_]{1,95}$/.test(value.errorCode ?? "") ? value.errorCode! : "AI_UNKNOWN_ERROR";
@@ -395,7 +396,7 @@ export class AiStore {
        GROUP BY tier,provider_id,capability,operation,error_code ORDER BY count DESC,error_code`, this.tenantId, Date.now() - safeWindow * 60_000,
     );
     return rows.map(row => ({
-      tier: row.tier as AiMode, provider: row.provider_id, capability: row.capability as AiHarnessCapability, operation: row.operation as "planning" | "execution",
+      tier: row.tier as AiMode | "all", provider: row.provider_id, capability: row.capability as AiObservabilityCapability, operation: row.operation as "planning" | "execution",
       requests: Number(row.requests), successes: Number(row.successes), failures: Number(row.failures),
       successRate: Number(row.requests) ? Number(row.successes) / Number(row.requests) : 0,
       errorRate: Number(row.requests) ? Number(row.failures) / Number(row.requests) : 0,
@@ -415,7 +416,7 @@ export class AiStore {
       return result;
     });
   }
-  private syncObservabilityAlerts(slices: AiObservabilitySlice[], trigger?: { tier: AiMode; provider: string; capability: AiHarnessCapability; operation: "planning" | "execution"; success: boolean; latencyMs: number }): void {
+  private syncObservabilityAlerts(slices: AiObservabilitySlice[], trigger?: { tier: AiMode | "all"; provider: string; capability: AiObservabilityCapability; operation: "planning" | "execution"; success: boolean; latencyMs: number }): void {
     const now = Date.now();
     const current = this.thresholdAlerts(slices);
     const active = this.sql.all<{ id: string; fingerprint: string }>("SELECT id,fingerprint FROM ai_observability_alerts WHERE tenant_id=? AND resolved_at IS NULL", this.tenantId);
@@ -442,7 +443,7 @@ export class AiStore {
   private observabilityAlertRows(): Array<AiObservabilityAlert & { fingerprint: string }> {
     return this.sql.all<{ fingerprint: string; id: string; code: AiObservabilityAlert["code"]; severity: AiObservabilityAlert["severity"]; tier: string; provider_id: string; capability: string; message: string; first_seen_at: number; last_seen_at: number; occurrence_count: number; acknowledged_at: number | null; resolved_at: number | null }>(
       "SELECT fingerprint,id,code,severity,tier,provider_id,capability,message,first_seen_at,last_seen_at,occurrence_count,acknowledged_at,resolved_at FROM ai_observability_alerts WHERE tenant_id=? ORDER BY last_seen_at DESC LIMIT 100", this.tenantId,
-    ).map(row => ({ fingerprint: String(row.fingerprint), id: row.id, code: row.code, severity: row.severity, tier: row.tier as AiMode, provider: row.provider_id, capability: row.capability as AiHarnessCapability, message: row.message, firstSeenAt: new Date(Number(row.first_seen_at)).toISOString(), lastSeenAt: new Date(Number(row.last_seen_at)).toISOString(), occurrences: Number(row.occurrence_count), acknowledgedAt: row.acknowledged_at === null ? null : new Date(Number(row.acknowledged_at)).toISOString(), resolvedAt: row.resolved_at === null ? null : new Date(Number(row.resolved_at)).toISOString() }));
+    ).map(row => ({ fingerprint: String(row.fingerprint), id: row.id, code: row.code, severity: row.severity, tier: row.tier as AiMode | "all", provider: row.provider_id, capability: row.capability as AiObservabilityCapability, message: row.message, firstSeenAt: new Date(Number(row.first_seen_at)).toISOString(), lastSeenAt: new Date(Number(row.last_seen_at)).toISOString(), occurrences: Number(row.occurrence_count), acknowledgedAt: row.acknowledged_at === null ? null : new Date(Number(row.acknowledged_at)).toISOString(), resolvedAt: row.resolved_at === null ? null : new Date(Number(row.resolved_at)).toISOString() }));
   }
 
   acknowledgeObservabilityAlert(alertId: string, actorId: string): AiObservabilityAlert {

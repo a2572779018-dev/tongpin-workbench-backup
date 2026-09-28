@@ -35,9 +35,12 @@ export function tiersManageRouting(config: AiHarnessConfig | null | undefined): 
 }
 
 /** Admin-visible service name for an internal provider ID (e.g. "legacy-video" → "视频服务"). */
+/** Built-in services that are not 服务连接 (voice input runs on Workers AI Whisper). */
+const BUILT_IN_SERVICE_LABELS: Readonly<Record<string, string>> = { "workers-ai": "Cloudflare Whisper（内置）" };
+
 export function harnessProviderLabel(config: AiHarnessConfig | null | undefined, providerId: string): string {
   const name = config?.providers.find(provider => provider.id === providerId)?.name.trim();
-  return name || providerId;
+  return name || BUILT_IN_SERVICE_LABELS[providerId] || providerId;
 }
 
 /** Labels of the enabled tiers that open a capability, in tier order. */

@@ -21,6 +21,11 @@ export type AiHarnessCapability = "chat" | "vision" | "web_search" | "code_inter
 export const AI_HARNESS_CAPABILITY_LABELS: Record<AiHarnessCapability, string> = {
   chat: "文字对话", vision: "图片理解", web_search: "联网搜索", code_interpreter: "代码执行", image: "图片生成", video: "视频生成", presentation: "演示文稿", computer: "电脑操作",
 };
+/** 运行监控 also records voice requests, which are not tier capabilities. */
+export type AiObservabilityCapability = AiHarnessCapability | "speech_input" | "speech_output";
+export const AI_OBSERVABILITY_CAPABILITY_LABELS: Record<AiObservabilityCapability, string> = {
+  ...AI_HARNESS_CAPABILITY_LABELS, speech_input: "语音转写", speech_output: "朗读",
+};
 /** Compatible relays cannot take max_tool_calls, so the search reserve/local
  * guard bound is local; a multi-part question routinely needs 3–4 calls. */
 export const AI_MAX_SEARCH_CALLS = 5;
@@ -127,7 +132,7 @@ export interface AiHarnessTrace {
 export interface AiObservabilitySlice {
   tier: AiMode | "all";
   provider: string;
-  capability: AiHarnessCapability;
+  capability: AiObservabilityCapability;
   operation: "planning" | "execution" | "all";
   requests: number;
   successes: number;
@@ -149,7 +154,7 @@ export interface AiObservabilityAlert {
   message: string;
   tier: AiMode | "all";
   provider: string;
-  capability: AiHarnessCapability;
+  capability: AiObservabilityCapability;
   firstSeenAt: string;
   lastSeenAt: string;
   occurrences: number;
