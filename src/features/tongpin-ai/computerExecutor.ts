@@ -165,7 +165,9 @@ function verifiedSummary(task: ComputerTaskSpec, app: string, readout: readonly 
   // What the member asked for comes first: the goal and check can be long.
   const named = title ? `「${app}」当前的标题是“${title}”。` : "";
   const shown = readout.length ? `「${app}」显示的结果：${readout.join("、")}。` : "";
-  return `已完成：${named}${shown}${task.goal}。界面检查符合完成标准：${task.successCheck}`;
+  // The planner usually ends the goal with its own full stop ("…告诉用户。").
+  const goal = task.goal.replace(/[。．.！!？?；;，,、\s]+$/u, "");
+  return `已完成：${named}${shown}${goal}。界面检查符合完成标准：${task.successCheck}`;
 }
 
 /** A task that asks to read something off the screen and report it. */

@@ -606,7 +606,8 @@ describe("computer executor read-back tasks", () => {
 
   it("accepts an insisted done without input only when the screen shows the calculation's correct result", async () => {
     const insisting = (display: string) => harness({
-      runTask: CALC,
+      // The planner's goal usually ends with its own full stop.
+      runTask: { ...CALC, goal: `${CALC.goal}。` },
       views: [(() => {
         const shown = calcView(0, display, [candidate("click_clear", "点击「全部清除」", "none", "click")]);
         return { ...shown, observation: { ...shown.observation, texts: [display] } };
@@ -614,8 +615,10 @@ describe("computer executor read-back tasks", () => {
       decisions: [{ id: "done", goalDone: 0.9 }, { id: "done", goalDone: 0.9 }, { id: "done", goalDone: 0.9 }],
     });
     const right = insisting("4,608");
-    expect(await run(right)).toMatchObject({ outcome: "verified" });
+    const accepted = await run(right);
+    expect(accepted).toMatchObject({ outcome: "verified" });
     expect(right.calls.execute).toEqual([]);
+    expect(accepted.summary).not.toContain("。。");
     const wrong = insisting("12");
     expect(await run(wrong)).toMatchObject({ outcome: "refuted" });
   });
