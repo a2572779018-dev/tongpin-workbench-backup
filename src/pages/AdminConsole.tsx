@@ -3,7 +3,6 @@ import {
   Check,
   CircleOff,
   Clock3,
-  KeyRound,
   RefreshCw,
   Search,
   UserCog,
@@ -33,6 +32,11 @@ const STATUS_COPY: Record<
   disabled: { label: "已停用", className: "is-disabled" },
 };
 
+/** Filter chips and their counts use the same rule, so a count always matches the rows shown. */
+export function matchesAccountFilter(user: Pick<User, "status">, filter: UserFilter): boolean {
+  return filter === "all" ? true : filter === "pending" ? user.status === "pending_approval" : user.status === filter;
+}
+
 export function AdminConsole() {
   const { session, api } = useAuth();
   const { notify } = useNoticeCenter();
@@ -40,9 +44,25 @@ export function AdminConsole() {
   const [filter, setFilter] = useState<UserFilter>("all");
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
-  const [workingId, setWorkingId] = useState("");
+  // Each row is busy on its own: one account's request never re-enables another's buttons.
+  const [workingIds, setWorkingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState("");
   const [jobDrafts, setJobDrafts] = useState<Record<string, string>>({});
+  // A role change or a lock-out takes effect only after a second, explicit confirmation.
+  const [pendingRoles, setPendingRoles] = useState<Record<string, "member" | "boss">>({});
+  const [confirmingBlock, setConfirmingBlock] = useState("");
+  const working = (id: string) => workingIds.has(id);
+  const setWorking = (id: string, on: boolean) => setWorkingIds(current => {
+    const next = new Set(current);
+    if (on) next.add(id); else next.delete(id);
+    return next;
+  });
+
+  useEffect(() => {
+    if (!confirmingBlock) return;
+    const timer = window.setTimeout(() => setConfirmingBlock(""), 6_000);
+    return () => window.clearTimeout(timer);
+  }, [confirmingBlock]);
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
@@ -68,15 +88,16 @@ export function AdminConsole() {
 
   const counts = useMemo(
     () => ({
-      all: users.filter((user) => user.role !== "admin").length,
-      pending: users.filter((user) => user.status === "pending_approval").length,
-      active: users.filter(
-        (user) => user.status === "active" && user.role !== "admin",
+      all: users.filter((user) => matchesAccountFilter(user, "all")).length,
+      pending: users.filter((user) => matchesAccountFilter(user, "pending")).length,
+      active: users.filter((user) => matchesAccountFilter(user, "active")).length,
+      disabled: users.filter((user) => matchesAccountFilter(user, "disabled")).length,
+      members: users.filter(
+        (user) => user.status === "active" && user.role === "member",
       ).length,
       bosses: users.filter(
         (user) => user.role === "boss" && user.status === "active",
       ).length,
-      disabled: users.filter((user) => user.status === "disabled").length,
     }),
     [users],
   );
@@ -84,12 +105,7 @@ export function AdminConsole() {
   const visibleUsers = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return users.filter((user) => {
-      const matchesFilter =
-        filter === "all"
-          ? true
-          : filter === "pending"
-            ? user.status === "pending_approval"
-            : user.status === filter;
+      const matchesFilter = matchesAccountFilter(user, filter);
       const matchesQuery =
         !normalizedQuery ||
         (user.name ?? "").toLowerCase().includes(normalizedQuery) ||
@@ -103,7 +119,9 @@ export function AdminConsole() {
     user: AdminUser,
     status: "active" | "disabled",
   ) {
-    setWorkingId(user.id);
+    if (working(user.id)) return;
+    setConfirmingBlock("");
+    setWorking(user.id, true);
     setError("");
     try {
       const result = await api<{ user: User }>(
@@ -135,12 +153,13 @@ export function AdminConsole() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "账号状态更新失败");
     } finally {
-      setWorkingId("");
+      setWorking(user.id, false);
     }
   }
 
   async function changeRole(user: AdminUser, role: Exclude<UserRole, "admin">) {
-    setWorkingId(user.id);
+    if (working(user.id)) return;
+    setWorking(user.id, true);
     setError("");
     try {
       const result = await api<{ user: User }>(
@@ -164,23 +183,28 @@ export function AdminConsole() {
         title: role === "boss" ? "老板权限已生效" : "成员权限已恢复",
         body:
           role === "boss"
-            ? `${user.name} 下次登录可查看全员进度。`
-            : `${user.name} 已恢复为普通成员。`,
+            ? `${user.name} 重新登录后可查看全员进度。`
+            : `${user.name} 已恢复为普通成员，需要重新登录。`,
         tone: "success",
         duration: 7_000,
       });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "角色更新失败");
     } finally {
-      setWorkingId("");
+      setPendingRoles((current) => {
+        const next = { ...current };
+        delete next[user.id];
+        return next;
+      });
+      setWorking(user.id, false);
     }
   }
 
   async function saveJobTitle(user: AdminUser) {
     const currentJobTitle = user.jobTitle ?? "";
     const jobTitle = (jobDrafts[user.id] ?? currentJobTitle).trim();
-    if (jobTitle === currentJobTitle) return;
-    setWorkingId(user.id);
+    if (jobTitle === currentJobTitle || working(user.id)) return;
+    setWorking(user.id, true);
     setError("");
     try {
       const result = await api<{ user: User }>(
@@ -214,36 +238,20 @@ export function AdminConsole() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "职位更新失败");
     } finally {
-      setWorkingId("");
+      setWorking(user.id, false);
     }
   }
 
   return (
     <div className="admin-page">
-      <section className="admin-hero bento-panel">
-        <div>
-          <h2>
-            准入要严格，
-            <span>角色要克制。</span>
-          </h2>
-        </div>
-        <div className="admin-hero__symbol" aria-hidden="true">
-          <div className="access-orbit">
-            <span>
-              <KeyRound size={38} />
-            </span>
-          </div>
-        </div>
-      </section>
-
       <section className="admin-stats" aria-label="账号统计">
         <article className="metric-tile tile-yellow">
           <span className="eyebrow">等待批准</span>
           <strong>{counts.pending}</strong>
         </article>
         <article className="metric-tile tile-blue">
-          <span className="eyebrow">正常成员</span>
-          <strong>{counts.active}</strong>
+          <span className="eyebrow">普通成员</span>
+          <strong>{counts.members}</strong>
         </article>
         <article className="metric-tile tile-pink">
           <span className="eyebrow">老板角色</span>
@@ -258,7 +266,8 @@ export function AdminConsole() {
       <section className="account-registry">
         <header className="section-heading">
           <div>
-            <h2>账号与权限</h2>
+            <h2>成员账号</h2>
+            <p className="registry-hint">新注册的账号需要你允许后才能进入同频；老板可以查看全员进度。改角色、停用账号都会让对方重新登录。</p>
           </div>
           <div className="registry-tools">
             <label className="search-field">
@@ -353,13 +362,13 @@ export function AdminConsole() {
                             }}
                             placeholder="填写职位"
                             maxLength={30}
-                            disabled={workingId === user.id}
+                            disabled={working(user.id)}
                             aria-label={`${user.name}的职位`}
                           />
                           <button
                             type="button"
                             disabled={
-                              workingId === user.id ||
+                              working(user.id) ||
                               (
                                 jobDrafts[user.id] ??
                                 user.jobTitle ??
@@ -393,21 +402,31 @@ export function AdminConsole() {
                       </span>
                     ) : (
                       <select
-                        value={user.role}
+                        value={pendingRoles[user.id] ?? user.role}
                         aria-label={`${user.name}的角色`}
-                        disabled={workingId === user.id}
-                        onChange={(event) =>
-                          void changeRole(
-                            user,
-                            event.target.value as "member" | "boss",
-                          )
-                        }
+                        disabled={working(user.id)}
+                        onChange={(event) => {
+                          const role = event.target.value as "member" | "boss";
+                          setPendingRoles((current) => {
+                            const next = { ...current };
+                            if (role === user.role) delete next[user.id];
+                            else next[user.id] = role;
+                            return next;
+                          });
+                        }}
                       >
                         <option value="member">普通成员</option>
                         <option value="boss">老板</option>
                       </select>
                     )}
                   </label>
+                  {pendingRoles[user.id] && !isProtected ? (
+                    <div className="role-confirm" role="group" aria-label={`确认修改${user.name}的角色`}>
+                      <small>{pendingRoles[user.id] === "boss" ? "改为老板：可查看全员进度" : "改回普通成员"}，对方需重新登录</small>
+                      <button type="button" className="approve-button" disabled={working(user.id)} onClick={() => void changeRole(user, pendingRoles[user.id])}>确认修改</button>
+                      <button type="button" className="reject-button" disabled={working(user.id)} onClick={() => setPendingRoles((current) => { const next = { ...current }; delete next[user.id]; return next; })}>取消</button>
+                    </div>
+                  ) : null}
                   <span className="task-total">{user.taskCount}</span>
                   <div className="account-actions">
                     {isProtected ? (
@@ -417,7 +436,7 @@ export function AdminConsole() {
                         <button
                           className="approve-button"
                           type="button"
-                          disabled={workingId === user.id}
+                          disabled={working(user.id)}
                           onClick={() => void changeAccess(user, "active")}
                         >
                           <UserRoundCheck size={15} />
@@ -426,26 +445,26 @@ export function AdminConsole() {
                         <button
                           className="reject-button"
                           type="button"
-                          disabled={workingId === user.id}
-                          onClick={() => void changeAccess(user, "disabled")}
+                          disabled={working(user.id)}
+                          onClick={() => confirmingBlock === user.id ? void changeAccess(user, "disabled") : setConfirmingBlock(user.id)}
                         >
-                          拒绝
+                          {confirmingBlock === user.id ? "确认拒绝？" : "拒绝"}
                         </button>
                       </>
                     ) : user.status === "active" ? (
                       <button
                         className="reject-button"
                         type="button"
-                        disabled={workingId === user.id}
-                        onClick={() => void changeAccess(user, "disabled")}
+                        disabled={working(user.id)}
+                        onClick={() => confirmingBlock === user.id ? void changeAccess(user, "disabled") : setConfirmingBlock(user.id)}
                       >
-                        停用账号
+                        {confirmingBlock === user.id ? "确认停用？会立即退出登录" : "停用账号"}
                       </button>
                     ) : user.status === "disabled" ? (
                       <button
                         className="approve-button"
                         type="button"
-                        disabled={workingId === user.id}
+                        disabled={working(user.id)}
                         onClick={() => void changeAccess(user, "active")}
                       >
                         恢复进入

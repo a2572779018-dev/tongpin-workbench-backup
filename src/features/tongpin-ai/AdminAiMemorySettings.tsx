@@ -38,8 +38,9 @@ export function AdminAiMemorySettings() {
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busyRef.current) return;
-    const pricePoints = Number(draft.pricePoints);
-    if (!Number.isSafeInteger(pricePoints) || pricePoints < 0 || pricePoints > AI_MEMORY_PRICE_MAX) { setNotice({ kind: "error", text: `每次更新记忆的折算需为 0 到 ${number(AI_MEMORY_PRICE_MAX)} 的整数` }); return; }
+    // A cleared field is not "0 = free": the administrator must type the number.
+    const pricePoints = /^\d+$/.test(draft.pricePoints.trim()) ? Number(draft.pricePoints.trim()) : Number.NaN;
+    if (!Number.isSafeInteger(pricePoints) || pricePoints < 0 || pricePoints > AI_MEMORY_PRICE_MAX) { setNotice({ kind: "error", text: `请填写每次更新记忆的折算：0 到 ${number(AI_MEMORY_PRICE_MAX)} 的整数（0 表示不向成员扣点）` }); return; }
     busyRef.current = true; setBusy(true); setNotice(null);
     try {
       apply(await api<View>("/api/admin/ai/memory", { method: "PUT", headers, body: JSON.stringify({ enabled: draft.enabled, reviewTier: draft.reviewTier, pricePoints, recallEnabled: draft.recallEnabled, skillsEnabled: draft.skillsEnabled }) }));
@@ -54,13 +55,13 @@ export function AdminAiMemorySettings() {
   const stats = view?.stats;
   return <section className="tp-ai-admin-card" aria-labelledby={`${id}-title`} aria-busy={!view || busy}>
     <header className="tp-ai-admin-heading">
-      <div><h2 id={`${id}-title`}><Brain size={21} aria-hidden="true" />记忆 · 越用越懂成员</h2>
+      <div><h2 id={`${id}-title`}><Brain size={21} aria-hidden="true" />记忆</h2>
         <p>开启后，成员每次完成有内容的对话，同频 AI 会在后台用所选档位的文字模型整理值得长期记住的信息（参考开源 Hermes Agent 的学习循环），并在之后的新对话中参考。记忆只有成员本人能查看和修改，管理员这里只显示汇总数字。</p></div>
       <button className="tp-ai-admin-button" type="button" disabled={busy} onClick={() => { setNotice(null); void load(); }}><RefreshCw size={17} aria-hidden="true" />刷新</button>
     </header>
     {notice ? <p className={notice.kind === "error" ? "tp-ai-admin-error" : "tp-ai-admin-success"} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</p> : null}
     {!view ? (notice ? null : <p role="status">读取配置中…</p>) : <>
-      <form onSubmit={event => void save(event)}>
+      <form onSubmit={event => void save(event)} noValidate>
         <fieldset className="tp-ai-admin-fields" disabled={busy}>
           <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.enabled} onChange={event => setDraft(current => ({ ...current, enabled: event.target.checked }))} />为本组织启用成员记忆</label>
           <label className="tp-ai-admin-field" htmlFor={`${id}-tier`}>记忆整理使用的档位
@@ -68,7 +69,7 @@ export function AdminAiMemorySettings() {
               {AI_BUSINESS_TIERS.map(tier => <option key={tier} value={tier}>{AI_BUSINESS_TIER_LABELS[tier]}</option>)}
             </select></label>
           <label className="tp-ai-admin-field" htmlFor={`${id}-price`}>每次更新记忆折算 · 同频点
-            <input id={`${id}-price`} type="number" min="0" max={AI_MEMORY_PRICE_MAX} step="1" value={draft.pricePoints} onChange={event => setDraft(current => ({ ...current, pricePoints: event.target.value }))} /></label>
+            <input id={`${id}-price`} type="text" inputMode="numeric" maxLength={8} value={draft.pricePoints} onChange={event => setDraft(current => ({ ...current, pricePoints: event.target.value }))} /></label>
           <p className="tp-ai-admin-hint is-wide">建议使用「快速」档位控制成本。只有记忆真的被更新（或提议了技能）时才向成员扣点，设为 0 表示不扣点（模型用量仍由组织承担）。寒暄和很短的对话不会触发整理，每位成员每天最多整理 40 次；密码、验证码、证件与银行卡号等敏感信息一律不保存。</p>
           <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.recallEnabled} disabled={!draft.enabled} onChange={event => setDraft(current => ({ ...current, recallEnabled: event.target.checked }))} />历史回忆：成员提到以前聊过的内容时，从其本人的其他对话中找出相关片段参考</label>
           <label className="tp-ai-admin-toggle is-wide"><input type="checkbox" checked={draft.skillsEnabled} disabled={!draft.enabled} onChange={event => setDraft(current => ({ ...current, skillsEnabled: event.target.checked }))} />技能学习：成员多次做同类任务后提议个人技能，成员采纳后才生效</label>

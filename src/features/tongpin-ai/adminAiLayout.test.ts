@@ -4,8 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { AiHarnessConfig, AiHarnessTierRoute } from "../../../shared/ai";
 import {
-  ADMIN_AI_TAB_INTROS, AdminAiPendingVideoJobSummary, AdminAiTabIntro, AdminAiTierVideoNote,
-  everyTierHasVideoModel, harnessProviderLabel, LEGACY_GROUP_LABEL, shortTaskId, tiersManageRouting, tierVideoRoutes,
+  ADMIN_AI_SECTIONS, AdminAiPendingVideoJobSummary, AdminAiSectionIntro, AdminAiTierVideoNote,
+  harnessProviderLabel, shortTaskId, tiersManageRouting, tiersWithCapability, tierVideoRoutes,
 } from "./adminAiLayout";
 
 const route = (patch: Partial<AiHarnessTierRoute> = {}): AiHarnessTierRoute => ({
@@ -34,22 +34,20 @@ describe("AI admin layout helpers", () => {
     expect(tiersManageRouting(config())).toBe(true);
   });
 
-  it("hides the legacy default video model only when every tier has its own video model", () => {
-    expect(everyTierHasVideoModel(config())).toBe(true);
-    expect(everyTierHasVideoModel(config({ pro: route({ videoProviderId: undefined, videoModelId: undefined }) }))).toBe(false);
-    expect(everyTierHasVideoModel(config({}, true))).toBe(false);
-    expect(everyTierHasVideoModel(null)).toBe(false);
-    const routes = tierVideoRoutes(config({ deep: route({ videoModelId: undefined }) }));
-    expect(routes.find(item => item.tier === "quick")).toMatchObject({ modelId: "minimax_h3_内置提示词优化", providerName: "视频服务" });
-    expect(routes.find(item => item.tier === "deep")?.modelId).toBeUndefined();
-  });
-
-  it("states which video model each tier actually uses", () => {
-    const markup = renderToStaticMarkup(createElement(AdminAiTierVideoNote, { config: config({ pro: route({ videoProviderId: undefined, videoModelId: undefined }) }) }));
+  it("lists which tiers open a capability, and which video model each tier uses", () => {
+    const cfg = config({ deep: route({ capabilities: ["chat"], videoModelId: undefined, videoProviderId: undefined }), pro: route({ enabled: false }) });
+    expect(tiersWithCapability(cfg, "video")).toEqual(["快速", "标准"]);
+    expect(tiersWithCapability(config({}, true), "video")).toEqual([]);
+    expect(tiersWithCapability(cfg, "web_search", "responses")).toEqual([]);
+    const routes = tierVideoRoutes(cfg);
+    expect(routes.find(item => item.tier === "quick")).toMatchObject({ modelId: "minimax_h3_内置提示词优化", providerName: "视频服务", opensVideo: true });
+    expect(routes.find(item => item.tier === "deep")).toMatchObject({ opensVideo: false });
+    const markup = renderToStaticMarkup(createElement(AdminAiTierVideoNote, { config: cfg }));
     expect(markup).toContain("minimax_h3_内置提示词优化 · 视频服务");
-    expect(markup).toContain("未设置，使用旧版默认模型");
-    expect(markup).not.toContain("旧版默认模型不再生效");
-    expect(renderToStaticMarkup(createElement(AdminAiTierVideoNote, { config: config() }))).toContain("旧版默认模型不再生效");
+    expect(markup).toContain("<strong>深度</strong>：未开放生成视频");
+    expect(markup).toContain("<strong>Pro</strong>：档位已停用");
+    expect(markup).not.toContain("旧版");
+    expect(renderToStaticMarkup(createElement(AdminAiTierVideoNote, { config: config({ standard: route({ videoModelId: undefined }) }) }))).toContain("还没选视频模型");
   });
 
   it("shows member identity, creation time and a short task ID for pending video jobs", () => {
@@ -65,23 +63,25 @@ describe("AI admin layout helpers", () => {
     expect(unknown).toContain(`成员编号 ${shortTaskId(job.userId)}`);
   });
 
-  it("explains every tab in one plain line", () => {
-    for (const section of ["models", "capabilities", "members", "monitoring"] as const) {
-      expect(ADMIN_AI_TAB_INTROS[section]).toMatch(/^这里/);
-      expect(renderToStaticMarkup(createElement(AdminAiTabIntro, { section }))).toContain('class="tp-ai-admin-tab-intro"');
+  it("explains every section in one plain line, grouped in the side navigation", () => {
+    expect(ADMIN_AI_SECTIONS.map(section => section.label)).toEqual(["服务与模型", "图片与视频", "联网与代码", "语音", "记忆", "电脑操作", "成员额度", "运行监控"]);
+    for (const section of ADMIN_AI_SECTIONS) {
+      expect(section.intro.length).toBeGreaterThan(10);
+      expect(renderToStaticMarkup(createElement(AdminAiSectionIntro, { section: section.key }))).toContain('class="tp-ai-admin-tab-intro"');
     }
+    // The key goes into 服务连接, and the intro says so.
+    expect(ADMIN_AI_SECTIONS[0].intro).toContain("API 密钥");
   });
 
-  it("keeps legacy settings editable and groups them only when tiers take over", () => {
+  it("has no legacy connection, legacy image or legacy video settings left", () => {
     const video = readFileSync(new URL("./AdminAiVideoSettings.tsx", import.meta.url), "utf8");
-    const provider = readFileSync(new URL("./AdminAiProviderSettings.tsx", import.meta.url), "utf8");
-    expect(LEGACY_GROUP_LABEL).toBe("旧版兼容（四档已接管，通常无需修改）");
-    expect(video).toContain("{tiersActive ? null : <details className=\"tp-ai-provider-capabilities is-wide\"><summary>旧版视频接入</summary>");
-    expect(video).toContain("{hideLegacyDefault ? null :");
-    expect(provider).toContain("{tiersActive ? null : legacyConnection}");
-    expect(provider).toContain("{tiersActive ? null : legacyImage}");
-    expect(provider).toContain("{LEGACY_GROUP_LABEL} · 文字与图片");
+    const capabilities = readFileSync(new URL("./AdminAiCapabilitySettings.tsx", import.meta.url), "utf8");
+    const panel = readFileSync(new URL("./AdminAiQuotaPanel.tsx", import.meta.url), "utf8");
+    for (const source of [video, capabilities, panel]) expect(source).not.toMatch(/旧版|legacy|AdminAiProviderSettings/i);
+    expect(capabilities).toContain('"/api/admin/ai/capabilities"');
+    expect(capabilities).not.toMatch(/apiKey|baseUrl|quickModel/);
     const observability = readFileSync(new URL("./AdminAiObservability.tsx", import.meta.url), "utf8");
     expect(observability).toContain("harnessProviderLabel(harnessConfig, slice.provider)");
   });
 });
+

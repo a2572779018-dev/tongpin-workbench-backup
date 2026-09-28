@@ -1,22 +1,35 @@
-import { AI_BUSINESS_TIERS, AI_BUSINESS_TIER_LABELS, type AiHarnessConfig, type AiMember, type AiMode } from "../../../shared/ai";
+import { AI_BUSINESS_TIERS, AI_BUSINESS_TIER_LABELS, type AiHarnessCapability, type AiHarnessConfig, type AiMember, type AiMode } from "../../../shared/ai";
 import type { AiAdminVideoReconciliationJob } from "../../../shared/aiVideo";
 import { videoModel } from "../../../shared/aiVideoModels";
 
-export type AdminAiSection = "models" | "capabilities" | "members" | "monitoring";
+/** AI 管理 sections, in the order of the side navigation. */
+export type AdminAiSection = "models" | "media" | "tools" | "voice" | "memory" | "computer" | "members" | "monitoring";
 
-/** One plain-language line per admin tab, shown above the tab content. */
-export const ADMIN_AI_TAB_INTROS: Record<AdminAiSection, string> = {
-  models: "这里决定成员实际用哪个 AI：先接入服务，再为快速、标准、深度、Pro 四个档位分别选择文字、图片、视频模型。",
-  capabilities: "这里控制图片、画面理解、联网搜索和视频是否开放，以及每次使用折算多少同频点；具体用哪个模型在「服务与模型」中选择。",
-  members: "这里查看每位成员的同频点额度和用量，并为成员设置或追加额度。",
-  monitoring: "这里只读查看最近 60 分钟 AI 请求是否正常（成功率、响应速度、告警），不会修改任何配置。",
-};
+export interface AdminAiSectionInfo {
+  key: AdminAiSection;
+  label: string;
+  group: "设置" | "成员" | "运行";
+  /** One plain-language line shown above the section. */
+  intro: string;
+}
 
-export const LEGACY_GROUP_LABEL = "旧版兼容（四档已接管，通常无需修改）";
+export const ADMIN_AI_SECTIONS: readonly AdminAiSectionInfo[] = [
+  { key: "models", label: "服务与模型", group: "设置", intro: "先接入 AI 服务（API 密钥填在「服务连接」里），再为快速、标准、深度、Pro 四个档位选择文字、图片、视频模型和开放的能力。" },
+  { key: "media", label: "图片与视频", group: "设置", intro: "生成图片、视频按次折算同频点：这里设置价格、是否开放视频和需要人工核对的视频任务。用哪个模型在「服务与模型」的档位里选。" },
+  { key: "tools", label: "联网与代码", group: "设置", intro: "联网搜索和代码执行由服务商执行、每次另外折算同频点；只有勾选了这些能力、使用 Responses 协议的档位才会用到。" },
+  { key: "voice", label: "语音", group: "设置", intro: "成员说话转文字、朗读回复和语音通话：可以接入硅基流动 CosyVoice2 等自然音色，并决定成员能选哪些音色。" },
+  { key: "memory", label: "记忆", group: "设置", intro: "开启后，同频 AI 会记住对成员长期有用的信息，越用越懂成员；只有成员本人能查看和修改。" },
+  { key: "computer", label: "电脑操作", group: "设置", intro: "成员让 AI 操作电脑时，每一步由 Jev 决策服务从界面上可做的动作里挑选；这里填 TypeSafe 密钥，设置折算和安全上限。" },
+  { key: "members", label: "成员额度", group: "成员", intro: "查看每位成员的同频点额度和用量，并设置或追加额度。" },
+  { key: "monitoring", label: "运行监控", group: "运行", intro: "只读查看最近 60 分钟 AI 请求是否正常（成功率、响应速度、告警），不会修改任何配置。" },
+];
+
+export function adminAiSection(key: AdminAiSection): AdminAiSectionInfo {
+  return ADMIN_AI_SECTIONS.find(section => section.key === key)!;
+}
 
 /** True once the administrator has saved the four-tier configuration. A
- * `migratedFromLegacy` config is only a read-only draft of the old settings,
- * so the legacy fields still drive routing in that case. */
+ * `migratedFromLegacy` config is only a read-only draft of the old settings. */
 export function tiersManageRouting(config: AiHarnessConfig | null | undefined): config is AiHarnessConfig {
   return Boolean(config && !config.migratedFromLegacy);
 }
@@ -27,14 +40,23 @@ export function harnessProviderLabel(config: AiHarnessConfig | null | undefined,
   return name || providerId;
 }
 
-export interface TierVideoRoute { tier: AiMode; tierLabel: string; enabled: boolean; modelId?: string; modelLabel?: string; providerName?: string }
+/** Labels of the enabled tiers that open a capability, in tier order. */
+export function tiersWithCapability(config: AiHarnessConfig | null | undefined, capability: AiHarnessCapability, protocol?: "responses"): string[] {
+  if (!tiersManageRouting(config)) return [];
+  return AI_BUSINESS_TIERS.filter(tier => {
+    const route = config.tiers[tier];
+    return route.enabled && route.capabilities.includes(capability) && (!protocol || route.protocol === protocol);
+  }).map(tier => AI_BUSINESS_TIER_LABELS[tier]);
+}
+
+export interface TierVideoRoute { tier: AiMode; tierLabel: string; enabled: boolean; opensVideo: boolean; modelId?: string; modelLabel?: string; providerName?: string }
 
 export function tierVideoRoutes(config: AiHarnessConfig): TierVideoRoute[] {
   return AI_BUSINESS_TIERS.map(tier => {
     const route = config.tiers[tier];
     const configured = Boolean(route.videoProviderId && route.videoModelId);
     return {
-      tier, tierLabel: AI_BUSINESS_TIER_LABELS[tier], enabled: route.enabled,
+      tier, tierLabel: AI_BUSINESS_TIER_LABELS[tier], enabled: route.enabled, opensVideo: route.capabilities.includes("video"),
       ...(configured ? {
         modelId: route.videoModelId!,
         modelLabel: videoModel(route.videoModelId!)?.label ?? route.videoModelId!,
@@ -44,28 +66,21 @@ export function tierVideoRoutes(config: AiHarnessConfig): TierVideoRoute[] {
   });
 }
 
-/** When every tier names its own video model, the legacy default model is never used. */
-export function everyTierHasVideoModel(config: AiHarnessConfig | null | undefined): boolean {
-  return tiersManageRouting(config) && tierVideoRoutes(config).every(route => Boolean(route.modelId));
-}
-
 export const shortTaskId = (id: string) => id.length > 8 ? id.slice(0, 8) : id;
 
-export function AdminAiTabIntro({ section }: { section: AdminAiSection }) {
-  return <p className="tp-ai-admin-tab-intro">{ADMIN_AI_TAB_INTROS[section]}</p>;
+export function AdminAiSectionIntro({ section }: { section: AdminAiSection }) {
+  return <p className="tp-ai-admin-tab-intro">{adminAiSection(section).intro}</p>;
 }
 
+/** Which video model each tier really uses (set in 服务与模型 → 四个档位). */
 export function AdminAiTierVideoNote({ config }: { config: AiHarnessConfig }) {
   const routes = tierVideoRoutes(config);
-  const allConfigured = routes.every(route => Boolean(route.modelId));
   return <div className="tp-ai-admin-tier-video-note is-wide">
-    <p className="tp-ai-admin-hint">{allConfigured
-      ? "四个档位都已在「服务与模型」中设置视频模型，成员实际使用下列模型，旧版默认模型不再生效："
-      : "成员实际使用的视频模型（在「服务与模型」→ 四个档位中设置）；未设置视频模型的档位才会使用下方旧版默认模型："}</p>
+    <p className="tp-ai-admin-hint">各档位生成视频使用的模型（在「服务与模型」→ 四个档位中修改）：</p>
     <ul>{routes.map(route => <li key={route.tier}>
-      <strong>{route.tierLabel}</strong>：{route.modelId
+      <strong>{route.tierLabel}</strong>：{!route.enabled ? "档位已停用" : !route.opensVideo ? "未开放生成视频" : route.modelId
         ? <>{route.modelLabel}<small>（{route.modelId} · {route.providerName}）</small></>
-        : "未设置，使用旧版默认模型"}{route.enabled ? "" : "（档位已停用）"}
+        : "开放了生成视频，但还没选视频模型"}
     </li>)}</ul>
   </div>;
 }

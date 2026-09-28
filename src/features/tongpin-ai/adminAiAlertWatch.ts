@@ -12,10 +12,6 @@ export const ADMIN_AI_ALERT_ENDPOINT = "/api/admin/ai/observability?windowMinute
 const STORAGE_PREFIX = "tongpin:admin-ai-alerts:v1:";
 const MAX_REMEMBERED_IDS = 200;
 
-export function canWatchAdminAiAlerts(role: string | null | undefined): boolean {
-  return role === "admin";
-}
-
 export const ADMIN_AI_ALERT_KIND_LABELS: Record<AiObservabilityAlert["code"], string> = {
   HIGH_ERROR_RATE: "错误率过高",
   HIGH_LATENCY: "响应过慢",

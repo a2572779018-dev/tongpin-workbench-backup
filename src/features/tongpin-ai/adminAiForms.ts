@@ -1,4 +1,4 @@
-import type { AiProviderConfig, AiProviderInput, AiQuota } from "../../../shared/ai";
+import type { AiQuota } from "../../../shared/ai";
 import { ApiRequestError } from "../../lib/api";
 
 export function normalizeAiBaseUrl(value: string): string {
@@ -10,47 +10,14 @@ export function normalizeAiBaseUrl(value: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
-export function validateAiProviderConnection(baseUrl: string, apiKey: string, saved: AiProviderConfig | null): string {
-  let normalized: string;
-  try { normalized = normalizeAiBaseUrl(baseUrl); }
-  catch { return "请填写有效的 HTTPS API 地址，不要在地址中包含密钥。"; }
-  if ((!saved?.apiKeyConfigured || normalizeAiBaseUrl(saved.baseUrl) !== normalized) && !apiKey.trim()) {
-    return saved?.apiKeyConfigured ? "修改 API 地址后，请重新填写该服务的密钥。" : "请填写 API 密钥。";
-  }
-  return "";
-}
-
-export function validateAiProviderInput(
-  input: AiProviderInput,
-  saved: AiProviderConfig | null,
-  harnessSearchConfigured = false,
-  harnessCodeInterpreterConfigured = false,
-): string {
-  const connectionError = validateAiProviderConnection(input.baseUrl, input.apiKey ?? "", saved);
-  if (connectionError) return connectionError;
-  if (!input.name.trim()) return "请填写服务名称。";
-  if (!input.quickModel.trim() || !input.deepModel.trim()) {
-    return "请填写快速模式和深度思考模式的模型 ID。";
-  }
-  if (!Number.isSafeInteger(input.maxOutputTokens) || input.maxOutputTokens < 16 || input.maxOutputTokens > 32_768) {
-    return "单次最大输出请填写 16–32,768 之间的整数。";
-  }
-  for (const amount of [input.imageQuotaTokens ?? 0, input.webSearchQuotaTokens ?? 0, input.codeInterpreterQuotaTokens ?? 0]) {
-    if (!Number.isSafeInteger(amount) || amount < 0 || amount > 10_000_000) return "工具折算同频点需填写 0 到 10,000,000 之间的整数。";
-  }
-  const visionReserve = input.visionInputReserveTokens ?? 4096;
-  if (!Number.isSafeInteger(visionReserve) || visionReserve < 256 || visionReserve > 131072) return "每张图片的输入预留需填写 256 到 131072 之间的整数估算值。";
-  if (input.webSearchProtocol !== undefined && input.webSearchProtocol !== "standard" && input.webSearchProtocol !== "compatible") return "请选择标准或兼容搜索接口。";
-  if (input.imageModel?.trim() && !(input.imageQuotaTokens && input.imageQuotaTokens > 0)) return "启用图片模型前，请设置每张图片折算的同频点。";
-  if (input.imageBaseUrl?.trim()) {
-    let base: string;
-    try { base = normalizeAiBaseUrl(input.imageBaseUrl); } catch { return "请填写有效的图片 HTTPS API 地址。"; }
-    const previous = saved?.imageBaseUrl ? normalizeAiBaseUrl(saved.imageBaseUrl) : "";
-    if ((!saved?.imageApiKeyConfigured || previous !== base) && !input.imageApiKey?.trim()) return "首次接入或更换图片 API 地址后，请重新填写图片密钥。";
-  } else if (input.imageApiKey?.trim()) return "填写独立图片密钥时，还需填写图片 API 地址。";
-  if (input.webSearchEnabled && ((!harnessSearchConfigured && input.protocol !== "responses") || !(input.webSearchQuotaTokens && input.webSearchQuotaTokens > 0))) return "联网搜索需要至少一个支持搜索的 Responses 档位，并设置每次搜索折算的同频点。";
-  if (input.codeInterpreterEnabled && ((!harnessCodeInterpreterConfigured && input.protocol !== "responses") || !(input.codeInterpreterQuotaTokens && input.codeInterpreterQuotaTokens > 0))) return "代码执行需要至少一个支持该能力的 Responses 档位，并设置每次执行折算的同频点。";
-  return "";
+/** A price field typed as text: blank or anything but a whole number is invalid (never "0 = free" by accident). */
+export function parseAdminPoints(value: string, label: string, { min = 0, max = 10_000_000 } = {}): { value: number; error: string } {
+  const trimmed = value.trim();
+  if (!trimmed) return { value: 0, error: `请填写${label}（${min} 到 ${max.toLocaleString("en-US")} 的整数）。` };
+  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(Number(trimmed))) return { value: 0, error: `${label}需填写整数。` };
+  const parsed = Number(trimmed);
+  if (parsed < min || parsed > max) return { value: parsed, error: `${label}需在 ${min} 到 ${max.toLocaleString("en-US")} 之间。` };
+  return { value: parsed, error: "" };
 }
 
 export function calculateAiQuotaLimit(
@@ -76,9 +43,20 @@ export function calculateAiQuotaLimit(
   return { limitTokens, error: "" };
 }
 
+/** Validation errors written by 同频's own server (never provider text), whose
+ * message names the exact field or tier to fix. */
+const OWN_VALIDATION_CODES = new Set([
+  "AI_HARNESS_INVALID", "AI_HARNESS_TOOL_PROTOCOL", "AI_HARNESS_PROVIDER_MISSING", "AI_HARNESS_PROVIDER_NOT_FOUND", "AI_HARNESS_PROVIDER_IN_USE",
+  "AI_HARNESS_IMAGE_ROUTE_REQUIRED", "AI_HARNESS_VIDEO_ROUTE_REQUIRED", "AI_HARNESS_REQUIRED", "AI_IMAGE_GENERATION_CAPABILITY_MISMATCH",
+  "AI_IMAGE_EDIT_CAPABILITY_INVALID", "AI_IMAGE_GENERATION_CAPABILITY_INVALID", "AI_CAPABILITY_INVALID", "AI_IMAGE_QUOTA_REQUIRED",
+  "AI_SEARCH_CONFIG_INVALID", "AI_CODE_INTERPRETER_CONFIG_INVALID", "AI_VISION_CONFIG_INVALID", "AI_VIDEO_SETTINGS_INVALID",
+  "AI_VIDEO_KEY_REQUIRED", "AI_VIDEO_MODEL_INVALID", "AI_VIDEO_MODEL_UNAVAILABLE", "AI_QUOTA_INVALID",
+]);
+
 // Never surface an arbitrary upstream response: it may echo the administrator's key.
 export function adminAiErrorMessage(error: unknown, fallback: string): string {
   if (!(error instanceof ApiRequestError)) return fallback;
+  if (OWN_VALIDATION_CODES.has(error.code) && error.message && error.status >= 400 && error.status < 500) return error.message;
   const knownErrors: Record<string, string> = {
     AI_URL_INVALID: "请输入有效的 HTTPS API 地址。",
     AI_URL_UNSAFE: "请使用公网 HTTPS API 域名，不要包含端口、账号或查询参数。",
@@ -103,6 +81,7 @@ export function adminAiErrorMessage(error: unknown, fallback: string): string {
     AI_KEY_UNREADABLE: "已保存的密钥无法读取，请重新填写并保存密钥。",
     AI_CONFIG_CHANGED: "接入配置刚被修改，请重新填写密钥后保存。",
     AI_QUOTA_BELOW_USED: "额度状态已变化；请刷新后重新设置，总限额不能低于已用和处理中预留的同频点。",
+    AI_HARNESS_MODEL_UNVERIFIED: "所选模型还没有通过当前密钥的模型列表校验，请在「服务与模型」读取模型后再试。",
   };
   if (knownErrors[error.code]) return knownErrors[error.code];
   if (error.code === "NETWORK_UNAVAILABLE") return "连接不上服务器，请稍后重试。";

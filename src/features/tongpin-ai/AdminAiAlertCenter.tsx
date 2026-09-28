@@ -62,6 +62,7 @@ export function AdminAiAlertCenter({ enabled, userId, onOpenMonitoring, children
   const memory = useRef<AdminAiAlertMemory>({ notified: [], viewed: [] });
   const monitoringVisible = useRef(false);
   const lastDashboard = useRef<Pick<AiObservabilityDashboard, "alerts"> | null>(null);
+  const announce = useRef<(fresh: AiObservabilityAlert[]) => Promise<void>>(async () => undefined);
   const harness = useRef<AiHarnessConfig | null | undefined>(undefined);
   const openMonitoringRef = useRef(onOpenMonitoring);
   openMonitoringRef.current = onOpenMonitoring;
@@ -79,6 +80,9 @@ export function AdminAiAlertCenter({ enabled, userId, onOpenMonitoring, children
     openMonitoringRef.current();
   }, []);
 
+  // 运行监控 only counts as seen while 同频 itself is on screen and focused:
+  // a selected tab in a hidden or background window must not swallow alerts.
+  const seenNow = () => monitoringVisible.current && appHasFocus();
   const apply = useCallback((dashboard: Pick<AiObservabilityDashboard, "alerts">, visible: boolean) => {
     lastDashboard.current = dashboard;
     const result = reduceAdminAiAlertPoll(dashboard, memory.current, { monitoringVisible: visible });
@@ -107,19 +111,23 @@ export function AdminAiAlertCenter({ enabled, userId, onOpenMonitoring, children
       }
       return (id: string) => harnessProviderLabel(harness.current, id);
     };
+    announce.current = async (fresh: AiObservabilityAlert[]) => {
+      const summary = summarizeAdminAiAlerts(fresh, await providerLabel());
+      if (disposed || !summary) return;
+      setToast({ ids: fresh.map(alert => alert.id), summary });
+      notifyDesktop(summary, fresh, openMonitoring);
+    };
+    // Also while the window is hidden or minimized (to the tray on Windows):
+    // that is when a desktop notice matters most.
     const poll = async () => {
-      if (disposed || inFlight || document.visibilityState === "hidden") return;
+      if (disposed || inFlight) return;
       inFlight = true;
       controller = new AbortController();
       try {
         const dashboard = await api<AiObservabilityDashboard>(ADMIN_AI_ALERT_ENDPOINT, { signal: controller.signal });
         if (disposed) return;
-        const result = apply(dashboard, monitoringVisible.current);
-        if (!result.fresh.length) return;
-        const summary = summarizeAdminAiAlerts(result.fresh, await providerLabel());
-        if (disposed || !summary) return;
-        setToast({ ids: result.fresh.map(alert => alert.id), summary });
-        notifyDesktop(summary, result.fresh, openMonitoring);
+        const result = apply(dashboard, seenNow());
+        if (result.fresh.length) await announce.current(result.fresh);
       } catch {
         // Background watch is best-effort; 运行监控 itself shows load errors.
       } finally {
@@ -129,13 +137,18 @@ export function AdminAiAlertCenter({ enabled, userId, onOpenMonitoring, children
     void poll();
     const interval = window.setInterval(() => void poll(), ADMIN_AI_ALERT_POLL_MS);
     const onVisibility = () => { if (document.visibilityState === "visible") void poll(); };
+    // Coming back to 同频 while 运行监控 is open counts as looking at it.
+    const onFocus = () => { if (seenNow() && lastDashboard.current) apply(lastDashboard.current, true); };
     document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocus);
     const stopDesktopAction = onAdminAiMonitoringNoticeAction(openMonitoring);
     return () => {
       disposed = true;
       controller?.abort();
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
+      announce.current = async () => undefined;
       stopDesktopAction();
     };
   }, [active, userId, api, apply, openMonitoring]);
@@ -144,10 +157,13 @@ export function AdminAiAlertCenter({ enabled, userId, onOpenMonitoring, children
   const setMonitoringVisible = useCallback((visible: boolean) => {
     if (monitoringVisible.current === visible) return;
     monitoringVisible.current = visible;
-    if (visible && lastDashboard.current) apply(lastDashboard.current, true);
+    if (visible && lastDashboard.current && appHasFocus()) apply(lastDashboard.current, true);
   }, [apply]);
   const markViewed = useCallback((dashboard: Pick<AiObservabilityDashboard, "alerts">) => {
-    if (monitoringVisible.current) apply(dashboard, true);
+    if (!monitoringVisible.current) return;
+    // The dashboard keeps refreshing in a background window: announce what is new there.
+    const result = apply(dashboard, appHasFocus());
+    if (result.fresh.length) void announce.current(result.fresh);
   }, [apply]);
 
   const value = useMemo<AdminAiAlertCenterValue>(() => active ? {

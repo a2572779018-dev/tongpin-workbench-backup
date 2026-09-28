@@ -89,16 +89,19 @@ describe("point labels preserve underlying quota and token accounting", () => {
 
   it("labels administrator balances and tool conversions in points, while keeping the text output cap in Token", () => {
     const admin = readFileSync(new URL("./AdminAiQuotaPanel.tsx", import.meta.url), "utf8");
-    const provider = readFileSync(new URL("./AdminAiProviderSettings.tsx", import.meta.url), "utf8");
+    const provider = readFileSync(new URL("./AdminAiCapabilitySettings.tsx", import.meta.url), "utf8");
     const harness = readFileSync(new URL("./AdminAiHarnessSettings.tsx", import.meta.url), "utf8");
-    expect(admin).toContain('JSON.stringify({ limitTokens: next.limitTokens,');
+    // An addition is sent as a delta the server applies to the current limit.
+    expect(admin).toContain('? { addTokens: added, reason: reason.trim() || "管理员追加额度" }');
+    expect(admin).toContain(': { limitTokens: next.limitTokens, reason: reason.trim() || "管理员设置总限额" }');
     expect(admin).toContain('formatAiPoints(member.quota.limitTokens)');
     expect(admin).toContain('AI_QUOTA_BILLING_NOTE');
     expect(provider).toContain('每张图片折算 · 同频点');
     expect(provider).toContain('每次联网搜索折算 · 同频点');
     expect(harness).toContain('单次输出上限 · Token');
     expect(harness).toContain('value={route.maxOutputTokens}');
-    expect(provider).toContain('imageQuotaTokens: input.imageQuotaTokens ?? 0');
-    expect(provider).toContain('webSearchQuotaTokens: input.webSearchQuotaTokens ?? 0');
+    // Prices are typed as text and a cleared field is rejected, never saved as 0 (free).
+    expect(provider).toContain('parseAdminPoints(price, "每张图片折算的同频点")');
+    expect(provider).toContain('parseAdminPoints(searchPrice, "每次联网搜索折算的同频点"');
   });
 });

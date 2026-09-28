@@ -5,7 +5,6 @@ import {
   ADMIN_AI_ALERT_ENDPOINT,
   ADMIN_AI_ALERT_POLL_MS,
   adminAiAlertStorageKey,
-  canWatchAdminAiAlerts,
   describeAdminAiAlert,
   readAdminAiAlertMemory,
   reduceAdminAiAlertPoll,
@@ -32,11 +31,7 @@ const alert = (overrides: Partial<AiObservabilityAlert> = {}): AiObservabilityAl
 });
 
 describe("admin AI alert watch", () => {
-  it("only watches for administrators, every ~60s, on the existing endpoint", () => {
-    expect(canWatchAdminAiAlerts("admin")).toBe(true);
-    expect(canWatchAdminAiAlerts("member")).toBe(false);
-    expect(canWatchAdminAiAlerts("boss")).toBe(false);
-    expect(canWatchAdminAiAlerts(undefined)).toBe(false);
+  it("watches every ~60s on the existing endpoint (App enables it for administrators only)", () => {
     expect(ADMIN_AI_ALERT_POLL_MS).toBe(60_000);
     expect(ADMIN_AI_ALERT_ENDPOINT).toBe("/api/admin/ai/observability?windowMinutes=60");
   });
@@ -109,7 +104,10 @@ describe("admin AI alert watch", () => {
     expect(app).toContain('enabled={session.user.role === "admin"}');
     const center = readFileSync(new URL("./AdminAiAlertCenter.tsx", import.meta.url), "utf8");
     expect(center).toContain("const active = enabled && Boolean(userId);");
-    expect(center).toContain('document.visibilityState === "hidden"');
+    // Alerts keep being checked while the window is hidden or minimized (desktop notices then),
+    // and 运行监控 only counts as seen while 同频 is visible and focused.
+    expect(center).not.toContain('document.visibilityState === "hidden"');
+    expect(center).toContain("const seenNow = () => monitoringVisible.current && appHasFocus();");
     expect(center).not.toMatch(/\bwindow\.tongpin\b|\blocalStorage\b/);
     const desktop = readFileSync(new URL("../../lib/adminAiAlertDesktop.ts", import.meta.url), "utf8");
     expect(desktop).toContain('Notification.permission !== "granted"');

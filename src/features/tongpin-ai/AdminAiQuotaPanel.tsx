@@ -2,7 +2,7 @@ import { Coins, History, Plus, RefreshCw, Search, UsersRound, X } from "lucide-r
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { AiHarnessConfig, AiMember, AiUsageEntry } from "../../../shared/ai";
 import { useAuth } from "../../auth/AuthContext";
-import { AdminAiProviderSettings } from "./AdminAiProviderSettings";
+import { AdminAiImageSettings, AdminAiToolSettings } from "./AdminAiCapabilitySettings";
 import { AdminAiVideoSettings } from "./AdminAiVideoSettings";
 import { AdminAiVoiceSettings } from "./AdminAiVoiceSettings";
 import { AdminAiHarnessSettings } from "./AdminAiHarnessSettings";
@@ -14,7 +14,7 @@ import { useAdminAiAlertCenter } from "./AdminAiAlertCenter";
 import { adminAiErrorMessage, calculateAiQuotaLimit } from "./adminAiForms";
 import { aiDiagnosticDescription, aiUsageDescription, aiUsageTotal } from "./usageFormatting";
 import { AI_QUOTA_BILLING_NOTE, formatAiPoints } from "./quotaFormatting";
-import { AdminAiTabIntro, type AdminAiSection } from "./adminAiLayout";
+import { ADMIN_AI_SECTIONS, AdminAiSectionIntro, type AdminAiSection } from "./adminAiLayout";
 import { formatWorkspaceMegabytes, workspaceStorageFrom, workspaceStorageLevel, workspaceStoragePercent } from "./workspaceStorage";
 import type { AiWorkspaceStorageUsage } from "../../../shared/aiWorkspace";
 import "./AdminAiQuotaPanel.css";
@@ -89,9 +89,14 @@ function MemberQuotaDialog({ member, onClose, onSaved }: {
     setBusy(true);
     setError("");
     try {
+      // An addition is applied by the server to the limit current at that moment,
+      // so a grant saved meanwhile (another device or administrator) is kept.
+      const added = next.limitTokens - member.quota.limitTokens;
       const result = await api<{ member: AiMember }>(`/api/admin/ai/members/${encodeURIComponent(member.id)}/quota`, {
         method: "PUT",
-        body: JSON.stringify({ limitTokens: next.limitTokens, reason: reason.trim() || (mode === "add" ? "管理员追加额度" : "管理员设置总限额") }),
+        body: JSON.stringify(mode === "add"
+          ? { addTokens: added, reason: reason.trim() || "管理员追加额度" }
+          : { limitTokens: next.limitTokens, reason: reason.trim() || "管理员设置总限额" }),
       });
       onSaved(result.member);
     } catch (caught) {
@@ -199,17 +204,23 @@ export function AdminAiQuotaPanel() {
   const [quotaMember, setQuotaMember] = useState<AiMember | null>(null);
   const [usageMember, setUsageMember] = useState<AiMember | null>(null);
   const [section, setSection] = useState<AdminAiSection>("models");
+  // Sections mount on first visit (each loads its own settings) and then stay
+  // mounted, so unsaved edits survive switching sections.
+  const [visited, setVisited] = useState<ReadonlySet<AdminAiSection>>(() => new Set<AdminAiSection>(["models"]));
   const [harnessConfig, setHarnessConfig] = useState<AiHarnessConfig | null>(null);
+  const [harnessRevision, setHarnessRevision] = useState(0);
   const alertCenter = useAdminAiAlertCenter();
   const { monitoringRequested, consumeMonitoringRequest, setMonitoringVisible } = alertCenter;
+  const open = (next: AdminAiSection) => { setSection(next); setVisited(current => current.has(next) ? current : new Set([...current, next])); };
 
   useEffect(() => {
     if (!monitoringRequested) return;
     setSection("monitoring");
+    setVisited(current => current.has("monitoring") ? current : new Set([...current, "monitoring"]));
     consumeMonitoringRequest();
   }, [monitoringRequested, consumeMonitoringRequest]);
 
-  // Opening 运行监控 acknowledges (views) the open alerts and clears the tab red dot.
+  // Opening 运行监控 acknowledges (views) the open alerts and clears its red dot.
   useEffect(() => {
     setMonitoringVisible(isAdmin && section === "monitoring");
     return () => setMonitoringVisible(false);
@@ -229,25 +240,37 @@ export function AdminAiQuotaPanel() {
   if (!isAdmin) return <p role="alert">仅管理员可访问 AI 管理。</p>;
   const needle = query.trim().toLocaleLowerCase();
   const visibleMembers = members.filter((member) => `${member.name} ${member.email}`.toLocaleLowerCase().includes(needle));
+  const mounted = (key: AdminAiSection) => visited.has(key);
+  const groups = [...new Set(ADMIN_AI_SECTIONS.map(item => item.group))];
 
   return (
-    <section className="tp-admin-ai-quota" aria-label="AI 接入与额度管理">
-      <nav className="tp-ai-admin-tabs" aria-label="AI 管理分类">{([
-        ["models", "服务与模型"], ["capabilities", "生成与搜索"], ["members", "成员额度"], ["monitoring", "运行监控"],
-      ] as const).map(([key, label]) => {
-        const alertDot = key === "monitoring" && section !== "monitoring" && alertCenter.unviewedCount > 0;
-        return <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => setSection(key)}>{label}{alertDot ? <span className="tp-ai-admin-tab-dot" role="status" aria-label={`${alertCenter.unviewedCount} 条未查看告警`} /> : null}</button>;
-      })}</nav>
-      <AdminAiTabIntro section={section} />
-      <div className="tp-ai-admin-section-stack" hidden={section !== "models"}><AdminAiHarnessSettings onConfigured={setHarnessConfig} /><AdminAiOpenSquillaSettings /></div>
-      <div className="tp-ai-admin-section-stack" hidden={section !== "capabilities"}>
-        <AdminAiProviderSettings harnessConfig={harnessConfig} />
-        <AdminAiVideoSettings key={session?.user.id} harnessConfig={harnessConfig} members={members} />
-        <AdminAiVoiceSettings key={`voice-${session?.user.id}`} harnessConfig={harnessConfig} />
-        <AdminAiMemorySettings key={`memory-${session?.user.id}`} />
-        <AdminAiJevSettings key={`jev-${session?.user.id}`} />
+    <section className="tp-admin-ai-quota" aria-label="AI 管理">
+      <nav className="tp-ai-admin-nav" aria-label="AI 管理分类">{groups.map(group => <div className="tp-ai-admin-nav__group" key={group}>
+        <span className="tp-ai-admin-nav__label">{group}</span>
+        {ADMIN_AI_SECTIONS.filter(item => item.group === group).map(({ key, label }) => {
+          const alertDot = key === "monitoring" && section !== "monitoring" && alertCenter.unviewedCount > 0;
+          return <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => open(key)}>{label}
+            {alertDot ? <span className="tp-ai-admin-tab-dot" role="status" aria-label={`${alertCenter.unviewedCount} 条未查看告警`} /> : null}</button>;
+        })}
+      </div>)}</nav>
+      <div className="tp-ai-admin-main">
+      <AdminAiSectionIntro section={section} />
+      <div className="tp-ai-admin-section-stack" hidden={section !== "models"}>
+        <AdminAiHarnessSettings key={`harness-${harnessRevision}`} onConfigured={setHarnessConfig} />
+        <AdminAiOpenSquillaSettings />
       </div>
-      <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} harnessConfig={harnessConfig} onDashboard={alertCenter.markViewed} /></div>
+      {mounted("media") ? <div className="tp-ai-admin-section-stack" hidden={section !== "media"}>
+        <AdminAiImageSettings harnessConfig={harnessConfig} />
+        <AdminAiVideoSettings key={session?.user.id} harnessConfig={harnessConfig} members={members} />
+      </div> : null}
+      {mounted("tools") ? <div className="tp-ai-admin-section-stack" hidden={section !== "tools"}><AdminAiToolSettings harnessConfig={harnessConfig} /></div> : null}
+      {mounted("voice") ? <div className="tp-ai-admin-section-stack" hidden={section !== "voice"}>
+        <AdminAiVoiceSettings key={`voice-${session?.user.id}`} harnessConfig={harnessConfig} onOpenModels={() => open("models")}
+          onHarnessChanged={config => { setHarnessConfig(config); setHarnessRevision(value => value + 1); }} />
+      </div> : null}
+      {mounted("memory") ? <div className="tp-ai-admin-section-stack" hidden={section !== "memory"}><AdminAiMemorySettings key={`memory-${session?.user.id}`} /></div> : null}
+      {mounted("computer") ? <div className="tp-ai-admin-section-stack" hidden={section !== "computer"}><AdminAiJevSettings key={`jev-${session?.user.id}`} /></div> : null}
+      {mounted("monitoring") ? <div hidden={section !== "monitoring"}><AdminAiObservability active={section === "monitoring"} harnessConfig={harnessConfig} onDashboard={alertCenter.markViewed} /></div> : null}
       <section hidden={section !== "members"} className="tp-ai-admin-card" aria-labelledby="tp-ai-admin-members-title" aria-busy={loading}>
         <header className="tp-ai-admin-heading">
           <div><h2 id="tp-ai-admin-members-title"><UsersRound size={21} aria-hidden="true" />成员额度</h2>
@@ -284,9 +307,10 @@ export function AdminAiQuotaPanel() {
           </div>
         )}
       </section>
+      </div>
       {quotaMember ? <MemberQuotaDialog member={quotaMember} onClose={() => setQuotaMember(null)} onSaved={(member) => {
         setMembers((current) => current.map((item) => item.id === member.id ? { ...member, workspaceStorage: member.workspaceStorage ?? item.workspaceStorage } : item));
-        setQuotaMember(null); setNotice(`${member.name} 的总限额已保存为 ${formatAiPoints(member.quota.limitTokens)}。`);
+        setQuotaMember(null); setNotice(`${member.name} 的总限额现在是 ${formatAiPoints(member.quota.limitTokens)}。`);
       }} /> : null}
       {usageMember ? <MemberUsageDialog member={usageMember} onClose={() => setUsageMember(null)} /> : null}
     </section>

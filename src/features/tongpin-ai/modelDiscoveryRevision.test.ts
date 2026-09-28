@@ -1,27 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { AiProviderConfig } from "../../../shared/ai";
-import { getImageModelOptions, getProviderModelOptions } from "./AdminAiProviderSettings";
 import { ModelDiscoveryRevision } from "./modelDiscoveryRevision";
 
-const saved = {
-  baseUrl: "https://old.example/v1", apiKeyConfigured: true, modelsVerified: true,
-  availableModels: ["old-key-only"],
-} as AiProviderConfig;
-
 describe("administrator model discovery identity", () => {
-  it("never offers a saved key's model list when a replacement key is being edited", () => {
-    expect(getProviderModelOptions("https://old.example/v1", saved, [], "new-key")).toEqual([]);
-    expect(getProviderModelOptions("https://old.example/v1", saved, [], "")).toEqual(["old-key-only"]);
-    expect(getProviderModelOptions("https://new.example/v1", saved, [], "")).toEqual([]);
-  });
-
-  it("does not offer chat-key models for a separately drafted image credential", () => {
-    expect(getImageModelOptions([], "", "new-image-key", ["chat-only"])).toEqual([]);
-    expect(getImageModelOptions([], "https://image.example/v1", "", ["chat-only"])).toEqual([]);
-    expect(getImageModelOptions([], "", "", ["chat-only"])).toEqual(["chat-only"]);
-    expect(getImageModelOptions(["image-only"], "https://image.example/v1", "", ["chat-only"])).toEqual(["image-only"]);
-  });
-
   it("drops a delayed old response after credentials change, but accepts the new one", async () => {
     const gate = new ModelDiscoveryRevision();
     const old = gate.begin("chat");
