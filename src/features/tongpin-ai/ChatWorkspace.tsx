@@ -705,6 +705,19 @@ export function ChatWorkspace({
     if (saved && !draft.trim()) onDraftChange(saved);
     requestAnimationFrame(() => composerRef.current?.focus());
   }
+  /** The conversation as the call sees it: image/video cards carry their task status. */
+  const callMessages = useMemo(() => !callActive ? messages : messages.map(message => {
+    const artifact = message.artifactId ? artifactById.get(message.artifactId) : undefined;
+    const status = artifact?.data?.mediaTaskStatus;
+    if (!artifact || typeof status !== "string" || (artifact.kind !== "图片" && artifact.kind !== "视频")) return message;
+    return { ...message, task: { kind: artifact.kind as "图片" | "视频", status } };
+  }), [callActive, messages, artifactById]);
+  // During a call the conversation is heard, not scrolled: keep the newest turn in view.
+  useEffect(() => {
+    if (!callActive) return;
+    followResponseRef.current = true;
+    scheduleFollowScroll();
+  }, [callActive, messages, scheduleFollowScroll]);
   function submitSpokenTurn(text: string): VoiceCallTurnResult {
     if (computerRequest) return { ok: false, reason: "电脑操作进行中，请等它结束后再说。" };
     if (responding || checkingQuota || imagePlanning || readingFiles || fileReadingRef.current || spokenTurnRef.current) return { ok: false, reason: "busy" };
@@ -1004,7 +1017,7 @@ export function ChatWorkspace({
         <div className="tp-ai-beam-wrap">
           {/* One stable slot: the call keeps running while a spoken request operates the computer. */}
           {callActive ? (
-            <VoiceCallPanel messages={messages} mode={mode} onModeChange={onModeChange} composerNotice={fileError} onSubmitTurn={submitSpokenTurn} onStopReply={onStop} onClose={closeCall} />
+            <VoiceCallPanel messages={callMessages} mode={mode} onModeChange={onModeChange} composerNotice={fileError} onSubmitTurn={submitSpokenTurn} onStopReply={onStop} onClose={closeCall} />
           ) : null}
           {computerRequest && computerPanel ? computerPanel : computerRequest ? <p className="tp-ai-copy-error" role="alert">电脑操作执行器未接入，已停止流程。</p> : callActive ? null : (
           <form className="tp-ai-composer" onSubmit={submitMessage}>

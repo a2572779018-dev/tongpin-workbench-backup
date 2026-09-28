@@ -146,6 +146,19 @@ describe("语音通话 controller (Open WebUI call-mode flow)", () => {
     expect(call.getState()).toMatchObject({ phase: "listening", notice: "图片生成尚未启用，请联系管理员配置。" });
   });
 
+  it("says when a spoken request's image finishes, but not for cards that were already there", () => {
+    const { call, spoken, events } = harness();
+    const card = (status: string): CallReplyLike => ({ id: "m1", role: "assistant", content: "", status: "ready", artifactId: "artifact-1", task: { kind: "图片", status } });
+    call.updateMessages([...history, card("completed")]);
+    expect(spoken).toEqual([]);
+    const fresh = harness();
+    fresh.call.updateMessages(history);
+    fresh.call.updateMessages([...history, card("running")]);
+    fresh.call.updateMessages([...history, card("completed")]);
+    expect(fresh.spoken).toEqual(["图片已经生成好了，在对话里可以看到。"]);
+    expect(events).toEqual([]);
+  });
+
   it("an empty transcript asks to repeat without sending", async () => {
     const { call, host } = harness({ transcribe: vi.fn(async () => "") });
     call.speechStarted(); call.speechEnded(new Float32Array(16000));

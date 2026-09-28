@@ -44,6 +44,17 @@ export interface CallReplyLike {
   status?: "thinking" | "typing" | "ready" | "error" | "stopped";
   /** A task card (image, video, PPT…) that the reply handed over to. */
   artifactId?: string;
+  /** The image/video task behind that card, so the call can say when it is done. */
+  task?: { kind: "图片" | "视频"; status: string };
+}
+
+/** What the call says when a spoken request's image/video task changes state. */
+export function taskAnnouncement(kind: "图片" | "视频", status: string): string | null {
+  if (status === "completed") return `${kind}已经生成好了，在对话里可以看到。`;
+  if (status === "failed") return `抱歉，${kind}没有生成成功，可以在对话里看原因。`;
+  if (status === "awaiting_authorization") return `${kind}的方案准备好了，需要你在屏幕上确认生成。`;
+  if (status === "awaiting_input") return `生成${kind}还需要你补充一点信息，请看一下屏幕。`;
+  return null;
 }
 
 export interface CallMicrophone {
@@ -103,6 +114,9 @@ export class VoiceCallController {
   /** Assistant messages already present or already spoken; anything newer is announced. */
   private readonly seen = new Set<string>();
   private primed = false;
+  private readonly taskStatus = new Map<string, string>();
+  private readonly announcements: string[] = [];
+  private announcementCount = 0;
 
   constructor(private readonly host: CallHost, private readonly speaker: CallSpeakerLike, private readonly wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))) {}
 
@@ -127,6 +141,8 @@ export class VoiceCallController {
     this.carry = "";
     this.seen.clear();
     this.primed = false;
+    this.taskStatus.clear();
+    this.announcements.length = 0;
     this.set({ phase: "starting", heard: "", saying: "", notice: "", fatal: null });
   }
 
@@ -216,9 +232,19 @@ export class VoiceCallController {
   /** The conversation's messages as rendered (streamed text included). */
   updateMessages(messages: readonly CallReplyLike[]): void {
     this.messages = messages;
-    if (!this.primed) {
+    const priming = !this.primed;
+    if (priming) {
       this.primed = true;
       for (const message of messages) if (message.role === "assistant") this.seen.add(message.id);
+    }
+    for (const message of messages) {
+      if (!message.task) continue;
+      const before = this.taskStatus.get(message.id);
+      if (before === message.task.status) continue;
+      this.taskStatus.set(message.id, message.task.status);
+      // Only changes seen during the call are news; a card's first status is the card itself.
+      const text = !priming && before !== undefined ? taskAnnouncement(message.task.kind, message.task.status) : null;
+      if (text) this.announcements.push(text);
     }
     this.track();
     this.announce();
@@ -228,6 +254,16 @@ export class VoiceCallController {
    * result, a finished task) is read out too. */
   private announce(): void {
     if (this.closed || this.follow || !this.microphone || this.state.phase !== "listening") return;
+    const news = this.announcements.shift();
+    if (news) {
+      const id = `call-announcement-${(this.announcementCount += 1)}`;
+      this.follow = { baseline: null, id, progress: NO_SPEECH_PROGRESS, spoken: true, finished: true };
+      this.speaker.start(id);
+      this.speaker.push(id, news);
+      this.speaker.finish(id);
+      void this.microphone.pause();
+      return;
+    }
     const reply = this.messages.find(message => message.role === "assistant" && !this.seen.has(message.id) && message.status !== "thinking" && message.content.trim());
     if (!reply) return;
     this.follow = { baseline: null, id: reply.id, progress: NO_SPEECH_PROGRESS, spoken: false, finished: false };
