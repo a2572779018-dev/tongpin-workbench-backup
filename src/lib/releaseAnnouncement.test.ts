@@ -33,21 +33,10 @@ describe("release announcement", () => {
         lastAnnouncedVersion: "0.1.23",
       }),
     ).toBe(true);
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "数值图表",
-    );
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "数学公式渲染",
-    );
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "追问建议",
-    );
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "工具请求信封",
-    );
-    expect(formatReleaseAnnouncementBody(announcement!)).toContain(
-      "保留任务、客户脉络图、AI 历史、密钥和已有成员额度",
-    );
+    const body = formatReleaseAnnouncementBody(announcement!);
+    for (const change of ["边生成边显示", "没生成成功会自动退还同频点", "朗读的声音可以自己选", "真正逐步执行", "快速档和标准档", "电脑操作（测试版"]) {
+      expect(body).toContain(change);
+    }
   });
 
   it("shows every release-notes line as its own numbered item", () => {

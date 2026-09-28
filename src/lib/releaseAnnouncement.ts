@@ -3,7 +3,7 @@ import { releaseNoteItems, releaseNoteItemsNotice, type ReleaseNotesNotice } fro
 
 export const RELEASE_ANNOUNCEMENT_STORAGE_KEY =
   "tongpin:last-announced-release";
-export const CURRENT_RELEASE_VERSION = "0.1.49";
+export const CURRENT_RELEASE_VERSION = "0.1.50";
 
 export interface ReleaseAnnouncement {
   version: string;
