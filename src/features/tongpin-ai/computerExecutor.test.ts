@@ -11,7 +11,7 @@ import type {
   ComputerObserveResult,
   ComputerTaskSpec,
 } from "../../../shared/computerAgent";
-import { calculationResult, computerInstructionText, evaluateComputerDone, readBackValues, runComputerTask, screenValues, type ComputerAnswer, type ComputerApi, type ComputerQuestion, type ComputerTimelineStep } from "./computerExecutor";
+import { calculationResult, computerInstructionText, evaluateComputerDone, readBackTitle, readBackValues, runComputerTask, screenValues, type ComputerAnswer, type ComputerApi, type ComputerQuestion, type ComputerTimelineStep } from "./computerExecutor";
 
 const QUOTA: AiQuota = { limitTokens: 100_000, usedTokens: 0, reservedTokens: 0, remainingTokens: 100_000, inputTokens: 0, outputTokens: 0 };
 const TASK: ComputerTaskSpec = {
@@ -476,6 +476,35 @@ describe("computer executor read-back tasks", () => {
     display: { app: "计算器", title: "计算器", elementCount: 30, axSparse: false, screenshotUsed: false },
   });
 
+  it("reports a web page's title when the member asked for it, bounded and without quotes", () => {
+    const WEB: ComputerTaskSpec = {
+      goal: "用 Safari 打开 https://samhubs.com，读取并告诉用户网页标题",
+      apps: [{ name: "Safari", bundleId: "com.apple.Safari" }],
+      parameters: [{ id: "p1", role: "text", label: "网址", value: "https://samhubs.com" }],
+      successCheck: "Safari 已打开指定网址，能从界面读取网页标题",
+      irreversible: null,
+      actionKinds: ["activate_app", "click", "type", "key"],
+    };
+    const page = (windowTitle: string | null) => ({ ...calcView(0, "", []).observation, app: "Safari", windowTitle });
+    expect(readBackTitle(WEB, page("SAM HUB | LORA Chain 導航中心"))).toBe("SAM HUB | LORA Chain 導航中心");
+    expect(readBackTitle(WEB, page("第一行\n“引号”\u0007里"))).toBe("第一行 引号 里");
+    expect([...readBackTitle(WEB, page("长".repeat(200)))!]).toHaveLength(81);
+    expect(readBackTitle(WEB, page(null))).toBeNull();
+    // Only a task that asks for the title reports it; a calculation never does.
+    expect(readBackTitle({ ...WEB, goal: "用 Safari 打开 https://samhubs.com", successCheck: "Safari 已打开指定网址" }, page("SAM HUB"))).toBeNull();
+    expect(readBackTitle(CALC, page("计算器"))).toBeNull();
+  });
+
+  it("finds the calculation in the goal when the plan typed its numbers separately", () => {
+    // Real run: the plan's parameters were 「128」 and 「36」, and Calculator still showed 4,608 from before.
+    const split: ComputerTaskSpec = { ...CALC, goal: "打开电脑上的计算器，计算 128×36，读取显示结果并告诉用户",
+      parameters: [{ id: "p1", role: "text", label: "数字", value: "128" }, { id: "p2", role: "text", label: "数字", value: "36" }] };
+    expect(calculationResult(split)).toBe(4608);
+    expect(readBackValues(split, new Set(["4,608", "100%"]), calcView(0, "4,608", []).observation)).toEqual(["4,608"]);
+    // Dates are not calculations.
+    expect(calculationResult({ ...split, goal: "打开日历看 9/28 的安排并告诉我" })).toBeNull();
+  });
+
   it("reports the value the last action brought up, and only plain values", () => {
     const observation = calcView(0, "4,608", []).observation;
     expect(screenValues(observation)).toEqual(["4,608", "100%"]);
@@ -521,7 +550,8 @@ describe("computer executor read-back tasks", () => {
     expect(literal("10 - 5 =")).toBe(5);
     expect(literal("7÷2")).toBe(3.5);
     expect(literal("1,200*3")).toBe(3600);
-    expect(literal("明天见")).toBeNull();
+    // Neither a calculation parameter nor one in the goal.
+    expect(calculationResult({ ...CALC, goal: "打开计算器", parameters: [{ id: "p1", role: "text", label: "文字", value: "明天见" }] })).toBeNull();
     expect(calculationResult(TASK)).toBeNull();
   });
 

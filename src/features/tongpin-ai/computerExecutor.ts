@@ -157,14 +157,15 @@ export function evaluateComputerDone(task: ComputerTaskSpec, facts: ComputerExec
   return "not_done";
 }
 
-function verifiedSummary(task: ComputerTaskSpec, app: string, readout: readonly string[] = []): string {
+function verifiedSummary(task: ComputerTaskSpec, app: string, readout: readonly string[] = [], title: string | null = null): string {
   const irreversible = task.irreversible;
   if (irreversible?.kind === "send_message" && irreversible.recipient && irreversible.content) {
     return `已完成：已在「${app}」给「${irreversible.recipient}」发送“${irreversible.content}”，并在聊天记录中看到了这条消息。`;
   }
-  // The value the member asked for comes first: the goal and check can be long.
+  // What the member asked for comes first: the goal and check can be long.
+  const named = title ? `「${app}」当前的标题是“${title}”。` : "";
   const shown = readout.length ? `「${app}」显示的结果：${readout.join("、")}。` : "";
-  return `已完成：${shown}${task.goal}。界面检查符合完成标准：${task.successCheck}`;
+  return `已完成：${named}${shown}${task.goal}。界面检查符合完成标准：${task.successCheck}`;
 }
 
 /** A task that asks to read something off the screen and report it. */
@@ -198,6 +199,25 @@ export function screenValues(observation: ComputerObserveResult["observation"]):
   return [...values];
 }
 
+/** A read-back task that asks for the window's (a web page's) title. */
+const TITLE_TASK = /(?:标题|title)/iu;
+const MAX_TITLE_CHARACTERS = 80;
+
+/**
+ * For "打开…网页，告诉我网页标题": the target window's title (a browser shows the
+ * page title there) as one bounded, quoted line — control characters, quotes
+ * and line breaks removed, at most 80 characters. Only when the member asked
+ * for a title; otherwise screen words stay off the chat (see screenValues).
+ */
+export function readBackTitle(task: ComputerTaskSpec, observation: ComputerObserveResult["observation"]): string | null {
+  const asked = `${task.goal} ${task.successCheck}`;
+  if (!READ_BACK_TASK.test(asked) || !TITLE_TASK.test(asked)) return null;
+  const title = (observation.windowTitle ?? "").replace(/[\u0000-\u001f\u007f"“”「」]/g, " ").replace(/\s+/g, " ").trim();
+  if (!title) return null;
+  const characters = [...title];
+  return characters.length > MAX_TITLE_CHARACTERS ? `${characters.slice(0, MAX_TITLE_CHARACTERS).join("")}…` : title;
+}
+
 /** A text literal that is a whole calculation ("128×36"); same shape as the Electron policy's. */
 const CALCULATION_LITERAL = /^\s*\d[\d.,，．]*(?:\s*[+\-−＋－×xX*＊÷/／]\s*\d[\d.,，．]*)+\s*[=＝]?\s*$/u;
 
@@ -206,9 +226,21 @@ function numberOf(text: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-/** The result of the task's calculation literal (× ÷ before + −), or null. */
+/** A calculation written inside the goal ("计算 128×36") when the plan typed its numbers as separate parameters. */
+const CALCULATION_IN_TEXT = /\d[\d.,，．]*(?:\s*[+\-−＋－×xX*＊÷/／]\s*\d[\d.,，．]*)+/u;
+
+/** The task's calculation: a whole-calculation parameter, else one written in its goal. */
+function calculationLiteral(task: ComputerTaskSpec): string | undefined {
+  const parameter = task.parameters.find(item => item.role === "text" && CALCULATION_LITERAL.test(item.value))?.value;
+  if (parameter) return parameter;
+  const written = CALCULATION_IN_TEXT.exec(task.goal)?.[0];
+  // A date ("9/28") or a phone number is not a calculation: an operator must sit between two numbers.
+  return written && /[+\-−＋－×xX*＊÷／]|\d\s*\/\s*\d/u.test(written) && !/^\d{1,2}\/\d{1,2}$/u.test(written.trim()) ? written : undefined;
+}
+
+/** The result of the task's calculation (× ÷ before + −), or null. */
 export function calculationResult(task: ComputerTaskSpec): number | null {
-  const literal = task.parameters.find(parameter => parameter.role === "text" && CALCULATION_LITERAL.test(parameter.value))?.value;
+  const literal = calculationLiteral(task);
   if (!literal) return null;
   const tokens = literal.replace(/[=＝\s]/g, "").match(/\d[\d.,，．]*|[+\-−＋－×xX*＊÷/／]/gu) ?? [];
   const terms: number[] = [];
@@ -393,6 +425,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       const view = observed.value;
       if (view.display.app) appName = view.display.app;
       const readout = readBackValues(spec, valuesBeforeAction, view.observation);
+      const readTitle = readBackTitle(spec, view.observation);
       // Typed text showed up in the wrong kind of input box: keyboard focus was
       // not where the run believed. Stop before any Return could send it.
       const landing = view.facts.typedLanding;
@@ -450,7 +483,7 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       /* Verification of the goal (executor evidence + Jev goal_done). */
       if (choice.id === "done" || (verification.goalDone >= AUTO_DONE_THRESHOLD && view.facts.irreversibleDone)) {
         const verdict = evaluateComputerDone(spec, view.facts, verification.goalDone);
-        if (verdict === "verified") throw new RunStop("verified", "goal_verified", verifiedSummary(spec, appName || spec.apps[0].name, readout));
+        if (verdict === "verified") throw new RunStop("verified", "goal_verified", verifiedSummary(spec, appName || spec.apps[0].name, readout, readTitle));
         if (verdict === "unconfirmed") throw new RunStop("unknown", "action_uncertain", `${spec.irreversible?.summary ?? "操作"}已执行，但无法从界面确认结果，请到「${appName || spec.apps[0].name}」里核对`);
         if (choice.id === "done") {
           prematureDone += 1;
