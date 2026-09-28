@@ -296,6 +296,15 @@ export function readBackValues(task: ComputerTaskSpec, beforeLastAction: Readonl
   return shown.filter(value => !beforeLastAction.has(value)).slice(0, 3);
 }
 
+/** The text a type candidate enters: the last 「…」 of its label (「字段」 may come first), bounded. */
+export function typedTextOf(label: string): string | null {
+  const matches = [...label.matchAll(/「([^「」]+)」/g)];
+  const text = matches.at(-1)?.[1]?.trim();
+  if (!text) return null;
+  const points = [...text];
+  return points.length > 40 ? `${points.slice(0, 39).join("")}…` : text;
+}
+
 const REASON_TEXT: Record<ComputerRunReason, string> = {
   goal_verified: "已完成",
   goal_refuted: "界面检查显示任务没有完成",
@@ -341,6 +350,8 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
   let points = 0;
   let irreversibleAttempted = false;
   let appName = "";
+  /** Text this run typed that no later Enter, send or submit consumed: it may still sit in the app. */
+  let unsentTyping: string | null = null;
 
   let budget: { startedAt: number; limits: ComputerRunLimits } | null = null;
   const stoppedReason = (): RunStop => {
@@ -358,7 +369,8 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
     const done = actions > 0
       ? `已执行 ${actions} 个动作${irreversibleAttempted ? "，其中授权的不可逆操作已执行一次" : "，没有执行任何发送、提交、删除或付款"}`
       : "没有执行任何动作";
-    return `未完成：${stop.message}。${done}。`;
+    const leftover = unsentTyping ? `最后输入的「${unsentTyping}」还没有发送或提交，可能还留在${appName ? `「${appName}」的` : ""}输入框里，不需要的话请手动删除。` : "";
+    return `未完成：${stop.message}。${done}。${leftover}`;
   };
 
   let result: ComputerRunResult;
@@ -607,6 +619,10 @@ export async function runComputerTask(deps: ComputerRunDeps, request: ComputerRu
       if (outcome.status !== "blocked") { actions += 1; valuesBeforeAction = new Set(screenValues(view.observation)); }
       if (outcome.status !== "blocked" && outcome.status !== "failed" && choice.kind !== "activate_app" && choice.kind !== "scroll" && choice.kind !== "reserved") inputActions += 1;
       if (choice.risk !== "none" && outcome.status !== "blocked" && outcome.status !== "failed") irreversibleAttempted = true;
+      if (outcome.status !== "blocked" && outcome.status !== "failed") {
+        if (choice.kind === "type") unsentTyping = typedTextOf(choice.label);
+        else if (choice.risk !== "none" || /回车/.test(choice.label)) unsentTyping = null;
+      }
       callbacks.onStep?.({ step, phase: outcome.status === "blocked" ? "authorize" : "verify", authorization: outcome.authorization, execution: { status: outcome.status, message: outcome.message, ...(outcome.delivery ? { delivery: outcome.delivery } : {}) } });
       history.push({ step, action: choice.description, result: outcome.status });
       if (outcome.status === "blocked") {

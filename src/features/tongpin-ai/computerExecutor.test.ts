@@ -11,7 +11,7 @@ import type {
   ComputerObserveResult,
   ComputerTaskSpec,
 } from "../../../shared/computerAgent";
-import { calculationResult, computerInstructionText, evaluateComputerDone, readBackTitle, readBackValues, runComputerTask, screenValues, type ComputerAnswer, type ComputerApi, type ComputerQuestion, type ComputerTimelineStep } from "./computerExecutor";
+import { calculationResult, computerInstructionText, evaluateComputerDone, readBackTitle, readBackValues, runComputerTask, screenValues, typedTextOf, type ComputerAnswer, type ComputerApi, type ComputerQuestion, type ComputerTimelineStep } from "./computerExecutor";
 
 const QUOTA: AiQuota = { limitTokens: 100_000, usedTokens: 0, reservedTokens: 0, remainingTokens: 100_000, inputTokens: 0, outputTokens: 0 };
 const TASK: ComputerTaskSpec = {
@@ -429,6 +429,30 @@ describe("computer executor loop", () => {
     const escResult = await pending;
     expect(escResult).toMatchObject({ outcome: "abstained", reason: "user_stopped" });
     expect(escResult.summary).toContain("Esc");
+  });
+
+  it("tells the member when text it typed was not sent and may still sit in the app", async () => {
+    const controller = new AbortController();
+    const h = harness({ views: wechatViews, decisions: [{ id: "open_search" }, { id: "type_p1_focus" }, { id: "key_return" }, { id: "type_p2_focus" }, { id: "key_return" }],
+      onDecide: body => { if (body.step === 5) controller.abort(); } });
+    const result = await run(h, { signal: controller.signal });
+    expect(result).toMatchObject({ outcome: "abstained", reason: "user_stopped" });
+    expect(result.summary).toContain("最后输入的「中秋快乐」还没有发送或提交，可能还留在「微信」的输入框里，不需要的话请手动删除。");
+
+    // Enter consumed the search text: nothing is left to warn about.
+    const consumed = new AbortController();
+    const searched = harness({ views: wechatViews, decisions: [{ id: "open_search" }, { id: "type_p1_focus" }, { id: "key_return" }, { id: "type_p2_focus" }],
+      onDecide: body => { if (body.step === 4) consumed.abort(); } });
+    const early = await run(searched, { signal: consumed.signal });
+    expect(early.reason).toBe("user_stopped");
+    expect(early.summary).not.toContain("还没有发送或提交");
+  });
+
+  it("reads the typed text from the last quote of a type candidate's label", () => {
+    expect(typedTextOf("在搜索框输入「姐姐」（前台）")).toBe("姐姐");
+    expect(typedTextOf("在输入框「标题」输入「季度汇报」")).toBe("季度汇报");
+    expect(typedTextOf("在输入框输入")).toBeNull();
+    expect([...typedTextOf(`在输入框输入「${"字".repeat(60)}」`)!]).toHaveLength(40);
   });
 
   it("stops when the screen needs the member (login, QR code, password)", async () => {
