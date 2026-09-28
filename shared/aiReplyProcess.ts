@@ -4,6 +4,7 @@ import {
   validSubagentRole, validSubagentSourceNumbers, validSubagentSummary, validSubagentTask, validSubagentTitle,
   type AiMultiAgentPhase, type AiSubagentFailure, type AiSubagentStatus, type AiSubagentUpdate,
 } from "./aiMultiAgent";
+import { readAiWorkflowUpdate, type AiWorkflowUpdate } from "./aiWorkflows";
 
 /**
  * Bounded record of what really happened while one assistant reply ran: the
@@ -175,6 +176,9 @@ export interface AiReplyProcessLiveExec {
 export type AiReplyProcessLiveStep = AiReplyProcessThinkingStep | AiReplyProcessLiveSearch | AiReplyProcessLiveExec | AiReplyProcessToolStep | AiReplyProcessLiveAgents;
 export interface AiReplyProcessLive {
   steps: AiReplyProcessLiveStep[];
+  /** The latest step list of a step-by-step Hub run. Display-only: never
+   * persisted (the harness trace keeps the settled step states). */
+  workflow?: AiWorkflowUpdate;
   /** `run_started.data.startedAt`: when the server accepted the request. */
   runStartedAt?: number;
   /** Timestamp of the journaled `run_finished` event. */
@@ -301,6 +305,10 @@ export function applyReplyProcessEvent(state: AiReplyProcessLive, event: AiReply
     case "subagent_update": {
       const update = readAiSubagentUpdate(event.data);
       return update ? applySubagentUpdate(state, update, at) : state;
+    }
+    case "workflow_update": {
+      const update = readAiWorkflowUpdate(event.data);
+      return update ? { ...state, workflow: update } : state;
     }
     case "run_finished": {
       const settled = finishLiveAgents(state, "done", at);

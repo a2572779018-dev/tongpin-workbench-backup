@@ -1,6 +1,7 @@
 import type { AiChatRequest, AiChatResponse } from "../../shared/ai";
 import { AI_TOOL_PROGRESS_STATUSES, type AiRunEvent } from "../../shared/aiRunEvents";
 import { readAiSubagentUpdate } from "../../shared/aiMultiAgent";
+import { readAiWorkflowUpdate } from "../../shared/aiWorkflows";
 import { validAiRichContent } from "../../shared/aiRichContent";
 import { ApiRequestError } from "./api";
 
@@ -76,6 +77,8 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
         throw new UnsafeEvent("回复结果标识或内容块不正确");
     } else if (event.type === "subagent_update") {
       if (!readAiSubagentUpdate(event.data)) throw new UnsafeEvent("多 Agent 协作进度格式无效");
+    } else if (event.type === "workflow_update") {
+      if (!readAiWorkflowUpdate(event.data)) throw new UnsafeEvent("Hub 工作流进度格式无效");
     } else if (event.type === "run_failed") {
       if (typeof event.data?.error?.code !== "string" || typeof event.data.error.message !== "string")
         throw new UnsafeEvent("回复失败事件格式无效");
@@ -151,8 +154,9 @@ export async function readAiChatStream(api: StreamApi, request: AiChatRequest, o
     response = await api<Response>("/api/ai/chat/stream", {
       method: "POST",
       // liveProgress opts this client in to reasoning_delta/tool_progress events;
-      // subagentEvents to 多 Agent 协作 subagent_update events.
-      body: JSON.stringify({ ...request, liveProgress: true, subagentEvents: true }), headers: accountHeaders, signal: options.signal,
+      // subagentEvents to 多 Agent 协作 subagent_update events; workflowEvents to
+      // the step-by-step Hub's workflow_update events.
+      body: JSON.stringify({ ...request, liveProgress: true, subagentEvents: true, workflowEvents: true }), headers: accountHeaders, signal: options.signal,
     }, 130_000, "stream");
   } catch (error) {
     checkAbort();

@@ -516,6 +516,18 @@ export class AiHarness {
     }
   }
 
+  /** A Hub run that executes its steps one model call at a time (hubRun.ts)
+   * records each step boundary the application verified. Summaries are
+   * application-authored: never member text, model output or reasoning. */
+  recordWorkflowStep(userId: string, requestId: string, workflowStepId: string, status: "running" | "succeeded" | "failed" | "cancelled", summary: string, runSummary?: string): void {
+    const run = this.store.harnessRun(userId, requestId);
+    if (!run) return;
+    const step = this.store.harnessSteps(userId, run.id).find(item => item.kind === "workflow" && item.workflowStepId === workflowStepId);
+    if (!step) return;
+    this.store.saveHarnessStep(userId, run.id, { ...step, status, summary, updatedAt: new Date().toISOString() });
+    if (runSummary && run.status === "running") this.store.updateHarnessRun(userId, requestId, "running", runSummary);
+  }
+
   private failCurrentWorkflowStep(userId: string, runId: string): void {
     const current = this.store.harnessSteps(userId, runId).find(step => step.kind === "workflow" && step.status === "running");
     if (!current) return;

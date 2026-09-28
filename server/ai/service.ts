@@ -31,6 +31,7 @@ import { withPendingGuidance } from "./runGuidance";
 import { AiVoiceService, type AiWhisperRunner } from "./voice";
 import { AiMemberMemoryService } from "./memberMemoryService";
 import { cancelMultiAgentRun as cancelActiveMultiAgentRun, multiAgentPreflight, runMultiAgentChat, type MultiAgentHost } from "./multiAgentRun";
+import { hubPreflight, runHubChat } from "./hubRun";
 import { parseComputerTaskOutput } from "./computerTask";
 import { AiComputerService } from "./computerExecutor";
 import { planOpenSquillaRoute, readOpenSquillaRouting } from "./openSquillaRouting";
@@ -742,7 +743,7 @@ export class AiService {
     const model = route.modelId;
     const persona = this.memberMemory.withMemory(new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile, userId, request, false);
     const ordinary = this.chatPreflight(userId, request, provider, persona, model);
-    return multiAgentPreflight({ route, request, provider, persona, ordinary }) ?? ordinary;
+    return hubPreflight({ route, request, provider, persona, ordinary }) ?? multiAgentPreflight({ route, request, provider, persona, ordinary }) ?? ordinary;
   }
   /** 多 Agent 协作 host: the run reserves, streams and settles through this service. */
   private multiAgentHost(userId: string): MultiAgentHost {
@@ -890,6 +891,13 @@ export class AiService {
     const idempotencyKey = await providerIdempotencyKey(this.store.tenantId, userId, request.requestId, "chat");
     const model = route.modelId;
     const persona = this.memberMemory.withMemory(new AiPersonaRepository(this.store.sql).read(userId, this.store.tenantId).profile, userId, request, true);
+    // A Hub (@研究简报 Hub …) runs its steps one model call at a time when its worst case fits.
+    const hub = await runHubChat(this.multiAgentHost(userId), { userId, request, provider, route, key, persona, hash, parentAttempt,
+      stream: options.stream, onEvent: options.onEvent, workflowEvents: object(value).workflowEvents === true, liveProgress });
+    if (hub) {
+      this.memberMemory.afterReply(userId, request, hub);
+      return hub;
+    }
     // Pro 多 Agent 协作: runs only when the tier opts in and its worst case fits; otherwise the ordinary path below.
     const multiAgent = await runMultiAgentChat(this.multiAgentHost(userId), { userId, request, provider, route, key, persona, hash, parentAttempt,
       stream: options.stream, onEvent: options.onEvent, subagentEvents: object(value).subagentEvents === true });

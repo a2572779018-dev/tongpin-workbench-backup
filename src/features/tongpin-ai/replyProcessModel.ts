@@ -2,6 +2,7 @@ import type { AiHarnessPublicStep, AiHarnessTrace } from "../../../shared/ai";
 import { coordinatorActivity, readReplyProcess, type AiReplyProcessAgentsStep, type AiReplyProcessLive, type AiReplyProcessLiveAgents, type AiReplyProcessOutcome, type AiReplyProcessStep } from "../../../shared/aiReplyProcess";
 import { subagentActivity, type AiMultiAgentPhase, type AiSubagentStatus } from "../../../shared/aiMultiAgent";
 import type { AiCodeExecStatus, AiToolProgress } from "../../../shared/aiRunEvents";
+import type { AiWorkflowLiveStep, AiWorkflowStepState, AiWorkflowUpdate } from "../../../shared/aiWorkflows";
 import { readGeneratedImageSelection } from "./generatedImageSelection";
 import { mediaTaskStatusText, type MediaTaskStatus } from "./mediaTaskClient";
 import { displaySources } from "./sourceDisplay";
@@ -30,7 +31,9 @@ export type ReplyProcessToolKind = "image" | "video" | "presentation" | "compute
 export type ReplyProcessPart =
   /** How the quick tier was routed (OpenSquilla or the built-in fallback), from the trace's route step. */
   | { kind: "route"; key: "route"; label: string; detail: string; state: "done" }
-  | { kind: "plan"; key: "plan"; label: "任务进度" | "工具进度"; steps: AiHarnessPublicStep[]; completed: number; state: ReplyProcessPartState }
+  /** Harness trace steps; while a step-by-step Hub streams, its live step list
+   * with `activity` naming the step now running. */
+  | { kind: "plan"; key: "plan"; label: "任务进度" | "工具进度"; steps: AiHarnessPublicStep[]; completed: number; state: ReplyProcessPartState; activity?: string }
   | { kind: "thinking"; key: "thinking"; text: string; state: ReplyProcessPartState }
   | { kind: "search"; key: string; query?: string; status: ReplyProcessSearchStatus; sourceCount?: number; durationMs?: number; state: ReplyProcessPartState }
   /** Older saved replies only report how many searches ran. */
@@ -185,6 +188,36 @@ function planPart(trace: AiHarnessTrace | undefined): Extract<ReplyProcessPart, 
   return { kind: "plan", key: "plan", label, steps, completed, state };
 }
 
+const WORKFLOW_STEP_STATUS: Record<AiWorkflowStepState, AiHarnessPublicStep["status"]> = {
+  planned: "planned", running: "running", done: "succeeded", failed: "failed", skipped: "cancelled",
+};
+
+function workflowStepSummary(step: AiWorkflowLiveStep): string {
+  const duration = step.durationMs !== undefined ? formatProcessDuration(step.durationMs) : "";
+  switch (step.status) {
+    case "planned": return "等待前面的步骤完成";
+    case "running": return step.activity ?? "正在执行";
+    case "done": return [step.activity ?? "已完成", duration].filter(Boolean).join(" · ");
+    case "failed": return [step.activity ?? "未完成", duration].filter(Boolean).join(" · ");
+    case "skipped": return step.activity ?? "未执行";
+  }
+}
+
+/** A step-by-step Hub while it streams: the same 任务进度 list its settled
+ * harness trace shows afterwards, fed by live `workflow_update` events. */
+export function workflowPlanPart(update: AiWorkflowUpdate): Extract<ReplyProcessPart, { kind: "plan" }> {
+  const steps = update.steps.map((step, index): AiHarnessPublicStep => ({
+    id: `hub:${step.id}`, kind: "workflow", capability: "chat", title: `${index + 1}. ${step.title}`,
+    summary: workflowStepSummary(step), status: WORKFLOW_STEP_STATUS[step.status], createdAt: "", updatedAt: "",
+  }));
+  const running = update.steps.findIndex(step => step.status === "running");
+  const last = update.steps[update.steps.length - 1];
+  const state: ReplyProcessPartState = last.status === "done" ? "done"
+    : running >= 0 || update.steps.some(step => step.status === "planned") ? "running" : "failed";
+  return { kind: "plan", key: "plan", label: "任务进度", steps, completed: update.steps.filter(step => step.status === "done").length, state,
+    ...(running >= 0 ? { activity: `正在执行第 ${running + 1}/${update.steps.length} 步：${update.steps[running].title}` } : {}) };
+}
+
 /** A compact row for the tool whose own result card sits below the answer. */
 export function replyProcessToolPart(artifact: TongpinAIArtifact | undefined): Extract<ReplyProcessPart, { kind: "tool" }> | undefined {
   if (!artifact) return undefined;
@@ -324,7 +357,9 @@ export function replyProcessView(input: { message: TongpinAIMessage; artifact?: 
   const summary = message.analysisSummary?.trim() ? message.analysisSummary.trim() : undefined;
   const recorded = readReplyProcess(message.process);
   const live = streaming && message.liveProcess?.steps.length ? message.liveProcess : undefined;
-  const plan = planPart(input.trace ?? message.trace);
+  // A streaming step-by-step Hub shows its live steps; the trace takes over once it settles.
+  const liveWorkflow = streaming ? message.liveProcess?.workflow : undefined;
+  const plan = liveWorkflow ? workflowPlanPart(liveWorkflow) : planPart(input.trace ?? message.trace);
   const route = replyProcessRoutePart(input.trace ?? message.trace);
   const tool = replyProcessToolPart(artifact);
 
@@ -404,7 +439,7 @@ export function replyProcessActivity(view: ReplyProcessView, message: Pick<Tongp
   const tool = view.parts.find(part => part.kind === "tool" && (part.state === "running" || part.state === "waiting"));
   if (tool?.kind === "tool") return tool.statusText;
   const plan = view.parts.find(part => part.kind === "plan" && (part.state === "running" || part.state === "waiting"));
-  if (plan?.kind === "plan") return plan.state === "waiting" ? "等待确认后继续" : "正在执行任务";
+  if (plan?.kind === "plan") return plan.state === "waiting" ? "等待确认后继续" : plan.activity ?? "正在执行任务";
   if (view.streaming && !message.content) return view.parts.some(part => part.kind === "thinking") ? "正在思考" : "正在处理";
   return view.streaming ? "正在生成回答" : replyProcessSummary(view);
 }

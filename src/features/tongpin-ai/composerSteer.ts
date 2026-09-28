@@ -116,6 +116,10 @@ type SteerRunMessage = Pick<TongpinAIMessage, "role" | "trace" | "requestId" | "
 export function activeMultiAgentRequestId(message?: Pick<TongpinAIMessage, "role" | "requestId" | "status" | "liveProcess">): string | undefined {
   if (message?.role !== "assistant" || (message.status !== "thinking" && message.status !== "typing")) return undefined;
   if (!message.requestId || message.requestId.startsWith("draft-")) return undefined;
+  // A step-by-step Hub takes guidance before each later step: while its last
+  // step has not started yet, a supplement still reaches a later model call.
+  const workflow = message.liveProcess?.workflow;
+  if (workflow) return workflow.steps[workflow.steps.length - 1].status === "planned" ? message.requestId : undefined;
   const agents = message.liveProcess?.steps.find(step => step.kind === "agents");
   return agents?.kind === "agents" && GUIDED_AGENT_PHASES.has(agents.phase) ? message.requestId : undefined;
 }

@@ -1,5 +1,6 @@
 import type { AiChatResponse, AiUsage } from "./ai";
 import type { AiSubagentUpdate } from "./aiMultiAgent";
+import type { AiWorkflowUpdate } from "./aiWorkflows";
 
 export type AiRunEventPayload =
   | { type: "run_started"; data: { startedAt: number } }
@@ -17,6 +18,9 @@ export type AiRunEventPayload =
   /** 多 Agent 协作 lifecycle (shared/aiMultiAgent.ts). Emitted only to clients
    * that opted in with `subagentEvents: true`; older clients reject unknown types. */
   | { type: "subagent_update"; data: AiSubagentUpdate }
+  /** Hub 工作流 step progress (shared/aiWorkflows.ts). Emitted only to clients
+   * that opted in with `workflowEvents: true`; display-only, never persisted. */
+  | { type: "workflow_update"; data: AiWorkflowUpdate }
   /** Emitted only after a provider-reported token usage has been durably settled.
    * totalTokens may include administrator-configured search conversion units;
    * inputTokens/outputTokens remain the provider-reported text counts. */

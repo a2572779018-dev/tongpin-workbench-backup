@@ -56,7 +56,9 @@ export function multiAgentDeadlineMs(): number {
 // ---------------------------------------------------------------------------
 
 /** Boundaries between orchestration steps where guidance can be injected. */
-export type MultiAgentCheckpoint = "before_coordinator" | "before_subagents" | "before_synthesis";
+export type MultiAgentCheckpoint = "before_coordinator" | "before_subagents" | "before_synthesis"
+  /** A real step-by-step Hub run (hubRun.ts) checks before each step. */
+  | "before_workflow_step" | "before_workflow_final";
 export interface MultiAgentGuidanceContext {
   checkpoint: MultiAgentCheckpoint;
   tenantId: string;
@@ -75,6 +77,8 @@ export interface MultiAgentGuidanceContext {
 export type MultiAgentPendingGuidance = (context: MultiAgentGuidanceContext) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
 let pendingGuidanceHook: MultiAgentPendingGuidance | undefined;
 export function setMultiAgentPendingGuidance(hook: MultiAgentPendingGuidance | undefined): void { pendingGuidanceHook = hook; }
+/** The wired guidance hook, shared with the step-by-step Hub run. */
+export function pendingRunGuidanceHook(): MultiAgentPendingGuidance | undefined { return pendingGuidanceHook; }
 
 const GUIDANCE_ITEMS = 3;
 const GUIDANCE_CODE_POINTS = 600;
@@ -82,7 +86,7 @@ const GUIDANCE_BYTES = utf8Bytes(guidanceBlock(["-", "-", "-"])) + GUIDANCE_CODE
 /** What one checkpoint carries, so a hook can take only items that fit whole. */
 export const MULTI_AGENT_GUIDANCE_LIMITS = Object.freeze({ items: GUIDANCE_ITEMS, codePoints: GUIDANCE_CODE_POINTS });
 
-function boundGuidance(items: readonly string[] | undefined): string[] {
+export function boundGuidance(items: readonly string[] | undefined): string[] {
   const result: string[] = [];
   let budget = GUIDANCE_CODE_POINTS;
   for (const item of items ?? []) {
@@ -104,6 +108,14 @@ class MultiAgentCancelled extends Error {
 }
 const activeRuns = new Map<string, AbortController>();
 const runKey = (tenantId: string, userId: string, requestId: string) => `${tenantId}\u0000${userId}\u0000${requestId}`;
+
+/** Puts another run (the step-by-step Hub run) behind the same member Stop
+ * route. Returns the function that removes it again. */
+export function trackCancellableRun(tenantId: string, userId: string, requestId: string, controller: AbortController): () => void {
+  const key = runKey(tenantId, userId, requestId);
+  activeRuns.set(key, controller);
+  return () => { if (activeRuns.get(key) === controller) activeRuns.delete(key); };
+}
 
 /** Aborts every in-flight and queued model call of this member's run. */
 export function cancelMultiAgentRun(tenantId: string, userId: string, requestId: string): boolean {
