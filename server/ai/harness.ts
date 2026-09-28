@@ -1,6 +1,7 @@
 import {
   AI_BUSINESS_TIERS,
   AI_BUSINESS_TIER_LABELS,
+  AI_HARNESS_CAPABILITY_LABELS,
   type AiChatRequest,
   type AiHarnessCapability,
   type AiHarnessConfig,
@@ -183,7 +184,7 @@ export class AiHarness {
     return value ? publicHarness(value) : null;
   }
 
-  private parseTier(value: unknown, providers: Set<string>): AiHarnessTierRoute {
+  private parseTier(tier: AiMode, value: unknown, providers: Set<string>): AiHarnessTierRoute {
     const route = object(value);
     const providerId = requiredText(route.providerId, "服务标识", 48);
     if (!providers.has(providerId)) throw new AiError(400, "AI_HARNESS_PROVIDER_MISSING", "业务档位引用了不存在的服务连接");
@@ -196,6 +197,12 @@ export class AiHarness {
     if (!Array.isArray(route.capabilities) || !route.capabilities.length) throw new AiError(400, "AI_HARNESS_INVALID", "每个业务档位至少需要文字对话能力");
     const capabilities = [...new Set(route.capabilities.map(item => String(item) as AiHarnessCapability))];
     if (!capabilities.includes("chat") || capabilities.some(item => !CAPABILITIES.has(item))) throw new AiError(400, "AI_HARNESS_INVALID", "业务档位能力列表不正确");
+    // Hosted search and code execution exist only in a Responses request body;
+    // on a Chat Completions text route they would be offered but never run.
+    const hostedTools = capabilities.filter(item => item === "web_search" || item === "code_interpreter");
+    if (protocol !== "responses" && hostedTools.length) {
+      throw new AiError(400, "AI_HARNESS_TOOL_PROTOCOL", `${AI_BUSINESS_TIER_LABELS[tier]}档：${hostedTools.map(item => AI_HARNESS_CAPABILITY_LABELS[item]).join("和")}需要 Responses 协议的文字服务`);
+    }
     if (typeof route.enabled !== "boolean") throw new AiError(400, "AI_HARNESS_INVALID", "业务档位启用状态不正确");
     const media = (capability: "image" | "video") => {
       const providerKey = `${capability}ProviderId` as const;
@@ -256,7 +263,7 @@ export class AiHarness {
       });
     }
     const tiersObject = object(input.tiers);
-    const tiers = Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, this.parseTier(tiersObject[tier], ids)])) as Record<AiMode, AiHarnessTierRoute>;
+    const tiers = Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, this.parseTier(tier, tiersObject[tier], ids)])) as Record<AiMode, AiHarnessTierRoute>;
     for (const tier of AI_BUSINESS_TIERS) {
       const route = tiers[tier];
       if (route.imageEditCapability && route.imageEditCapability.baseUrl !== prepared.find(provider => provider.id === route.imageProviderId)?.baseUrl) throw new AiError(400, "AI_IMAGE_EDIT_CAPABILITY_INVALID", "图片服务地址已改变，请重新确认编辑协议");

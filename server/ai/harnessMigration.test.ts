@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNodeAi } from "./node";
-import type { AiHarnessInput } from "../../shared/ai";
+import { AI_BUSINESS_TIERS, type AiHarnessInput } from "../../shared/ai";
+import { TONGPIN_QUICK_AGENT } from "../../shared/aiAuto";
 import type { AiTransport } from "./provider";
 
 describe("unified AI settings migration", () => {
@@ -85,6 +86,20 @@ describe("unified AI settings migration", () => {
     await service.availability("member", "image");
     expect(transport.mock.calls[0][0]).toBe("https://images.example.com/v1/models");
     expect(transport.mock.calls[0][1].headers.Authorization).toBe("Bearer test-image-key");
+  });
+
+  it("offers hosted search only on Responses tiers, so the draft remains savable", async () => {
+    // A legacy row stored before search required the Responses protocol.
+    runtime.store.saveProvider({ ...runtime.store.provider()!, webSearchEnabled: true, webSearchQuotaTokens: 100 });
+    expect(AI_BUSINESS_TIERS.some(tier => runtime.service.harness.settings()!.tiers[tier].capabilities.includes("web_search"))).toBe(false);
+    await expect(runtime.service.saveHarness(draft())).resolves.toMatchObject({ migratedFromLegacy: false });
+
+    const auto = runtime.service.forTenant("auto-team");
+    auto.store.saveProvider({ ...runtime.store.provider()!, baseUrl: "https://api.b.ai/v1", protocol: "responses", quickModel: TONGPIN_QUICK_AGENT, deepModel: "gpt-6-astra" });
+    const tiers = auto.harness.settings()!.tiers;
+    expect(AI_BUSINESS_TIERS.map(tier => [tiers[tier].protocol, tiers[tier].capabilities.includes("web_search")])).toEqual([
+      ["chat_completions", false], ["chat_completions", false], ["responses", true], ["responses", true],
+    ]);
   });
 
   it("rejects stale discovery when credentials change during the model request", async () => {

@@ -46,16 +46,21 @@ export function legacyHarnessDraft(store: AiStore): StoredHarnessConfig | null {
     providers.push({ ...connection("legacy-video", "视频服务", "https://www.75api.com/v1", video!.encryptedKey!,
       videoVersion, videoKeyVersion, videoVerified, video!.verifiedModels, null), protocol: "chat_completions", enabled: true });
   }
-  const tiers = Object.fromEntries(AI_BUSINESS_TIERS.map(tier => [tier, {
-    providerId: "legacy", modelId: tier === "quick" || tier === "standard" ? quickModel : legacy.deepModel,
-    protocol: wasAuto ? (tier === "quick" || tier === "standard" ? "chat_completions" : "responses") : legacy.protocol, maxOutputTokens: legacy.maxOutputTokens,
-    reasoningEffort: tier === "deep" || tier === "pro" ? legacy.reasoningEffort : "",
-    enabled: legacy.enabled,
-    capabilities: ["chat", "presentation", ...(legacy.visionEnabled ? ["vision"] : []),
-      ...(legacy.webSearchEnabled ? ["web_search"] : []), ...(hasImage ? ["image"] : []), ...(hasVideo && video!.enabled ? ["video"] : [])],
-    ...(hasImage ? { imageProviderId, imageModelId: legacy.imageModel } : {}),
-    ...(hasVideo ? { videoProviderId: "legacy-video", videoModelId: videoModel(video!.defaultModel)?.id ?? "minimax_h3" } : {}),
-  }])) as Record<AiMode, AiHarnessTierRoute>;
+  const tiers = Object.fromEntries(AI_BUSINESS_TIERS.map(tier => {
+    const protocol = wasAuto ? (tier === "quick" || tier === "standard" ? "chat_completions" : "responses") : legacy.protocol;
+    // Hosted search runs only on a Responses text route; the four-tier settings reject it elsewhere.
+    const hostedTools = protocol === "responses" && legacy.webSearchEnabled ? ["web_search"] : [];
+    return [tier, {
+      providerId: "legacy", modelId: tier === "quick" || tier === "standard" ? quickModel : legacy.deepModel,
+      protocol, maxOutputTokens: legacy.maxOutputTokens,
+      reasoningEffort: tier === "deep" || tier === "pro" ? legacy.reasoningEffort : "",
+      enabled: legacy.enabled,
+      capabilities: ["chat", "presentation", ...(legacy.visionEnabled ? ["vision"] : []),
+        ...hostedTools, ...(hasImage ? ["image"] : []), ...(hasVideo && video!.enabled ? ["video"] : [])],
+      ...(hasImage ? { imageProviderId, imageModelId: legacy.imageModel } : {}),
+      ...(hasVideo ? { videoProviderId: "legacy-video", videoModelId: videoModel(video!.defaultModel)?.id ?? "minimax_h3" } : {}),
+    }];
+  })) as Record<AiMode, AiHarnessTierRoute>;
   return { providers, tiers, policy: { strategy: "direct", maxToolSteps: 1, requireApproval: true, autoWebSearch: true },
     updatedAt: legacy.updatedAt, migratedFromLegacy: true };
 }

@@ -308,6 +308,23 @@ describe("AI Harness", () => {
     expect(transport.mock.calls.filter(([url]) => url.endsWith("/models"))).toHaveLength(2);
   });
 
+  it("rejects hosted search or code execution on a Chat Completions tier and names the tier", async () => {
+    const input = harnessInput();
+    input.tiers.standard.capabilities = [...input.tiers.standard.capabilities, "web_search", "code_interpreter"];
+    await expect(runtime.service.saveHarness(input)).rejects.toMatchObject({ status: 400, code: "AI_HARNESS_TOOL_PROTOCOL", message: "标准档：联网搜索和代码执行需要 Responses 协议的文字服务" });
+    input.tiers.standard.capabilities = input.tiers.standard.capabilities.filter(item => item !== "web_search");
+    input.tiers.pro.capabilities = [...input.tiers.pro.capabilities, "web_search"];
+    await expect(runtime.service.saveHarness(input)).rejects.toMatchObject({ code: "AI_HARNESS_TOOL_PROTOCOL", message: "标准档：代码执行需要 Responses 协议的文字服务" });
+    input.tiers.standard.protocol = "responses";
+    await expect(runtime.service.saveHarness(input)).rejects.toMatchObject({ code: "AI_HARNESS_TOOL_PROTOCOL", message: "Pro档：联网搜索需要 Responses 协议的文字服务" });
+    expect(runtime.store.harness()).toBeNull();
+    input.tiers.pro.protocol = "responses";
+    const saved = await runtime.service.saveHarness(input);
+    expect(saved.tiers.standard).toMatchObject({ protocol: "responses", capabilities: expect.arrayContaining(["code_interpreter"]) });
+    expect(saved.tiers.pro).toMatchObject({ protocol: "responses", capabilities: expect.arrayContaining(["web_search"]) });
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("persists concise member-safe reasoning and approval lifecycle without prompts or private chain-of-thought", async () => {
     await configure();
     runtime.service.setQuota("member", "admin", { limitTokens: 20_000 });
