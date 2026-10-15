@@ -283,10 +283,13 @@ describe("workspace V2 prepared per-entity storage (inactive)", () => {
 
   it("enforces the account-wide message count before any append write", async () => {
     const prepared = await active();
-    for (let index = 0; index < 4999; index++) {
-      database.prepare("INSERT INTO ai_workspace_v2_message_owners(tenant_id,user_id,message_id,conversation_id) VALUES('default','member-a',?,'other-chat')")
-        .run(`existing-${index}`);
-    }
+    // Fixture setup is not a durability benchmark: avoid 4,999 individual
+    // disk fsyncs on CI while retaining the exact account-limit boundary.
+    const insertOwner = database.prepare("INSERT INTO ai_workspace_v2_message_owners(tenant_id,user_id,message_id,conversation_id) VALUES('default','member-a',?,'other-chat')");
+    sql.transaction(() => {
+      for (let index = 0; index < 4999; index++) insertOwner.run(`existing-${index}`);
+    });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ai_workspace_v2_message_owners WHERE tenant_id='default' AND user_id='member-a'").get()).toEqual({ count: 5000 });
     await expect(v2.appendActiveMessages("member-a", { epoch: prepared.epoch, mutationId: crypto.randomUUID(), conversationId: "chat-a", expectedRevision: 1,
       messages: [{ id: "overflow", role: "user", content: "不应保存", time: "10:01" }] })).rejects.toMatchObject({ code: "AI_WORKSPACE_TOO_LARGE" });
     expect((await v2.readActiveEntity("member-a", "conversation", "chat-a"))?.revision).toBe(1);

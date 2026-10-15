@@ -1,5 +1,6 @@
 import express, { type NextFunction, type Request, type Response } from "express";
-import type { Server } from "node:http";
+import { request as nativeRequest, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -104,10 +105,30 @@ describe("Node voice routes", () => {
       .field("requestId", `voice-${crypto.randomUUID()}`).field("durationMs", "1000").attach("audio", small, { filename: "a.webm", contentType: "audio/webm" }).expect(409);
     const json = await request(http!).post("/api/ai/audio/transcriptions").set(as("member")).send({ audio: "AAAA" }).expect(415);
     expect(json.body.error.code).toBe("AI_VOICE_UPLOAD_INVALID");
-    const huge = await request(http!).post("/api/ai/audio/transcriptions").set(as("member"))
-      .field("requestId", `voice-${crypto.randomUUID()}`).field("durationMs", "1000")
-      .attach("audio", Buffer.alloc(AI_VOICE_LIMITS.uploadBytes + 1024), { filename: "big.webm", contentType: "audio/webm" }).expect(413);
-    expect(huge.body.error.code).toBe("AI_VOICE_AUDIO_TOO_LARGE");
+    // This branch rejects from Content-Length before reading the body. Sending
+    // 10 MiB through Superagent races its writer against the early HTTP 413
+    // (ECONNRESET on macOS); send just those headers and require a full reply.
+    const huge = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+      const upload = nativeRequest({
+        host: "127.0.0.1", port: (http!.address() as AddressInfo).port,
+        method: "POST", path: "/api/ai/audio/transcriptions",
+        headers: { ...as("member"), "Content-Type": "multipart/form-data; boundary=oversized-fixture", "Content-Length": AI_VOICE_LIMITS.uploadBytes + 1024, Connection: "close" },
+      }, response => {
+        const chunks: Buffer[] = [];
+        response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+        response.once("error", reject);
+        response.once("aborted", () => reject(new Error("Oversized-upload rejection response was incomplete")));
+        response.once("end", () => {
+          resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString("utf8") });
+          upload.destroy();
+        });
+      });
+      upload.once("error", reject);
+      upload.setTimeout(3000, () => upload.destroy(new Error("Oversized-upload rejection timed out")));
+      upload.end();
+    });
+    expect(huge.status).toBe(413);
+    expect(JSON.parse(huge.body).error.code).toBe("AI_VOICE_AUDIO_TOO_LARGE");
     expect(posts()).toHaveLength(0);
   });
 
