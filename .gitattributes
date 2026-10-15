@@ -1,0 +1,6 @@
+# Keep source inspections and builds consistent on Windows and Unix checkouts.
+* text=auto eol=lf
+
+# These shipped resources are SHA-256 pinned. Git must preserve their exact bytes,
+# including JSON files that would otherwise be treated as normal source text.
+/electron/opensquilla-router/bundle/** -text
