@@ -238,6 +238,10 @@ describe("P1 stage A: real answer delta reaches the browser incrementally", () =
     const requestB = request({ conversationId: "conversation-b" });
     const seenA: AiRunEvent[] = [], seenB: AiRunEvent[] = [];
     const clientA = subscriber(requestA, 5, seenA);
+    // Bind the first queued fixture response to A before B can reach transport.
+    // Both streams remain open and overlap below; provider arrival order is not
+    // itself a production guarantee (async preparation can finish B first).
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
     const clientB = subscriber(requestB, 5, seenB);
     await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(2));
 
