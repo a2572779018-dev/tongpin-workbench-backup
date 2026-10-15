@@ -42,7 +42,7 @@ export class AppErrorBoundary extends Component<
             <TriangleAlert size={30} />
           </span>
           <h1>界面加载失败</h1>
-          <p>账号资料存在旧版本数据，当前页面已停止加载。</p>
+          <p>当前界面遇到异常，请重新加载后再试。</p>
           <div>
             <button
               className="primary-button"

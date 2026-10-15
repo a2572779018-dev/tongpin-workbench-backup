@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowsClockwise, Circle, Cube } from "@phosphor-icons/react";
 import { useAuth } from "../auth/AuthContext";
 import { ApiRequestError } from "../lib/api";
+import { LoraDashboardErrorBoundary } from "../components/LoraDashboardErrorBoundary";
+import {
+  chooseLoraDashboardSnapshot,
+  readLoraDashboardSnapshot,
+  type LoraDashboardSnapshot,
+} from "../lib/loraDashboardSnapshot";
 import {
   LORA_PAIR_ADDRESS,
   LORA_DASHBOARD_POLL_MS,
@@ -65,11 +71,6 @@ function addressMetricValue(addresses: LoraDashboardData["addresses"] | undefine
   return `≈${value}`;
 }
 
-function dashboardTimestamp(data: LoraDashboardData): number {
-  const parsed = Date.parse(data.dataUpdatedAt ?? data.generatedAt);
-  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
-}
-
 function priceStateLabel(data: LoraDashboardData | null): string {
   if (!data) return "等待价格";
   return {
@@ -83,15 +84,7 @@ function priceStateLabel(data: LoraDashboardData | null): string {
 }
 
 export function dashboardFromRefresh(payload: unknown): LoraDashboardData | null {
-  if (!payload || typeof payload !== "object") return null;
-  if ("dashboard" in payload) {
-    const dashboard = (payload as { dashboard?: unknown }).dashboard;
-    if (dashboard && typeof dashboard === "object" && "reportDate" in dashboard) {
-      return dashboard as LoraDashboardData;
-    }
-    return null;
-  }
-  return "reportDate" in payload ? payload as LoraDashboardData : null;
+  return readLoraDashboardSnapshot(payload)?.data ?? null;
 }
 
 function normalizeHourly(points: LoraHourlyPoint[]): LoraHourlyPoint[] {
@@ -126,7 +119,8 @@ function HourlyBars({ points }: { points: LoraHourlyPoint[] }) {
 function HourlyLine({ points }: { points: LoraHourlyPoint[] }) {
   const normalized = normalizeHourly(points);
   const values = normalized.map((point) => chartCount(point.count));
-  const maximum = Math.max(1, ...values);
+  const peakValue = Math.max(...values);
+  const maximum = Math.max(1, peakValue);
   const hasData = normalized.some((point) => point.count !== null);
   const line = normalized
     .map((point, index) => {
@@ -135,7 +129,8 @@ function HourlyLine({ points }: { points: LoraHourlyPoint[] }) {
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     })
     .join(" ");
-  const peakIndex = hasData ? values.indexOf(maximum) : 0;
+  // The scale floor is not a measured peak: a valid all-zero day has no 1.
+  const peakIndex = Math.max(0, normalized.findIndex((point, index) => point.count !== null && values[index] === peakValue));
   const peakX = (peakIndex / 23) * 100;
   const peakY = 35 - (values[peakIndex] / maximum) * 30;
   return (
@@ -299,7 +294,7 @@ export function LoraChainDashboardView({
   const dashboardState = busy
     ? data ? "正在刷新数据" : "正在加载数据"
     : error
-      ? "暂不可用"
+      ? data ? "本次更新暂不可用" : "暂不可用"
       : !data
         ? "等待数据"
         : data.baselineStatus === "building"
@@ -477,9 +472,12 @@ export function LoraChainDashboardView({
   );
 }
 
-export function LoraChainDashboard() {
+function LoraChainDashboardController() {
   const { api } = useAuth();
-  const [data, setData] = useState<LoraDashboardData | null>(null);
+  const [snapshot, setSnapshot] = useState<LoraDashboardSnapshot | null>(null);
+  const currentSnapshot = useRef<LoraDashboardSnapshot | null>(null);
+  const dataRevision = useRef(0);
+  const requestSequence = useRef(0);
   const [clock, setClock] = useState(() => SHANGHAI_CLOCK.format(new Date()));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -495,30 +493,44 @@ export function LoraChainDashboard() {
     if (foregroundRequests.current === 0) setBusy(false);
   }, []);
 
-  const applyDashboard = useCallback((next: LoraDashboardData) => {
-    setData((current) => {
-      if (!current || dashboardTimestamp(next) >= dashboardTimestamp(current)) return next;
-      return current;
-    });
+  const applyDashboard = useCallback((payload: unknown) => {
+    const next = readLoraDashboardSnapshot(payload);
+    if (!next) throw new Error("链上数据暂时无法读取，请稍后刷新。");
+    const selected = chooseLoraDashboardSnapshot(currentSnapshot.current, next);
+    const changed = selected !== currentSnapshot.current;
+    if (changed) {
+      currentSnapshot.current = selected;
+      dataRevision.current += 1;
+      setSnapshot(selected);
+    }
+    return { changed, partial: next.issues.length > 0 };
   }, []);
 
   const load = useCallback(async (
     path = "/api/boss/lora-chain/dashboard",
     foreground = true,
   ) => {
+    const requestId = ++requestSequence.current;
+    const revision = dataRevision.current;
     if (foreground) startForegroundRequest();
     try {
-      const result = await api<LoraDashboardData>(path);
-      applyDashboard(result);
-      setError("");
+      const result = await api<unknown>(path);
+      const accepted = applyDashboard(result);
+      if (accepted.changed || (requestId === requestSequence.current && revision === dataRevision.current)) {
+        setError(accepted.partial ? "部分链上数据暂不可用，已保留可用数据，请稍后刷新。" : "");
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "数据暂不可用");
+      if (requestId === requestSequence.current && revision === dataRevision.current) {
+        setError(caught instanceof Error ? caught.message : "数据暂不可用");
+      }
     } finally {
       if (foreground) finishForegroundRequest();
     }
   }, [api, applyDashboard, finishForegroundRequest, startForegroundRequest]);
 
   const refresh = useCallback(async () => {
+    const requestId = ++requestSequence.current;
+    const revision = dataRevision.current;
     startForegroundRequest();
     try {
       const result = await api<unknown>(
@@ -526,16 +538,18 @@ export function LoraChainDashboard() {
         { method: "POST" },
         LORA_MANUAL_REFRESH_TIMEOUT_MS,
       );
-      const refreshed = dashboardFromRefresh(result);
-      if (!refreshed) throw new Error("刷新返回缺少驾驶舱数据");
-      applyDashboard(refreshed);
-      setError("");
+      const accepted = applyDashboard(result);
+      if (accepted.changed || (requestId === requestSequence.current && revision === dataRevision.current)) {
+        setError(accepted.partial ? "部分链上数据暂不可用，已保留可用数据，请稍后刷新。" : "");
+      }
     } catch (caught) {
       if (caught instanceof ApiRequestError && (caught.status === 404 || caught.status === 405)) {
         await load("/api/boss/lora-chain/dashboard?refresh=true", false);
         return;
       }
-      setError(caught instanceof Error ? caught.message : "刷新失败");
+      if (requestId === requestSequence.current && revision === dataRevision.current) {
+        setError(caught instanceof Error ? caught.message : "刷新失败");
+      }
     } finally {
       finishForegroundRequest();
     }
@@ -561,11 +575,15 @@ export function LoraChainDashboard() {
   useEffect(() => {
     let timer: number | null = null;
     const handleUpdate = (event: Event) => {
-      const pushed = dashboardFromRefresh((event as CustomEvent<unknown>).detail);
-      if (pushed) {
-        applyDashboard(pushed);
-        setError("");
-        return;
+      requestSequence.current += 1;
+      try {
+        const accepted = applyDashboard((event as CustomEvent<unknown>).detail);
+        if (!accepted.partial) {
+          if (accepted.changed) setError("");
+          return;
+        }
+      } catch {
+        // A malformed real-time event is only a hint to refetch, never page state.
       }
       if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(() => void load("/api/boss/lora-chain/dashboard", false), 250);
@@ -579,11 +597,15 @@ export function LoraChainDashboard() {
 
   return (
     <LoraChainDashboardView
-      data={data}
+      data={snapshot?.data ?? null}
       clock={clock}
       busy={busy}
-      error={error}
+      error={error || (snapshot?.issues.length ? "部分链上数据暂不可用，已显示可用数据，请稍后刷新。" : "")}
       onRefresh={() => void refresh()}
     />
   );
+}
+
+export function LoraChainDashboard() {
+  return <LoraDashboardErrorBoundary><LoraChainDashboardController /></LoraDashboardErrorBoundary>;
 }

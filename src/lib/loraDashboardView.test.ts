@@ -116,9 +116,13 @@ function render(data: LoraDashboardData | null): string {
 }
 
 describe("LORA dashboard fixed fixture", () => {
+  it("does not accept a report-date-only event as a renderable dashboard", () => {
+    expect(dashboardFromRefresh({ reportDate: "2026-08-14" })).toBeNull();
+  });
+
   it("accepts both direct and wrapped refresh snapshots", () => {
-    expect(dashboardFromRefresh(fixture)).toBe(fixture);
-    expect(dashboardFromRefresh({ dashboard: fixture })).toBe(fixture);
+    expect(dashboardFromRefresh(fixture)).toEqual(fixture);
+    expect(dashboardFromRefresh({ dashboard: fixture })).toEqual(fixture);
     expect(dashboardFromRefresh({ ok: true })).toBeNull();
   });
 
@@ -148,6 +152,18 @@ describe("LORA dashboard fixed fixture", () => {
     expect(markup).toContain("待建立基线");
     expect(markup).toContain("暂无可信价格");
     expect(markup).not.toContain(">0<");
+  });
+
+  it("renders a fully sampled day with zero new nodes", () => {
+    const data = { ...fixture, nodes: { ...fixture.nodes, todayCount: "0", hourly: Array.from({ length: 24 }, (_, hour) => ({ hour: String(hour).padStart(2, "0"), count: "0" })) } };
+    expect(() => render(data)).not.toThrow();
+    expect(render(data)).toContain("峰值 00 时 0");
+  });
+
+  it("selects a measured zero hour rather than an absent hour", () => {
+    const data = { ...fixture, nodes: { ...fixture.nodes, hourly: [{ hour: "10", count: "0" }] } };
+    expect(() => render(data)).not.toThrow();
+    expect(render(data)).toContain("峰值 10 时 0");
   });
 
   it("keeps recovered address data visible while the exact midnight baseline rebuilds", () => {

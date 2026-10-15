@@ -8,6 +8,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Build only the Windows candidate installer
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,9 +67,20 @@ jobs:
             throw "Windows installer is empty."
           }
       - run: npm run release:verify:win
+      - name: Keep Windows candidate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tongpin-windows-${{ github.sha }}
+          path: |
+            artifacts/Tongpin-Setup-*.exe
+            artifacts/Tongpin-Setup-*.exe.blockmap
+            artifacts/latest.yml
+          if-no-files-found: error
+          retention-days: 14
 
   macos:
     name: macOS universal test package
+    if: ${{ !inputs.windows_only }}
     needs: quality
     runs-on: macos-15
     timeout-minutes: 45
