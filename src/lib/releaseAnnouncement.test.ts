@@ -34,7 +34,7 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     const body = formatReleaseAnnouncementBody(announcement!);
-    for (const change of ["边生成边显示", "没生成成功会自动退还同频点", "朗读的声音可以自己选", "真正逐步执行", "快速档和标准档", "电脑操作（测试版"]) {
+    for (const change of ["新增节点全部为零", "保留可用数据", "复制故障信息", "旧版本数据"]) {
       expect(body).toContain(change);
     }
   });
