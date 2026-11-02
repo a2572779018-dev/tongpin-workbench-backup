@@ -37,10 +37,8 @@ import {
   toDateKey,
 } from "../lib/date";
 import { TASK_PRIORITY_META } from "../lib/taskPriority";
-import {
-  rolloverCheckKey,
-  shouldCheckRollover,
-} from "../lib/rolloverSchedule";
+import { TaskBacklog } from "../components/TaskBacklog";
+import { syncPastTaskGroups } from "../lib/taskCarryoverClient";
 import {
   isLaneHomeLayout,
   type HomeLayout,
@@ -140,20 +138,14 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [highlightTaskId, setHighlightTaskId] = useState("");
-  const [rollover, setRollover] = useState<{
-    sourceDate: string;
-    targetDate: string;
-    tasks: Task[];
-  } | null>(null);
-  const [rolloverSelection, setRolloverSelection] = useState<string[]>([]);
-  const [rolloverBusy, setRolloverBusy] = useState(false);
   const [pastSyncSelection, setPastSyncSelection] = useState<string[]>([]);
   const [syncedSourceTaskIds, setSyncedSourceTaskIds] = useState<string[]>([]);
   const [pastSyncLoading, setPastSyncLoading] = useState(false);
   const [pastSyncBusy, setPastSyncBusy] = useState(false);
   const selectedDateRef = useRef(selectedDate);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const activeDateRef = useRef(toDateKey(new Date()));
-  const lastRolloverCheckRef = useRef("");
 
   const week = useMemo(() => getWeek(selectedDate), [selectedDate]);
   const from = toDateKey(week[0]);
@@ -163,16 +155,18 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
 
   const loadTasks = useCallback(async ({ showLoading = true } = {}) => {
     if (showLoading) setLoading(true);
-    setError("");
+    if (showLoading) setError("");
     try {
       const result = await api<{ tasks: Task[] }>(
         `/api/tasks?date=${selectedDate}`,
       );
-      setTasks(sortTasks(result.tasks));
+      if (alive.current && selectedDateRef.current === selectedDate) setTasks(sortTasks(result.tasks));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "任务加载失败");
+      if (alive.current && selectedDateRef.current === selectedDate) setError(caught instanceof Error ? caught.message : "任务加载失败");
     } finally {
-      if (showLoading) setLoading(false);
+      if (alive.current && selectedDateRef.current === selectedDate) {
+        if (showLoading) setLoading(false);
+      }
     }
   }, [api, selectedDate]);
 
@@ -200,11 +194,12 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     setPastSyncLoading(true);
     void api<{
       syncedTaskIds: string[];
+      unavailableTaskIds?: string[];
     }>(
       `/api/tasks/sync-to-today?sourceDate=${selectedDate}`,
     )
       .then((result) => {
-        if (!cancelled) setSyncedSourceTaskIds(result.syncedTaskIds);
+        if (!cancelled) setSyncedSourceTaskIds([...result.syncedTaskIds, ...(result.unavailableTaskIds ?? [])]);
       })
       .catch((caught) => {
         if (!cancelled) {
@@ -238,68 +233,19 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     selectedDateRef.current = selectedDate;
   }, [selectedDate]);
 
-  const checkRollover = useCallback(async () => {
-    const now = new Date();
-    const today = toDateKey(now);
-    const previousActiveDate = activeDateRef.current;
-
-    if (previousActiveDate !== today) {
-      activeDateRef.current = today;
-      lastRolloverCheckRef.current = "";
-      setRollover(null);
-      setRolloverSelection([]);
-      if (selectedDateRef.current === previousActiveDate) {
-        selectedDateRef.current = today;
-        setSelectedDate(today);
-      }
-    }
-
-    const userId = session?.user.id ?? "";
-    if (
-      !shouldCheckRollover(
-        userId,
-        now,
-        lastRolloverCheckRef.current,
-      )
-    ) {
-      return;
-    }
-
-    const checkKey = rolloverCheckKey(userId, now);
-    lastRolloverCheckRef.current = checkKey;
-    try {
-      const result = await api<{
-        sourceDate: string;
-        targetDate: string;
-        pending: boolean;
-        tasks: Task[];
-      }>(`/api/tasks/rollover?targetDate=${today}`);
-      if (!result.pending) return;
-      setRollover(result);
-      setRolloverSelection(result.tasks.map((task) => task.id));
-    } catch {
-      if (lastRolloverCheckRef.current === checkKey) {
-        lastRolloverCheckRef.current = "";
-      }
-    }
-  }, [api, session?.user.id]);
-
   useEffect(() => {
-    const check = () => void checkRollover();
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible") check();
+    const checkDay = () => {
+      const today = toDateKey(new Date()), previous = activeDateRef.current;
+      if (previous === today) return;
+      activeDateRef.current = today;
+      if (selectedDateRef.current === previous) {
+        selectedDateRef.current = today; setSelectedDate(today);
+      }
     };
-
-    check();
-    const timer = window.setInterval(check, 30_000);
-    window.addEventListener("focus", check);
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", check);
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, [checkRollover]);
+    const timer = window.setInterval(checkDay, 30000);
+    window.addEventListener("focus", checkDay);
+    return () => { clearInterval(timer); window.removeEventListener("focus", checkDay); };
+  }, []);
 
   useEffect(() => {
     const openTask = (event: Event) => {
@@ -476,38 +422,6 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     }
   }
 
-  async function decideRollover(taskIds: string[]) {
-    if (!rollover || rolloverBusy) return;
-    setRolloverBusy(true);
-    setError("");
-    try {
-      const result = await api<{ created: Task[] }>("/api/tasks/rollover", {
-        method: "POST",
-        body: JSON.stringify({
-          targetDate: rollover.targetDate,
-          taskIds,
-        }),
-      });
-      setRollover(null);
-      setRolloverSelection([]);
-      if (result.created.length > 0) {
-        setSelectedDate(rollover.targetDate);
-        await loadTasks();
-        await loadSummary();
-        notify({
-          title: "任务已带到今天",
-          body: `已承接 ${result.created.length} 项，昨天的记录仍保留。`,
-          tone: "success",
-          duration: 7_000,
-        });
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "昨日任务承接失败");
-    } finally {
-      setRolloverBusy(false);
-    }
-  }
-
   function togglePastSyncTask(taskId: string) {
     if (syncedSourceTaskIds.includes(taskId)) return;
     setPastSyncSelection((current) =>
@@ -519,59 +433,22 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
 
   async function syncPastTasks(taskIds = pastSyncSelection) {
     if (pastSyncBusy || taskIds.length === 0) return;
-    setPastSyncBusy(true);
-    setError("");
+    setPastSyncBusy(true); setError("");
     try {
-      const result = await api<{
-        targetDate: string;
-        created: Task[];
-        skippedTaskIds: string[];
-      }>("/api/tasks/sync-to-today", {
-        method: "POST",
-        body: JSON.stringify({
-          sourceDate: selectedDate,
-          taskIds,
-        }),
-      });
-      setSyncedSourceTaskIds((current) => [
-        ...new Set([
-          ...current,
-          ...taskIds,
-          ...result.skippedTaskIds,
-        ]),
-      ]);
-      setPastSyncSelection((current) =>
-        current.filter((taskId) => !taskIds.includes(taskId)),
-      );
+      const result = await syncPastTaskGroups(api, tasks.filter(task => taskIds.includes(task.id)), session!.user.id);
+      if (!alive.current) return;
+      setSyncedSourceTaskIds(previous => [...new Set([...previous, ...result.handledIds])]);
+      setPastSyncSelection(previous => previous.filter(id => !result.handledIds.includes(id)));
       await loadSummary();
-      if (result.created.length > 0) {
-        setSelectedDate(result.targetDate);
-      }
-      notify({
-        title:
-          result.created.length > 0
-            ? "已同步到今天"
-            : "这些任务今天已经存在",
-        body:
-          result.created.length > 0
-            ? `${result.created.length} 项已加入今日待办，原日期记录保持不变。`
-            : "系统已阻止重复同步。",
-        tone: result.created.length > 0 ? "success" : "info",
-        duration: 7_000,
+      window.dispatchEvent(new Event("tongpin:task-sync"));
+      if (result.errors.length) setError(result.errors.join("；"));
+      if (result.handledIds.length) notify({
+        title: result.createdCount ? "已加入今日 " + result.createdCount + " 项" : "任务已在今日清单",
+        body: "", tone: "success", duration: 5000,
+        actions: [{ label: "查看今日", onSelect: () => setSelectedDate(result.targetDate) }],
       });
-    } catch (caught) {
-      const message =
-        caught instanceof Error ? caught.message : "往日任务同步失败";
-      setError(message);
-      notify({
-        title: "同步到今天失败",
-        body: message,
-        tone: "error",
-        duration: 7_000,
-      });
-    } finally {
-      setPastSyncBusy(false);
-    }
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "往日任务同步失败"); }
+    finally { setPastSyncBusy(false); }
   }
 
   function moveWeek(amount: number) {
@@ -586,6 +463,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         `member-page--${layout}`,
       ].join(" ")}
     >
+      <TaskBacklog onViewToday={date => { if (date) setSelectedDate(date); }} />
       {usesLaneLayout ? (
         <LaneTaskBoard
           tasks={tasks}
@@ -842,10 +720,10 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                         .filter(Boolean)
                         .join(" ")}
                       type="button"
-                      disabled={syncedSourceTaskIds.includes(task.id)}
+                      disabled={pastSyncLoading || pastSyncBusy || syncedSourceTaskIds.includes(task.id)}
                       aria-label={
                         syncedSourceTaskIds.includes(task.id)
-                          ? `${task.title} 已同步到今天`
+                          ? `${task.title} 已有承接记录`
                           : `${pastSyncSelection.includes(task.id) ? "取消选择" : "选择"} ${task.title}`
                       }
                       onClick={(event) => {
@@ -919,7 +797,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                         type="button"
                         title="将该任务放到今天"
                         aria-label="将该任务放到今天"
-                        disabled={pastSyncBusy}
+                        disabled={pastSyncBusy || pastSyncLoading}
                         onClick={(event) => {
                           event.stopPropagation();
                           void syncPastTasks([task.id]);
@@ -995,91 +873,6 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         />
       )}
 
-      {rollover && (
-        <section
-          className="rollover-card"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="rollover-title"
-        >
-          <header>
-            <div>
-              <span>昨日未完成</span>
-              <h2 id="rollover-title">要带到今天吗？</h2>
-            </div>
-            <button
-              type="button"
-              aria-label="留在昨天"
-              onClick={() => void decideRollover([])}
-            >
-              <X size={18} />
-            </button>
-          </header>
-          <div className="rollover-card__tasks">
-            {rollover.tasks.map((task) => (
-              <label key={task.id}>
-                <input
-                  type="checkbox"
-                  checked={rolloverSelection.includes(task.id)}
-                  onChange={(event) =>
-                    setRolloverSelection((current) =>
-                      event.target.checked
-                        ? [...current, task.id]
-                        : current.filter((id) => id !== task.id),
-                    )
-                  }
-                />
-                <span>
-                  <b>{task.title}</b>
-                  <small>{TASK_PRIORITY_META[task.priority].label}</small>
-                </span>
-              </label>
-            ))}
-          </div>
-          <footer>
-            <div className="rollover-card__selection">
-              <button
-                type="button"
-                disabled={rolloverBusy}
-                onClick={() =>
-                  setRolloverSelection((current) =>
-                    current.length === rollover.tasks.length
-                      ? []
-                      : rollover.tasks.map((task) => task.id),
-                  )
-                }
-              >
-                {rolloverSelection.length === rollover.tasks.length
-                  ? "取消全选"
-                  : "全选"}
-              </button>
-              <span>
-                已选 {rolloverSelection.length}/{rollover.tasks.length}
-              </span>
-            </div>
-            <div className="rollover-card__actions">
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={rolloverBusy}
-                onClick={() => void decideRollover([])}
-              >
-                留在昨天
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={rolloverBusy || rolloverSelection.length === 0}
-                onClick={() => void decideRollover(rolloverSelection)}
-              >
-                {rolloverBusy
-                  ? "正在承接…"
-                  : `带入 ${rolloverSelection.length} 项`}
-              </button>
-            </div>
-          </footer>
-        </section>
-      )}
     </div>
   );
 }
@@ -1705,10 +1498,10 @@ function LaneTaskBoard({
                             .filter(Boolean)
                             .join(" ")}
                           type="button"
-                          disabled={syncedSourceTaskIds.includes(task.id)}
+                          disabled={pastSyncLoading || pastSyncBusy || syncedSourceTaskIds.includes(task.id)}
                           aria-label={
                             syncedSourceTaskIds.includes(task.id)
-                              ? `${task.title} 已同步到今天`
+                              ? `${task.title} 已有承接记录`
                               : `${pastSyncSelection.includes(task.id) ? "取消选择" : "选择"} ${task.title}`
                           }
                           onClick={(event) => {
@@ -1786,7 +1579,7 @@ function LaneTaskBoard({
                               type="button"
                               title="将该任务放到今天"
                               aria-label="将该任务放到今天"
-                              disabled={pastSyncBusy}
+                              disabled={pastSyncBusy || pastSyncLoading}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 void onSyncPastTasks([task.id]);

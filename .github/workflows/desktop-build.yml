@@ -13,8 +13,8 @@ on:
         description: Build only the Windows candidate installer
         type: boolean
         default: false
-      client_hotfix:
-        description: Client-only patch (full backend suite stays in Linux quality; native client checks run on Windows)
+      native_client_checks:
+        description: Full backend suite on Linux; shipped client and Cloudflare checks also run on Windows
         type: boolean
         default: false
 
@@ -54,13 +54,13 @@ jobs:
           cache: npm
       - run: npm ci --include=optional
       # Normal CI retains the existing full Windows suite. A manually selected
-      # client-only hotfix still requires the full Linux quality job above.
+      # native-client validation still requires the full Linux quality job above.
       # The production desktop connects to Cloudflare and does not ship or run
       # dist/server; Windows Node-backend compatibility is a separate result.
-      - if: ${{ !inputs.client_hotfix }}
+      - if: ${{ !inputs.native_client_checks }}
         run: npm run dist:win
-      - name: Check Windows client hotfix
-        if: ${{ inputs.client_hotfix }}
+      - name: Check Windows client and Cloudflare runtime
+        if: ${{ inputs.native_client_checks }}
         run: |
           node scripts/verify-computer-use-runtime.cjs --source --target win32-x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -72,8 +72,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build:opensquilla-router
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Package Windows client hotfix
-        if: ${{ inputs.client_hotfix }}
+      - name: Package Windows client
+        if: ${{ inputs.native_client_checks }}
         run: npm exec electron-builder -- --win nsis --publish never
       - name: Verify packaged Electron runtime files
         shell: pwsh

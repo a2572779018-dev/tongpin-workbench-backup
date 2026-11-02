@@ -34,7 +34,7 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     const body = formatReleaseAnnouncementBody(announcement!);
-    for (const change of ["新增节点全部为零", "保留可用数据", "复制故障信息", "旧版本数据"]) {
+    for (const change of ["往日未完成", "批量", "跳转", "历史记录"]) {
       expect(body).toContain(change);
     }
   });

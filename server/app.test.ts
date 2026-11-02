@@ -1349,6 +1349,29 @@ describe("同频 API 纵向流程", () => {
     expect(copies).toHaveLength(1);
   });
 
+  it("跨周末汇总本人往日未完成任务，排除已完成延续链和其他成员", async () => {
+    const olderDate = new Date(`${TODAY}T00:00:00Z`);
+    olderDate.setUTCDate(olderDate.getUTCDate() - 3);
+    const friday = olderDate.toISOString().slice(0, 10);
+    const pending = randomUUID(), ancestor = randomUUID(), child = randomUUID();
+    const completed = randomUUID(), foreign = randomUUID();
+    const now = new Date().toISOString();
+    const seed = (id: string, date: string, sourceTaskId: string | null = null, status: "todo" | "done" = "todo", userId = bobId) => ({
+      id, userId, date, sourceTaskId, status, title: `历史验收-${id}`, details: "", priority: "p2" as const,
+      origin: "self" as const, assignedBy: null, assignmentId: null, assignmentDeliveredAt: null,
+      assignmentViewedAt: null, completedAt: status === "done" ? now : null, createdAt: now, updatedAt: now,
+    });
+    await runtime.store.mutate(db => db.tasks.push(seed(pending, friday), seed(ancestor, friday), seed(child, YESTERDAY, ancestor), seed(completed, TODAY, child, "done"), seed(foreign, friday, null, "todo", aliceId)));
+    const response = await request(http).get("/api/tasks/backlog?limit=100").set("Authorization", `Bearer ${bobToken}`).expect(200);
+    const ids = response.body.tasks.map((task: { id: string }) => task.id);
+    expect(ids).toContain(pending);
+    for (const id of [ancestor, child, completed, foreign]) expect(ids).not.toContain(id);
+    expect(response.body.targetDate).toBe(TODAY);
+    const duplicate = await request(http).post("/api/tasks/sync-to-today").set("Authorization", `Bearer ${bobToken}`).send({ sourceDate: friday, taskIds: [ancestor] }).expect(201);
+    expect(duplicate.body.created).toHaveLength(0);
+    expect(duplicate.body.skippedTaskIds).toContain(ancestor);
+  });
+
   it("普通成员无法访问管理员端和老板端", async () => {
     await request(http)
       .get("/api/admin/users")

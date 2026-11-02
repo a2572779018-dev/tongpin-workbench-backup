@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { classifyTaskCarryover, indexTaskCarryover, taskBacklogPage, type CarryoverRef } from "../../shared/taskCarryover";
 import { createWorkerAi } from "./ai/runtime";
 import { handleAiRequest } from "./ai/routes";
 import { createDifyToolResponse, type DifyRouteOptions } from "../../server/ai/difyRuntimeRoutes";
@@ -1007,6 +1008,9 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       }
       if (path === "/api/tasks/summary" && method === "GET") {
         return await this.getTaskSummary(request, url);
+      }
+      if (path === "/api/tasks/backlog" && method === "GET") {
+        return await this.getTaskBacklog(request, url);
       }
       if (path === "/api/tasks/rollover" && method === "GET") {
         return await this.getTaskRollover(request, url);
@@ -2818,6 +2822,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       });
     }
 
+    const eligibleIds = new Set(classifyTaskCarryover(this.taskCarryoverIndex(user.id), body.taskIds, sourceDate, body.targetDate).eligible.map(task => task.id));
     const eligible = this.sql
       .exec<TaskRow>(
         `SELECT * FROM tasks
@@ -2826,7 +2831,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         sourceDate,
       )
       .toArray()
-      .filter((task) => body.taskIds.includes(task.id));
+      .filter((task) => eligibleIds.has(task.id));
     const now = new Date().toISOString();
     const created: Task[] = [];
     for (const source of eligible) {
@@ -2914,6 +2919,30 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
     );
   }
 
+  private taskCarryoverIndex(userId: string) {
+    const tasks = this.sql.exec<TaskRow>("SELECT id, user_id, date, status, source_task_id, created_at, updated_at FROM tasks WHERE user_id = ?", userId).toArray()
+      .map(row => ({ id: row.id, userId: row.user_id, date: row.date, status: row.status, sourceTaskId: row.source_task_id, createdAt: row.created_at, updatedAt: row.updated_at }));
+    const deleted: CarryoverRef[] = [];
+    for (const row of this.sql.exec<TaskAuditRow>("SELECT * FROM task_audit_events WHERE user_id = ? AND action = 'deleted'", userId).toArray()) {
+      try {
+        const snapshot = JSON.parse(row.snapshot_json) as CarryoverRef;
+        if (snapshot && snapshot.id === row.task_id && snapshot.userId === userId) deleted.push(snapshot);
+      } catch { /* A damaged legacy audit must not block the user's task list. */ }
+    }
+    return indexTaskCarryover(tasks, deleted, userId);
+  }
+
+  private async getTaskBacklog(request: Request, url: URL): Promise<Response> {
+    const user = await this.requireUser(request);
+    const limit = Number(url.searchParams.get("limit") ?? 50), cursor = url.searchParams.get("cursor") ?? "", today = businessDateKey();
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor && (cursor.length > 160 || !/^[0-9a-f-]{36}\/\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}\/[0-9a-f-]{36}$/i.test(cursor) || !cursor.startsWith(`${user.id}/${today}/`)))) {
+      throw new ApiError(400, "BACKLOG_QUERY_INVALID", "列表已变化，请刷新后重试");
+    }
+    const page = taskBacklogPage(this.taskCarryoverIndex(user.id), today, limit, cursor);
+    const tasks = page.tasks.map(ref => toTask(firstRow(this.sql.exec<TaskRow>("SELECT * FROM tasks WHERE user_id = ? AND id = ?", user.id, ref.id))!));
+    return json({ ...page, tasks });
+  }
+
   private async getTaskSyncToToday(
     request: Request,
     url: URL,
@@ -2942,18 +2971,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           priorityRank(left.priority) - priorityRank(right.priority) ||
           right.createdAt.localeCompare(left.createdAt),
       );
-    const sourceIds = new Set(tasks.map((task) => task.id));
-    const syncedTaskIds = this.sql
-      .exec<{ source_task_id: string }>(
-        `SELECT source_task_id FROM tasks
-         WHERE user_id = ? AND date = ? AND source_task_id IS NOT NULL`,
-        user.id,
-        targetDate,
-      )
-      .toArray()
-      .map((row) => row.source_task_id)
-      .filter((taskId) => sourceIds.has(taskId));
-    return json({ sourceDate, targetDate, tasks, syncedTaskIds });
+    const result = classifyTaskCarryover(this.taskCarryoverIndex(user.id), tasks.map(task => task.id), sourceDate, targetDate);
+    return json({ sourceDate, targetDate, tasks, syncedTaskIds: result.skippedTaskIds, unavailableTaskIds: result.rejectedTaskIds });
   }
 
   private async applyTaskSyncToToday(
@@ -2969,18 +2988,12 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         "只能从往日待办同步到今天",
       );
     }
-    const eligible = this.sql
-      .exec<TaskRow>(
-        `SELECT * FROM tasks
-         WHERE user_id = ? AND date = ? AND status != 'done'`,
-        user.id,
-        body.sourceDate,
-      )
-      .toArray()
-      .filter((task) => body.taskIds.includes(task.id));
+    const classified = classifyTaskCarryover(this.taskCarryoverIndex(user.id), body.taskIds, body.sourceDate, targetDate);
+    const eligible = classified.eligible.map(ref => toTask(firstRow(this.sql.exec<TaskRow>("SELECT * FROM tasks WHERE user_id = ? AND id = ?", user.id, ref.id))!));
     const now = new Date().toISOString();
     const created: Task[] = [];
-    const skippedTaskIds: string[] = [];
+    const skippedTaskIds: string[] = [...classified.skippedTaskIds];
+    this.ctx.storage.transactionSync(() => {
     for (const source of eligible) {
       const duplicate = firstRow(
         this.sql.exec<TaskRow>(
@@ -3009,11 +3022,11 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         source.title,
         source.details,
         source.priority,
-        source.assigned_by,
-        source.assignment_id,
+        source.assignedBy,
+        source.assignmentId,
         source.id,
-        source.assignment_delivered_at,
-        source.assignment_viewed_at,
+        source.assignmentDeliveredAt,
+        source.assignmentViewedAt,
         now,
         now,
       );
@@ -3037,6 +3050,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         now,
       );
     }
+    });
     if (created.length > 0) {
       this.pushToUser(user.id, "task:batch-changed", {
         tasks: created,
@@ -3049,9 +3063,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         targetDate,
         created,
         skippedTaskIds,
-        rejectedTaskIds: body.taskIds.filter(
-          (taskId) => !eligible.some((task) => task.id === taskId),
-        ),
+        rejectedTaskIds: classified.rejectedTaskIds,
       },
       201,
     );

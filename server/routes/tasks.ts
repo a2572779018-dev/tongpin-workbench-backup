@@ -5,6 +5,7 @@ import { businessDateKey, taskDatesForScope } from "../business-date";
 import { ApiError } from "../errors";
 import { JsonStore } from "../store";
 import { appendTaskAudit, taskChanges } from "../task-audit";
+import { classifyTaskCarryover, indexTaskCarryover, taskBacklogPage } from "../../shared/taskCarryover";
 import { toPublicUser, type Task } from "../types";
 import type { RealtimeHub } from "./boss";
 
@@ -107,6 +108,15 @@ export function createTasksRouter(
     }
   });
 
+  router.get("/backlog", async (request, response, next) => {
+    try {
+      const { limit, cursor } = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50), cursor: z.string().max(160).regex(/^[0-9a-f-]{36}\/\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}\/[0-9a-f-]{36}$/i).optional() }).parse(request.query);
+      const userId = request.currentUser!.id;
+      if (cursor && !cursor.startsWith(`${userId}/${businessDateKey()}/`)) throw new ApiError(400, "BACKLOG_CURSOR_INVALID", "列表已变化，请刷新后重试");
+      response.json(await store.read(db => taskBacklogPage(indexTaskCarryover(db.tasks, db.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), businessDateKey(), limit, cursor)));
+    } catch (error) { next(error); }
+  });
+
   router.get("/rollover", async (request, response, next) => {
     try {
       const { targetDate } = z
@@ -178,13 +188,7 @@ export function createTasksRouter(
           };
         }
 
-        const eligible = database.tasks.filter(
-          (task) =>
-            task.userId === userId &&
-            task.date === sourceDate &&
-            task.status !== "done" &&
-            taskIds.includes(task.id),
-        );
+        const { eligible } = classifyTaskCarryover(indexTaskCarryover(database.tasks, database.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), taskIds, sourceDate, targetDate);
         const now = new Date().toISOString();
         const created: Task[] = [];
         for (const source of eligible) {
@@ -281,17 +285,8 @@ export function createTasksRouter(
                 ({ p0: 0, p1: 1, p2: 2, p3: 3, p4: 4 })[right.priority] ||
               right.createdAt.localeCompare(left.createdAt),
           );
-        const sourceIds = new Set(tasks.map((task) => task.id));
-        const syncedTaskIds = database.tasks
-          .filter(
-            (task) =>
-              task.userId === userId &&
-              task.date === targetDate &&
-              task.sourceTaskId !== null &&
-              sourceIds.has(task.sourceTaskId),
-          )
-          .map((task) => task.sourceTaskId!);
-        return { sourceDate, targetDate, tasks, syncedTaskIds };
+        const result = classifyTaskCarryover(indexTaskCarryover(database.tasks, database.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), tasks.map(task => task.id), sourceDate, targetDate);
+        return { sourceDate, targetDate, tasks, syncedTaskIds: result.skippedTaskIds, unavailableTaskIds: result.rejectedTaskIds };
       });
       response.json(result);
     } catch (error) {
@@ -317,16 +312,9 @@ export function createTasksRouter(
       }
       const userId = request.currentUser!.id;
       const result = await store.mutate((database) => {
-        const eligible = database.tasks.filter(
-          (task) =>
-            task.userId === userId &&
-            task.date === sourceDate &&
-            task.status !== "done" &&
-            taskIds.includes(task.id),
-        );
+        const { eligible, skippedTaskIds, rejectedTaskIds } = classifyTaskCarryover(indexTaskCarryover(database.tasks, database.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), taskIds, sourceDate, targetDate);
         const now = new Date().toISOString();
         const created: Task[] = [];
-        const skippedTaskIds: string[] = [];
         for (const source of eligible) {
           const duplicate = database.tasks.find(
             (task) =>
@@ -371,9 +359,7 @@ export function createTasksRouter(
           targetDate,
           created,
           skippedTaskIds,
-          rejectedTaskIds: taskIds.filter(
-            (taskId) => !eligible.some((task) => task.id === taskId),
-          ),
+          rejectedTaskIds,
         };
       });
       if (result.created.length > 0) {
