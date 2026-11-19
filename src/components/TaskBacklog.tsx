@@ -28,10 +28,9 @@ export function TaskBacklog({ onViewToday }: { onViewToday: (date: string) => vo
   useEffect(() => {
     alive.current = true; void load();
     const refresh = () => { if (!state.current.open && !state.current.busy && document.visibilityState === "visible") void load(); };
-    const timer = window.setInterval(refresh, 60000);
     window.addEventListener("focus", refresh); window.addEventListener("tongpin:task-sync", refresh);
     document.addEventListener("visibilitychange", refresh);
-    return () => { alive.current = false; requestId.current++; clearInterval(timer); window.removeEventListener("focus", refresh); window.removeEventListener("tongpin:task-sync", refresh); document.removeEventListener("visibilitychange", refresh); };
+    return () => { alive.current = false; requestId.current++; window.removeEventListener("focus", refresh); window.removeEventListener("tongpin:task-sync", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, [load, session?.user.id]);
   useEffect(() => {
     if (!open) return;

@@ -5,8 +5,8 @@ import { businessDateKey, taskDatesForScope } from "../business-date";
 import { ApiError } from "../errors";
 import { JsonStore } from "../store";
 import { appendTaskAudit, taskChanges } from "../task-audit";
-import { classifyTaskCarryover, indexTaskCarryover, taskBacklogPage } from "../../shared/taskCarryover";
-import { toPublicUser, type Task } from "../types";
+import { classifyTaskCarryover, completedCarryoverCopies, indexTaskCarryover, taskBacklogPage } from "../../shared/taskCarryover";
+import { toPublicUser, type Task, type DatabaseShape } from "../types";
 import type { RealtimeHub } from "./boss";
 
 const dateSchema = z
@@ -33,6 +33,11 @@ function previousDate(date: string): string {
   return value.toISOString().slice(0, 10);
 }
 
+function carryoverIndex(database: DatabaseShape, userId: string) {
+  const audit = database.taskAuditEvents.filter(event => event.userId === userId);
+  return indexTaskCarryover(database.tasks, audit.filter(event => event.action === "deleted").map(event => event.snapshot), userId, audit);
+}
+
 export function createTasksRouter(
   store: JsonStore,
   requireAuth: ReturnType<typeof import("../middleware").createRequireAuth>,
@@ -40,6 +45,25 @@ export function createTasksRouter(
 ): Router {
   const router = Router();
   router.use(requireAuth);
+
+  router.post("/reconcile-carryover", async (request, response, next) => {
+    try {
+      const userId = request.currentUser!.id, targetDate = businessDateKey(), now = new Date().toISOString();
+      const tasks = await store.mutate(database => {
+        const result: Task[] = [];
+        for (const repair of completedCarryoverCopies(carryoverIndex(database, userId), targetDate)) {
+          const task = database.tasks.find(item => item.id === repair.task.id && item.userId === userId)!;
+          const before = structuredClone(task);
+          task.status = "done"; task.completedAt = repair.completedAt; task.updatedAt = now;
+          appendTaskAudit(database, task, userId, "updated", taskChanges(before, task), now);
+          result.push(structuredClone(task));
+        }
+        return result;
+      });
+      if (tasks.length) realtime.pushUser(userId, "task:batch-changed", { tasks, dates: [targetDate] });
+      response.json({ targetDate, tasks });
+    } catch (error) { next(error); }
+  });
 
   router.get("/", async (request, response, next) => {
     try {
@@ -113,7 +137,7 @@ export function createTasksRouter(
       const { limit, cursor } = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50), cursor: z.string().max(160).regex(/^[0-9a-f-]{36}\/\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}\/[0-9a-f-]{36}$/i).optional() }).parse(request.query);
       const userId = request.currentUser!.id;
       if (cursor && !cursor.startsWith(`${userId}/${businessDateKey()}/`)) throw new ApiError(400, "BACKLOG_CURSOR_INVALID", "列表已变化，请刷新后重试");
-      response.json(await store.read(db => taskBacklogPage(indexTaskCarryover(db.tasks, db.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), businessDateKey(), limit, cursor)));
+      response.json(await store.read(db => taskBacklogPage(carryoverIndex(db, userId), businessDateKey(), limit, cursor)));
     } catch (error) { next(error); }
   });
 
@@ -188,7 +212,7 @@ export function createTasksRouter(
           };
         }
 
-        const { eligible } = classifyTaskCarryover(indexTaskCarryover(database.tasks, database.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), taskIds, sourceDate, targetDate);
+        const { eligible } = classifyTaskCarryover(carryoverIndex(database, userId), taskIds, sourceDate, targetDate);
         const now = new Date().toISOString();
         const created: Task[] = [];
         for (const source of eligible) {
@@ -285,7 +309,7 @@ export function createTasksRouter(
                 ({ p0: 0, p1: 1, p2: 2, p3: 3, p4: 4 })[right.priority] ||
               right.createdAt.localeCompare(left.createdAt),
           );
-        const result = classifyTaskCarryover(indexTaskCarryover(database.tasks, database.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), tasks.map(task => task.id), sourceDate, targetDate);
+        const result = classifyTaskCarryover(carryoverIndex(database, userId), tasks.map(task => task.id), sourceDate, targetDate);
         return { sourceDate, targetDate, tasks, syncedTaskIds: result.skippedTaskIds, unavailableTaskIds: result.rejectedTaskIds };
       });
       response.json(result);
@@ -312,7 +336,8 @@ export function createTasksRouter(
       }
       const userId = request.currentUser!.id;
       const result = await store.mutate((database) => {
-        const { eligible, skippedTaskIds, rejectedTaskIds } = classifyTaskCarryover(indexTaskCarryover(database.tasks, database.taskAuditEvents.filter(e => e.userId === userId && e.action === "deleted").map(e => e.snapshot), userId), taskIds, sourceDate, targetDate);
+        const index = carryoverIndex(database, userId);
+        const { eligible, skippedTaskIds, rejectedTaskIds } = classifyTaskCarryover(index, taskIds, sourceDate, targetDate);
         const now = new Date().toISOString();
         const created: Task[] = [];
         for (const source of eligible) {
@@ -322,7 +347,7 @@ export function createTasksRouter(
               task.date === targetDate &&
               task.sourceTaskId === source.id,
           );
-          if (duplicate) {
+          if (duplicate && index.isCurrent(duplicate)) {
             skippedTaskIds.push(source.id);
             continue;
           }

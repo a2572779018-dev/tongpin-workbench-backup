@@ -89,6 +89,7 @@ import "../features/tongpin-ai/ai-metal-theme.css";
 import "../features/tongpin-ai/ai-capabilities.css";
 import "../features/tongpin-ai/ai-refinements.css";
 import "../features/tongpin-ai/workspace-storage.css";
+import "../features/tongpin-ai/ai-viewport.css";
 import { WorkspaceStorageRelief } from "../features/tongpin-ai/WorkspaceStoragePanel";
 import { attachOpenSquillaRoute, warmOpenSquillaRouter } from "../features/tongpin-ai/opensquilla/desktopBridge";
 import { conversationExportFilename, conversationExportJson, isWorkspaceSpaceRejection, largestWorkspaceConversations } from "../features/tongpin-ai/workspaceStorage";

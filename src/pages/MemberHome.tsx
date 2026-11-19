@@ -39,6 +39,7 @@ import {
 import { TASK_PRIORITY_META } from "../lib/taskPriority";
 import { TaskBacklog } from "../components/TaskBacklog";
 import { syncPastTaskGroups } from "../lib/taskCarryoverClient";
+import { TaskReconcileGate } from "../lib/taskReconcile";
 import {
   isLaneHomeLayout,
   type HomeLayout,
@@ -143,6 +144,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   const [pastSyncLoading, setPastSyncLoading] = useState(false);
   const [pastSyncBusy, setPastSyncBusy] = useState(false);
   const selectedDateRef = useRef(selectedDate);
+  const reconcileGate = useRef(new TaskReconcileGate());
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const activeDateRef = useRef(toDateKey(new Date()));
@@ -157,6 +159,9 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     if (showLoading) setLoading(true);
     if (showLoading) setError("");
     try {
+      if (selectedDate === toDateKey(new Date())) {
+        await reconcileGate.current.ensure(`${session!.user.id}/${selectedDate}`, () => api("/api/tasks/reconcile-carryover", { method: "POST", headers: { "X-Tongpin-Account": session!.user.id }, body: "{}" }));
+      }
       const result = await api<{ tasks: Task[] }>(
         `/api/tasks?date=${selectedDate}`,
       );
@@ -264,6 +269,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   useEffect(() => {
     let refreshTimer: number | null = null;
     const refreshTasks = () => {
+      reconcileGate.current.invalidate();
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         refreshTimer = null;

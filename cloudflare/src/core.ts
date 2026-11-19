@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { classifyTaskCarryover, indexTaskCarryover, taskBacklogPage, type CarryoverRef } from "../../shared/taskCarryover";
+import { classifyTaskCarryover, completedCarryoverCopies, indexTaskCarryover, taskBacklogPage, type CarryoverRef, type CarryoverStateEvent } from "../../shared/taskCarryover";
 import { createWorkerAi } from "./ai/runtime";
 import { handleAiRequest } from "./ai/routes";
 import { createDifyToolResponse, type DifyRouteOptions } from "../../server/ai/difyRuntimeRoutes";
@@ -1011,6 +1011,9 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
       }
       if (path === "/api/tasks/backlog" && method === "GET") {
         return await this.getTaskBacklog(request, url);
+      }
+      if (path === "/api/tasks/reconcile-carryover" && method === "POST") {
+        return await this.reconcileTaskCarryover(request);
       }
       if (path === "/api/tasks/rollover" && method === "GET") {
         return await this.getTaskRollover(request, url);
@@ -2920,16 +2923,37 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
   }
 
   private taskCarryoverIndex(userId: string) {
-    const tasks = this.sql.exec<TaskRow>("SELECT id, user_id, date, status, source_task_id, created_at, updated_at FROM tasks WHERE user_id = ?", userId).toArray()
-      .map(row => ({ id: row.id, userId: row.user_id, date: row.date, status: row.status, sourceTaskId: row.source_task_id, createdAt: row.created_at, updatedAt: row.updated_at }));
+    const tasks = this.sql.exec<TaskRow>("SELECT id, user_id, date, status, source_task_id, created_at, updated_at, completed_at FROM tasks WHERE user_id = ?", userId).toArray()
+      .map(row => ({ id: row.id, userId: row.user_id, date: row.date, status: row.status, sourceTaskId: row.source_task_id, createdAt: row.created_at, updatedAt: row.updated_at, completedAt: row.completed_at }));
     const deleted: CarryoverRef[] = [];
-    for (const row of this.sql.exec<TaskAuditRow>("SELECT * FROM task_audit_events WHERE user_id = ? AND action = 'deleted'", userId).toArray()) {
+    const events: CarryoverStateEvent[] = [];
+    for (const row of this.sql.exec<TaskAuditRow>("SELECT task_id, user_id, action, created_at, CASE WHEN action = 'deleted' THEN snapshot_json ELSE NULL END AS snapshot_json FROM task_audit_events WHERE user_id = ? AND action IN ('deleted', 'completed', 'reopened', 'carried_over') ORDER BY created_at ASC, rowid ASC", userId).toArray()) {
+      if (row.action !== "deleted") { events.push({ taskId: row.task_id, userId: row.user_id, action: row.action, createdAt: row.created_at }); continue; }
       try {
         const snapshot = JSON.parse(row.snapshot_json) as CarryoverRef;
         if (snapshot && snapshot.id === row.task_id && snapshot.userId === userId) deleted.push(snapshot);
       } catch { /* A damaged legacy audit must not block the user's task list. */ }
     }
-    return indexTaskCarryover(tasks, deleted, userId);
+    return indexTaskCarryover(tasks, deleted, userId, events);
+  }
+
+  private async reconcileTaskCarryover(request: Request): Promise<Response> {
+    const user = await this.requireUser(request), targetDate = businessDateKey();
+    const repairs = completedCarryoverCopies(this.taskCarryoverIndex(user.id), targetDate);
+    const tasks: Task[] = [], now = new Date().toISOString();
+    this.ctx.storage.transactionSync(() => {
+      for (const repair of repairs) {
+        const row = firstRow(this.sql.exec<TaskRow>("SELECT * FROM tasks WHERE id = ? AND user_id = ?", repair.task.id, user.id));
+        if (!row || row.status === "done") continue;
+        this.sql.exec("UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?", repair.completedAt, now, row.id, user.id);
+        const task = toTask(firstRow(this.sql.exec<TaskRow>("SELECT * FROM tasks WHERE id = ?", row.id))!);
+        // This corrects a stale copy; it is not a new completion of a reopened generation.
+        this.recordTaskAudit(task, user.id, "updated", [{ field: "status", before: row.status, after: "done" }], now);
+        tasks.push(task);
+      }
+    });
+    if (tasks.length) this.pushToUser(user.id, "task:batch-changed", { tasks, dates: [targetDate] });
+    return json({ targetDate, tasks });
   }
 
   private async getTaskBacklog(request: Request, url: URL): Promise<Response> {
@@ -2988,7 +3012,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
         "只能从往日待办同步到今天",
       );
     }
-    const classified = classifyTaskCarryover(this.taskCarryoverIndex(user.id), body.taskIds, body.sourceDate, targetDate);
+    const index = this.taskCarryoverIndex(user.id);
+    const classified = classifyTaskCarryover(index, body.taskIds, body.sourceDate, targetDate);
     const eligible = classified.eligible.map(ref => toTask(firstRow(this.sql.exec<TaskRow>("SELECT * FROM tasks WHERE user_id = ? AND id = ?", user.id, ref.id))!));
     const now = new Date().toISOString();
     const created: Task[] = [];
@@ -3004,7 +3029,7 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           source.id,
         ),
       );
-      if (duplicate) {
+      if (duplicate && index.isCurrent(toTask(duplicate))) {
         skippedTaskIds.push(source.id);
         continue;
       }

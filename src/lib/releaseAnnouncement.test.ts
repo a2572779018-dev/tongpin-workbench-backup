@@ -34,7 +34,7 @@ describe("release announcement", () => {
       }),
     ).toBe(true);
     const body = formatReleaseAnnouncementBody(announcement!);
-    for (const change of ["往日未完成", "批量", "跳转", "历史记录"]) {
+    for (const change of ["消息阅读空间", "长草稿", "已完成", "主动恢复"]) {
       expect(body).toContain(change);
     }
   });

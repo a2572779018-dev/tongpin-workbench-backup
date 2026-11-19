@@ -6,14 +6,16 @@ export interface CarryoverRef {
   sourceTaskId: string | null;
   createdAt?: string;
   updatedAt?: string;
+  completedAt?: string | null;
 }
 
+export interface CarryoverStateEvent { taskId: string; userId: string; action: string; createdAt: string }
+
 /** Deleted snapshots are lineage links only, never candidates for recreation. */
-export function indexTaskCarryover<T extends CarryoverRef>(tasks: T[], deleted: CarryoverRef[], userId: string) {
+export function indexTaskCarryover<T extends CarryoverRef>(tasks: T[], deleted: CarryoverRef[], userId: string, events: CarryoverStateEvent[] = []) {
   const valid = (task: CarryoverRef) => task && task.userId === userId && typeof task.id === "string" && typeof task.date === "string" && (task.sourceTaskId === null || typeof task.sourceTaskId === "string");
   const own = tasks.filter(valid);
   const links = new Map([...deleted, ...own].filter(valid).map(task => [task.id, task]));
-  const covered = new Set([...links.values()].flatMap(task => task.sourceTaskId ? [task.sourceTaskId] : []));
   const roots = new Map<string, string>();
   const rootOf = (id: string): string => {
     const path: string[] = [], seen = new Set<string>();
@@ -29,16 +31,58 @@ export function indexTaskCarryover<T extends CarryoverRef>(tasks: T[], deleted: 
     for (const item of path) roots.set(item, current);
     return current;
   };
+  // A completion closes the whole continuation, even when an older copy is
+  // still todo. Only a real done -> todo/doing audit can open a new generation.
+  type State = { taskId: string; action: string; createdAt: string; order: number };
+  const states = new Map<string, State>(), completions = new Map<string, State>();
+  const reliable = events.filter(event => event && event.userId === userId && links.has(event.taskId) && Number.isFinite(Date.parse(event.createdAt)));
+  const auditedCompletions = new Set(reliable.filter(event => event.action === "completed").map(event => event.taskId));
+  const births = new Map<string, State>();
+  const put = (state: State) => {
+    const root = rootOf(state.taskId), previous = states.get(root);
+    const newer = (a: State, b?: State) => !b || a.createdAt > b.createdAt || (a.createdAt === b.createdAt && a.order > b.order);
+    if (newer(state, previous)) states.set(root, state);
+    if (state.action === "completed" && newer(state, completions.get(root))) completions.set(root, state);
+  };
+  for (const task of links.values()) if (task.status === "done" && (task.completedAt || !auditedCompletions.has(task.id))) put({ taskId: task.id, action: "completed", createdAt: task.completedAt ?? task.updatedAt ?? "", order: -1 });
+  reliable.forEach((event, order) => {
+    if (["created", "carried_over"].includes(event.action)) births.set(event.taskId, { ...event, order });
+    if (["completed", "reopened"].includes(event.action)) put({ ...event, order });
+  });
+  const isCurrent = (task: CarryoverRef) => {
+    const state = states.get(rootOf(task.id));
+    if (!state) return true;
+    if (state.action === "completed") return false;
+    if (task.id === state.taskId) return true;
+    if (!task.createdAt || task.createdAt < state.createdAt) return false;
+    const birth = births.get(task.id);
+    if (task.createdAt === state.createdAt && birth && birth.order < state.order) return false;
+    let parent = task.sourceTaskId;
+    const seen = new Set<string>();
+    while (parent && !seen.has(parent)) {
+      if (parent === state.taskId) return true;
+      seen.add(parent); parent = links.get(parent)?.sourceTaskId ?? null;
+    }
+    return false;
+  };
+  const covered = new Set([...links.values()].filter(isCurrent).flatMap(task => task.sourceTaskId ? [task.sourceTaskId] : []));
   const latest = new Map<string, T>();
   for (const task of own) {
-    if (covered.has(task.id)) continue;
+    if (!isCurrent(task) || covered.has(task.id)) continue;
     const root = rootOf(task.id), previous = latest.get(root);
     const order = previous ? task.date.localeCompare(previous.date)
       || (task.updatedAt ?? task.createdAt ?? "").localeCompare(previous.updatedAt ?? previous.createdAt ?? "")
       || (task.createdAt ?? "").localeCompare(previous.createdAt ?? "") || task.id.localeCompare(previous.id) : 1;
     if (order > 0) latest.set(root, task);
   }
-  return { own, rootOf, latest, userId };
+  return { own, rootOf, latest, userId, isCurrent, completions };
+}
+
+/** Repair only today's obsolete continuation copies; never delete history or
+ * change unrelated, independently created same-title tasks. */
+export function completedCarryoverCopies<T extends CarryoverRef>(index: ReturnType<typeof indexTaskCarryover<T>>, today: string) {
+  return index.own.filter(task => task.date === today && task.sourceTaskId && task.status !== "done" && !index.isCurrent(task))
+    .flatMap(task => { const completion = index.completions.get(index.rootOf(task.id)); return completion ? [{ task, completedAt: completion.createdAt || null }] : []; });
 }
 
 export function taskBacklogPage<T extends CarryoverRef>(index: ReturnType<typeof indexTaskCarryover<T>>, today: string, limit: number, cursor = "") {
@@ -54,7 +98,7 @@ export function taskBacklogPage<T extends CarryoverRef>(index: ReturnType<typeof
 
 /** A stale request may only create the effective unfinished leaf. */
 export function classifyTaskCarryover<T extends CarryoverRef>(index: ReturnType<typeof indexTaskCarryover<T>>, taskIds: string[], sourceDate: string, today: string) {
-  const todayRoots = new Set(index.own.filter(task => task.date === today).map(task => index.rootOf(task.id)));
+  const todayRoots = new Set(index.own.filter(task => task.date === today && (index.isCurrent(task) || (task.status === "done" && !index.latest.has(index.rootOf(task.id))))).map(task => index.rootOf(task.id)));
   const eligible: T[] = [], skippedTaskIds: string[] = [], rejectedTaskIds: string[] = [];
   for (const id of new Set(taskIds)) {
     const task = index.own.find(item => item.id === id);

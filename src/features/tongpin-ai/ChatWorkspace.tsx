@@ -1053,7 +1053,7 @@ export function ChatWorkspace({
               id="tp-ai-message-input"
               value={draft}
               readOnly={videoBusy}
-              rows={2}
+              rows={1}
               placeholder={videoOpen ? "描述你想生成的视频…" : composerTool === "image" ? "描述你想生成的图片…" : composerTool === "presentation" ? "告诉我 PPT 的主题、用途和页数…" : `把任务交给${assistantName}…`}
               aria-controls={mention ? "tp-ai-skill-mentions" : undefined}
               aria-expanded={Boolean(mention)}

@@ -99,4 +99,40 @@ describe.sequential("history task carryover in real SQLite Durable Object", () =
     const stale = await call("/api/tasks/sync-to-today", member, { sourceDate: past(8), taskIds: [a] });
     expect(stale.body.created).toEqual([]); expect(stale.body.rejectedTaskIds).toEqual([a]);
   });
+  it("closes stale ancestors and repairs only today's obsolete copies, with explicit reopen support", async () => {
+    const parent = await seed(past(3)), old = await seed(past(1), parent), todayCopy = await seed(today, old);
+    const independent = await seed(today);
+    expect((await call(`/api/tasks/${parent}`, member, { status: "done" }, "PATCH")).status).toBe(200);
+    const backlog = await call("/api/tasks/backlog?limit=100", member);
+    expect(backlog.body.tasks.some((t: any) => t.id === old)).toBe(false);
+    const stale = await call("/api/tasks/sync-to-today", member, { sourceDate: past(1), taskIds: [old] });
+    expect(stale.body.created).toEqual([]);
+    const repaired = await call("/api/tasks/reconcile-carryover", member, {});
+    expect(repaired.status).toBe(200); expect(repaired.body.tasks.map((t: any) => t.id)).toContain(todayCopy);
+    await expect((await storage()).exec("SELECT status FROM tasks WHERE id=?", todayCopy)).resolves.toEqual([{ status: "done" }]);
+    await expect((await storage()).exec("SELECT status FROM tasks WHERE id=?", independent)).resolves.toEqual([{ status: "todo" }]);
+    expect((await call("/api/tasks/reconcile-carryover", member, {})).body.tasks).toEqual([]);
+    await call(`/api/tasks/${parent}`, member, { title: "只修改标题" }, "PATCH");
+    expect((await call("/api/tasks/backlog?limit=100", member)).body.tasks.some((t: any) => t.id === old)).toBe(false);
+    await call(`/api/tasks/${parent}`, member, { status: "doing" }, "PATCH");
+    const reopened = await call("/api/tasks/backlog?limit=100", member);
+    expect(reopened.body.tasks.some((t: any) => t.id === parent)).toBe(true);
+    const fresh = await call("/api/tasks/sync-to-today", member, { sourceDate: past(3), taskIds: [parent] });
+    expect(fresh.body.created).toHaveLength(1);
+    expect((await call("/api/tasks/reconcile-carryover", member, {})).body.tasks).toEqual([]);
+  });
+  it("rolls back correction and audit together, and does not correct another account", async () => {
+    const parent = await seed(past(2)), first = await seed(today, parent), second = await seed(today, parent), db = await storage();
+    await call(`/api/tasks/${parent}`, member, { status: "done" }, "PATCH");
+    expect((await call("/api/tasks/reconcile-carryover", other, {})).body.tasks).toEqual([]);
+    await db.exec(`CREATE TRIGGER local_reconcile_failure BEFORE UPDATE ON tasks WHEN NEW.id = '${second}' BEGIN SELECT RAISE(ABORT, 'local fixture reconcile failure'); END`);
+    try {
+      expect((await call("/api/tasks/reconcile-carryover", member, {})).status).toBe(500);
+      expect(await db.exec("SELECT status FROM tasks WHERE id IN (?,?)", first, second)).toEqual([{ status: "todo" }, { status: "todo" }]);
+      expect(await db.exec("SELECT id FROM task_audit_events WHERE action='updated' AND task_id IN (?,?)", first, second)).toEqual([]);
+    } finally { await db.exec("DROP TRIGGER local_reconcile_failure"); }
+    expect((await call("/api/tasks/reconcile-carryover", member, {})).body.tasks).toHaveLength(2);
+    await call(`/api/tasks/${parent}`, member, { status: "todo" }, "PATCH");
+    expect((await call("/api/tasks/sync-to-today", member, { sourceDate: past(2), taskIds: [parent] })).body.created).toHaveLength(1);
+  });
 });

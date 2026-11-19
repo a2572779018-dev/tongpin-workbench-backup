@@ -1347,6 +1347,13 @@ describe("同频 API 纵向流程", () => {
       database.tasks.filter((task) => task.sourceTaskId === taskId),
     );
     expect(copies).toHaveLength(1);
+    // Completing the historical source closes an already-created stale copy.
+    await request(http).patch(`/api/tasks/${taskId}`).set("Authorization", `Bearer ${bobToken}`).send({ status: "done" }).expect(200);
+    const repaired = await request(http).post("/api/tasks/reconcile-carryover").set("Authorization", `Bearer ${bobToken}`).send({}).expect(200);
+    expect(repaired.body.tasks.find((task: { id: string; status: string }) => task.id === copies[0].id)?.status).toBe("done");
+    await request(http).patch(`/api/tasks/${taskId}`).set("Authorization", `Bearer ${bobToken}`).send({ status: "doing" }).expect(200);
+    const reopened = await request(http).post("/api/tasks/sync-to-today").set("Authorization", `Bearer ${bobToken}`).send({ sourceDate: YESTERDAY, taskIds: [taskId] }).expect(201);
+    expect(reopened.body.created).toHaveLength(1);
   });
 
   it("跨周末汇总本人往日未完成任务，排除已完成延续链和其他成员", async () => {
