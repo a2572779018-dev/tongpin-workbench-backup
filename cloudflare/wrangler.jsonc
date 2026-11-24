@@ -41,6 +41,6 @@
     "AI_ALLOWED_HOSTS": "yes.hubniconico.com,www.75api.com,api.b.ai,api.openai.com,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,api.siliconflow.cn,api.siliconflow.com,open.bigmodel.cn,api.typesafe.ai",
     "CLIENT_ORIGINS": "null,file://,http://127.0.0.1:5173,http://127.0.0.1:4173",
     "LORA_EXPLORER_API": "https://explorer.lorachain.org/api/v2",
-    "LORA_RPC_URL": "https://explorer.lorachain.org/api/eth-rpc"
+    "LORA_RPC_URL": "https://rpc.lorachain.org"
   }
 }

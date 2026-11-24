@@ -10,7 +10,7 @@ describe("member task refresh visual policy", () => {
   it("uses skeletons only for the initial date load", () => {
     expect(source).toContain("async ({ showLoading = true } = {})");
     expect(source).toContain("if (showLoading) setLoading(true)");
-    expect(source).toContain("if (showLoading) setLoading(false)");
+    expect(source).toContain("if (current()) setLoading(false)");
   });
 
   it("keeps existing cards visible during realtime task synchronization", () => {

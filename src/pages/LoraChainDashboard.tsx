@@ -74,10 +74,10 @@ function addressMetricValue(addresses: LoraDashboardData["addresses"] | undefine
 function priceStateLabel(data: LoraDashboardData | null): string {
   if (!data) return "等待价格";
   return {
-    ready: "1 LRB = USDT",
-    stale: "缓存价格",
+    ready: "流动性池报价",
+    stale: data.price.priceUsdt ? `上次报价 · ${formatShanghaiDateTime(data.price.updatedAt)}` : "暂无有效报价",
     building: "价格采集中",
-    missing: "暂无成交价格",
+    missing: "暂无池报价",
     unavailable: "价格不可用",
     "config-error": "价格配置错误",
   }[data.price.status];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { syncPastTaskGroups } from "./taskCarryoverClient";
+import { daySelectionSources, syncPastTaskGroups } from "./taskCarryoverClient";
 
 describe("history batch result reconciliation", () => {
   it("keeps the failed date selected, without resending an earlier successful date", async () => {
@@ -33,4 +33,13 @@ describe("history batch result reconciliation", () => {
     }, [{ id: "a", date: "2026-10-30" }, { id: "b", date: "2026-10-20" }], "account-a");
     expect(accounts).toEqual(["account-a", "account-a"]);
   });
+});
+
+it("maps historical cards to the current copy without selecting done or already scheduled records", () => {
+  const tasks = ["a", "b", "c", "d", "e"].map(id => ({ id, date: "2026-10-01", status: id === "e" ? "done" : "todo" }));
+  const status = { tasks, syncedTaskIds: ["c"], unavailableTaskIds: ["a", "d"] };
+  const sources = daySelectionSources({ ...status, continuationSources: { a: { id: "new-a", date: "2026-11-01" } } });
+  expect([...sources.keys()]).toEqual(["a", "b"]);
+  expect(sources.get("a")).toEqual({ id: "new-a", date: "2026-11-01" });
+  expect([...daySelectionSources(status).keys()]).toEqual(["b"]);
 });

@@ -72,7 +72,6 @@ const MAX_DETAIL_PAGES = 100;
 const PAIR_LOG_WINDOW_BLOCKS = 5_000;
 const MAX_PAIR_WINDOWS_PER_TICK = 2;
 const PAIR_CONFIRMATIONS = 6;
-const PAIR_RESERVE_STALE_SECONDS = 10 * 60;
 export const MAX_PENDING_INTERNAL_TRANSACTIONS = 5_000;
 
 /** Nominal first-attempt budget used by production-scale regression tests. */
@@ -1143,18 +1142,6 @@ export function validatePairConfiguration(values: {
   };
 }
 
-export function isPairReserveFresh(
-  reserveTimestampSeconds: bigint,
-  blockTimestampSeconds: bigint,
-  maxAgeSeconds = BigInt(PAIR_RESERVE_STALE_SECONDS),
-): boolean {
-  return (
-    reserveTimestampSeconds > 0n &&
-    blockTimestampSeconds >= reserveTimestampSeconds &&
-    blockTimestampSeconds - reserveTimestampSeconds <= maxAgeSeconds
-  );
-}
-
 export class ExplorerLoraChainDataSource implements LoraChainDataSource {
   private readonly client = new RetryingJsonClient();
   private rpcId = 0;
@@ -1276,8 +1263,8 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
 
   private async collectPrice(
     liveBlock: LiveRpcBlock,
+    chainId: string,
   ): Promise<LoraPriceSnapshot> {
-    const chainId = await this.rpc<string>("eth_chainId", []);
     const token0Raw = await this.rpc<string>("eth_call", [
       { to: LORA_PAIR_ADDRESS, data: "0x0dfe1681" },
       liveBlock.blockHex,
@@ -1312,11 +1299,15 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       token1Decimals === null ||
       reserve0 === null ||
       reserve1 === null ||
-      reserveTimestamp === null
+      reserveTimestamp === null ||
+      reserveTimestamp <= 0n ||
+      reserveTimestamp > BigInt(Math.floor(Date.parse(liveBlock.timestamp) / 1_000))
     ) {
       throw new Error("invalid pair response");
     }
-    const validated = {
+    // getReserves reports when liquidity last changed. An idle pool still has
+    // a verifiable reserve ratio at this block; the dashboard dates the quote.
+    return {
       ...validatePairConfiguration({
         chainId,
         token0,
@@ -1331,20 +1322,6 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       blockTimestamp: liveBlock.timestamp,
       averageBlockTimeMs: liveBlock.averageBlockTimeMs,
     };
-    if (
-      validated.status === "ready" &&
-      !isPairReserveFresh(
-        reserveTimestamp,
-        BigInt(Math.floor(Date.parse(liveBlock.timestamp) / 1_000)),
-      )
-    ) {
-      return {
-        ...validated,
-        status: "stale",
-        priceUsdt: null,
-      };
-    }
-    return validated;
   }
 
   private async collectTransactionInternals(
@@ -1538,15 +1515,21 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
       source: "WLRB/USDT Pair getReserves",
       configError: null,
     };
+    let chainId = "";
     try {
-      liveBlock = await this.collectLiveBlock();
-      rpcHealthy = true;
-      price = {
-        ...price,
-        blockNumber: liveBlock.blockNumber,
-        blockTimestamp: liveBlock.timestamp,
-        averageBlockTimeMs: liveBlock.averageBlockTimeMs,
-      };
+      chainId = await this.rpc<string>("eth_chainId", []);
+      if (chainId.toLowerCase() !== LORA_CHAIN_ID_HEX) {
+        price = { ...price, status: "config-error", configError: "CHAIN_ID_MISMATCH" };
+      } else {
+        liveBlock = await this.collectLiveBlock();
+        rpcHealthy = true;
+        price = {
+          ...price,
+          blockNumber: liveBlock.blockNumber,
+          blockTimestamp: liveBlock.timestamp,
+          averageBlockTimeMs: liveBlock.averageBlockTimeMs,
+        };
+      }
     } catch {
       rpcHealthy = false;
     }
@@ -1567,7 +1550,7 @@ export class ExplorerLoraChainDataSource implements LoraChainDataSource {
         // is unavailable; never replace a previous exact balance with null.
       }
       try {
-        price = await this.collectPrice(liveBlock);
+        price = await this.collectPrice(liveBlock, chainId);
         pairConfigurationVerified = price.status !== "config-error";
       } catch {
         // Chain head remains usable even when Pair calls are unavailable.

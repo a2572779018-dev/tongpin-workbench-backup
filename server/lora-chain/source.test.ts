@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  LORA_DEFAULT_RPC_URL,
   LORA_PAIR_ADDRESS,
   LORA_ROUTER_ADDRESS,
   LORA_SWAP_TOPIC,
@@ -12,7 +13,7 @@ import {
   buildExplorerBlockByTimeUrl,
   collectPaginatedHead,
   collectInternalDetailRound,
-  isPairReserveFresh,
+  ExplorerLoraChainDataSource,
   LORA_SOURCE_REQUEST_BUDGET_LIMITS,
   MAX_PENDING_INTERNAL_TRANSACTIONS,
   normalizePendingInternalTransactions,
@@ -24,6 +25,8 @@ import {
   parseRpcSwapLog,
   RetryingJsonClient,
 } from "./source";
+import { readFileSync } from "node:fs";
+import { EMPTY_LORA_COLLECTOR_STATE } from "./state";
 import type {
   LoraIndexedTransaction,
   LoraPendingInternalTransaction,
@@ -658,10 +661,48 @@ describe("LORA source strict schema fixtures", () => {
     ).toThrow("next_page_params value schema mismatch");
   });
 
-  it("uses the Pair reserve timestamp instead of the request time", () => {
-    expect(isPairReserveFresh(1_000n, 1_600n)).toBe(true);
-    expect(isPairReserveFresh(1_000n, 1_601n)).toBe(false);
-    expect(isPairReserveFresh(1_601n, 1_600n)).toBe(false);
+  it("uses the published mainnet RPC in both collection environments", () => {
+    expect(LORA_DEFAULT_RPC_URL).toBe("https://rpc.lorachain.org");
+    const workerConfig = readFileSync(new URL("../../cloudflare/wrangler.jsonc", import.meta.url), "utf8");
+    expect(workerConfig).toContain(`"LORA_RPC_URL": "${LORA_DEFAULT_RPC_URL}"`);
+  });
+
+  it.each([
+    { age: 86400, chainId: "0x18d7", price: "0.2", status: "ready" },
+    { age: -1, chainId: "0x18d7", price: null, status: "unavailable" },
+    { age: 86400, chainId: "0x539", price: null, status: "config-error" },
+  ])("reads a pinned Pair quote with reserve age $age on chain $chainId", async ({ age, chainId, price, status }) => {
+    const now = new Date("2026-08-14T02:00:00.000Z");
+    const seconds = now.getTime() / 1000;
+    const word = (value: bigint) => value.toString(16).padStart(64, "0");
+    const rpcMethods: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url !== LORA_DEFAULT_RPC_URL) return fixtureResponse(200, { items: [], next_page_params: null });
+      const { method, params } = JSON.parse(String(init?.body));
+      rpcMethods.push(method);
+      const results: Record<string, unknown> = {
+        eth_chainId: chainId, eth_blockNumber: "0x100", eth_getBlockByNumber: { timestamp: `0x${seconds.toString(16)}` },
+        eth_getBalance: "0x0", eth_getLogs: [],
+      };
+      if (method === "eth_call") {
+        expect(params[1]).toBe("0x100");
+        const words: Record<string, string> = {
+          "0x0dfe1681": word(BigInt(LORA_USDT_ADDRESS)), "0xd21220a7": word(BigInt(LORA_WLRB_ADDRESS)),
+          "0x313ce567": word(18n), "0x0902f1ac": word(2n) + word(10n) + word(BigInt(seconds - age)),
+        };
+        results.eth_call = `0x${words[params[0].data]}`;
+      }
+      return fixtureResponse(200, { result: results[method] });
+    });
+
+    const source = new ExplorerLoraChainDataSource("https://fixture.invalid/api/v2", LORA_DEFAULT_RPC_URL);
+    const batch = await source.collect({ now, state: { ...EMPTY_LORA_COLLECTOR_STATE } });
+    expect(batch.price).toMatchObject({ status, priceUsdt: price });
+    if (price !== null) expect(batch.price.updatedAt).toBe(new Date((seconds - age) * 1000).toISOString());
+    if (chainId === "0x539") {
+      expect(rpcMethods).toEqual(["eth_chainId"]);
+      expect(batch.burnBalanceWei).toBeNull();
+    }
   });
 });
 

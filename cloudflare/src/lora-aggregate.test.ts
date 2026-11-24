@@ -282,6 +282,19 @@ describe("LORA R2 aggregate", () => {
     expect(dashboard.nodes.cumulativeBurnLrb).toBe("0");
   });
 
+  it("recovers a dated pool quote after a network mismatch even if the pool is idle", () => {
+    const verified = batch().price;
+    const wrongNetwork = batch({ price: { ...verified, status: "config-error", priceUsdt: null, configError: "CHAIN_ID_MISMATCH" } });
+    const initial = applyLoraAggregateBatch(createEmptyLoraAggregateSnapshot(), wrongNetwork, NOW);
+    expect(buildLoraAggregateDashboard(initial, NOW).price.priceUsdt).toBeNull();
+
+    const updatedAt = new Date(NOW.getTime() - 86_400_000).toISOString();
+    const recovered = applyLoraAggregateBatch(initial, batch({ price: { ...verified, updatedAt } }), NOW);
+    expect(buildLoraAggregateDashboard(recovered, NOW).price).toMatchObject({
+      status: "stale", priceUsdt: verified.priceUsdt, updatedAt,
+    });
+  });
+
   it("uses the live RPC head and never treats sparse block samples as adjacent", () => {
     const snapshot = applyLoraAggregateBatch(
       createEmptyLoraAggregateSnapshot(),

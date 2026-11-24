@@ -41,3 +41,24 @@ export function getWorkdayCountdown(now: Date): WorkdayCountdown {
 export function formatCountdownUnit(value: number): string {
   return String(value).padStart(2, "0");
 }
+
+const PAYDAY = 15;
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+export function formatPaydayCountdown(now: Date): string {
+  const beijing = new Date(now.getTime() + BEIJING_OFFSET_MS);
+  const day = beijing.getUTCDate();
+  if (day === PAYDAY) return "今天";
+
+  const month = beijing.getUTCMonth() + (day > PAYDAY ? 1 : 0);
+  const payday = Date.UTC(beijing.getUTCFullYear(), month, PAYDAY) - BEIJING_OFFSET_MS;
+  const remainingMinutes = Math.floor((payday - now.getTime()) / 60_000);
+  const days = Math.floor(remainingMinutes / 1440);
+  const hours = Math.floor(remainingMinutes / 60) % 24;
+  const minutes = remainingMinutes % 60;
+  return [
+    days && `${days} 天`,
+    hours && `${hours} 小时`,
+    minutes && `${minutes} 分钟`,
+  ].filter(Boolean).join(" ") || "不足 1 分钟";
+}

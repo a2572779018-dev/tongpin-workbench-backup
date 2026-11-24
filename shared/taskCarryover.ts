@@ -110,3 +110,20 @@ export function classifyTaskCarryover<T extends CarryoverRef>(index: ReturnType<
   }
   return { eligible, skippedTaskIds, rejectedTaskIds };
 }
+
+/** A historical card may point to a later unfinished copy. The write API still
+ * accepts only the effective source and revalidates it at commit time. */
+export function dayCarryoverStatus<T extends CarryoverRef>(index: ReturnType<typeof indexTaskCarryover<T>>, dayTasks: CarryoverRef[], sourceDate: string, today: string) {
+  const { skippedTaskIds, rejectedTaskIds } = classifyTaskCarryover(index, dayTasks.map(task => task.id), sourceDate, today);
+  const rejected = new Set(rejectedTaskIds);
+  const continuationSources: Record<string, { id: string; date: string }> = {};
+  for (const task of dayTasks) {
+    if (!rejected.has(task.id) || task.userId !== index.userId || task.status === "done" || !index.isCurrent(task)) continue;
+    const current = index.latest.get(index.rootOf(task.id));
+    if (current && current.id !== task.id && current.date < today && current.status !== "done") {
+      continuationSources[task.id] = { id: current.id, date: current.date };
+    }
+  }
+  // Older clients only understand the original unavailable list.
+  return { syncedTaskIds: skippedTaskIds, unavailableTaskIds: rejectedTaskIds, continuationSources };
+}

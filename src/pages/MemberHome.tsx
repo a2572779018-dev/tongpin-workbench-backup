@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
 } from "react";
 import {
   ArrowLeft,
@@ -20,6 +21,7 @@ import {
   Plus,
   Sparkles,
   Trash2,
+  Wallet,
   X,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
@@ -32,13 +34,15 @@ import {
   getWeek,
   greetingByHour,
   isSameDate,
-  isToday,
   startOfWeek,
   toDateKey,
 } from "../lib/date";
 import { TASK_PRIORITY_META } from "../lib/taskPriority";
 import { TaskBacklog } from "../components/TaskBacklog";
-import { syncPastTaskGroups } from "../lib/taskCarryoverClient";
+import { daySelectionSources, syncPastTaskGroups, type DayCarryoverResponse, type TaskSource } from "../lib/taskCarryoverClient";
+import { shanghaiDateKey } from "../lib/quickTaskPanel";
+import { readTaskDay, taskReadIssue } from "../lib/readTaskDay";
+import { isNetworkUnavailable } from "../lib/api";
 import { TaskReconcileGate } from "../lib/taskReconcile";
 import {
   isLaneHomeLayout,
@@ -46,6 +50,7 @@ import {
 } from "../lib/homeLayout";
 import {
   formatCountdownUnit,
+  formatPaydayCountdown,
   getWorkdayCountdown,
 } from "../lib/workday";
 import type { Task, TaskPriority, TaskStatus } from "../types";
@@ -90,7 +95,7 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   done: "已完成",
 };
 
-function WorkdayCountdownPanel() {
+function MemberCountdowns() {
   const [now, setNow] = useState(() => new Date());
   const countdown = getWorkdayCountdown(now);
 
@@ -100,27 +105,33 @@ function WorkdayCountdownPanel() {
   }, []);
 
   return (
-    <div
-      className={`workday-countdown is-${countdown.status}`}
-      role="timer"
-      aria-label={
-        countdown.status === "off-work"
-          ? "今日已经下班"
-          : `距离下班还有 ${countdown.hours} 小时 ${countdown.minutes} 分钟 ${countdown.seconds} 秒`
-      }
-    >
-      <span>
-        <Clock3 size={15} />
-        {countdown.status === "off-work" ? "今日已下班" : "距离下班还有"}
-      </span>
-      <strong>
-        <b>{formatCountdownUnit(countdown.hours)}</b>
-        <i>时</i>
-        <b>{formatCountdownUnit(countdown.minutes)}</b>
-        <i>分</i>
-        <b>{formatCountdownUnit(countdown.seconds)}</b>
-        <i>秒</i>
-      </strong>
+    <div className="member-countdowns">
+      <div className="payday-countdown" role="timer" aria-label="发薪日" title="每月 15 日 00:00（北京时间）">
+        <span><Wallet size={15} aria-hidden="true" />发薪日</span>
+        <strong>{formatPaydayCountdown(now)}</strong>
+      </div>
+      <div
+        className={`workday-countdown is-${countdown.status}`}
+        role="timer"
+        aria-label={
+          countdown.status === "off-work"
+            ? "今日已经下班"
+            : `距离下班还有 ${countdown.hours} 小时 ${countdown.minutes} 分钟 ${countdown.seconds} 秒`
+        }
+      >
+        <span>
+          <Clock3 size={15} />
+          {countdown.status === "off-work" ? "今日已下班" : "距离下班还有"}
+        </span>
+        <strong>
+          <b>{formatCountdownUnit(countdown.hours)}</b>
+          <i>时</i>
+          <b>{formatCountdownUnit(countdown.minutes)}</b>
+          <i>分</i>
+          <b>{formatCountdownUnit(countdown.seconds)}</b>
+          <i>秒</i>
+        </strong>
+      </div>
     </div>
   );
 }
@@ -128,7 +139,8 @@ function WorkdayCountdownPanel() {
 export function MemberHome({ layout }: { layout: HomeLayout }) {
   const { session, api } = useAuth();
   const { confirm: confirmNotice, notify } = useNoticeCenter();
-  const [selectedDate, setSelectedDate] = useState(toDateKey(new Date()));
+  const [businessToday, setBusinessToday] = useState(() => shanghaiDateKey());
+  const [selectedDate, setSelectedDate] = useState(businessToday);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [summary, setSummary] = useState<Record<string, DailySummary>>({});
   const [title, setTitle] = useState("");
@@ -138,49 +150,84 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [readIssue, setReadIssue] = useState<ReturnType<typeof taskReadIssue> | null>(null);
+  const readSequence = useRef(0);
+  const summarySequence = useRef(0);
+  const loadedDate = useRef("");
+  const accountId = session!.user.id;
   const [highlightTaskId, setHighlightTaskId] = useState("");
-  const [pastSyncSelection, setPastSyncSelection] = useState<string[]>([]);
-  const [syncedSourceTaskIds, setSyncedSourceTaskIds] = useState<string[]>([]);
-  const [pastSyncLoading, setPastSyncLoading] = useState(false);
+  const [selectedSources, setSelectedSources] = useState<Map<string, TaskSource>>(() => new Map());
+  const [dayAvailability, setDayAvailability] = useState<{ date: string; sources: Map<string, TaskSource>; error?: string } | null>(null);
+  const [availabilityRevision, setAvailabilityRevision] = useState(0);
+  const [carryoverError, setCarryoverError] = useState("");
+  const submittingCarryover = useRef(false);
   const [pastSyncBusy, setPastSyncBusy] = useState(false);
   const selectedDateRef = useRef(selectedDate);
   const reconcileGate = useRef(new TaskReconcileGate());
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  const activeDateRef = useRef(toDateKey(new Date()));
+  const activeDateRef = useRef(businessToday);
 
   const week = useMemo(() => getWeek(selectedDate), [selectedDate]);
   const from = toDateKey(week[0]);
   const to = toDateKey(week[6]);
-  const isPastDate = selectedDate < toDateKey(new Date());
+  const isPastDate = selectedDate < businessToday;
   const usesLaneLayout = isLaneHomeLayout(layout);
 
+  useEffect(() => {
+    selectedDateRef.current = selectedDate;
+  }, [selectedDate]);
+
   const loadTasks = useCallback(async ({ showLoading = true } = {}) => {
+    if (!alive.current || selectedDateRef.current !== selectedDate) return;
+    const sequence = ++readSequence.current;
+    const current = () => alive.current && sequence === readSequence.current && selectedDateRef.current === selectedDate;
     if (showLoading) setLoading(true);
-    if (showLoading) setError("");
-    try {
-      if (selectedDate === toDateKey(new Date())) {
-        await reconcileGate.current.ensure(`${session!.user.id}/${selectedDate}`, () => api("/api/tasks/reconcile-carryover", { method: "POST", headers: { "X-Tongpin-Account": session!.user.id }, body: "{}" }));
-      }
-      const result = await api<{ tasks: Task[] }>(
-        `/api/tasks?date=${selectedDate}`,
-      );
-      if (alive.current && selectedDateRef.current === selectedDate) setTasks(sortTasks(result.tasks));
-    } catch (caught) {
-      if (alive.current && selectedDateRef.current === selectedDate) setError(caught instanceof Error ? caught.message : "任务加载失败");
-    } finally {
-      if (alive.current && selectedDateRef.current === selectedDate) {
-        if (showLoading) setLoading(false);
-      }
+    if (showLoading && loadedDate.current !== selectedDate) {
+      setTasks([]);
+      loadedDate.current = "";
+      setReadIssue(null);
+      setError("");
     }
-  }, [api, selectedDate]);
+    try {
+      const result = await readTaskDay(api, reconcileGate.current, accountId, selectedDate, shanghaiDateKey());
+      if (!current()) return;
+      loadedDate.current = selectedDate;
+      setTasks(sortTasks(result.tasks));
+      setReadIssue(result.issue);
+    } catch (caught) {
+      if (current()) setReadIssue(taskReadIssue(caught, loadedDate.current === selectedDate
+        ? "任务列表刷新失败，显示上次同步的结果" : "任务列表暂未加载"));
+    } finally {
+      if (current()) setLoading(false);
+    }
+  }, [api, accountId, selectedDate]);
+
+  const retryMessage = readIssue?.transient ? readIssue.message : "";
+  useEffect(() => {
+    if (!retryMessage) return;
+    const recover = () => {
+      if (document.visibilityState === "visible" && navigator.onLine) void loadTasks({ showLoading: false });
+    };
+    const timers = [2_000, 15_000].map(delay => window.setTimeout(recover, delay));
+    window.addEventListener("online", recover);
+    window.addEventListener("focus", recover);
+    return () => {
+      timers.forEach(timer => window.clearTimeout(timer));
+      window.removeEventListener("online", recover);
+      window.removeEventListener("focus", recover);
+    };
+  }, [loadTasks, retryMessage]);
 
   const loadSummary = useCallback(async () => {
+    const inWeek = () => selectedDateRef.current >= from && selectedDateRef.current <= to;
+    if (!alive.current || !inWeek()) return;
+    const sequence = ++summarySequence.current;
     try {
       const result = await api<{ summary: Record<string, DailySummary> }>(
         `/api/tasks/summary?from=${from}&to=${to}`,
       );
-      setSummary(result.summary);
+      if (alive.current && inWeek() && sequence === summarySequence.current) setSummary(result.summary);
     } catch {
       // 日期卡片没有摘要时仍可继续管理当天任务。
     }
@@ -191,58 +238,46 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
     void loadSummary();
   }, [loadSummary, loadTasks]);
 
+  const availability = dayAvailability?.date === selectedDate ? dayAvailability : null;
+  const pastSyncLoading = isPastDate && (!availability || Boolean(availability.error));
+  const visibleTasks = tasks.filter(task => task.date === selectedDate);
+  const pastSyncSelection = visibleTasks.filter(task => {
+    const source = availability?.sources.get(task.id);
+    return source && selectedSources.has(source.id);
+  }).map(task => task.id);
+  const syncedSourceTaskIds = visibleTasks.filter(task => availability && !availability.error && !availability.sources.has(task.id)).map(task => task.id);
+
   useEffect(() => {
-    setPastSyncSelection([]);
-    setSyncedSourceTaskIds([]);
+    setSelectedSources(new Map());
+  }, [session?.user.id]);
+
+  useEffect(() => { setCarryoverError(""); }, [selectedDate]);
+
+  useEffect(() => {
+    setDayAvailability(null);
     if (!isPastDate) return;
     let cancelled = false;
-    setPastSyncLoading(true);
-    void api<{
-      syncedTaskIds: string[];
-      unavailableTaskIds?: string[];
-    }>(
-      `/api/tasks/sync-to-today?sourceDate=${selectedDate}`,
-    )
-      .then((result) => {
-        if (!cancelled) setSyncedSourceTaskIds([...result.syncedTaskIds, ...(result.unavailableTaskIds ?? [])]);
+    void api<DayCarryoverResponse>(`/api/tasks/sync-to-today?sourceDate=${selectedDate}`,
+      { headers: { "X-Tongpin-Account": session!.user.id } })
+      .then(result => {
+        if (cancelled) return;
+        const sources = daySelectionSources(result);
+        setDayAvailability({ date: selectedDate, sources });
+        const eligible = new Set([...sources.values()].map(source => source.id));
+        setSelectedSources(current => new Map([...current].filter(([id, source]) => source.date !== selectedDate || eligible.has(id))));
       })
-      .catch((caught) => {
-        if (!cancelled) {
-          setError(
-            caught instanceof Error ? caught.message : "同步状态加载失败",
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setPastSyncLoading(false);
+      .catch(caught => {
+        if (!cancelled) setDayAvailability({ date: selectedDate, sources: new Map(), error: taskReadIssue(caught, "结转状态读取失败").message });
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [api, isPastDate, selectedDate]);
-
-  useEffect(() => {
-    setPastSyncSelection((current) =>
-      current.filter((taskId) =>
-        tasks.some(
-          (task) =>
-            task.id === taskId &&
-            task.status !== "done" &&
-            !syncedSourceTaskIds.includes(task.id),
-        ),
-      ),
-    );
-  }, [syncedSourceTaskIds, tasks]);
-
-  useEffect(() => {
-    selectedDateRef.current = selectedDate;
-  }, [selectedDate]);
+    return () => { cancelled = true; };
+  }, [api, isPastDate, selectedDate, businessToday, availabilityRevision, session?.user.id]);
 
   useEffect(() => {
     const checkDay = () => {
-      const today = toDateKey(new Date()), previous = activeDateRef.current;
+      const today = shanghaiDateKey(), previous = activeDateRef.current;
       if (previous === today) return;
       activeDateRef.current = today;
+      setBusinessToday(today);
       if (selectedDateRef.current === previous) {
         selectedDateRef.current = today; setSelectedDate(today);
       }
@@ -273,6 +308,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         refreshTimer = null;
+        if (isPastDate) setAvailabilityRevision(value => value + 1);
         void loadTasks({ showLoading: false });
         void loadSummary();
       }, 120);
@@ -283,7 +319,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
       window.removeEventListener("tongpin:task-sync", refreshTasks);
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
     };
-  }, [loadSummary, loadTasks]);
+  }, [isPastDate, loadSummary, loadTasks]);
 
   useEffect(() => {
     if (!highlightTaskId || loading) return;
@@ -347,7 +383,15 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         });
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "任务创建失败");
+      if (!alive.current) return;
+      const message = isNetworkUnavailable(caught) ? "提交结果尚未确认，请核对任务列表后再重试。"
+        : caught instanceof Error ? caught.message : "任务创建失败";
+      if (selectedDateRef.current === selectedDate) {
+        setError(message);
+        if (isNetworkUnavailable(caught)) void loadTasks({ showLoading: false });
+      } else {
+        notify({ title: `${formatFullDate(selectedDate)} · 创建任务`, body: message, tone: "warning" });
+      }
     } finally {
       setSaving(false);
     }
@@ -359,7 +403,6 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
       Pick<Task, "status" | "title" | "details" | "date" | "priority">
     >,
   ) {
-    setError("");
     try {
       const result = await api<{ task: Task }>(`/api/tasks/${taskId}`, {
         method: "PATCH",
@@ -377,8 +420,12 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
       await loadSummary();
       return result.task;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "任务更新失败");
-      throw caught;
+      if (alive.current) {
+        notify({ title: "更新任务", tone: "warning", body: isNetworkUnavailable(caught)
+          ? "更新结果尚未确认，请核对任务状态后再重试。" : caught instanceof Error ? caught.message : "任务更新失败" });
+        if (isNetworkUnavailable(caught)) void loadTasks({ showLoading: false });
+      }
+      return null;
     }
   }
 
@@ -392,9 +439,8 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         ),
       ),
     );
-    try {
-      await updateTask(taskId, { status });
-    } catch {
+    const updated = await updateTask(taskId, { status });
+    if (!updated && selectedDateRef.current === selectedDate) {
       setTasks((current) =>
         sortTasks(
           current.map((task) =>
@@ -424,38 +470,77 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         duration: 5_000,
       });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "任务删除失败");
+      if (alive.current) {
+        notify({ title: "删除任务", tone: "warning", body: isNetworkUnavailable(caught)
+          ? "删除结果尚未确认，请核对任务列表后再重试。" : caught instanceof Error ? caught.message : "任务删除失败" });
+        if (isNetworkUnavailable(caught)) void loadTasks({ showLoading: false });
+      }
     }
   }
 
   function togglePastSyncTask(taskId: string) {
-    if (syncedSourceTaskIds.includes(taskId)) return;
-    setPastSyncSelection((current) =>
-      current.includes(taskId)
-        ? current.filter((candidate) => candidate !== taskId)
-        : [...current, taskId],
-    );
+    const source = availability?.sources.get(taskId);
+    if (!source) return;
+    setSelectedSources(current => {
+      const next = new Map(current);
+      if (next.has(source.id)) next.delete(source.id);
+      else next.set(source.id, source);
+      return next;
+    });
   }
 
-  async function syncPastTasks(taskIds = pastSyncSelection) {
-    if (pastSyncBusy || taskIds.length === 0) return;
-    setPastSyncBusy(true); setError("");
+  async function syncPastTasks(taskIds?: string[]) {
+    if (submittingCarryover.current) return;
+    const sources = taskIds
+      ? taskIds.flatMap(id => availability?.sources.get(id) ?? [])
+      : [...selectedSources.values()];
+    if (!sources.length) return;
+    submittingCarryover.current = true;
+    setPastSyncBusy(true); setCarryoverError("");
     try {
-      const result = await syncPastTaskGroups(api, tasks.filter(task => taskIds.includes(task.id)), session!.user.id);
+      const result = await syncPastTaskGroups(api, sources, session!.user.id);
       if (!alive.current) return;
-      setSyncedSourceTaskIds(previous => [...new Set([...previous, ...result.handledIds])]);
-      setPastSyncSelection(previous => previous.filter(id => !result.handledIds.includes(id)));
-      await loadSummary();
-      window.dispatchEvent(new Event("tongpin:task-sync"));
-      if (result.errors.length) setError(result.errors.join("；"));
-      if (result.handledIds.length) notify({
-        title: result.createdCount ? "已加入今日 " + result.createdCount + " 项" : "任务已在今日清单",
-        body: "", tone: "success", duration: 5000,
-        actions: [{ label: "查看今日", onSelect: () => setSelectedDate(result.targetDate) }],
-      });
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "往日任务同步失败"); }
-    finally { setPastSyncBusy(false); }
+      const handled = new Set(result.handledIds);
+      const settled = new Set([...handled, ...result.rejectedIds]);
+      setSelectedSources(current => new Map([...current].filter(([id]) => !settled.has(id))));
+      if (settled.size) {
+        setDayAvailability(current => current && ({
+          ...current, sources: new Map([...current.sources].filter(([, source]) => !settled.has(source.id))),
+        }));
+        window.dispatchEvent(new Event("tongpin:task-sync"));
+        if (handled.size) notify({
+          title: result.createdCount ? `已结转至今日 ${result.createdCount} 项` : "所选任务已在今日清单",
+          body: "", tone: "success", duration: 5000,
+          actions: [{ label: "查看今日", onSelect: () => setSelectedDate(result.targetDate) }],
+        });
+      }
+      if (result.errors.length) setCarryoverError(result.errors.join("；"));
+    } finally {
+      submittingCarryover.current = false;
+      if (alive.current) setPastSyncBusy(false);
+    }
   }
+
+  const currentDaySources = [...(availability?.sources.values() ?? [])];
+  const allDaySelected = currentDaySources.length > 0 && currentDaySources.every(source => selectedSources.has(source.id));
+  const pastSyncBar = <PastTaskSyncBar
+    availableCount={new Set(currentDaySources.map(source => source.id)).size}
+    selectedCount={selectedSources.size}
+    loading={pastSyncLoading}
+    busy={pastSyncBusy}
+    error={availability?.error || carryoverError}
+    allDaySelected={allDaySelected}
+    onToggleDay={() => setSelectedSources(current => {
+      const next = new Map(current);
+      for (const source of currentDaySources) {
+        if (allDaySelected) next.delete(source.id);
+        else next.set(source.id, source);
+      }
+      return next;
+    })}
+    onRefresh={() => { setCarryoverError(""); setAvailabilityRevision(value => value + 1); }}
+    onSync={() => void syncPastTasks()}
+  />;
 
   function moveWeek(amount: number) {
     setSelectedDate(toDateKey(addDays(startOfWeek(selectedDate), amount * 7)));
@@ -469,15 +554,24 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
         `member-page--${layout}`,
       ].join(" ")}
     >
-      <TaskBacklog onViewToday={date => { if (date) setSelectedDate(date); }} />
+      <TaskBacklog key={session!.user.id} onViewDate={setSelectedDate}
+        selected={selectedSources} setSelected={setSelectedSources} businessToday={businessToday} submitting={pastSyncBusy} />
+      {readIssue && (
+        <div className="task-read-status" role="status">
+          <span>{readIssue.message}</span>
+          <button type="button" onClick={() => void loadTasks({ showLoading: false })}>重新同步</button>
+        </div>
+      )}
       {usesLaneLayout ? (
         <LaneTaskBoard
           tasks={tasks}
           selectedDate={selectedDate}
+          businessToday={businessToday}
           title={title}
           priority={priority}
           createScope={createScope}
           loading={loading}
+          listUnavailable={Boolean(readIssue && !loadedDate.current)}
           saving={saving}
           error={error}
           highlightTaskId={highlightTaskId}
@@ -489,6 +583,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
           syncedSourceTaskIds={syncedSourceTaskIds}
           pastSyncLoading={pastSyncLoading}
           pastSyncBusy={pastSyncBusy}
+          pastSyncBar={pastSyncBar}
           onSelectedDateChange={setSelectedDate}
           onTitleChange={setTitle}
           onPriorityChange={setPriority}
@@ -511,12 +606,12 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                 {greetingByHour()}，{session!.user.name}
               </span>
               <h2>
-                {isToday(selectedDate)
+                {selectedDate === businessToday
                   ? "把今天做清楚。"
                   : formatFullDate(selectedDate)}
               </h2>
             </div>
-            {session!.user.role === "member" && <WorkdayCountdownPanel />}
+            {session!.user.role === "member" && <MemberCountdowns />}
           </div>
 
           <div className="member-date-picker">
@@ -537,7 +632,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSelectedDate(toDateKey(new Date()))}
+                  onClick={() => setSelectedDate(businessToday)}
                 >
                   今天
                 </button>
@@ -566,7 +661,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                     type="button"
                     className={[
                       isSameDate(date, selectedDate) ? "is-selected" : "",
-                      isToday(date) ? "is-today" : "",
+                      toDateKey(date) === businessToday ? "is-today" : "",
                     ]
                       .filter(Boolean)
                       .join(" ")}
@@ -574,7 +669,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                   >
                     <span className="date-card__weekday">
                       周{label.weekday}
-                      {isToday(date) && <i>今日</i>}
+                      {toDateKey(date) === businessToday && <i>今日</i>}
                     </span>
                     <strong>{label.day}</strong>
                     <span className="date-card__month">{label.month}</span>
@@ -630,19 +725,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
           </header>
 
           {isPastDate ? (
-            <PastTaskSyncBar
-              availableCount={
-                tasks.filter(
-                  (task) =>
-                    task.status !== "done" &&
-                    !syncedSourceTaskIds.includes(task.id),
-                ).length
-              }
-              selectedCount={pastSyncSelection.length}
-              loading={pastSyncLoading}
-              busy={pastSyncBusy}
-              onSync={() => void syncPastTasks()}
-            />
+            pastSyncBar
           ) : (
           <form className="quick-add" onSubmit={createTask}>
             <span className="quick-add__plus">
@@ -692,7 +775,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                 <div className="task-skeleton" />
                 <div className="task-skeleton" />
               </>
-            ) : tasks.length === 0 ? (
+            ) : readIssue && !loadedDate.current ? null : tasks.length === 0 ? (
               <div className="task-empty">
                 <span>
                   <ListChecks size={27} />
@@ -729,7 +812,7 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                       disabled={pastSyncLoading || pastSyncBusy || syncedSourceTaskIds.includes(task.id)}
                       aria-label={
                         syncedSourceTaskIds.includes(task.id)
-                          ? `${task.title} 已有承接记录`
+                          ? `${task.title} 当前不可结转`
                           : `${pastSyncSelection.includes(task.id) ? "取消选择" : "选择"} ${task.title}`
                       }
                       onClick={(event) => {
@@ -801,15 +884,15 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
                       <button
                         className="task-action task-action--today"
                         type="button"
-                        title="将该任务放到今天"
-                        aria-label="将该任务放到今天"
+                        title="结转至今日"
+                        aria-label="结转至今日"
                         disabled={pastSyncBusy || pastSyncLoading}
                         onClick={(event) => {
                           event.stopPropagation();
                           void syncPastTasks([task.id]);
                         }}
                       >
-                        今
+                        结转
                       </button>
                     )}
                   {!task.assignedBy && (
@@ -870,11 +953,11 @@ export function MemberHome({ layout }: { layout: HomeLayout }) {
           task={editingTask}
           onClose={() => setEditingTask(null)}
           onSave={async (patch) => {
-            await updateTask(
+            const updated = await updateTask(
               editingTask.id,
               editingTask.assignedBy ? { details: patch.details } : patch,
             );
-            setEditingTask(null);
+            if (updated) setEditingTask(null);
           }}
         />
       )}
@@ -1081,12 +1164,20 @@ function PastTaskSyncBar({
   selectedCount,
   loading,
   busy,
+  error,
+  allDaySelected,
+  onToggleDay,
+  onRefresh,
   onSync,
 }: {
   availableCount: number;
   selectedCount: number;
   loading: boolean;
   busy: boolean;
+  error?: string;
+  allDaySelected: boolean;
+  onToggleDay: () => void;
+  onRefresh: () => void;
   onSync: () => void;
 }) {
   return (
@@ -1095,13 +1186,14 @@ function PastTaskSyncBar({
         <CalendarDays size={18} />
       </span>
       <span className="past-sync-bar__copy">
-        <b>勾选未完成任务，带到今天</b>
+        <b>历史任务结转</b>
+        {availableCount > 0 && <button className="past-sync-day-toggle" type="button" disabled={loading || busy} onClick={onToggleDay}>{allDaySelected ? "取消当日全选" : "全选当日"}</button>}
         <small>
-          {loading
-            ? "正在核对同步记录…"
+          {error ? <span role="alert">{error} <button type="button" onClick={onRefresh}>重新核对</button></span> : loading
+            ? "正在核对任务状态…"
             : availableCount === 0
-              ? "没有可同步的任务"
-              : `可选 ${availableCount} 项`}
+              ? "当日无可结转任务"
+              : `当日可选 ${availableCount} 项`}
         </small>
       </span>
       <button
@@ -1109,7 +1201,7 @@ function PastTaskSyncBar({
         disabled={loading || busy || selectedCount === 0}
         onClick={onSync}
       >
-        {busy ? "同步中…" : `同步 ${selectedCount} 项`}
+        {busy ? "结转中…" : `结转至今日（${selectedCount}）`}
         <ArrowRight size={16} />
       </button>
     </section>
@@ -1119,10 +1211,12 @@ function PastTaskSyncBar({
 function LaneTaskBoard({
   tasks,
   selectedDate,
+  businessToday,
   title,
   priority,
   createScope,
   loading,
+  listUnavailable,
   saving,
   error,
   highlightTaskId,
@@ -1134,6 +1228,7 @@ function LaneTaskBoard({
   syncedSourceTaskIds,
   pastSyncLoading,
   pastSyncBusy,
+  pastSyncBar,
   onSelectedDateChange,
   onTitleChange,
   onPriorityChange,
@@ -1147,10 +1242,12 @@ function LaneTaskBoard({
 }: {
   tasks: Task[];
   selectedDate: string;
+  businessToday: string;
   title: string;
   priority: TaskPriority;
   createScope: TaskCreateScope;
   loading: boolean;
+  listUnavailable: boolean;
   saving: boolean;
   error: string;
   highlightTaskId: string;
@@ -1162,6 +1259,7 @@ function LaneTaskBoard({
   syncedSourceTaskIds: string[];
   pastSyncLoading: boolean;
   pastSyncBusy: boolean;
+  pastSyncBar: ReactNode;
   onSelectedDateChange: (date: string) => void;
   onTitleChange: (title: string) => void;
   onPriorityChange: (priority: TaskPriority) => void;
@@ -1283,7 +1381,7 @@ function LaneTaskBoard({
                           ? "is-muted"
                           : "",
                         dateKey === selectedDate ? "is-selected" : "",
-                        isToday(date) ? "is-today" : "",
+                        toDateKey(date) === businessToday ? "is-today" : "",
                       ]
                         .filter(Boolean)
                         .join(" ")}
@@ -1301,9 +1399,8 @@ function LaneTaskBoard({
                 className="compact-calendar__today"
                 type="button"
                 onClick={() => {
-                  const today = toDateKey(new Date());
-                  onSelectedDateChange(today);
-                  setCalendarCursor(new Date());
+                  onSelectedDateChange(businessToday);
+                  setCalendarCursor(fromDateKey(businessToday));
                   setCalendarOpen(false);
                 }}
               >
@@ -1315,7 +1412,7 @@ function LaneTaskBoard({
 
         {userRole === "member" && (
           <div className="lane-countdown-slot">
-            <WorkdayCountdownPanel />
+            <MemberCountdowns />
           </div>
         )}
 
@@ -1345,19 +1442,7 @@ function LaneTaskBoard({
       </header>
 
       {isPastDate ? (
-        <PastTaskSyncBar
-          availableCount={
-            tasks.filter(
-              (task) =>
-                task.status !== "done" &&
-                !syncedSourceTaskIds.includes(task.id),
-            ).length
-          }
-          selectedCount={pastSyncSelection.length}
-          loading={pastSyncLoading}
-          busy={pastSyncBusy}
-          onSync={() => void onSyncPastTasks()}
-        />
+        pastSyncBar
       ) : (
       <form
         className="quick-add lane-quick-add"
@@ -1459,7 +1544,7 @@ function LaneTaskBoard({
                     <div className="lane-task-skeleton" />
                     <div className="lane-task-skeleton" />
                   </>
-                ) : items.length === 0 ? (
+                ) : listUnavailable ? null : items.length === 0 ? (
                   <p className="lane-empty">
                     {isDropTarget ? "松开即可移动到这里" : "暂无任务"}
                   </p>
@@ -1507,7 +1592,7 @@ function LaneTaskBoard({
                           disabled={pastSyncLoading || pastSyncBusy || syncedSourceTaskIds.includes(task.id)}
                           aria-label={
                             syncedSourceTaskIds.includes(task.id)
-                              ? `${task.title} 已有承接记录`
+                              ? `${task.title} 当前不可结转`
                               : `${pastSyncSelection.includes(task.id) ? "取消选择" : "选择"} ${task.title}`
                           }
                           onClick={(event) => {
@@ -1583,15 +1668,15 @@ function LaneTaskBoard({
                             <button
                               className="lane-task__today"
                               type="button"
-                              title="将该任务放到今天"
-                              aria-label="将该任务放到今天"
+                              title="结转至今日"
+                              aria-label="结转至今日"
                               disabled={pastSyncBusy || pastSyncLoading}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 void onSyncPastTasks([task.id]);
                               }}
                             >
-                              今
+                              结转
                             </button>
                           )}
                       </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyTaskCarryover, completedCarryoverCopies, indexTaskCarryover, taskBacklogPage, type CarryoverRef } from "../../shared/taskCarryover";
+import { classifyTaskCarryover, completedCarryoverCopies, dayCarryoverStatus, indexTaskCarryover, taskBacklogPage, type CarryoverRef } from "../../shared/taskCarryover";
 
 const task = (id: string, date = "2026-10-30", sourceTaskId: string | null = null, status = "todo", userId = "me"): CarryoverRef => ({ id, date, sourceTaskId, status, userId });
 const today = "2026-11-02";
@@ -111,5 +111,22 @@ describe("effective history carryover", () => {
     const index = indexTaskCarryover([parent, reopened, fresh], [], "me", [{ taskId: "parent", userId: "me", action: "completed", createdAt: "2026-10-31T10:00:00Z" }, { taskId: "reopened", userId: "me", action: "reopened", createdAt: "2026-11-01T10:00:00Z" }]);
     expect(index.isCurrent(fresh)).toBe(true);
     expect(completedCarryoverCopies(index, today)).toEqual([]);
+  });
+});
+
+describe("historical day source resolution", () => {
+  const original = task("old", "2026-09-01"), child = task("child", "2026-10-31", "old");
+  it("resolves a still-open historical card older than thirty days to its current source", () => {
+    const result = dayCarryoverStatus(indexTaskCarryover([original, child], [], "me"), [original], original.date, today);
+    expect(result.continuationSources.old).toEqual({ id: child.id, date: child.date });
+    expect(result.unavailableTaskIds).toEqual(["old"]);
+  });
+  it("never resolves a closed, deleted, future or foreign continuation", () => {
+    for (const index of [
+      indexTaskCarryover([original, { ...child, status: "done" }], [], "me"),
+      indexTaskCarryover([original], [child], "me"),
+      indexTaskCarryover([original, { ...child, date: "2027-01-01" }], [], "me"),
+      indexTaskCarryover([original, { ...child, userId: "other" }], [], "me"),
+    ]) expect(dayCarryoverStatus(index, [original], original.date, today).continuationSources).toEqual({});
   });
 });

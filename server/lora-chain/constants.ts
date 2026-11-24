@@ -6,7 +6,7 @@ export const LORA_BUSINESS_TIME_ZONE = "Asia/Shanghai";
 
 export const LORA_EXPLORER_ORIGIN = "https://explorer.lorachain.org";
 export const LORA_EXPLORER_API = `${LORA_EXPLORER_ORIGIN}/api/v2`;
-export const LORA_DEFAULT_RPC_URL = `${LORA_EXPLORER_ORIGIN}/api/eth-rpc`;
+export const LORA_DEFAULT_RPC_URL = "https://rpc.lorachain.org";
 
 export const LORA_BURN_ADDRESS =
   "0x000000000000000000000000000000000000dead";

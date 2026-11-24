@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { classifyTaskCarryover, completedCarryoverCopies, indexTaskCarryover, taskBacklogPage, type CarryoverRef, type CarryoverStateEvent } from "../../shared/taskCarryover";
+import { classifyTaskCarryover, completedCarryoverCopies, dayCarryoverStatus, indexTaskCarryover, taskBacklogPage, type CarryoverRef, type CarryoverStateEvent } from "../../shared/taskCarryover";
 import { createWorkerAi } from "./ai/runtime";
 import { handleAiRequest } from "./ai/routes";
 import { createDifyToolResponse, type DifyRouteOptions } from "../../server/ai/difyRuntimeRoutes";
@@ -2995,8 +2995,8 @@ export class TongpinCore extends DurableObject<WorkerEnv> {
           priorityRank(left.priority) - priorityRank(right.priority) ||
           right.createdAt.localeCompare(left.createdAt),
       );
-    const result = classifyTaskCarryover(this.taskCarryoverIndex(user.id), tasks.map(task => task.id), sourceDate, targetDate);
-    return json({ sourceDate, targetDate, tasks, syncedTaskIds: result.skippedTaskIds, unavailableTaskIds: result.rejectedTaskIds });
+    const status = dayCarryoverStatus(this.taskCarryoverIndex(user.id), tasks, sourceDate, targetDate);
+    return json({ sourceDate, targetDate, tasks, ...status });
   }
 
   private async applyTaskSyncToToday(

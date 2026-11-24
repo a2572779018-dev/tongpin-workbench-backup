@@ -1748,6 +1748,34 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
   line-height: 0.92;
 }
 
+.member-countdowns {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 0.45rem;
+}
+
+.payday-countdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 0.65rem;
+  padding: 0.45rem 0.85rem;
+  border: var(--thin-border);
+  border-radius: 0.65rem;
+  background: var(--white);
+  box-shadow: var(--small-shadow);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.payday-countdown > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 .workday-countdown {
   display: grid;
   flex: 0 0 auto;
@@ -2525,6 +2553,8 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
 }
 
 .task-action--today {
+  padding-inline: 0;
+  white-space: nowrap;
   border-color: var(--ink);
   background: var(--yellow);
   font-family: "DM Mono", monospace;
@@ -6962,8 +6992,11 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
   justify-content: center;
 }
 
-.lane-countdown-slot .workday-countdown {
+.lane-countdown-slot .member-countdowns {
   width: min(100%, 31rem);
+}
+
+.lane-countdown-slot .workday-countdown {
   min-width: 0;
   min-height: 6.9rem;
   align-content: center;
@@ -7336,6 +7369,8 @@ html:has(dialog:modal) dialog:modal input { cursor: text !important; }
 }
 
 .lane-task__actions > .lane-task__today {
+  padding-inline: 0;
+  white-space: nowrap;
   border-color: var(--ink);
   background: var(--yellow);
   font-family: "DM Mono", monospace;
@@ -9499,4 +9534,24 @@ html[data-home-layout="cards-yellow"] .quick-add__submit {
 html[data-home-layout="cards-yellow"]
   .quick-add__submit:hover:not(:disabled) {
   background: #ffe56b;
+}
+
+.task-read-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  color: var(--ink);
+  background: #fff4d6;
+  border: 1px solid #c5a74d;
+  border-radius: 8px;
+}
+.task-read-status button {
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }

@@ -207,7 +207,7 @@ describe("LORA dashboard fixed fixture", () => {
     expect(staleMarkup).toContain("缓存估算");
     expect(unavailableMarkup).toContain("暂不可用");
     expect(unavailableMarkup).toContain("价格不可用");
-    expect(unavailableMarkup).not.toContain("1 LRB = USDT");
+    expect(unavailableMarkup).not.toContain("流动性池报价");
   });
 
   it("announces an active refresh and exposes navigable section headings", () => {
@@ -231,7 +231,7 @@ describe("LORA dashboard fixed fixture", () => {
       price: { ...fixture.price, status: "stale" },
     });
     expect(markup).toContain("0.2");
-    expect(markup).toContain("缓存价格");
+    expect(markup).toContain("上次报价 · 08/14 10:29");
   });
 
   it("finishes an empty Swap scan as no matching Swap instead of collecting forever", () => {

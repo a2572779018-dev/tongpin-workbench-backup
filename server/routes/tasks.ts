@@ -5,7 +5,7 @@ import { businessDateKey, taskDatesForScope } from "../business-date";
 import { ApiError } from "../errors";
 import { JsonStore } from "../store";
 import { appendTaskAudit, taskChanges } from "../task-audit";
-import { classifyTaskCarryover, completedCarryoverCopies, indexTaskCarryover, taskBacklogPage } from "../../shared/taskCarryover";
+import { classifyTaskCarryover, completedCarryoverCopies, dayCarryoverStatus, indexTaskCarryover, taskBacklogPage } from "../../shared/taskCarryover";
 import { toPublicUser, type Task, type DatabaseShape } from "../types";
 import type { RealtimeHub } from "./boss";
 
@@ -309,8 +309,8 @@ export function createTasksRouter(
                 ({ p0: 0, p1: 1, p2: 2, p3: 3, p4: 4 })[right.priority] ||
               right.createdAt.localeCompare(left.createdAt),
           );
-        const result = classifyTaskCarryover(carryoverIndex(database, userId), tasks.map(task => task.id), sourceDate, targetDate);
-        return { sourceDate, targetDate, tasks, syncedTaskIds: result.skippedTaskIds, unavailableTaskIds: result.rejectedTaskIds };
+        const status = dayCarryoverStatus(carryoverIndex(database, userId), tasks, sourceDate, targetDate);
+        return { sourceDate, targetDate, tasks, ...status };
       });
       response.json(result);
     } catch (error) {

@@ -203,7 +203,7 @@ export function App() {
     ) : view === "member-graphs" && session.user.role === "boss" ? (
       <BossRelationshipGraphs />
     ) : (
-      <MemberHome layout={homeLayout} />
+      <MemberHome key={session.user.id} layout={homeLayout} />
     );
   }
 

@@ -62,7 +62,10 @@ describe.sequential("history task carryover in real SQLite Durable Object", () =
   });
   it("rechecks lineage and completion, deduplicates concurrent and repeated requests", async () => {
     const a = await seed(past(6)), b = await seed(past(3), a);
-    const ids = [b, b];
+    const history = await call(`/api/tasks/sync-to-today?sourceDate=${past(6)}`, member);
+    expect(history.body.continuationSources[a]).toEqual({ id: b, date: past(3) });
+    expect(history.body.unavailableTaskIds).toContain(a); // legacy clients must not submit the obsolete id
+    const ids = [history.body.continuationSources[a].id, b];
     const sent = await Promise.all([call("/api/tasks/sync-to-today", member, { sourceDate: past(3), taskIds: ids }), call("/api/tasks/sync-to-today", member, { sourceDate: past(3), taskIds: [b] })]);
     expect(sent.reduce((n, r) => n + r.body.created.length, 0)).toBe(1);
     expect((await call("/api/tasks/sync-to-today", member, { sourceDate: past(6), taskIds: [a] })).body.skippedTaskIds).toEqual([a]);
